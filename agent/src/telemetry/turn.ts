@@ -63,6 +63,11 @@ export type TurnTraceOptions = {
   parent: Context
   /** Each tool's tier, for its span. */
   tierOf: (toolName: string) => RiskTier
+  /**
+   * #2376 — the session's spend and model turns before this turn. An outcome carries the
+   * session's running totals, so without these a late turn of a long chat reads as costly.
+   */
+  before?: { costUsd: number; turns: number }
 }
 
 type Segment = {
@@ -81,12 +86,21 @@ function outcomeOf(outcome: TurnOutcome): string {
   return outcome.kind === 'result' ? outcome.subtype : outcome.kind
 }
 
-/** The outcome's cost and model turns, and the result's token counts: never its text. */
-function usageOf(outcome: TurnOutcome, result: SDKResultMessage | undefined): Attributes {
+/**
+ * The turn's own cost and model turns (the audit `turn` row's, #2376), the session's totals
+ * beside them, and the result's token counts: never its text.
+ */
+function usageOf(
+  outcome: TurnOutcome,
+  result: SDKResultMessage | undefined,
+  before: { costUsd: number; turns: number },
+): Attributes {
   const out: Attributes = {}
   if (outcome.kind === 'result') {
-    out['scadbuddy.cost_usd'] = outcome.costUsd
-    out['scadbuddy.turns'] = outcome.turns
+    out['scadbuddy.cost_usd'] = outcome.costUsd - before.costUsd
+    out['scadbuddy.turns'] = outcome.turns - before.turns
+    out['scadbuddy.session_cost_usd'] = outcome.costUsd
+    out['scadbuddy.session_turns'] = outcome.turns
   }
   const usage = result?.usage as Partial<Record<'input_tokens' | 'output_tokens', number>> | undefined
   if (typeof usage?.input_tokens === 'number') out['scadbuddy.input_tokens'] = usage.input_tokens
@@ -98,6 +112,7 @@ export class TurnTrace implements GateTrace {
   readonly #sessionId: string
   readonly #turnId: string
   readonly #tierOf: (toolName: string) => RiskTier
+  readonly #before: { costUsd: number; turns: number }
   readonly #calls = new Map<string, Call>()
   #segment: Segment
   /** What fail() was given; recorded only if the turn's outcome is `failed`. */
@@ -109,6 +124,7 @@ export class TurnTrace implements GateTrace {
     this.#sessionId = options.sessionId
     this.#turnId = options.turnId
     this.#tierOf = options.tierOf
+    this.#before = options.before ?? { costUsd: 0, turns: 0 }
     this.#segment = this.#open(TURN_SPAN, 0, options.parent, [])
   }
 
@@ -360,6 +376,6 @@ export class TurnTrace implements GateTrace {
       if (this.#failure) recordFailure(segment.span, this.#failure.err)
       else segment.span.setStatus({ code: SpanStatusCode.ERROR })
     }
-    this.#endSegment(segment, { 'scadbuddy.outcome': outcomeOf(outcome), ...usageOf(outcome, result) })
+    this.#endSegment(segment, { 'scadbuddy.outcome': outcomeOf(outcome), ...usageOf(outcome, result, this.#before) })
   }
 }

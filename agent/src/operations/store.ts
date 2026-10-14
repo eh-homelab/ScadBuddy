@@ -1,5 +1,7 @@
-import { createHash } from 'node:crypto'
-import type { Sql } from 'postgres'
+import { createHash, randomUUID } from 'node:crypto'
+import type { Sql, TransactionSql } from 'postgres'
+import { PG_CHANNEL } from '../events/bus.js'
+import type { OperationActor } from '../temporal/names.js'
 
 // `ai_operations` (spec 2026-10-01 §4.2 "Our record", #1055): one row per execution of
 // an AgentOperation workflow, written only by its activities, as the backend's
@@ -84,6 +86,18 @@ export type InsertOperation = {
   request: unknown
   workflowId: string
   workflowRunId: string
+  actor?: OperationActor
+}
+
+/** Tell the bus a row changed (the backend's activity index re-reads it); in the writing transaction. */
+async function announce(tx: TransactionSql, operationId: string): Promise<void> {
+  const event = {
+    id: randomUUID().replaceAll('-', ''),
+    at: new Date().toISOString(),
+    kind: 'ai_operation.changed',
+    operation_id: operationId,
+  }
+  await tx`SELECT pg_notify(${PG_CHANNEL}, ${JSON.stringify(event)})`
 }
 
 export class OperationStore {
@@ -122,12 +136,17 @@ export class OperationStore {
     return this.sql.begin(async (tx) => {
       await tx`DELETE FROM ai_operations WHERE finished_at < now() - make_interval(secs => ${retentionSeconds})`
       const [inserted] = await tx<Row[]>`
-        INSERT INTO ai_operations (id, kind, subject, operation_key, status, request, workflow_id, workflow_run_id)
+        INSERT INTO ai_operations (id, kind, subject, operation_key, status, request, workflow_id, workflow_run_id,
+                                   principal, session, via_tool)
         VALUES (${op.id}, ${op.kind}, ${op.subject}, ${op.operationKey}, 'running',
-                ${tx.json((op.request ?? null) as never)}, ${op.workflowId}, ${op.workflowRunId})
+                ${tx.json((op.request ?? null) as never)}, ${op.workflowId}, ${op.workflowRunId},
+                ${op.actor?.principal ?? null}, ${op.actor?.session ?? null}, ${op.actor?.viaTool ?? null})
         ON CONFLICT (workflow_id, workflow_run_id) DO NOTHING
         RETURNING id, kind, subject, status, result, error, created_at, finished_at`
-      if (inserted) return view(inserted)
+      if (inserted) {
+        await announce(tx, inserted.id)
+        return view(inserted)
+      }
       const [existing] = await tx.unsafe<Row[]>(
         `SELECT ${COLUMNS} FROM ai_operations WHERE workflow_id = $1 AND workflow_run_id = $2`,
         [op.workflowId, op.workflowRunId],
@@ -141,10 +160,14 @@ export class OperationStore {
     const failed = 'error' in outcome
     const result = failed ? null : this.sql.json((outcome.result ?? null) as never)
     const error = failed ? this.sql.json(outcome.error as never) : null
-    await this.sql`
-      UPDATE ai_operations SET status = ${failed ? 'failed' : 'succeeded'}, result = ${result}, error = ${error},
-                               finished_at = now()
-      WHERE id = ${id} AND status = 'running'`
+    await this.sql.begin(async (tx) => {
+      const ended = await tx`
+        UPDATE ai_operations SET status = ${failed ? 'failed' : 'succeeded'}, result = ${result}, error = ${error},
+                                 finished_at = now()
+        WHERE id = ${id} AND status = 'running'
+        RETURNING id`
+      if (ended.length > 0) await announce(tx, id)
+    })
     const op = await this.get(id)
     if (!op) throw new Error(`no operation ${id}`)
     return op

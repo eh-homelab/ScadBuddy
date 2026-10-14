@@ -30,7 +30,10 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
+import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { ActivityBell } from './activity/ActivityBell'
+import { Toasts } from './ui/Toasts'
 import { Button } from './ui/Button'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
@@ -49,6 +52,8 @@ const NAV = [
   { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
   { to: '/workflows', label: 'Workflows', end: false },
+  // Not on a phone, where the row would overflow: the bell's popover links to it there.
+  { to: '/activity', label: 'Activity', end: false, wide: true },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
@@ -103,6 +108,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       setOpenRequest(null)
     }
   }, [shown])
+  // #2372 — nor does it come back on the chat a reload would have restored.
+  useEffect(() => {
+    if (off) rememberSession(null)
+  }, [off])
   // #815 — what waits on the user (approvals, questions, attention requests), shown on the
   // toggle so a closed panel (or a background session's, which never reaches this tab's
   // socket) still says so.
@@ -123,6 +132,21 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
   // has no room beside it and covers it.
   const panelOverlays = useMediaQuery(PANEL_OVERLAYS_QUERY)
+
+  // #2372 — a reload reopens the panel this tab had open, once the assistant is known to
+  // be there, without taking the focus from the page. Remembered from then on.
+  const reopen = useRef<boolean | null>(panelWasOpen())
+  useEffect(() => {
+    if (reopen.current === null || !ai.available) return
+    if (reopen.current) {
+      setMounted(true)
+      setOpen(true)
+    }
+    reopen.current = null
+  }, [ai.available])
+  useEffect(() => {
+    if (reopen.current === null) rememberPanelOpen(open)
+  }, [open])
 
   const openPanel = useCallback(() => {
     setMounted(true)
@@ -228,7 +252,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   to={item.to}
                   end={item.end}
                   className={({ isActive }) =>
-                    `rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                    `${'wide' in item ? 'hidden sm:block ' : ''}rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                       isActive
                         ? 'bg-surface-3 text-ink'
                         : 'text-muted hover:bg-surface-2 hover:text-ink'
@@ -242,6 +266,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
 
             <div className="ml-auto flex items-center gap-2">
               <LiveUpdatesIndicator />
+              <ActivityBell />
               {shown && (
                 // Announces the badge (#815): it appears while focus is elsewhere, so the
                 // button's own name changing is not enough. A bare live region, not
@@ -323,6 +348,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 <Outlet />
               </ErrorBoundary>
             </main>
+            <Toasts />
             {shown && mounted && (
               <aside
                 ref={setPanelElement}

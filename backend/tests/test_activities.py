@@ -363,6 +363,22 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     assert inner is not None and inner.cancelled()
 
 
+async def test_a_step_past_the_heartbeat_interval_outside_an_activity_still_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stage called directly (a test, or a caller that runs it outside Temporal) that
+    outlasts the heartbeat interval returns its result rather than raising "Not in
+    activity context": the flake a loaded machine made of the piece-activity tests. The
+    interval is shrunk rather than waited out."""
+    monkeypatch.setattr(_heartbeating, "__defaults__", (0.01,))
+
+    async def slow() -> str:
+        await asyncio.sleep(0.05)  # several intervals
+        return "done"
+
+    assert await _heartbeating(asyncio.create_task(slow())) == "done"
+
+
 async def test_a_cancelled_finish_piece_returns_only_once_its_writer_has(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,9 +569,55 @@ async def test_project_running_records_the_queue_wait_once(
     await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
 
     registry = metrics.registry
-    assert registry.get_sample_value("scadbuddy_render_queue_wait_seconds_count") == 1
-    waited = registry.get_sample_value("scadbuddy_render_queue_wait_seconds_sum")
+    assert (
+        registry.get_sample_value("scadbuddy_render_queue_wait_seconds_count", {"kind": "render"})
+        == 1
+    )
+    waited = registry.get_sample_value(
+        "scadbuddy_render_queue_wait_seconds_sum", {"kind": "render"}
+    )
     assert waited is not None and 29 <= waited < 120
+
+
+@pytest.mark.requires_postgres
+async def test_an_arranges_wait_and_settling_are_counted_as_arrange(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """#2294: an arrange shares the queue, so its wait, latency and outcome carry
+    ``kind="arrange"`` and the renders' series stay renders only."""
+    metrics = Metrics()
+    deps = worker_deps(tmp_path, demo_paths(tmp_path), projection=projection)
+    acts = RenderActivities(replace(deps, metrics=metrics))
+    job = _job(width=2).model_copy(update={"kind": "arrange"})
+    key = render_key("demo", {"width": 2}, None)
+    projection.accept(job, key, workflow_id=f"render-{key}", run_id=uuid.uuid4().hex)
+
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+    started = projection.read(job.id)
+    assert started.kind == "arrange"
+    settled = started.model_copy(update={"state": "done", "finished_at": datetime.now(UTC)})
+    activities_module._observe_settled(metrics, settled)
+
+    sample = metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_queue_wait_seconds_count", {"kind": "arrange"}) == 1
+    assert sample("scadbuddy_render_queue_wait_seconds_count", {"kind": "render"}) == 0
+    done = {"kind": "arrange", "outcome": "done"}
+    assert sample("scadbuddy_render_jobs_finished_total", done) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", done) == 1
+    assert sample("scadbuddy_render_duration_seconds_count", done) == 1
+    assert (
+        sample("scadbuddy_render_jobs_finished_total", {"kind": "render", "outcome": "done"}) == 0
+    )
+
+
+def test_the_metrics_kinds_are_the_job_tables() -> None:
+    """``core.metrics`` spells the kinds out rather than import the render stack."""
+    from typing import get_args
+
+    from scadbuddy.core.metrics import RenderKind
+    from scadbuddy.render.job_models import JobTableKind
+
+    assert get_args(RenderKind) == get_args(JobTableKind)
 
 
 @pytest.mark.requires_postgres

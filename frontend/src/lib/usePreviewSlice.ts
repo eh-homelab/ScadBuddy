@@ -13,6 +13,11 @@ export const RESLICE_POLL_MS = 2000
 export interface PreviewSliceState {
   /** The newest finished slice for this source; kept while a newer one runs. */
   result: SlicePreview | null
+  /**
+   * #2714 review — the plate `result` was sliced for. A stale result can be another
+   * plate's, so a caller matches this, not the plate on screen.
+   */
+  plateId: number | null
   /** The nozzle plan the slice was made with. */
   plan: NozzlePlan | null
   /** A slice for the choices on screen is still on its way: `result` is for older ones. */
@@ -84,6 +89,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
   const mine = shown?.source === own ? shown : null
   return {
     result: mine?.result ?? null,
+    plateId: mine ? ((JSON.parse(mine.request) as PrintRunRequest).plate_id ?? 1) : null,
     plan: mine?.plan ?? null,
     stale: mine !== null && mine.request !== wanted,
     slicing: slicing && wanted !== null,

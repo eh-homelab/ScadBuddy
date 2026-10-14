@@ -43,6 +43,7 @@ from scadbuddy.render.bambu3mf import (
 )
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
+from scadbuddy.render.provenance import content_key
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import normalise_colour
 
@@ -402,9 +403,10 @@ async def upload_copy(
     target: Target | None = None,
     folder_id: int | None = None,
     stem: str | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, bool]:
     """Upload a new copy of the 3MF, laid out for ``target``, into ``folder_id`` (the
-    inbox when ``None``); returns its library file id and file name.
+    inbox when ``None``); returns its library file id, its file name, and whether it was
+    uploaded (rather than an identical one taken, #2476).
 
     In a project's folder, ``stem`` names the file (:func:`project_filename`, #317): for
     an output, the template and the params that differ from its defaults, made unique in
@@ -413,11 +415,13 @@ async def upload_copy(
     A folder carries ``project_id``, so the folder is what files the copy under a
     project (#79) and puts it on Bambuddy's project page.
 
-    Only in the inbox does the new copy *supersede* anything: every other copy already
-    in the inbox is deleted, so the inbox holds one copy per output (or library file)
-    rather than one per printer it was ever aimed at. A copy in a project's folder is
-    never deleted, even when this upload is for another printer — that project printed
-    from it (#316).
+    In the inbox the new copy *supersedes* every other copy already there, so the inbox
+    holds one copy per output (or library file) rather than one per printer it was ever
+    aimed at. In a project's folder it supersedes only this output's copies nothing was
+    printed from (:func:`_supersede_unprinted`, #2476); a copy the project printed from
+    is never deleted, even when this upload is for another printer (#316). A project
+    folder that already holds the same 3MF for the same target, filed by an identical
+    output, gets nothing new (:func:`_same_content`).
 
     The order matters. The plate fit is decided before anything touches Bambuddy, so a
     model that cannot be laid out refuses with every copy intact. The upload comes
@@ -432,12 +436,23 @@ async def upload_copy(
     no duplicate in the folder.
     """
     target = target if target is not None else await target_for(client, settings)
-    payload = _laid_out_for(await printable.fetch(), target)
+    # Re-plating is mesh work that took ~23 s on a big output, on the event loop every
+    # other request shares (#2354).
+    payload = await asyncio.to_thread(_laid_out_for, await printable.fetch(), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     project_stem = (
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
 
+    content = (
+        await asyncio.to_thread(content_key, payload)
+        if project_stem is not None and folder is not None
+        else None
+    )
+    if content is not None:
+        same = await _same_content(client, uploads, printable.key, folder, target.key, content)
+        if same is not None:
+            return same.id, same.filename, False
     listed = await _listing(client, folder)
     uploaded = await _left_unrecorded(
         client, uploads, listed, payload, project_stem, printable.inbox_name, printable.origin_id
@@ -452,14 +467,107 @@ async def upload_copy(
         # (#2263): the upload waits for it rather than failing the file.
         uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
-        printable.key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
+        printable.key,
+        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key, content_key=content),
     )
     if is_inbox(folder, settings):
         for copy in await uploads.for_output(printable.key):
             if copy.id == uploaded.id or copy.folder_id != folder:
                 continue
             await _delete_copy(client, uploads, printable.key, copy.id, strict=False)
-    return uploaded.id, uploaded.filename
+        return uploaded.id, uploaded.filename, True
+    filename = await _supersede_unprinted(client, uploads, printable.key, folder, uploaded)
+    return uploaded.id, filename, True
+
+
+async def _same_content(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    folder: int | None,
+    target_key: str,
+    content: str,
+) -> LibraryFile | None:
+    """A copy another output put in ``folder`` for the same target, holding the same
+    3MF but for the stamp naming the output (#2476): an identical re-Generate files
+    nothing new, and the copy is recorded under ``key`` too. ``None`` when there is
+    none Bambuddy still has."""
+    for owner, copy in await uploads.same_content(folder, target_key, content):
+        try:
+            found = await client.library_file(copy.id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                # Not worth failing a print or a filing over: a new copy is uploaded.
+                logger.warning(
+                    "could not check an identical project copy; uploading another",
+                    extra={"library_file_id": copy.id, "status": error.status},
+                )
+                return None
+            await uploads.forget(owner, copy.id)
+            continue
+        if owner != key:
+            await uploads.record(key, copy)
+        return found
+    return None
+
+
+async def _supersede_unprinted(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    folder: int | None,
+    uploaded: LibraryFile,
+) -> str:
+    """Replace ``key``'s other copies in the project's ``folder`` that nothing printed
+    from with ``uploaded`` (#2476); its file name, which takes theirs.
+
+    Generate files a copy laid out for its best guess at the printer; a print on another
+    printer or nozzle then adds its own. Rather than leave both (and a third, its slice)
+    with no way to tell which printed, the guess makes way: it is deleted (into
+    Bambuddy's trash), and the print's copy takes its name and its "Edit in ScadBuddy"
+    note. A copy anything was sliced from, or that another output shares, stays.
+    """
+    unprinted = [
+        copy
+        for copy in await uploads.for_output(key)
+        if copy.folder_id == folder and copy.id != uploaded.id and not copy.sliced
+    ]
+    shared = await uploads.shared([copy.id for copy in unprinted], key)
+    filename = uploaded.filename
+    notes = uploaded.notes
+    for copy in unprinted:
+        if copy.id in shared:
+            continue
+        try:
+            old = await client.library_file(copy.id)
+        except ApiError as error:
+            if error.status == status.HTTP_404_NOT_FOUND:
+                await uploads.forget(key, copy.id)
+                continue
+            logger.warning(
+                "could not read a project copy to replace; it stays",
+                extra={"library_file_id": copy.id, "status": error.status},
+            )
+            continue
+        if not await _delete_copy(client, uploads, key, copy.id, strict=False):
+            continue
+        if filename == uploaded.filename and old.filename != filename:
+            try:
+                filename = (await client.rename_library_file(uploaded.id, old.filename)).filename
+            except ApiError as error:
+                logger.warning(
+                    "could not give a print's copy the name of the one it replaced",
+                    extra={"library_file_id": uploaded.id, "status": error.status},
+                )
+        if old.notes and not notes:
+            try:
+                notes = (await client.annotate_library_file(uploaded.id, old.notes)).notes
+            except ApiError as error:
+                logger.warning(
+                    "could not carry the replaced copy's note over",
+                    extra={"library_file_id": uploaded.id, "status": error.status},
+                )
+    return filename
 
 
 async def _listing(
@@ -553,8 +661,9 @@ async def _delete_copy(
     library_file_id: int,
     *,
     strict: bool,
-) -> None:
-    """Delete one copy and forget it once the delete has come back (committed or 404).
+) -> bool:
+    """Delete one copy and forget it once the delete has come back (committed or 404);
+    whether it is gone.
 
     ``strict`` raises a failed delete; otherwise it is logged and the copy stays
     recorded, to be retried. Forgetting it first is never right: a delete that failed
@@ -567,12 +676,13 @@ async def _delete_copy(
             if strict:
                 raise
             logger.warning(
-                "could not delete a superseded inbox copy; it stays recorded for the next try",
+                "could not delete a superseded copy; it stays recorded for the next try",
                 extra={"library_file_id": library_file_id, "status": error.status},
             )
-            return
+            return False
         logger.info("the library copy was already gone", extra={"library_file_id": library_file_id})
     await uploads.forget(key, library_file_id)
+    return True
 
 
 async def ensure_copy(
@@ -648,10 +758,10 @@ async def _ensure_copy(
             )
             if found is not None:
                 return _Ensured(copy.id, found.filename, created=False)
-        library_file_id, filename = await upload_copy(
+        library_file_id, filename, created = await upload_copy(
             client, uploads, printable, settings, target=target, folder_id=folder_id, stem=stem
         )
-    return _Ensured(library_file_id, filename, created=True)
+    return _Ensured(library_file_id, filename, created=created)
 
 
 #: One per folder while :func:`ensure_copy` holds it; weak, so an idle folder's lock is
@@ -836,7 +946,7 @@ async def ensure_uploaded(
     Anything else uploads a **new copy** there (#316). Never a move: a file sent to
     project A is A's record of what it printed, and A's slices and archives stay in A,
     so moving the file to project B would leave A pointing at nothing. And never a
-    delete outside the inbox; see :func:`upload_copy`.
+    delete outside the inbox of a copy anything printed from; see :func:`upload_copy`.
     """
     ensured = await _ensure_copy(
         client,

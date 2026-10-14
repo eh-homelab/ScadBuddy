@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -53,7 +54,14 @@ with workflow.unsafe.imports_passed_through():
         RESPOND_UPDATE,
         refused_failure_type,
     )
-    from scadbuddy_durable.gate.store import SYSTEM, GrantInput, OpenInput, Outcome, ResolveInput
+    from scadbuddy_durable.gate.store import (
+        SYSTEM,
+        DenyInput,
+        GrantInput,
+        OpenInput,
+        Outcome,
+        ResolveInput,
+    )
     from scadbuddy_durable.gate.validate import (
         GateEntry,
         Principal,
@@ -64,6 +72,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session import tools as manifest
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
+        FORK_POINT_QUERY,
         MAX_SEGMENTS,
         MESSAGE_MAX,
         PROJECTS_QUEUE,
@@ -76,6 +85,8 @@ with workflow.unsafe.imports_passed_through():
         FinishTurn,
         FlowTurn,
         FollowArgs,
+        ForkPoint,
+        ForkPointArgs,
         GateSettings,
         MemoryRecalled,
         MemoryTurn,
@@ -136,6 +147,13 @@ SETTLE_PARKED = "turn-end-settles-resolving-entries"
 STOP_FIRST = "stop-cancels-the-run-first"
 # #2481: a flow turn's approval call is checked against the run's grant first.
 SESSION_FLOW_GRANT = "session-flow-grant"
+# A flow turn's call outside the grant (#2482): `on_outside="deny"` refuses it, and the
+# entry is the run's, with its hop and one timer for both hops.
+SESSION_FLOW_ESCALATION = "session-flow-escalation"
+# An entry's timer at most (ai_pending_input's CHECK).
+ENTRY_MAX_S = 86_400
+# A session id, as ai_pending_input.parent_session holds it.
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 FLOW_GRANT_CHECK = "flow_grant_check"
 
 
@@ -193,6 +211,11 @@ def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str
         return (
             f"The user denied {what}; it was not run. Do not retry it unless the user asks you to."
         )
+    if outcome == "flow_denied":
+        return (
+            f"The flow that sent this turn refused {what}: it is outside what the run may do"
+            f" ({reason or 'no reason given'}), so it was not run. Do not retry it."
+        )
     if outcome == "expired":
         return (
             f"Nobody decided on {what} before it expired, so it was not run. "
@@ -209,6 +232,12 @@ def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str
             f"({reason or 'no reason given'}), so it was not run."
         )
     return f"{what} was not approved, so it was not run."
+
+
+def _joined(append: str | None, note: str | None) -> str | None:
+    """The turn's system append, with what this turn's listing said to tell the model."""
+    parts = [p for p in (append, note) if p]
+    return "\n\n".join(parts) if parts else None
 
 
 @workflow.defn(name=WORKFLOW)
@@ -229,6 +258,7 @@ class DurableSession:
         self._turn_tiers: dict[str, str] = {}
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
         self._packages: list[TurnPackage] = []
+        self._system_note: str | None = None
         # The replica this session's pinned turn tools run on (#2581), from the last listing.
         self._host_queue: str | None = start.host_queue
         self._turn: TurnStart | None = start.turn
@@ -328,9 +358,11 @@ class DurableSession:
                 e.name: e.tier for e in offered.tools if e.name in self._turn_tools and e.tier
             }
             self._packages = list(offered.packages)
+            self._system_note = offered.system_note
             # The built-ins the allowed packages name, as a classic turn offers them; each
             # call is outward there, so here it runs as its own activity after a human
-            # approved it (the agent offers only Bash and PowerShell, which can).
+            # approved it (the agent lists only Bash and PowerShell here, which can; it
+            # provides the others as its own `builtin` turn tools, #2393).
             named = sorted(
                 {t for p in offered.packages for t in p.builtin_tools} - {"Skill", "Agent"}
             )
@@ -539,6 +571,7 @@ class DurableSession:
             )
             summary, input_hash = str(described["summary"]), str(described["input_hash"])
         grant_timeout = 0
+        outside: dict[str, Any] | None = None
         flow = self._turn.flow if self._turn is not None else None
         if (
             kind == "approval"
@@ -570,6 +603,40 @@ class DurableSession:
                     return
             elif verdict is not None:
                 grant_timeout = int(verdict.get("timeout_s") or 0)
+                outside = verdict
+        # A flow turn's call is in its run's queue (#2482): the person's, never a grant's.
+        escalation = (
+            kind == "approval" and flow is not None and workflow.patched(SESSION_FLOW_ESCALATION)
+        )
+        if (
+            escalation
+            and flow is not None
+            and outside is not None
+            and outside.get("on_outside") == "deny"
+            and input_hash is not None
+        ):
+            reason = str(outside.get("reason") or "") or None
+            await workflow.execute_activity(
+                "deny_input",
+                DenyInput(
+                    request_id=rid,
+                    session_id=sid,
+                    run_id=flow.run_id,
+                    tool=name,
+                    summary=summary,
+                    input_hash=input_hash,
+                    reason=reason,
+                    requested_by=_owner(author),
+                ),
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(maximum_attempts=5),
+                result_type=bool,
+            )
+            # The script said so (spec §4.3): refused at once, never parked.
+            if self._turn is not None:
+                self._turn.refusals[str(call["id"])] = refusal(name, rid, "flow_denied", reason)
+            self._agent.decide(str(call["id"]), False, approver=f"flow:{flow.run_id}")
+            return
         try:
             built = build_entry(
                 request_id=rid,
@@ -580,14 +647,41 @@ class DurableSession:
                 requested_by=Principal(author.kind, author.id),
                 session_owner=Principal(self._start.owner.kind, self._start.owner.id),
                 session_creator=Principal(self._start.creator.kind, self._start.creator.id),
+                in_run=escalation,
             )
         except MalformedAnswerInputError:
             # Refused to the model, never parked (Ruling 9); the error is not kept.
             self._agent.decide(str(call["id"]), False, approver="scadbuddy")
             return
+        hop: dict[str, Any] = {}
         if kind == "approval":
             # A flow turn's call outside the grant waits as the run's own calls do.
             timeout = grant_timeout or self._settings.approval_expiry_s
+            if escalation and flow is not None:
+                hop = {"flow_run_id": flow.run_id, "hop": "person"}
+                if outside is not None:
+                    hop["outside_reason"] = str(outside.get("reason") or "") or None
+                hop_s = int((outside or {}).get("hop_s") or 0)
+                parent = (outside or {}).get("parent_session")
+                principal = (outside or {}).get("parent_principal")
+                if (
+                    (outside or {}).get("parent_hop")
+                    and hop_s > 0
+                    and isinstance(parent, str)
+                    and _UUID.fullmatch(parent) is not None
+                    and isinstance(principal, str)
+                    and principal
+                ):
+                    # The starter session first, for its hop; then the person. One
+                    # timer covers both (spec §4.6): the agent's sweep moves it up.
+                    hop_s = min(hop_s, ENTRY_MAX_S - 1)
+                    hop.update(
+                        hop="parent",
+                        hop_until=_iso(workflow.now() + timedelta(seconds=hop_s)),
+                        parent_session=parent,
+                        parent_principal=principal,
+                    )
+                    timeout = min(hop_s + timeout, ENTRY_MAX_S)
         elif name == ASK_USER:
             timeout = self._settings.question_expiry_s
         else:
@@ -626,6 +720,7 @@ class DurableSession:
                     expires_at=_iso(parked.expires_at),
                     questions=built.questions,
                     attention=built.attention,
+                    **hop,
                 ),
                 start_to_close_timeout=SHORT,
             )
@@ -903,10 +998,11 @@ class DurableSession:
         return SegmentContext(
             images=list(self._turn.images) if self._turn else [],
             # The turn's own append; a turn sent without one keeps the session's first (#2525).
-            system_append=(
+            system_append=_joined(
                 self._turn.system_append
                 if self._turn is not None and self._turn.system_append is not None
-                else self._start.system_append
+                else self._start.system_append,
+                self._system_note,
             ),
             disabled_tools=list(self._settings.disabled_tools),
             packages=list(self._packages),
@@ -920,3 +1016,24 @@ class DurableSession:
         if self._turn is not None:
             return self._turn.turn_id
         return self._message.turn_id if self._message is not None else None
+
+    @workflow.query(name=FORK_POINT_QUERY)
+    def fork_point(self, args: ForkPointArgs) -> ForkPoint:
+        """A page of the committed conversation, from ``args.start``, for a fork (#2688):
+        at least one entry, then as many as fit in ``args.limit`` characters."""
+        state = self._agent.state()
+        texts = state.conversation
+        start = max(0, args.start)
+        end, used = start, 0
+        while end < len(texts) and (end == start or used + len(texts[end]) <= args.limit):
+            used += len(texts[end])
+            end += 1
+        return ForkPoint(
+            session_id=state.session_id,
+            checkpoint=state.checkpoint,
+            # The plugin's task, not the turn: once its run returns, the conversation is
+            # committed through the reply, while the turn still drains and is written.
+            busy=self._agent.busy,
+            total=len(texts),
+            entries=texts[start:end],
+        )

@@ -24,6 +24,8 @@ SEGMENT_CONTEXT_QUERY = "segment_context"
 # The turn the workflow holds (taken, running, or finishing), or None between turns:
 # what the agent's sweep reads to give back a claim no turn will end (plan 5c Ruling 18).
 TURN_QUERY = "turn"
+# The committed conversation a fork of the session starts from (#2688), a page at a time.
+FORK_POINT_QUERY = "fork_point"
 # What a segment that starts with nothing left to spend ends with; the workflow reads it
 # from the plugin's error to end the turn as `budget_exhausted` (plan 5c Ruling 3).
 BUDGET_EXHAUSTED = "budget_exhausted: the chat used its budget"
@@ -103,6 +105,31 @@ class SessionStart:
 
 
 @dataclass
+class ForkPointArgs:
+    """``fork_point``'s argument: the first entry, and the most characters of entries."""
+
+    start: int = 0
+    limit: int = 512 * 1024
+
+
+@dataclass
+class ForkPoint:
+    """A page of the conversation the session's agent holds, for a fork (#2688).
+
+    ``entries`` are transcript entries as JSON text, as AgentState keeps them; the
+    agent service reads every page and seeds the child's SessionStart.agent with a
+    copy (agent/src/sessions/durable.ts ``forkSource``)."""
+
+    # The Claude session the entries belong to, and where it was last committed.
+    session_id: str | None
+    checkpoint: str | None
+    # The agent's task runs: what it writes past the checkpoint is not committed yet.
+    busy: bool
+    total: int
+    entries: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Message:
     """``send_message``: one user turn, accepted while no turn runs."""
 
@@ -174,6 +201,9 @@ class TurnTools:
     tools: list[TurnTool] = field(default_factory=list)
     # Defaulted: a listing an older agent made named no packages.
     packages: list[TurnPackage] = field(default_factory=list)
+    # Said to the model in the turn's system prompt: the built-ins it gets as turn tools
+    # (#2393, agent/src/temporal/turnServers.ts builtinNote). None from an older agent.
+    system_note: str | None = None
 
 
 @dataclass

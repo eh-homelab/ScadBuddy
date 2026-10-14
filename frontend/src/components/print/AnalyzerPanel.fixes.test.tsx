@@ -52,7 +52,7 @@ describe('AnalyzerPanel · fixes', () => {
     const line = within(preview).getByTestId('change-enable_support')
     expect(line).toHaveTextContent('enable_support')
     expect(line).toHaveTextContent('unknown')
-    expect(line).toHaveTextContent('1')
+    expect(within(line).getByTestId('change-proposed')).toHaveTextContent(/^1$/)
     expect(line).toHaveTextContent('Derived process preset')
     expect(preview).toHaveTextContent('every BBL system process preset inherits')
     expect(
@@ -109,6 +109,60 @@ describe('AnalyzerPanel · fixes', () => {
       target: { library_file_id: 7 },
       scope: { kind: 'print', key: 'library:7' },
     })
+  })
+
+  it('previews a fix without a decisions store, and only Apply is held', async () => {
+    setMockAnalyzerDiagnostics([verifiedFixDiagnostic])
+    server.use(
+      http.post('/api/v1/analyzers/run', async ({ request: sent }) => {
+        const body = (await sent.json()) as { request: AnalysisRequest }
+        return HttpResponse.json({
+          ...analysisReport(output, body.request, [verifiedFixDiagnostic]),
+          decisions_available: false,
+          decisions_reason: 'Decisions need Postgres.',
+        })
+      }),
+    )
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    expect(within(row).queryByRole('button', { name: 'Suppress…' })).not.toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+    expect(await within(preview).findByTestId('change-timelapse')).toBeInTheDocument()
+    expect(within(preview).getByTestId('fix-no-store')).toBeInTheDocument()
+    expect(within(preview).queryByLabelText('Accept for')).not.toBeInTheDocument()
+    expect(within(preview).getByRole('button', { name: 'Apply' })).toBeDisabled()
+  })
+
+  it('shows the unit on both sides of a change', async () => {
+    const fix = verifiedFixDiagnostic.fixes![0]!
+    const temp = { ...fix.changes[0]!, setting: 'nozzle_temperature', base: 220, proposed: 210, unit: '°C' }
+    setMockAnalyzerDiagnostics([{ ...verifiedFixDiagnostic, fixes: [{ ...fix, changes: [temp] }] }])
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const line = await within(row).findByTestId('change-nozzle_temperature')
+    expect(within(line).getByTestId('change-base')).toHaveTextContent('220 °C')
+    expect(within(line).getByTestId('change-proposed')).toHaveTextContent('210 °C')
+  })
+
+  it('previews again after a preview that failed', async () => {
+    setMockAnalyzerDiagnostics([verifiedFixDiagnostic])
+    let calls = 0
+    server.use(
+      http.post('/api/v1/analyzers/fixes/preview', () => {
+        calls += 1
+        return calls === 1 ? HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 }) : undefined
+      }),
+    )
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+    const alert = await within(preview).findByRole('alert')
+    await user.click(within(alert).getByRole('button', { name: 'Preview again' }))
+    expect(await within(preview).findByTestId('change-timelapse')).toBeInTheDocument()
+    expect(calls).toBe(2)
   })
 
   it('offers a finding about some slots no material scope to accept at', async () => {

@@ -53,6 +53,8 @@ export interface SourceApi {
   preview: (body: PrintRunRequest) => Promise<PreviewStarted>
   /** #2169 — how one of this source's background slices stands. */
   readPreview: (jobId: number) => Promise<SlicePreview>
+  /** #2072 — a finished background slice's toolpath (binary; see `lib/toolpath`). */
+  toolpathUrl: (jobId: number) => string
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -129,6 +131,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       check: (body) => api.checkPrint(id, body),
       preview: (body) => api.previewSlice(id, body),
       readPreview: (jobId) => api.getPreviewSlice(id, jobId),
+      toolpathUrl: (jobId) => api.previewToolpathUrl(id, jobId),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -143,6 +146,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     check: (body) => api.checkLibraryPrint(id, body),
     preview: (body) => api.previewLibrarySlice(id, body),
     readPreview: (jobId) => api.getLibraryPreviewSlice(id, jobId),
+    toolpathUrl: (jobId) => api.libraryPreviewToolpathUrl(id, jobId),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }

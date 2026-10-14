@@ -21,9 +21,9 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.agent_tools import AgentTools
 from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.flows.keys import approval_key, payload_keys
-from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
@@ -49,6 +49,8 @@ class Flows:
     definitions: FlowDefinitions
     #: The payload keys, with the KEK; None without one.
     keys: PgPayloadKeys | None
+    #: The agent's tools and their tiers now, from the agent beside this API (#2704).
+    agent_tools: AgentTools
     #: A connection to the database holding the keys (forgetting a run takes its lock).
     connect: Connect | None = None
     #: Connected when the app runs; None without a KEK (or before then).
@@ -71,9 +73,6 @@ FLOWS: Key[Flows] = Key("flows")
 
 def _build(core: Core, components: Components) -> Flows:
     keys = payload_keys(core.settings)
-    if core.settings.flow_tools_json is not None:
-        # The in-process worker's `tool(...)`, and the Reset preview's outward tools.
-        load_manifest(core.settings.flow_tools_json)
 
     def projects_operations() -> list[Callable[..., Any]]:
         from scadbuddy.operations.component import OPERATIONS
@@ -94,6 +93,7 @@ def _build(core: Core, components: Components) -> Flows:
         settings=core.settings,
         definitions=FlowDefinitions(history, store, FlowStates(core.projection.pool)),
         keys=keys[0] if keys is not None else None,
+        agent_tools=AgentTools(core.settings.agent_internal_url),
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,
     )

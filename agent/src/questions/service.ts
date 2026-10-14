@@ -145,8 +145,10 @@ export type QuestionGateContext = {
    * When the turn was claimed, by the database's clock (the claim's `now()`): a
    * `done` summary covers the touches since, and `ai_session_resources.at` is
    * stamped by the same clock. The agent's own clock may disagree with it.
+   * Postgres's text for it, microseconds kept: a JS Date would round it down to
+   * the millisecond and let in a touch made just before the claim (#1383).
    */
-  turnStartedAt: Date
+  turnStartedAt: string
 }
 
 type Row = {
@@ -966,7 +968,27 @@ export class QuestionService {
           finishedAt: new Date(),
         })),
       )
-      if (asked.limited !== undefined) return { answered: false, message: asked.limited }
+      if (asked.limited !== undefined) {
+        // #1205: a refused request leaves a trail, as a timed-out or replaced one does, so a
+        // looping agent shows in the audit log and not only in its own transcript.
+        await this.audited([
+          {
+            kind: 'question',
+            action: 'rate_limited',
+            surface: 'system',
+            actor: SYSTEM_ACTOR,
+            sessionId,
+            turnId,
+            toolUseId: request.toolUseId,
+            tier: 'read',
+            outcome: 'refused',
+            detail: safeDetail(`${request.tool} attention request (${attention?.reason ?? 'question'}): ${asked.limited}`),
+            startedAt,
+            finishedAt: new Date(),
+          },
+        ])
+        return { answered: false, message: asked.limited }
+      }
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }

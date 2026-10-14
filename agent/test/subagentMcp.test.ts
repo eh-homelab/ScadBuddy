@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
+import { SETTING_DURABLE_SUBAGENTS } from '../src/routes/durableSubagents.js'
 import { BuiltInTools, builtInToolsSetting } from '../src/plugins/builtInTools.js'
 import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { ASK_THE_MAIN_AGENT, SUBAGENT_MCP_PATH, type SubagentMcpDeps, subagentServer, TURN_OVER } from '../src/routes/subagentMcp.js'
@@ -175,5 +176,41 @@ describe("a durable segment's subagents' tools", () => {
     expect((await post('127.0.0.1', { authorization: `Bearer ${token}` })).status).toBe(401)
     state.running = true
     expect((await post('127.0.0.1', { authorization: `Bearer ${token}` })).status).not.toBe(401)
+  })
+
+  it('answers a network peer only in the ranges Settings names, still never through a proxy or without a token', async () => {
+    const { deps, token } = rig()
+    const values = new Map<string, unknown>()
+    const settings: SettingsRepo = {
+      get: <T>(key: string) => Promise.resolve(values.get(key) as T),
+      set: () => Promise.resolve(),
+    }
+    const post = (peer: string, headers: Record<string, string>) =>
+      createApp({
+        database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+        backend: () => Promise.resolve(true),
+        kek: { ok: true, kek: KEK },
+        credentials: new MemoryCredentials(),
+        remoteAddress: () => peer,
+        origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+        testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
+        settings,
+        subagentMcp: deps,
+      }).request(SUBAGENT_MCP_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      })
+    const auth = { authorization: `Bearer ${token}` }
+    expect((await post('10.42.1.5', auth)).status).toBe(404)
+    values.set(SETTING_DURABLE_SUBAGENTS, { url: null, peers: ['10.42.0.0/16'] })
+    expect((await post('10.42.1.5', auth)).status).not.toBe(404)
+    expect((await post('10.42.1.5', auth)).status).not.toBe(401)
+    expect((await post('10.42.1.5', {})).status).toBe(401)
+    expect((await post('10.42.1.5', { ...auth, 'x-forwarded-for': '10.42.1.6' })).status).toBe(404)
+    expect((await post('10.43.0.1', auth)).status).toBe(404)
+    // A stored range the route could not have written answers no network peer.
+    values.set(SETTING_DURABLE_SUBAGENTS, { url: null, peers: ['10.42.0.0/16', 'bogus'] })
+    expect((await post('10.42.1.5', auth)).status).toBe(404)
   })
 })

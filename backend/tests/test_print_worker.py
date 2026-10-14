@@ -8,7 +8,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -17,6 +17,7 @@ from temporalio.client import Client
 from temporalio.common import VersioningBehavior
 from temporalio.worker import Worker
 
+from scadbuddy import worker as worker_module
 from scadbuddy.bambuddy import output_reader
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.store import Operation
@@ -200,6 +201,27 @@ async def test_the_print_worker_is_current_serves_a_prelude_and_stops(
     assert finish.error is not None
 
 
+@pytest.mark.requires_postgres
+async def test_the_print_worker_never_drains(
+    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2544: its workflows are AUTO_UPGRADE, so the next build takes them over: it
+    stops without waiting for its runs (``drain_timeout=None``)."""
+    served: dict[str, Any] = {}
+
+    async def serve(_client: Any, workers: Any, _stop: Any, **kwargs: Any) -> None:
+        served.update(kwargs, workers=workers)
+
+    monkeypatch.setattr(worker_module, "_serve_versioned", serve)
+    monkeypatch.setattr(worker_module, "bambuddy_worker", lambda *_a, **_k: "bambuddy")
+    monkeypatch.setattr(worker_module, "follow_worker", lambda *_a, **_k: "follow")
+    settings = print_settings(pg_conninfo, tmp_path, revision="b1")
+    await run_print_worker(settings, health_port=None, client=cast(Client, object()))
+    assert served["drain_timeout"] is None
+    assert served["deployment_name"] == PRINT_DEPLOYMENT_NAME
+    assert served["workers"] == ["bambuddy", "follow"]
+
+
 async def _until_current(client: Client, build_id: str) -> None:
     for _ in range(300):
         try:
@@ -234,3 +256,13 @@ async def _delete_with_prelude(client: Client, library_queue: str, queue: str) -
     )
     done: Operation = await asyncio.wait_for(handle.result(), 120)
     return done
+
+
+@pytest.mark.requires_postgres
+async def test_the_print_workers_stores_write_activity(pg_conninfo: str, tmp_path: Path) -> None:
+    deps = await asyncio.to_thread(build_print_deps, print_settings(pg_conninfo, tmp_path))
+    try:
+        assert deps.print_runs.activity is not None
+        assert deps.operations.activity is not None
+    finally:
+        await deps.aclose()

@@ -210,7 +210,8 @@ change a jointed half's scale: the other half's cut and the joint's root are num
 their own, so one side would move without the other, and a joint's size would skip the
 fit check. Scale before splitting. `lay_flat`'s drop to the bed counts what ops add (a
 peg, an `add`), and `largest_flat` never picks a cut face carrying a peg, which would
-put the peg into the bed. The peg's fit is checked once, when the split is made: a later
+put the peg into the bed. `largest_flat` measures the printed parts only, so a face a
+negative part cuts into (a recess in a base) counts at its whole area (#2516). The peg's fit is checked once, when the split is made: a later
 edit to an earlier op that changes the section there (an `add` across the plane, a
 parameter on an earlier cut) is not checked again, and the render is the check.
 
@@ -228,8 +229,13 @@ Measuring (sections, inscribed circles, faces) runs in `asyncio.to_thread` under
 runs to its end (`operations.kinds.to_thread_to_end`), so a run past its timeout whose
 commit lands still announces it.
 
-`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`). The
-model is then an ordinary template whose source imports `meshes/`.
+`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`, and
+`meshes/` stays: the ejected source imports it). The model is then an ordinary template
+whose source imports `meshes/`.
+
+A `scene_edit` removes the files under `meshes/` that no part uses any more, such as a
+deleted object's (`operations.py` `unused_meshes`, #2632); `restore_version` brings them
+back with the scene that used them.
 
 ## 6. Temporal, operations, flows and pipelines
 

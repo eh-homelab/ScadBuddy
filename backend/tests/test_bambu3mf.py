@@ -48,6 +48,7 @@ from scadbuddy.render.bambu3mf import (
 )
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
+from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.render.thumbnail import (
@@ -1414,3 +1415,101 @@ def test_a_painting_needs_a_tower_only_in_a_filament_the_plate_does_not_use(
     with zipfile.ZipFile(out) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert ("wipe_tower_x" in settings) is tower
+
+
+# ── #956: one object per declared object ──────────────────────────────────────
+
+
+def _two_objects(colours: tuple[str, str] = ("#FF6AC1", "#FF6AC1")) -> PlateParts:
+    """Two 10 mm boxes 60 mm apart, each its own object; in one colour by default."""
+    left = ColourPart(1, "Left", colours[0], trimesh.creation.box(extents=(10, 10, 4)))
+    right = ColourPart(
+        2,
+        "Right",
+        colours[1],
+        trimesh.creation.box(extents=(10, 10, 8), transform=_translate(60, 0, 2)),
+    )
+    extruders = (1, 1) if colours[0] == colours[1] else (1, 2)
+    return PlateParts((left, right), extruders, (1, 2))
+
+
+def _items(payload: bytes) -> list[ET.Element]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = parse_model(archive, "3D/3dmodel.model").root
+    return list(root.iter(f"{{{bambu3mf.CORE_NS}}}item"))
+
+
+def test_each_declared_object_is_its_own_build_item_on_its_plate(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    plate = _two_objects()
+    write_plates_3mf([plate], ["#FF6AC1"], out, thumbnails=None, model_name="bins")
+
+    payload = out.read_bytes()
+    items = _items(payload)
+    # Two objects, each placed by the plate's one offset, so they keep their spacing.
+    assert len(items) == 2
+    assert items[0].get("transform") == items[1].get("transform")
+    with zipfile.ZipFile(out) as archive:
+        [settings] = plate_settings(ET.fromstring(archive.read("Metadata/model_settings.config")))
+        [laid_out] = laid_out_plates(archive)
+    assert len(settings.object_ids) == 2
+    assert laid_out.assembly_ids == tuple(item.get("objectid") for item in items)
+    assert laid_out.extruders == frozenset({1})
+    assert [entry.name for entry in plates_of(out)] == ["bins (object 1) + bins (object 2)"]
+    # A reader of any 3MF (Arrange's) sees the two objects too.
+    assert [obj.name for obj in read_objects(payload)] == ["bins (object 1)", "bins (object 2)"]
+
+
+def test_one_object_writes_the_file_it_always_did(tmp_path: Path) -> None:
+    parts = _parts()
+    implicit, explicit = tmp_path / "implicit.3mf", tmp_path / "explicit.3mf"
+    write_plates_3mf([single_plate(parts)], ["#FF6AC1", "#1F6FEB"], implicit, thumbnails=None)
+    write_plates_3mf(
+        [PlateParts(tuple(parts), (1, 2), (7, 7))],
+        ["#FF6AC1", "#1F6FEB"],
+        explicit,
+        thumbnails=None,
+    )
+    assert implicit.read_bytes() == explicit.read_bytes()
+
+
+def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    write_plates_3mf([_two_objects()], ["#FF6AC1"], out, thumbnails=None)
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    transforms = {item.get("transform") for item in _items(moved)}
+    assert len(transforms) == 1
+    assert transforms != {item.get("transform") for item in _items(out.read_bytes())}
+    # One filament across both objects: no prime tower, though the plate has two parts.
+    assert "wipe_tower_x" not in _settings_of_bytes(moved)
+
+
+def test_objects_in_two_colours_still_get_a_prime_tower(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    write_plates_3mf(
+        [_two_objects(("#FF6AC1", "#1F6FEB"))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
+    )
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+    assert "wipe_tower_x" in _settings_of_bytes(moved)
+
+
+@pytest.mark.parametrize(("painted_in", "tower"), [("#1F6FEB", True), ("#FF6AC1", False)])
+def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2874 review: two packed copies of a piece painted in a second filament. Their
+    parts state one extruder, and replate counted only those, so it dropped the tower
+    the painting needs. A painting in the filament they already use still needs none."""
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), (painted_in,))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    colours = ["#FF6AC1"] if painted_in == "#FF6AC1" else ["#FF6AC1", painted_in]
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf([PlateParts((left, painted), (1, 1), (1, 2))], colours, out, thumbnails=None)
+    assert ("wipe_tower_x" in _settings_of_bytes(out.read_bytes())) is tower
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower

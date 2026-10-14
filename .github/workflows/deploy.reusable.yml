@@ -19,9 +19,11 @@ name: Deploy (reusable)
 #      The agent sidecar's line in the API manifest (#738) is pinned to
 #      `ghcr.io/eh-homelab/scadbuddy-agent:<version>@sha256:<its digest>`, the
 #      same build's agent image, so the two containers never drift apart.
-#      Once clusters runs it, the durable sessions sidecar's line (#1056) is
+#      Once clusters runs it, the durable sessions worker's line (#1056) is
 #      pinned the same way, to
-#      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`.
+#      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`,
+#      in scadbuddy-agent-durable.yaml (its own Deployment) or, before that
+#      file exists, in the API's manifest (where it first ran as a sidecar).
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
@@ -95,9 +97,11 @@ env:
   # The agent sidecar (#261), built by the same Build Image run under the same
   # tags, and pinned in $MANIFEST beside the API (#738).
   AGENT_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent
-  # The durable sessions sidecar (#1056), same run, same tags, pinned in
-  # $MANIFEST once clusters runs it.
+  # The durable sessions worker (#1056), same run, same tags, pinned once
+  # clusters runs it: in its own Deployment's file, or in $MANIFEST while it
+  # is still a sidecar there. Never both.
   AGENT_DURABLE_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent-durable
+  MANIFEST_AGENT_DURABLE: applications/scadbuddy/scadbuddy-agent-durable.yaml
   # The overlay that pulls in deploy/grafana as a remote kustomize resource,
   # and that resource without its `?ref=` (spec 2026-10-01 §7, #988).
   KUSTOMIZATION: clusters/prod/scadbuddy/kustomization.yaml
@@ -201,8 +205,8 @@ jobs:
           fetch-depth: 1
           path: clusters
 
-      # The durable sessions sidecar (#1056), resolved like the agent, but only
-      # when the manifest runs it: a manifest without its line needs no image,
+      # The durable sessions worker (#1056), resolved like the agent, but only
+      # when a manifest runs it: one without its line needs no image,
       # so a build from before 5e, or a still-private package, costs no wait.
       # Its job builds the agent-build chain plus the stage and can finish well
       # after the API's, so it waits up to 20 minutes. The pin step fails when
@@ -213,8 +217,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if ! grep -qE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "clusters/${MANIFEST}"; then
-            echo "clusters/${MANIFEST} does not run agent-durable; not resolving it"
+          if ! grep -sqE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "clusters/${MANIFEST}" "clusters/${MANIFEST_AGENT_DURABLE}"; then
+            echo "neither clusters/${MANIFEST} nor clusters/${MANIFEST_AGENT_DURABLE} runs agent-durable; not resolving it"
             echo "digest=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -351,7 +355,7 @@ jobs:
             expect_one "$target" "^\s*image: ${AGENT_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DIGEST}\$" "pinned agent image"
           }
 
-          # The durable sessions sidecar's line (#1056). Optional until clusters
+          # The durable sessions worker's line (#1056). Optional until clusters
           # runs it: a manifest with no line deploys without it. A manifest that
           # names it gets this build's image or fails, never a stale pin beside
           # a new agent (the two share the tool manifest). Sets $durable to
@@ -478,6 +482,19 @@ jobs:
           pin "$MANIFEST" scadbuddy
           pin_agent "$MANIFEST"
           pin_agent_durable "$MANIFEST"
+          # Its own Deployment (it first ran as a sidecar in $MANIFEST). Once
+          # the file exists it must run agent-durable, and $MANIFEST must not:
+          # two pollers of one queue from two places is a half-done move.
+          if [ -f "$MANIFEST_AGENT_DURABLE" ]; then
+            if [ "$durable" = pinned ]; then
+              echo "::error file=$MANIFEST::runs agent-durable, but ${MANIFEST_AGENT_DURABLE} exists; it belongs in one of them"; exit 1
+            fi
+            pin_agent_durable "$MANIFEST_AGENT_DURABLE"
+            if [ "$durable" != pinned ]; then
+              echo "::error file=$MANIFEST_AGENT_DURABLE::has no image line for ${AGENT_DURABLE_IMAGE}"; exit 1
+            fi
+            manifests+=("$MANIFEST_AGENT_DURABLE")
+          fi
           echo "durable=$durable" >> "$GITHUB_OUTPUT"
           pin_dashboard "$KUSTOMIZATION"
           echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"

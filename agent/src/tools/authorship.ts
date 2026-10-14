@@ -10,6 +10,7 @@ import type { Principal } from '../auth/principal.js'
 
 export const AUTHOR_HEADER = 'X-ScadBuddy-Agent-Author'
 export const AUTHOR_SESSION_HEADER = 'X-ScadBuddy-Agent-Author-Session'
+export const TOOL_HEADER = 'X-ScadBuddy-Agent-Tool'
 
 /** The backend's bound (core/authorship.py MAX_PRINCIPAL). */
 const MAX_PRINCIPAL = 300
@@ -32,10 +33,11 @@ export function principalHeader(id: string): string {
   return out || 'unknown'
 }
 
-export function authorHeaders(principal: Principal, session?: string): Record<string, string> {
+export function authorHeaders(principal: Principal, session?: string, tool?: string): Record<string, string> {
   return {
     [AUTHOR_HEADER]: principalHeader(principal.id),
     ...(session && /^[A-Za-z0-9_-]{1,64}$/.test(session) ? { [AUTHOR_SESSION_HEADER]: session } : {}),
+    ...(tool && /^[A-Za-z0-9_-]{1,64}$/.test(tool) ? { [TOOL_HEADER]: tool } : {}),
   }
 }
 

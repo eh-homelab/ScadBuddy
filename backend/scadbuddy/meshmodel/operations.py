@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import trimesh
 from fastapi import status
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.api import models as models_api
 from scadbuddy.bambuddy.client import client_for
@@ -27,17 +27,19 @@ from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
-from scadbuddy.library.presets import ParamPresetUpdate
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import (
+    MESHES_DIR,
     SCENE_NAME,
     Scene,
     SceneSource,
     dump_scene,
     exposed_values,
     load_scene,
+    mesh_files,
+    source_name,
     text_sha256,
 )
 from scadbuddy.operations.claims import ClaimStore
@@ -98,16 +100,54 @@ def compiled(scene: Scene) -> tuple[Scene, str]:
 
 def hand_edited(directory: Path, scene: Scene) -> bool:
     """Whether ``model.scad`` is no longer what the scene compiled (spec §5): by its
-    hash, never a fresh compile."""
-    source = (directory / SOURCE_NAME).read_text(encoding="utf-8")
+    hash, never a fresh compile. A missing one (a manual edit, a restore) is not what
+    the scene compiled either (#2631), so an edit is refused with the eject hint rather
+    than failing as a 500."""
+    try:
+        source = (directory / SOURCE_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
     return text_sha256(source) != scene.generated_sha256
 
 
-def read_scene(directory: Path, slug: str) -> Scene:
-    path = directory / SCENE_NAME
-    if not path.is_file():
+def has_scene(directory: Path, slug: str) -> None:
+    """404 unless the model is a mesh model: it has a ``scene.json``, valid or not."""
+    if not (directory / SCENE_NAME).is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} is not a mesh model (it has no scene)")
-    return load_scene(path.read_text(encoding="utf-8"))
+
+
+def read_scene(directory: Path, slug: str) -> Scene:
+    """The model's scene; 404 for a model with none, and 422 for a ``scene.json`` that is
+    not a valid scene (a manual edit, a restore of a broken one, #2631), naming eject:
+    the scene cannot be edited, but ``model.scad`` can once it is plain source."""
+    has_scene(directory, slug)
+    try:
+        return load_scene((directory / SCENE_NAME).read_text(encoding="utf-8"))
+    except ValidationError as e:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{slug!r} has a scene.json that is not a valid scene ({e.error_count()} "
+            "errors); eject the scene (POST /models/{slug}/scene/eject, the agent's "
+            "eject_scene) to keep the model as source, or restore an earlier version",
+        ) from None
+
+
+def unused_meshes(directory: Path, scene: Scene) -> list[str]:
+    """The scene's own files under ``meshes/`` that no part of ``scene`` uses any more (a
+    deleted object's): an edit removes them, so they leave the volume and every later
+    revision, and ``restore_version`` brings them back with the scene that used them
+    (#2632). Eject keeps them: the ejected ``model.scad`` imports the meshes."""
+    meshes = directory / MESHES_DIR
+    if not meshes.is_dir():
+        return []
+    used = mesh_files(scene)
+    return sorted(
+        f"{MESHES_DIR}/{path.name}"
+        for path in meshes.iterdir()
+        if path.is_file()
+        and SCENE_FILE.fullmatch(f"{MESHES_DIR}/{path.name}")
+        and f"{MESHES_DIR}/{path.name}" not in used
+    )
 
 
 def mesh_loader(directory: Path) -> MeshOf:
@@ -209,7 +249,7 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             data, name = payload, filename
         found_at = SceneSource(
             kind=source["kind"],
-            name=name,
+            name=source_name(name),
             sha256=hashlib.sha256(data).hexdigest(),
             file_id=source.get("file_id"),
             output_id=source.get("output_id"),
@@ -274,12 +314,12 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         return {}
 
     def trim_saved_presets(slug: str) -> None:
-        """Drop from each saved preset the parameters the scene no longer exposes."""
-        kept = exposed_values(read_scene(state.paths.model_dir(slug), slug))
-        for preset in state.presets.saved_presets(slug):
-            if set(preset.params) - set(kept):
-                params = {k: v for k, v in preset.params.items() if k in kept}
-                state.presets.update(slug, preset.id, ParamPresetUpdate(params=params))
+        """Drop from each saved preset the parameters the scene no longer exposes: the
+        scene read and every preset rewritten under the model's preset lock (#2631), so a
+        preset saved meanwhile is trimmed from what it holds then, never overwritten from
+        an earlier read, and a later edit's trim sees that edit's scene."""
+        directory = state.paths.model_dir(slug)
+        state.presets.keep_only(slug, lambda: exposed_values(read_scene(directory, slug)))
 
     async def edit_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         slug = request["slug"]
@@ -313,7 +353,12 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                         "send drop_from_presets to remove it from them",
                     )
             after, text = compiled(after)
-            return scene_files({SCENE_NAME: dump_scene(after).encode(), SOURCE_NAME: text.encode()})
+            writes: dict[str, bytes | None] = {
+                SCENE_NAME: dump_scene(after).encode(),
+                SOURCE_NAME: text.encode(),
+            }
+            writes.update(dict.fromkeys(unused_meshes(directory, after)))
+            return scene_files(writes)
 
         update = partial(state.catalogue.update_files, slug, compute, message=request["message"])
         record = await to_thread_to_end(
@@ -329,7 +374,8 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
     async def eject_check(request: dict[str, Any]) -> dict[str, Any]:
         slug = request["slug"]
         models_api.require_model_exists(state.catalogue, slug)
-        await asyncio.to_thread(read_scene, state.paths.model_dir(slug), slug)
+        # Only that it is a mesh model: an invalid scene.json is what eject is for (#2631).
+        await asyncio.to_thread(has_scene, state.paths.model_dir(slug), slug)
         return {}
 
     async def eject_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
