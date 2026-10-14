@@ -103,12 +103,24 @@ async def _sweep(
                 extra={"slice_job_id": job_id, "status": error.status},
             )
             settled = False
+            if _bambuddy_failing(error):
+                # The jobs after it would fail the same way: one warning per lost
+                # start, not one per candidate (#3013 review).
+                break
             continue
         if found is None:
             settled = False
         elif found:
             removed += 1
     return settled, removed
+
+
+def _bambuddy_failing(error: ApiError) -> bool:
+    """Whether ``error`` says Bambuddy itself is failing or unreachable (a 5xx, which
+    is also how the client reports no answer, or a 429), not this one job."""
+    return error.status >= status.HTTP_500_INTERNAL_SERVER_ERROR or (
+        error.status == status.HTTP_429_TOO_MANY_REQUESTS
+    )
 
 
 async def _remove_if_lost(client: BambuddyClient, lost: LostStart, job_id: int) -> bool | None:

@@ -8,6 +8,7 @@ recorded after a lost start (`bambuddy/lost_slices.py`).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from typing import Any, cast
 import pytest
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.bambuddy import lost_slices
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SliceLostError, SliceStarted
 from scadbuddy.bambuddy.lost_slices import GIVE_UP_AFTER, STARTS_KEPT, sweep_lost_slices
@@ -204,15 +206,46 @@ async def test_with_nothing_started_since_it_waits_then_gives_up() -> None:
     assert store.finished == [1]
 
 
-async def test_bambuddy_unreachable_keeps_the_lost_start_for_the_next_sweep() -> None:
+async def test_bambuddy_unreachable_keeps_the_lost_start_for_the_next_sweep(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class Down(Jobs):
         async def slice_job(self, job_id: int) -> SliceJob:
+            self.read.append(job_id)
             raise ApiError(503, "Bambuddy is down")
 
     store = lost_at()
     store.jobs[11] = T0 + timedelta(minutes=1)
+    bambuddy = Down()
 
-    assert await sweep(Down(), store) == 0
+    with caplog.at_level(logging.WARNING, logger=lost_slices.__name__):
+        assert await sweep(bambuddy, store) == 0
+    assert store.finished == []
+    # Bambuddy failing stops this lost start's look at once: one read, one warning,
+    # not one per job beside it (#3013 review).
+    assert len(bambuddy.read) == 1
+    assert len(caplog.records) == 1
+
+
+async def test_a_job_bambuddy_refuses_alone_does_not_stop_the_look_beside_it() -> None:
+    """A 4xx other than 404 is about that one job: the jobs after it are still read."""
+
+    class Forbids(Jobs):
+        async def slice_job(self, job_id: int) -> SliceJob:
+            if job_id == 9:
+                self.read.append(job_id)
+                raise ApiError(403, "not yours")
+            return await super().slice_job(job_id)
+
+    store = lost_at()
+    store.jobs[11] = T0 + timedelta(minutes=1)
+    bambuddy = Forbids()
+    j = job(10, sliced=502)
+    bambuddy.jobs[10] = j
+    bambuddy.files[502] = "sliced-502.gcode.3mf"
+
+    assert await sweep(bambuddy, store) == 1
+    assert bambuddy.deleted == [502]
     assert store.finished == []
 
 
