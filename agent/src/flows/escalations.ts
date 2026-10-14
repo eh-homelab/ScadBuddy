@@ -253,7 +253,7 @@ export class Escalations {
       bySession.set(session, [...(bySession.get(session) ?? []), { principal, call }])
     }
     const stepsOf = new Map<string, Awaited<ReturnType<FlowQueue['steps']>>>()
-    const parkedAt = new Map<string, Date>()
+    const pastGrace = new Set<string>()
     // Each session's oldest entry before any session's second: a backlog of one busy
     // session's entries never holds another session's out of the batch.
     for (const r of await this.#deps.sql<
@@ -264,13 +264,15 @@ export class Escalations {
         summary: string
         outside_reason: string | null
         hop_until: Date
-        created_at: Date
+        past_grace: boolean
         session_id: string
         parent_session: string
         parent_principal: string
       }[]
     >`
-      SELECT request_id, flow_run_id, tool, summary, outside_reason, hop_until, created_at, session_id::text, parent_session::text, parent_principal
+      SELECT request_id, flow_run_id, tool, summary, outside_reason, hop_until,
+             created_at < now() - make_interval(secs => ${UNLOGGED_GRACE_MS / 1000}) AS past_grace,
+             session_id::text, parent_session::text, parent_principal
       FROM (
         SELECT *, row_number() OVER (PARTITION BY parent_session ORDER BY created_at) AS nth
         FROM ai_pending_input
@@ -279,7 +281,7 @@ export class Escalations {
       ORDER BY nth, created_at LIMIT 200`) {
       const steps = stepsOf.get(r.flow_run_id) ?? (await this.#queue.steps(r.flow_run_id))
       stepsOf.set(r.flow_run_id, steps)
-      parkedAt.set(r.request_id, r.created_at)
+      if (r.past_grace) pastGrace.add(r.request_id)
       add(r.parent_session, r.parent_principal, {
         request_id: r.request_id,
         run_id: r.flow_run_id,
@@ -321,13 +323,14 @@ export class Escalations {
       // a later tick rather than go up with none, since it is sent only once. Past
       // `UNLOGGED_GRACE_MS` it goes up with none: the log has moved on without it.
       const reasoning = new Map<string, string>()
-      const graceFrom = Date.now() - UNLOGGED_GRACE_MS
       await Promise.all(
         calls.map(async (c) => {
           if (c.child_session === undefined) return
           const text = await childReasoning(this.#deps.sql, c.request_id)
           if (text !== undefined) reasoning.set(c.request_id, text)
-          else if ((parkedAt.get(c.request_id)?.getTime() ?? 0) < graceFrom) reasoning.set(c.request_id, '')
+          // Postgres's clock both stamps `created_at` and judges the grace (#3411): a
+          // replica's skewed clock neither shortens nor stretches it.
+          else if (pastGrace.has(c.request_id)) reasoning.set(c.request_id, '')
         }),
       )
       const ready = calls.filter((c) => c.child_session === undefined || reasoning.has(c.request_id))
@@ -389,16 +392,23 @@ export class Escalations {
       started_by: { session?: unknown; principal?: unknown }
       waiting_on: { call_id: string; kind: string; fn: string; hop?: string | null; hop_until?: string | null; reason?: string | null }[]
       steps: Parameters<typeof ownStep>[0] | null
+      live: string[]
     }[]
     try {
       rows = await this.#deps.sql`
-        SELECT id, workflow_run_id, started_by, waiting_on, steps FROM workflow_runs r
+        SELECT id, workflow_run_id, started_by, waiting_on, steps,
+               -- The calls whose hop has not timed out, by Postgres's clock (#3411).
+               (SELECT coalesce(jsonb_agg(w->>'call_id'), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w
+                 WHERE (w->>'hop_until')::timestamptz > now()) AS live
+        FROM workflow_runs r
         WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
           -- Before the limit: runs whose calls were all delivered already, still at hop
           -- parent, never keep a newer run's calls out of the 200.
           AND EXISTS (
             SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
             WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval'
+              -- A call whose hop timed out, not moved on yet, yields nothing (#3411).
+              AND (w->>'hop_until')::timestamptz > now()
               AND NOT EXISTS (
                 SELECT 1 FROM ai_escalation_deliveries d
                 WHERE d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w->>'call_id')))
@@ -413,7 +423,7 @@ export class Escalations {
       const { session, principal } = run.started_by
       if (typeof session !== 'string' || !isUuid(session) || typeof principal !== 'string') continue
       for (const w of run.waiting_on) {
-        if (w.kind !== 'approval' || w.hop !== 'parent' || !w.hop_until || Date.parse(w.hop_until) <= Date.now()) continue
+        if (w.kind !== 'approval' || w.hop !== 'parent' || !w.hop_until || !run.live.includes(w.call_id)) continue
         out.push({
           session,
           principal,

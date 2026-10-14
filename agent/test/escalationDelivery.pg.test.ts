@@ -321,6 +321,41 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent[0]!.text).toContain(newer)
   })
 
+  it("runs whose parent-hop calls timed out do not keep a newer run's call out of the batch (#3411)", async () => {
+    // Timed out but not moved on yet (moveDue runs on its own tick): they yield nothing.
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() - 60_000).toISOString(), hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    for (let i = 0; i < 200; i++) {
+      const old = randomUUID()
+      await db.sql`
+        INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+        VALUES (${old}, 'd1', 1, 'swap', 'waiting', ${`flow-${old}`}, 'wr1',
+                ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+    }
+    const newer = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(newer)
+  })
+
+  it("judges a call's hop and its grace by Postgres's clock, not a skewed replica's (#3411)", async () => {
+    const ownCall = await flowRun()
+    const unlogged = await park(parent, child, TOKEN, `toolu_${randomUUID()}`, false)
+    // This replica's clock runs 15 minutes fast: past the own call's hop (10 minutes) and
+    // the unlogged call's grace, though neither has passed.
+    const now = Date.now()
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000)
+    try {
+      expect(await escalations.deliver()).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(sent[0]!.text).toContain(ownCall)
+    expect(sent[0]!.text).not.toContain(unlogged)
+    expect(await hop(unlogged)).toMatchObject({ hop: 'parent', delivered: false })
+  })
+
   it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {
     const ownCall = await flowRun()
     expect(await escalations.deliver()).toBe(1)
