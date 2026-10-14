@@ -19,6 +19,7 @@ from typing import Any
 
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.flow_triggers.models import (
     MAX_EVENT_FIRES_PER_HOUR,
@@ -185,16 +186,37 @@ class TriggerFires:
 
 #: Between attempts to put the Schedules right while Temporal does not take them.
 SCHEDULES_RETRY = 5.0
-#: Between passes once they are right: a route that changed a row while Temporal was
-#: away (503) leaves its Schedule out of step until the next pass, not the next start.
+#: Between passes once they are right: a pause or resume saved while Temporal was away
+#: leaves its Schedule out of step until the next pass, not the next start. A spec
+#: Temporal refuses is never applied, only logged on each pass.
 RECONCILE_INTERVAL = 300.0
 
 
 async def ensure_trigger_schedules(client: Client, task_queue: str, store: TriggerStore) -> None:
     """Every trigger's Schedule as its row says (§12.1): one edited while Temporal was
-    away is put right here, and a trigger that is no longer a schedule loses its own."""
+    away is put right here, and a trigger that is no longer a schedule loses its own.
+
+    One trigger's failure never stops the rest. A spec Temporal refuses
+    (`INVALID_ARGUMENT`, a row saved before the routes checked specs first) is logged
+    and left: retrying it cannot help. Any other failure is raised once every trigger
+    has been tried, so the caller retries soon."""
+    retry: Exception | None = None
     for trigger in await store.list_triggers():
-        await ensure_trigger_schedule(client, trigger, task_queue)
+        try:
+            await ensure_trigger_schedule(client, trigger, task_queue)
+        except Exception as error:
+            refused = isinstance(error, RPCError) and error.status == RPCStatusCode.INVALID_ARGUMENT
+            logger.warning(
+                "Temporal refused a trigger's Schedule; it is left as it is"
+                if refused
+                else "could not put a trigger's Schedule right",
+                extra={"trigger": trigger.id},
+                exc_info=True,
+            )
+            if not refused:
+                retry = error
+    if retry is not None:
+        raise retry
 
 
 async def reconcile_trigger_schedules(

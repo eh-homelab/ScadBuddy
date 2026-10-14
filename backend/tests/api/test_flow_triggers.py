@@ -5,6 +5,7 @@ approved; who made or changed a trigger, and its grant, is the server's record."
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -14,7 +15,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverlapPolicy
+from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api import flow_triggers as routes
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import EventBus, JobEvent, VersionCommitted
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -348,6 +351,84 @@ def test_an_edit_returns_the_standing_grant_to_requested(
     client.post(f"/api/v1/flow-triggers/{trigger['id']}/pause")
     client.post(f"/api/v1/flow-triggers/{trigger['id']}/resume")
     assert view(client, trigger["id"])["grant"]["in_force"] is True
+
+
+@pytest.mark.usefixtures("triggers")
+def test_an_edit_temporal_refuses_saves_nothing(
+    client: TestClient, workflow_reaper: WorkflowReaper
+) -> None:
+    """#2729 review: the Schedule is set before the row is saved. A cron our check lets
+    through but Temporal refuses is a 422 that leaves the row, the Schedule and the
+    approval as they were."""
+    definition = register(client, WAITS)
+    trigger = create(client, definition["id"])
+    assert attach(client, trigger["id"], grant({"fn": "queue_print"})).status_code == 200
+    before = view(client, trigger["id"])
+    assert before["grant"]["in_force"] is True
+    temporal = workflow_reaper.client
+    assert isinstance(temporal, Client)
+    handle = temporal.get_schedule_handle(schedule_id(trigger["id"]))
+    spec = workflow_reaper.run(handle.describe()).schedule.spec
+    refused = client.patch(
+        f"/api/v1/flow-triggers/{trigger['id']}", json={"schedule": {"cron": ["99 * * * *"]}}
+    )
+    assert refused.status_code == 422, refused.text
+    after = view(client, trigger["id"])
+    assert after["schedule"] == before["schedule"]
+    assert after["updated_at"] == before["updated_at"]
+    assert (after["grant"]["status"], after["grant"]["in_force"]) == ("approved", True)
+    assert workflow_reaper.run(handle.describe()).schedule.spec == spec
+
+
+@pytest.mark.usefixtures("triggers")
+def test_a_pause_or_resume_saved_while_temporal_is_away_answers_200(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2729 review: the row took effect, so the route does not say "try again"; the
+    worker's reconcile puts the Schedule right."""
+    definition = register(client, QUICK)
+    trigger = create(client, definition["id"])
+
+    async def away(*_: Any) -> None:
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(routes, "ensure_trigger_schedule", away)
+    paused = client.post(f"/api/v1/flow-triggers/{trigger['id']}/pause")
+    assert paused.status_code == 200, paused.text
+    assert view(client, trigger["id"])["paused"] is True
+    resumed = client.post(f"/api/v1/flow-triggers/{trigger['id']}/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert view(client, trigger["id"])["paused"] is False
+    # An edit is still checked first: with Temporal away it saves nothing (503).
+    edited = client.patch(f"/api/v1/flow-triggers/{trigger['id']}", json={"overlap": "allow_all"})
+    assert edited.status_code == 503, edited.text
+    assert view(client, trigger["id"])["overlap"] == trigger["overlap"]
+
+
+@pytest.mark.usefixtures("triggers")
+def test_the_list_builds_a_few_views_at_once_in_order(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2729 review: up to 200 triggers, each a Temporal describe and three queries, are
+    not read one after another; at most `LIST_VIEWS_AT_ONCE` at a time."""
+    definition = register(client, QUICK)
+    made = [create(client, definition["id"])["id"] for _ in range(12)]
+    real = routes._view
+    running = peak = 0
+
+    async def counted(triggers: Any, trigger: Any) -> Any:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        return await real(triggers, trigger)
+
+    monkeypatch.setattr(routes, "_view", counted)
+    listed = client.get("/api/v1/flow-triggers", params={"limit": 200})
+    assert listed.status_code == 200, listed.text
+    assert [t["id"] for t in listed.json()] == list(reversed(made))
+    assert 1 < peak <= routes.LIST_VIEWS_AT_ONCE
 
 
 @pytest.mark.usefixtures("triggers")

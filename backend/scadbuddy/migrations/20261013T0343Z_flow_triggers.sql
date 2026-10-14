@@ -31,7 +31,8 @@ CREATE INDEX flow_triggers_event ON flow_triggers ((event ->> 'kind')) WHERE kin
 
 -- A trigger's standing grant (§12.4): what its fires' runs may do without asking. A
 -- person approves it; at each fire while it is in force, the run gets a run grant
--- (`flow_grants.standing_grant_id`) with the same rules and fresh counters.
+-- (`flow_grants.standing_grant_id`) with the same rules. Its limits are spent across
+-- every run it seeds under one approval (`used`), never afresh per run.
 CREATE TABLE flow_trigger_grants (
     id           text PRIMARY KEY,
     trigger_id   text NOT NULL REFERENCES flow_triggers (id) ON DELETE CASCADE,
