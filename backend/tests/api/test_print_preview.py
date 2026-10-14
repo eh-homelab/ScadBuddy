@@ -25,9 +25,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import outputs as outputs_api
 from scadbuddy.bambuddy import preview
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
@@ -538,6 +540,27 @@ def test_a_plate_clicked_in_the_dialog_is_previewed_on_its_own(
     assert plate.content[:4] == b"glTF"
     assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=2").status_code == 422
     assert client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=9").status_code == 404
+
+
+def test_a_plate_too_big_to_read_is_refused_as_a_library_plate_is(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2767: out of memory reading an output's plate is the library's 422, not a 500."""
+    output_id = two_plate_output(client, model, paths)
+
+    def oom(*_: object) -> bytes:
+        raise MemoryError
+
+    # Only this patch is undone: the autouse fixtures' patches stay for the read after.
+    with monkeypatch.context() as patched:
+        patched.setattr(outputs_api, "plate_glb", oom)
+        response = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == str(ReadOutOfMemoryError())
+
+    # Nothing is kept: the same plate reads once there is memory for it.
+    again = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
+    assert again.status_code == 200, again.text
 
 
 def _sweep(client: TestClient, grace: timedelta = PREVIEW_GRACE) -> int:
