@@ -796,11 +796,19 @@ def _attribute(tag: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: The longest coordinate :func:`object_model` writes (``_number``: six decimals) is far
+#: under this; a longer one is not that writer's, and is parsed instead. It bounds what
+#: one vertex costs as an array row, whatever the file holds (#2877).
+_MAX_WRITTEN_NUMBER = 32
 #: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
 #: two counted against each other, so a file written any other way is parsed instead.
-_WRITTEN_VERTEX = re.compile(rb'<vertex x="([^"]*)" y="([^"]*)" z="([^"]*)"/>')
+_WRITTEN_VERTEX = re.compile(
+    rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
+)
 _ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
 _PAINT_CODE = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="([^"]*)"')
+#: Vertices turned into numbers at a time, so the copy never costs more than a batch.
+_VERTEX_BATCH = 65536
 
 
 def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
@@ -808,24 +816,49 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     wrote, read off its bytes by pattern rather than parsed vertex by vertex (#2877):
     a re-placed print only needs the box, and the parse of an 86 MB file held a worker
     for 39 s. ``None`` when the file is not in that writer's shape (a vertex written
-    otherwise, a comment, an entity, no vertex at all, a code past its cap), which
-    :func:`_plate_geometry` then parses as it always has."""
+    otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
+    entity, no vertex at all, a code past its cap), which :func:`_plate_geometry` then
+    parses as it always has.
+
+    Every value is bounded before it is copied: no entity is expanded (none is
+    accepted), coordinates are read a batch at a time into rows of at most
+    :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
     if b"<!--" in data or b"<![CDATA[" in data or b"&" in data:
         return None
-    found = _WRITTEN_VERTEX.findall(data)
-    if not found or len(found) != len(_ANY_VERTEX.findall(data)):
-        return None
+    low = np.full(3, np.inf)
+    high = np.full(3, -np.inf)
+    count = 0
+    batch: list[tuple[bytes, bytes, bytes]] = []
+
+    def reduce() -> None:
+        points = np.array(batch, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
+        np.minimum(low, points.min(axis=0), out=low)
+        np.maximum(high, points.max(axis=0), out=high)
+        batch.clear()
+
     try:
-        points = np.array(found, dtype=np.bytes_).astype(np.float64)
+        for match in _WRITTEN_VERTEX.finditer(data):
+            batch.append((match[1], match[2], match[3]))
+            count += 1
+            if len(batch) == _VERTEX_BATCH:
+                reduce()
+        if batch:
+            reduce()
     except ValueError:
         return None
-    painted: set[int] = set()
-    for code in set(_PAINT_CODE.findall(data)):
-        if len(code) > MAX_CODE_DIGITS:
+    if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
+        return None
+    codes: set[bytes] = set()
+    for match in _PAINT_CODE.finditer(data):
+        code = match.group(1)
+        if len(code) > MAX_CODE_DIGITS or not code.isascii():
             return None
+        codes.add(code)
+    painted: set[int] = set()
+    for code in codes:
         if code:
             painted.update(states(code.decode("ascii")))
-    return np.array([points.min(axis=0), points.max(axis=0)]), frozenset(painted)
+    return np.array([low, high]), frozenset(painted)
 
 
 def _plate_geometry(

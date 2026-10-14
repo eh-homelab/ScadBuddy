@@ -1600,3 +1600,35 @@ def test_a_written_paint_code_past_its_cap_is_parsed_and_refused(tmp_path: Path)
     )
     with pytest.raises(ValueError, match="paint_color"):
         replate_3mf(other, plate_for("H2C"))
+
+
+def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
+    """#2877 review: a numpy bytes array is as wide as its longest value, so one 2 MB
+    coordinate among a hundred short ones would have cost 600 MB to read a box. A
+    coordinate longer than the writer ever writes leaves the file to the parse."""
+    vertex = b'\n     <vertex x="1" y="2" z="3"/>'
+    long = b'\n     <vertex x="1.' + b"0" * 2_000_000 + b'" y="2" z="3"/>'
+    data = b"<model><resources><object><mesh><vertices>" + vertex * 100 + long
+    data += b"</vertices></mesh></object></resources></model>"
+
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20 * 1024 * 1024
+
+
+def test_written_extents_are_read_a_batch_at_a_time() -> None:
+    vertices = b"".join(
+        b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(bambu3mf._VERTEX_BATCH + 5)
+    )
+    data = b"<model><mesh><vertices>" + vertices + b"</vertices></mesh></model>"
+    box, painted = bambu3mf._written_extents(data) or (None, None)
+    assert box is not None
+    assert box.tolist() == [
+        [0, -(bambu3mf._VERTEX_BATCH + 4), 1],
+        [bambu3mf._VERTEX_BATCH + 4, 0, 1],
+    ]
+    assert painted == frozenset()
