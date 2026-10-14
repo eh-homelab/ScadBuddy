@@ -516,6 +516,25 @@ describe('ArrangeDialog', () => {
       expect(screen.getByRole('button', { name: 'Add from a model' })).toBeDisabled()
     })
 
+    it('leaves a flagged output with objects out once it is removed (#2754 review)', async () => {
+      // The list showed Nova's objects; Arrange's refusal flagged it. Removed, it is in
+      // neither the re-render nor the request, and no prompt opens over an empty list.
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(within(await screen.findByRole('group', { name: 'Re-render first' })).getByRole('button', { name: 'Cancel' }))
+      await user.click(screen.getByRole('button', { name: /^Remove .*Nova$/ }))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual(first.manifest!.map(() => first.id))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
@@ -606,9 +625,28 @@ describe('ArrangeDialog', () => {
       // The note names it as the row does, never by its 32-hex id.
       expect(screen.getByRole('status')).toHaveTextContent('Name Keychain c0ffee00 was saved before Arrange existed')
       await user.click(screen.getByRole('button', { name: `Re-render ${label}` }))
-      await waitFor(() => expect(backfill).toHaveBeenCalledWith(stale.id))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(stale.id, expect.any(AbortSignal)))
       expect(await screen.findByLabelText(/^Copies of .* — c0ffee00$/, {}, { timeout: 5000 })).toBeInTheDocument()
       expect(screen.queryByText('needs a re-render', { exact: false })).not.toBeInTheDocument()
+    })
+
+    it("traces a row's Re-render as one action (#2754 review)", async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(
+          <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+        )
+        await user.click(await screen.findByRole('button', { name: 'Re-render Name Keychain — c0ffee00' }))
+        await waitFor(() => expect(tracing.exporter.getFinishedSpans().map((s) => s.name)).toContain('rerender'), {
+          timeout: 5000,
+        })
+        const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'rerender')
+        expect(span?.attributes['scadbuddy.output_id']).toBe(stale.id)
+      } finally {
+        tracing.uninstall()
+      }
     })
 
     it('takes an output that needs a re-render out with Remove, asking nothing about it', async () => {

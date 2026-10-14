@@ -19,6 +19,7 @@ import {
   type ArrangedJob,
   type OutputRef,
 } from '../lib/arrange'
+import { shortId } from '../lib/format'
 import { traceAction } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
@@ -39,11 +40,6 @@ function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
     (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
   )
-}
-
-/** #2285 — an output id's head, as History shows it: the whole 32 hex says nothing more. */
-function shortId(id: string): string {
-  return id.slice(0, 8)
 }
 
 /**
@@ -374,10 +370,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     running.current = controller
     try {
       say(rerenderStage(1))
-      const { ready, failed } = await backfillOutputs([refOf(output)], {
-        signal: controller.signal,
-        onProgress: (ref, message) => setBackfill((shown) => ({ ...shown, [ref.id]: message })),
-      })
+      // One action, as Arrange's re-renders are (#2292): its start is the action's child.
+      const { ready, failed } = await traceAction('rerender', { 'scadbuddy.output_id': output.id }, (within) =>
+        backfillOutputs([refOf(output)], {
+          signal: controller.signal,
+          within,
+          onProgress: (ref, message) => setBackfill((shown) => ({ ...shown, [ref.id]: message })),
+        }),
+      )
       setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
       setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
       if (failed.length > 0) setFailures(backfillFailures(failed))
@@ -393,8 +393,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     }
   }
 
-  /** Arrange: first re-render `stale` (confirmed by the user), then arrange every output that can be. */
-  async function submit(stale: Output[]) {
+  /**
+   * Arrange: first re-render `rerendering` (confirmed by the user), then arrange every
+   * output that can be. Never the dialog's `stale`: a stale output the user removed is in
+   * neither, and must not come back into the request (#2754 review).
+   */
+  async function submit(rerendering: Output[]) {
     setBusy(true)
     setAsking(false)
     setError(null)
@@ -409,14 +413,15 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         {
           'scadbuddy.outputs': outputs.length,
           'scadbuddy.library_files': fileRows.length,
-          'scadbuddy.rerendered': stale.length,
+          'scadbuddy.rerendered': rerendering.length,
         },
         async (within, span) => {
+          // Every output that needs no re-render; a stale one comes back only once re-rendered.
           let usable = outputs.filter((output) => !stale.includes(output))
           let skipped: string | undefined
-          if (stale.length > 0) {
-            say(rerenderStage(stale.length))
-            const { ready, failed } = await backfillOutputs(stale.map(refOf), {
+          if (rerendering.length > 0) {
+            say(rerenderStage(rerendering.length))
+            const { ready, failed } = await backfillOutputs(rerendering.map(refOf), {
               signal: controller.signal,
               within,
               onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),

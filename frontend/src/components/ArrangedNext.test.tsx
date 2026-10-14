@@ -42,6 +42,20 @@ describe('ArrangedNext (#2287)', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('says the plates are unavailable when they cannot be read, rather than showing none (#2754 review)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json(
+          { title: 'Bad Gateway', status: 502 },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
+    expect(await screen.findByText('Plates unavailable')).toBeInTheDocument()
+    expect(screen.queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+  })
+
   it('shows the plates of the arranged result before its next step (#2282)', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>

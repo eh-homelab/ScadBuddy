@@ -1,5 +1,6 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
+import { shortId } from './format'
 import type { Within } from './traceAction'
 import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
 
@@ -189,7 +190,7 @@ export function backfillIds(cause: unknown): string[] | null {
 /** "A", "A and B", "A, B and C". */
 export function listNames(outputs: OutputRef[]): string {
   // #2285 — an unnamed one by its id's head, as History shows it.
-  const names = outputs.map((o) => o.name ?? o.id.slice(0, 8))
+  const names = outputs.map((o) => o.name ?? shortId(o.id))
   if (names.length <= 1) return names[0] ?? ''
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }

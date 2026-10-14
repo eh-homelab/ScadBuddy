@@ -5,10 +5,13 @@ import { useAsync } from '../lib/useAsync'
  * #2282 — an arranged output's plates: how many, and a picture of each, read from its
  * 3MF (`GET /outputs/{id}/plates`). Shown under the result of an Arrange and on an
  * arranged History row, so the layout can be seen without downloading the 3MF. Nothing
- * while the plates are read, or when they cannot be.
+ * while the plates are read; a muted note when they cannot be, so a failed read does not
+ * look like an arrange with no plates.
  */
 export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; size?: 'sm' | 'md' }) {
-  const plates = useAsync(() => api.getOutputPlates(outputId).catch(() => []), [outputId]).data ?? []
+  const read = useAsync(() => api.getOutputPlates(outputId), [outputId])
+  if (read.error) return <p className="mt-1.5 text-[12px] text-faint">Plates unavailable</p>
+  const plates = read.data ?? []
   if (plates.length === 0) return null
   const box = size === 'sm' ? 'size-14' : 'size-24'
   return (

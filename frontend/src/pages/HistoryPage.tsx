@@ -18,18 +18,13 @@ import { editPath, editTargetFor, modelPath, type EditNavigationState } from '..
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { wasSent } from '../lib/sent'
-import { formatBbox, formatValue, timeAgo } from '../lib/format'
+import { formatBbox, formatValue, shortId, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
-
-/** Output ids are 32 hex characters; only the head of one is worth showing. */
-function shortId(id: string): string {
-  return id.slice(0, 8)
-}
 
 export function HistoryPage() {
   const { slug = '' } = useParams()
@@ -176,6 +171,8 @@ export function HistoryPage() {
                   onDelete={() => setConfirmFor(output)}
                   bambuddyUrl={bambuddyUrl}
                   pinned={modelState.data?.libraries}
+                  // Its plates show once, in the next-step card above (#2754 review).
+                  platesAbove={arrangedRow?.id === output.id}
                 />
               ))}
             </ul>
@@ -416,6 +413,7 @@ function OutputRow({
   onDelete,
   bambuddyUrl,
   pinned,
+  platesAbove = false,
 }: {
   output: Output
   schema: CustomizerSchema
@@ -430,6 +428,8 @@ function OutputRow({
   bambuddyUrl: string | undefined
   /** The model's current pins; undefined until the model has loaded, so nothing is flagged. */
   pinned: ModelLibrary[] | undefined
+  /** The just-arranged output, whose plates `ArrangedNext` shows above the list already. */
+  platesAbove?: boolean
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
@@ -490,7 +490,7 @@ function OutputRow({
           </p>
           <OutputLibraries libraries={output.libraries ?? []} pinned={pinned} />
           {/* #2282 — an arranged output's layout is what it is: its plates, on the row. */}
-          {arrangedFrom > 0 && <ArrangedPlates outputId={output.id} size="sm" />}
+          {arrangedFrom > 0 && !platesAbove && <ArrangedPlates outputId={output.id} size="sm" />}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, LibraryListing, ModelSummary, Output } from '../api/types'
 import { needsBackfill } from '../lib/arrange'
-import { formatBbox, timeAgo } from '../lib/format'
+import { formatBbox, shortId, timeAgo } from '../lib/format'
 import { useDisplayUnit } from '../lib/units'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
@@ -213,7 +213,7 @@ export function AddFromModel(props: Props<Output>) {
           // #2285 — when and how big, so two outputs of one name can be told apart.
           label={(output) =>
             [
-              output.name ?? output.id.slice(0, 8),
+              output.name ?? shortId(output.id),
               timeAgo(output.created_at),
               ...(output.bbox_mm ? [formatBbox(output.bbox_mm, unit)] : []),
               ...(needsBackfill(output) ? ['needs a re-render'] : []),
