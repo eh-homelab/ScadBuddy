@@ -332,6 +332,23 @@ else
   fail "dashboard: step failed: $(grep '::error' "$work/log")"
 fi
 
+# 9a. The one allowed suffix, `&timeout=<n>s|m|h` (kustomize's git timeout):
+#     the ref moves and the suffix is carried over unchanged, and a rerun once
+#     clusters merged it finds nothing to deploy.
+for timeout in 180s 3m 1h; do
+  overlay=$(overlay_ns "${dashboard_line}${old_ref}&timeout=${timeout}")
+  if run "$api_and_agent"; then
+    grep -qxF "${dashboard_line}${REVISION}&timeout=${timeout}" "$work/repo/$KUSTOMIZATION" \
+      || fail "dashboard timeout=${timeout}: ref not moved or suffix lost: $(grep -F deploy/grafana "$work/repo/$KUSTOMIZATION")"
+    grep -qF "$old_ref" "$work/repo/$KUSTOMIZATION" && fail "dashboard timeout=${timeout}: old ref survived"
+    grep -qx 'dashboard=pinned' "$work/out" || fail "dashboard timeout=${timeout}: dashboard output is not pinned"
+    rerun || fail "dashboard timeout=${timeout}: rerun failed: $(grep '::error' "$work/log")"
+    grep -qx 'unchanged=true' "$work/out" || fail "dashboard timeout=${timeout}: rerun expected unchanged=true"
+  else
+    fail "dashboard timeout=${timeout}: step failed: $(grep '::error' "$work/log")"
+  fi
+done
+
 # 9b. A rollback to a revision without deploy/grafana: the images move, the
 #     dashboard line stays at its old ref, with a warning.
 overlay=$(overlay_ns "${dashboard_line}${old_ref}")
@@ -468,6 +485,13 @@ dashboard_fails "lower case" "$near_miss" "  - https://github.com/eh-homelab/sca
 dashboard_fails "commented out" "$near_miss" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
 dashboard_fails "extra space" "$near_miss" "  -  $DASHBOARD_RESOURCE?ref=${old_ref}"
 dashboard_fails ".git form" "$near_miss" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=${old_ref}"
+# Only `&timeout=<n>s|m|h`, exactly, may follow the SHA.
+dashboard_fails "timeout without unit" "$near_miss" "${dashboard_line}${old_ref}&timeout=180"
+dashboard_fails "timeout in ms" "$near_miss" "${dashboard_line}${old_ref}&timeout=180ms"
+dashboard_fails "other parameter" "$near_miss" "${dashboard_line}${old_ref}&submodules=false"
+dashboard_fails "timeout plus another parameter" "$near_miss" "${dashboard_line}${old_ref}&timeout=180s&submodules=false"
+dashboard_fails "timeout twice" "$near_miss" "${dashboard_line}${old_ref}&timeout=180s&timeout=1s"
+dashboard_fails "timeout before ref" "$near_miss" "  - $DASHBOARD_RESOURCE?timeout=180s&ref=${old_ref}"
 # ...and beside an exact line they are errors too: a second, unpinned copy.
 dashboard_fails "exact line plus .git near miss" "times but only 1 line is exactly" \
   "${dashboard_line}${old_ref}" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=main"
