@@ -9,6 +9,7 @@ import pytest
 
 from scadbuddy.flows.inputs import (
     MAX_PATTERNED_LENGTH,
+    PATTERN_TIMEOUT_S,
     InputsError,
     inputs_model,
     resolve_inputs,
@@ -141,11 +142,46 @@ def test_a_pattern_needs_a_bounded_max_length(prop: dict[str, Any]) -> None:
     """#2661: every start runs the pattern; a short backtracking one on a long value is slow."""
     schema = {"type": "object", "properties": {"s": prop}}
     assert any("maxLength" in p for p in schema_problems(schema))
+
+
+def test_a_pattern_with_a_bounded_max_length_is_accepted() -> None:
     bounded = {
         "type": "object",
         "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 64}},
     }
     assert schema_problems(bounded) == []
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "integer", "pattern": "^1$"},
+        {"type": "array", "items": {"type": "integer", "pattern": "^1$"}},
+    ],
+)
+def test_a_pattern_on_another_type_is_not_supported_and_asks_no_max_length(
+    prop: dict[str, Any],
+) -> None:
+    problems = schema_problems({"type": "object", "properties": {"s": prop}})
+    assert any("'pattern' is not supported" in p for p in problems), problems
+    assert not any("maxLength" in p for p in problems), problems
+
+
+def test_an_exponential_pattern_within_its_max_length_is_cut_off() -> None:
+    """#2661 review: a bounded maxLength bounds a linear pattern, not `^(a|aa)+$`; the
+    value is refused at PATTERN_TIMEOUT_S rather than backtracking for minutes."""
+    schema = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64}},
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"s": "a" * 60 + "!"})
+    assert time.monotonic() - started < 1.0
+    assert err.value.problems == [
+        f"s: is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it"
+    ]
+    assert resolve_inputs(schema, {"s": "aaa"}) == {"s": "aaa"}
 
 
 SLOW = {"type": "string", "pattern": "^[a-z]+$", "maxLength": 64}

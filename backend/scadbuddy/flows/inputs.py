@@ -23,10 +23,11 @@ import copy
 import json
 import keyword
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any, Final, Literal
 
 import jsonschema
+import regex
 from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
 INPUTS_FILE: Final = "inputs.json"
@@ -36,6 +37,9 @@ MAX_PATTERN = 256
 #: The longest value a ``pattern`` runs against, which such an input must declare as its
 #: ``maxLength`` (#2661): every start runs the regex in the API process.
 MAX_PATTERNED_LENGTH = 1024
+#: How long a pattern may take on one value before the value is refused (#2661): a bounded
+#: `maxLength` bounds a linear pattern's work, not an exponential one's (`^(a|aa)+$`).
+PATTERN_TIMEOUT_S: Final = 0.1
 #: The type the script's `inputs()` returns, in the stubs and the editor's help.
 INPUTS_TYPE = "FlowInputs"
 
@@ -126,7 +130,9 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
         problems.append("enum must list at least one value")
     items = prop.get("items")
     for where in (prop, items if isinstance(items, dict) else {}):
-        if "pattern" not in where:
+        # Only a string's: on any other type `pattern` is "not supported" above, and JSON
+        # Schema ignores it there.
+        if "pattern" not in where or where.get("type") != "string":
             continue
         if len(str(where["pattern"])) > MAX_PATTERN:
             # Every start runs it: a pasted one is bounded.
@@ -141,10 +147,37 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if "default" in prop and not problems:
         try:
-            jsonschema.Draft202012Validator(prop).validate(prop["default"])
+            _Validator(prop).validate(prop["default"])
         except jsonschema.ValidationError as err:
             problems.append(f"default does not fit: {err.message}")
     return problems
+
+
+def _pattern(
+    validator: Any, pattern: str, instance: Any, schema: dict[str, Any]
+) -> Iterator[jsonschema.ValidationError]:
+    """jsonschema's `pattern`, run with a deadline: past PATTERN_TIMEOUT_S the value is
+    refused rather than left to backtrack on the API's event loop (#2661)."""
+    if not validator.is_type(instance, "string"):
+        return
+    try:
+        found = regex.search(pattern, instance, timeout=PATTERN_TIMEOUT_S)
+    except TimeoutError:
+        yield jsonschema.ValidationError(
+            f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it"
+        )
+        return
+    except regex.error as err:
+        yield jsonschema.ValidationError(f"its pattern does not compile: {err}")
+        return
+    if found is None:
+        yield jsonschema.ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
+#: Draft 2020-12, its `pattern` run by `_pattern`.
+_Validator = jsonschema.validators.extend(  # type: ignore[no-untyped-call]
+    jsonschema.Draft202012Validator, {"pattern": _pattern}
+)
 
 
 def _python_type(prop: dict[str, Any]) -> Any:
@@ -244,7 +277,7 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
     # over-long input is said here, and checked for everything but its pattern.
     too_long = _too_long_for_pattern(properties, given)
     checked = {**_without_patterns(schema, too_long), "additionalProperties": False}
-    validator = jsonschema.Draft202012Validator(checked)
+    validator = _Validator(checked)
     problems = [p for said in too_long.values() for p in said] + [
         f"{'.'.join(str(p) for p in err.absolute_path) or 'inputs'}: {err.message}"
         for err in sorted(validator.iter_errors(given), key=lambda e: list(e.absolute_path))
