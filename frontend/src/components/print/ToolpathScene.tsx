@@ -3,7 +3,7 @@ import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { cameraFraming } from '../../lib/previewFrame'
-import { STRIDE, TRAVEL, toolpathLines, type Toolpath, type ToolpathView } from '../../lib/toolpath'
+import { STRIDE, TRAVEL, printedUpTo, toolpathLines, type Toolpath, type ToolpathView } from '../../lib/toolpath'
 
 type Props = {
   path: Toolpath
@@ -58,15 +58,23 @@ function ToolpathLines({ path, view, layer }: Omit<Props, 'background'>) {
   const aspect = useThree((state) => state.size.width / Math.max(1, state.size.height))
   const { center, size } = useMemo(() => printBox(path), [path])
 
+  // Built once per path and view: Layers draws every layer's lines and shows the ones up
+  // to the slider's by a draw range, so a slider move allocates nothing.
   const geometry = useMemo(() => {
-    const { positions, colours } = toolpathLines(path, view, layer)
+    const { positions, colours } = toolpathLines(path, view, null)
     const built = new THREE.BufferGeometry()
     built.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     built.setAttribute('color', new THREE.BufferAttribute(colours, 3))
     return built
-  }, [path, view, layer])
+  }, [path, view])
+  const upTo = useMemo(() => (view === 'layers' ? printedUpTo(path) : null), [path, view])
   useEffect(() => () => geometry.dispose(), [geometry])
-  useEffect(() => invalidate(), [geometry, invalidate])
+  useEffect(() => {
+    const lines = upTo === null || layer === null ? undefined : upTo[Math.min(layer, upTo.length - 1)]
+    // Two vertices a line.
+    geometry.setDrawRange(0, lines === undefined ? Infinity : 2 * lines)
+    invalidate()
+  }, [geometry, upTo, layer, invalidate])
 
   useEffect(() => {
     if (!controls) return
