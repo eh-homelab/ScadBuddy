@@ -87,6 +87,8 @@ WarningKind = Literal[
     "rack-unsafe-material",
     "rack-left-to-bambuddy",
     "rack-manual-partial",
+    # A by-object print whose objects the toolhead or the gantry would hit (#956).
+    "sequence-clearance",
 ]
 
 
