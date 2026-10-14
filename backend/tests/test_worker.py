@@ -69,6 +69,7 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
     connect_lazily,
+    current_routing,
     drained,
     is_current,
     make_current,
@@ -446,6 +447,79 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
+
+
+async def _routing_once_current(
+    client: Client, deployment: str, build_id: str
+) -> tuple[str | None, bytes]:
+    """`current_routing` once it names ``build_id``: just after a write the deployment's
+    own workflow is still propagating it (see `_is_current_answer`)."""
+    for attempt in range(IS_CURRENT_ATTEMPTS):
+        try:
+            build, token = await current_routing(
+                client, namespace=client.namespace, deployment_name=deployment
+            )
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT:
+                raise
+        else:
+            if build == build_id:
+                return build, token
+        await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+    raise AssertionError(f"{build_id} never became current")
+
+
+@pytest.mark.requires_temporal
+async def test_temporal_refuses_a_write_with_a_stale_conflict_token() -> None:
+    """#2538: what `deployment_writes` relies on. A token read before another build was
+    made current is refused; the token read since is accepted."""
+    deployment = f"d-{uuid.uuid4().hex[:8]}"
+    old, new = f"old-{uuid.uuid4().hex[:8]}", f"new-{uuid.uuid4().hex[:8]}"
+
+    def versioned(client: Client, build_id: str) -> Worker:
+        return Worker(
+            client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            workflows=[_BlocksUntilReleased],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=deployment, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        )
+
+    async def made_current(client: Client, build_id: str, token: bytes = b"") -> None:
+        await make_current(
+            client,
+            namespace=client.namespace,
+            build_id=build_id,
+            deployment_name=deployment,
+            conflict_token=token,
+        )
+
+    async def polled_then_current(client: Client, build_id: str) -> bytes:
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: made_current(client, build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
+            ),
+            MAKE_CURRENT_WITHIN,
+        )
+        return (await _routing_once_current(client, deployment, build_id))[1]
+
+    async with temporal_client() as client, versioned(client, old), versioned(client, new):
+        stale = await polled_then_current(client, old)
+        fresh = await polled_then_current(client, new)
+
+        with pytest.raises(RPCError):
+            await made_current(client, old, stale)
+        assert (await _routing_once_current(client, deployment, new))[0] == new
+        await made_current(client, old, fresh)
+        await _routing_once_current(client, deployment, old)
 
 
 #: How long a healthy worker start takes to make its build current, with room: the
