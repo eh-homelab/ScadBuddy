@@ -89,7 +89,8 @@ class PlateSend(BaseModel):
 
     plate_id: int
     queue_item_id: int
-    slice_job_id: int
+    #: ``None`` for a plate queued with no slice (#2671).
+    slice_job_id: int | None = None
 
 
 class BackfillState(BaseModel):

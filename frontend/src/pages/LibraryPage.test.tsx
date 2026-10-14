@@ -102,16 +102,27 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
-  it('Advanced lists the sliced file without Print and is remembered', async () => {
+  it('Advanced lists the sliced file with Print and is remembered', async () => {
     const { user, unmount } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     const sliced = await screen.findByTestId('library-file-104')
-    expect(within(sliced).queryByRole('button', { name: /^Print / })).toBeNull()
-    expect(within(sliced).getByText(/print it from Bambuddy/i)).toBeInTheDocument()
+    // #2671 — printed as it is, through the same dialog.
+    expect(within(sliced).getByRole('button', { name: /^Print / })).toBeInTheDocument()
+    expect(within(sliced).queryByText(/print it from Bambuddy/i)).toBeNull()
     unmount()
     renderPage(<LibraryPage />, { route: '/library' })
     expect(await screen.findByTestId('library-file-104')).toBeInTheDocument()
+  })
+
+  it('leaves a ticked sliced file out of Arrange selected (#2671)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(await screen.findByRole('checkbox', { name: /Select .*\.gcode\.3mf/ }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(screen.getAllByRole('checkbox', { name: /Select .*\.3mf$/ })[0] as HTMLElement)
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {

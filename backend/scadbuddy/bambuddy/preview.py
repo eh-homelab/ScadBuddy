@@ -102,12 +102,27 @@ async def start_preview(
     change, and a copy filed in a project's folder is that project's record, never
     removed (#317), so trying spools would fill the project. A print into the project
     then slices its own copy."""
+    if source.is_sliced:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This file is sliced already, so there is nothing to slice: it prints as it is.",
+        )
     request = request.model_copy(update={"project_id": None})
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
-    planned = await plan_run(client, source, settings, request, PreparedPlates.of(prepared))
+    # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
+    planned = await plan_run(
+        client, source, settings, request, PreparedPlates.of(prepared), reuse_slices=False
+    )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
     plate = planned.plates[0]
+    if plate.plan is None:
+        # Only a sliced file's plates have no plan, and those are refused above; said
+        # rather than asserted, which python -O strips (#2691 review).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This plate prints a file sliced already, so there is nothing to slice.",
+        )
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:

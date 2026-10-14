@@ -169,6 +169,10 @@ LIBRARY_FOLLOW_PATCH = "follow-library-print"
 #: ``workflow.patched`` id of slicing a plate again when its slice was lost (#2081). A
 #: history from before it recorded the run failed at the first lost slice.
 SLICE_RETRY_PATCH = "print-slice-again-when-lost"
+#: ``workflow.patched`` id of a plate queued with no slice (#2671): a sliced library file,
+#: or ScadBuddy's own earlier slice of the copy. Only such a plate asks, and no history
+#: from before it has one.
+SLICED_PATCH = "print-sliced-file"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -323,6 +327,12 @@ class PrintRunWorkflow:
         :data:`SLICE_BACKOFF`, up to :data:`SLICE_ATTEMPTS` in all (#2081). Starting it
         again is safe: nothing was queued, and the run queues each plate once, from the
         slice that finished. Any other failure ends the run as before."""
+        if plate.plan is None:
+            # Only a plate with a sliced file has no plan, and it is never sliced; a
+            # non-retryable failure rather than an assert python -O strips (#2691 review).
+            raise ApplicationError(
+                f"plate {plate.plate_id} has no slice plan", type=REFUSED, non_retryable=True
+            )
         attempt = 1
         while True:
             try:
@@ -373,7 +383,14 @@ class PrintRunWorkflow:
         sent: list[PlateSend] = []
         last = len(planned.plates) - 1
         for index, plate in enumerate(planned.plates):
-            started, sliced = await self._slice(planned, plate)
+            job_id: int | None = None
+            preset_key: str | None = None
+            if plate.sliced_file_id is not None and workflow.patched(SLICED_PATCH):
+                # Sliced already (#2671): queued as it is.
+                sliced = plate.sliced_file_id
+            else:
+                started, sliced = await self._slice(planned, plate)
+                job_id, preset_key = started.job_id, started.preset_key
             if not self.enqueue_attempted:
                 # Before the first POST /queue/: from here a failure may have queued. The
                 # flag follows the row's column, so a cancel's message agrees with it. A
@@ -416,9 +433,9 @@ class PrintRunWorkflow:
                 self._shielded(enqueue) if index == last else self._shielded(enqueue, PLATES_PATCH)
             )
             outcome = QueueOutcome(
-                slice_job_id=started.job_id,
+                slice_job_id=job_id,
                 sliced_library_file_id=sliced,
-                preset_key=started.preset_key,
+                preset_key=preset_key,
                 queue_item_ids=[queued_plate.item_id],
                 printer_id=planned.printer_id,
             )

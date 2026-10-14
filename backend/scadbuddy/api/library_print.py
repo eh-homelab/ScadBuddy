@@ -2,8 +2,9 @@
 
 The same dialog as an output's (``printing.py``): its choices, filament step and run,
 over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`, which prints a copy laid
-out for the printer as an output's is (#1752) and never changes the file itself; the
-images are proxied so the API key never reaches the browser.
+out for the printer as an output's is (#1752) and never changes the file itself; a
+sliced file is queued as it is (#2671). The images are proxied so the API key never
+reaches the browser.
 """
 
 from __future__ import annotations
@@ -722,10 +723,12 @@ async def post_library_run(
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
-    A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
-    202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
-    ``output_id``, which older clients read. The file's filament slots go with the run,
-    read from the file as ``/choices`` read them (#2550)."""
+    A sliced file is queued as it is, with no slice (#2671), and never refused: one
+    sliced for another printer model or a nozzle the printer lacks queues with a
+    warning that says so. A file deleted in Bambuddy is its 404, before the 202. The
+    run's ``subject`` is ``library:<file id>``, and so is its ``output_id``, which older
+    clients read. The file's filament slots go with the run, read from the file as
+    ``/choices`` read them (#2550)."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
         filaments = await _run_filaments(store, paths, budget, file_id)
