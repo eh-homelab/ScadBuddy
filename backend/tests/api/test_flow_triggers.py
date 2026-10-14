@@ -337,7 +337,8 @@ def test_an_edit_returns_the_standing_grant_to_requested(
     assert body["schedule"]["interval_s"] == 7200
     assert body["updated_by"] == {"kind": "browser"}
     assert (body["grant"]["status"], body["grant"]["in_force"]) == ("requested", False)
-    # A run already started keeps the grant it was given.
+    # A run already started keeps its run grant's row (it spends only under the approval
+    # that seeded it, which the edit ended).
     assert run_view(client, fired["run_id"])["grant"]["in_force"] is True
     # The next fire gets none until a person approves it again.
     later = fire(workflow_reaper, client, trigger["id"])
@@ -466,7 +467,7 @@ def test_a_stale_schedule_never_fires_an_event_trigger(
     workflow_reaper.run(handle.trigger(overlap=ScheduleOverlapPolicy.ALLOW_ALL))
     fired = decided(client, trigger["id"], 1)
     assert (fired["outcome"], fired["reason"]) == ("skipped", "not a schedule trigger")
-    # The reconcile at the worker's start removes the Schedule of every non-schedule trigger.
+    # The worker's reconcile removes the Schedule of every non-schedule trigger.
     workflow_reaper.run(ensure_trigger_schedules(temporal, queue, store))
     assert schedule_id(trigger["id"]) not in workflow_reaper.run(_schedule_ids(temporal))
 

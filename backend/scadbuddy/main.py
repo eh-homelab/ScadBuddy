@@ -69,7 +69,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
-from scadbuddy.flow_triggers.fire import TriggerFires, ensure_trigger_schedules_logged
+from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
@@ -967,11 +967,11 @@ def _flow_triggers(
     state: AppState, client: Client, queue: str, stop: asyncio.Event
 ) -> tuple[list[Callable[..., Any]], Callable[[], Coroutine[Any, Any, None]]]:
     """Flow triggers (#2484) on the library worker: their fires run here, beside the data
-    volume; their Schedules are put right once; their events are heard by every replica.
-    The fire activities, and what stops the rest."""
+    volume; their Schedules are put right now and every `RECONCILE_INTERVAL`; their events
+    are heard by every replica. The fire activities, and what stops the rest."""
     triggers = state.components.get(FLOW_TRIGGERS)
     schedules = asyncio.create_task(
-        ensure_trigger_schedules_logged(client, queue, triggers.store, stop)
+        reconcile_trigger_schedules(client, queue, triggers.store, stop)
     )
     unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
 

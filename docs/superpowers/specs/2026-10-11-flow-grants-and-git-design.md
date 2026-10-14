@@ -816,8 +816,8 @@ the data volume with `data/flows`. Its action starts `FlowTriggerFire` with the
 **trigger id only**. Everything a fire acts on is read from the row when it fires, so
 nothing carried in a Schedule's action, or in an event, can say who a run is or what it
 may do. The row is the truth. A Schedule out of step with it (Temporal was down when a
-trigger was edited) is put right when the library worker starts
-(`ensure_trigger_schedules`), and a fire whose row says paused, or which no longer
+trigger was edited) is put right when the library worker starts and every five minutes
+after (`reconcile_trigger_schedules`), and a fire whose row says paused, or which no longer
 exists, starts nothing. The Schedule's own `SchedulePolicy.overlap` (`SKIP` or
 `ALLOW_ALL`) applies to the fire workflow, and the fire checks the trigger's previous
 run as well (Ruling 21).
@@ -928,8 +928,7 @@ A triggered run has no person present, so:
   - **Any edit of the trigger returns its standing grant to `requested`** (Ruling 20):
     its version, inputs, timing, overlap or approval timeout. A person approved it for
     what the trigger was then, and approves it again for what it is now. Runs already
-    started keep their run grant rows, but those spend only under the approval that
-    seeded them, so their outward calls wait for a person from then on.
+    started keep the run grants they were given.
   - A trigger has at most one live (requested, or approved and not revoked) standing
     grant. Attaching another while one is live is 409. One revoked, declined or expired
     may be replaced.
@@ -975,8 +974,9 @@ edits a trigger) carry `USER_ONLY`; #2653 tracks the server-side half.
     fire's run grant still expires within 7 days of the fire, and every limit is spent
     across all the runs the standing grant seeds.
 20. **(user) Any edit of a trigger returns its standing grant to `requested`**, and the
-    person's approval names the state it saw. Runs already started keep their grant
-    rows but spend nothing more; pausing and resuming change nothing.
+    person's approval names the state it saw. Runs already started keep their run
+    grants, but those spend only under the approval that seeded them, so their outward
+    calls wait; pausing and resuming change nothing.
 21. **Overlap is `skip` or `allow_all`.** A fire ends once its run has started, so
     Temporal's own policy sees only the fire, and the fire checks the previous run
     itself. Temporal's `BUFFER_*`, `CANCEL_OTHER` and `TERMINATE_OTHER` would need the
