@@ -373,7 +373,7 @@ export type Outcome =
  * the last one of a completed exchange, whose row the caller writes with `audit`
  * once it knows whether the body was saved (#1292, #2224).
  */
-export async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
+export async function exchange(args: HttpRequestArgs, context: Omit<HttpRequestContext, 'saved'>, callSignal?: AbortSignal): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
   const deadline = AbortSignal.timeout(args.timeout_ms)
