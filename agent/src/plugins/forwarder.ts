@@ -69,6 +69,12 @@ import {
 export type ForwardOptions = {
   /** Filter `tools/list` results (disabled and colliding tools). Off for the connection test, which shows them all. */
   filterTools?: boolean
+  /**
+   * Record the route's upstream sessions in the ledger. Only for a registration whose sessions will be
+   * ended: by `terminate` (a warm process's), or by its client's own DELETE through the route (a kept
+   * client's). One that only ever `release`s would leave a row nothing removes.
+   */
+  record?: boolean
 }
 
 export type Registration = {
@@ -96,6 +102,8 @@ type Route = {
   address: string
   /** The upstream `mcp-session-id`s this route's responses carried, until a `DELETE` of one answered. */
   sessions: Set<string>
+  /** Whether its sessions are in the ledger (`ForwardOptions.record`). */
+  record: boolean
   filterTools: boolean
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
@@ -366,6 +374,7 @@ export class PluginForwarder {
       plugin,
       address,
       sessions: new Set(),
+      record: options.record ?? false,
       filterTools: options.filterTools ?? true,
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
@@ -396,11 +405,13 @@ export class PluginForwarder {
   private note(route: Route, id: string): void {
     if (route.sessions.has(id)) return
     route.sessions.add(id)
+    if (!route.record) return
     this.ledger?.seen(route.plugin.name, id).catch((err: unknown) => this.log(`plugins: recording an MCP session failed: ${String(err)}`))
   }
 
   private forget(route: Route, id: string): void {
     route.sessions.delete(id)
+    if (!route.record) return
     this.ledger?.ended(route.plugin.name, id).catch((err: unknown) => this.log(`plugins: forgetting an MCP session failed: ${String(err)}`))
   }
 
@@ -644,10 +655,10 @@ export function pluginFingerprint({ plugin, address }: CheckedPlugin): string {
 }
 
 /** Registers the loaded plugins for one run; `release()` when the run ends. */
-export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder): PluginsForRun {
+export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder, options: Pick<ForwardOptions, 'record'> = {}): PluginsForRun {
   const registrations = loaded.plugins.map(({ plugin, address }) => ({
     plugin,
-    registration: forwarder.register(plugin, address),
+    registration: forwarder.register(plugin, address, options),
   }))
   const hindsight = loaded.plugins.find(({ plugin }) => plugin.name === HINDSIGHT_PLUGIN)
   return {
@@ -664,7 +675,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     keep: (name) => {
       const checked = loaded.plugins.find(({ plugin }) => plugin.name === name)
       return checked
-        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address) }
+        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address, { record: true }) }
         : undefined
     },
     terminate: async () => {

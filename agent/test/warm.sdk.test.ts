@@ -183,6 +183,18 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
       expect(exited(h.spawns[0]!.child)).toBe(true)
     }, 60_000)
 
+    it("a recycle's plugin-session DELETE does not delay the next spawn", async () => {
+      h = await warmHarness(db)
+      const id = h.newSession()
+      const first = withPlugin(h.assembled())
+      first.terminate = () => new Promise(() => {})
+      const one = await h.turn(id, first, 1)
+      const two = await h.turn(id, h.assembled({ credentialUpdatedAt: '2' }), 1 - one.result.total_cost_usd, h.credential('gw-new-key-9999'))
+      expect(two).toMatchObject({ outcome: 'recycle', reason: 'fingerprint' })
+      await h.spawns[0]?.exited
+      expect(first.release).not.toHaveBeenCalled()
+    }, 60_000)
+
     it("a fingerprint recycle deletes the old process's session, once", async () => {
       h = await warmHarness(db)
       const id = h.newSession()

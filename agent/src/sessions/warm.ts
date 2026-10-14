@@ -496,15 +496,22 @@ export class WarmSessions {
       forget()
     }
     slot.entry.inbox.close()
-    const closed = (how === 'drain' ? this.drain(slot) : Promise.resolve()).then(async () => {
+    // The process has ended once `ended` settles: the next spawn waits for that and no more.
+    const ended = (how === 'drain' ? this.drain(slot) : Promise.resolve()).then(async () => {
       try {
         // `void` in the SDK's type; a rejection at run time is this log's, not an unhandled one.
         await slot.entry.query.close()
       } catch (err) {
         this.log(`warm: closing session ${id}'s process failed: ${err instanceof Error ? err.message : String(err)}`)
       }
+    })
+    this.closing.set(id, ended)
+    void ended.then(() => {
+      if (this.closing.get(id) === ended) this.closing.delete(id)
+    })
+    // Its plugin sessions go after it (it sent no DELETE of its own), outside `closing`: up to 5 s that a spawn does not wait for.
+    return ended.then(async () => {
       try {
-        // The process has ended: its plugin sessions go now, since it sent no DELETE of its own.
         await slot.entry.turn.terminate()
       } catch (err) {
         this.log(`warm: ending session ${id}'s plugin sessions failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -518,11 +525,6 @@ export class WarmSessions {
       }
       this.log(`warm: closed session ${id}'s process: ${reason}`)
     })
-    this.closing.set(id, closed)
-    void closed.then(() => {
-      if (this.closing.get(id) === closed) this.closing.delete(id)
-    })
-    return closed
   }
 
   /**

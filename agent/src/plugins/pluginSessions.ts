@@ -58,29 +58,61 @@ export type SweepDeps = {
   log?: (message: string) => void
 }
 
+/** A row whose DELETE keeps failing is dropped after this, however it failed. */
+export const SWEEP_GIVE_UP_MS = 24 * 3_600_000
+
+type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
+
 /**
- * Ends every recorded session whose replica is not in `liveReplicas`, then forgets it. A
- * session of a plugin that is gone, disabled or no longer passes the egress check is forgotten
- * without a DELETE. Returns how many rows it removed.
+ * Sends each row's session its DELETE, as the plugin is now (the registry's URL and header, the
+ * address the egress check passes), and forgets it. A session of a plugin that is gone, disabled
+ * or refused by the egress check is forgotten without a DELETE (one log line names each such
+ * plugin); that includes a package's http server, which is not in the registry (the packages are
+ * not resolved here). A failed DELETE keeps its row for the next sweep unless it is `old` or
+ * `forgetFailed`.
  */
-export async function sweepDeadReplicas(sql: Sql, liveReplicas: Set<string>, deps: SweepDeps): Promise<number> {
+async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed: boolean): Promise<void> {
+  if (rows.length === 0) return
   const log = deps.log ?? (() => {})
-  const dead = [...liveReplicas]
-  const rows = await sql<{ plugin_id: string; upstream_session_id: string }[]>`
-    SELECT plugin_id, upstream_session_id FROM ai_plugin_sessions
-    WHERE replica <> ALL(${dead}) AND created_at < now() - ${(deps.graceMs ?? SWEEP_GRACE_MS) / 1000} * interval '1 second'`
-  if (rows.length === 0) return 0
   const loaded = await loadEnabledPlugins(deps.plugins, deps.kek, deps.resolve)
   const byName = new Map(loaded.plugins.map((checked) => [checked.plugin.name, checked]))
+  for (const name of new Set(rows.filter((r) => !byName.has(r.plugin_id)).map((r) => r.plugin_id))) {
+    log(`plugin session sweep: ${name} is not an enabled plugin that passes the egress check (or is a package's server); its sessions are dropped without a DELETE`)
+  }
   await Promise.all(
     rows.map(async (row) => {
       const checked = byName.get(row.plugin_id)
-      if (checked) await deleteUpstreamSession(checked.plugin, checked.address, row.upstream_session_id, log)
+      const ended = checked ? await deleteUpstreamSession(checked.plugin, checked.address, row.upstream_session_id, log) : true
+      if (!ended && !row.old && !forgetFailed) return
       await sql`
         DELETE FROM ai_plugin_sessions
         WHERE plugin_id = ${row.plugin_id} AND upstream_session_id = ${row.upstream_session_id}`
     }),
   )
+}
+
+/**
+ * Ends every recorded session whose replica is not in `liveReplicas`, then forgets it (see
+ * `endSessions`). Returns how many rows it looked at.
+ */
+export async function sweepDeadReplicas(sql: Sql, liveReplicas: Set<string>, deps: SweepDeps): Promise<number> {
+  const rows = await sql<Row[]>`
+    SELECT plugin_id, upstream_session_id, created_at < now() - ${SWEEP_GIVE_UP_MS / 1000} * interval '1 second' AS old
+    FROM ai_plugin_sessions
+    WHERE replica <> ALL(${[...liveReplicas]}) AND created_at < now() - ${(deps.graceMs ?? SWEEP_GRACE_MS) / 1000} * interval '1 second'`
+  await endSessions(sql, rows, deps, false)
+  return rows.length
+}
+
+/**
+ * At start, before the first sweep: ends the sessions this replica's previous incarnation left
+ * (the hostname is reused across a restart, so the sweep would count them live). Failed DELETEs
+ * are forgotten too: nothing would retry them.
+ */
+export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps): Promise<number> {
+  const rows = await sql<Row[]>`
+    SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions WHERE replica = ${self}`
+  await endSessions(sql, rows, deps, true)
   return rows.length
 }
 
@@ -110,6 +142,10 @@ export type SweepRunDeps = SweepDeps & {
  */
 export async function runPluginSessionSweep(deps: SweepRunDeps): Promise<void> {
   const log = deps.log ?? (() => {})
+  // Known limit: a replica whose agent-tools worker has been unable to poll for more than
+  // SWEEP_GRACE_MS (Temporal unreachable from it) while it still serves warm sessions is not in
+  // `live`, so the other replicas end its sessions. Its next call to one gets a 404 for the
+  // session, and Claude Code opens a new one.
   if (!deps.client) return log('plugin session sweep skipped: Temporal is not configured')
   let live: Set<string>
   try {

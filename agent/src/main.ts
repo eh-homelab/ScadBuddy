@@ -21,7 +21,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
-import { PluginSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
+import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
@@ -320,12 +320,12 @@ const sessions =
         ...(plugins
           ? {
               remotePlugins: async () =>
-                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
+                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder, { record: true }),
             }
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
@@ -595,15 +595,16 @@ const PLUGIN_SESSION_SWEEP_MS = 5 * 60_000
 const stopPluginSessionSweep =
   database && plugins
     ? (() => {
+        const deps = { plugins, kek: kek.ok ? kek.kek : undefined, log: (message: string) => console.error(message) }
+        let ownEnded = false
         const sweep = async () => {
           if (!(await database.ready())) return
-          await runPluginSessionSweep({
-            sql: database.sql,
-            client: temporalClient,
-            plugins,
-            kek: kek.ok ? kek.kek : undefined,
-            log: (message) => console.error(message),
-          })
+          // Once, first: what this hostname's previous incarnation left; nothing of this one's is live yet.
+          if (!ownEnded) {
+            await endOwnSessions(database.sql, replicaIdentity(), deps)
+            ownEnded = true
+          }
+          await runPluginSessionSweep({ sql: database.sql, client: temporalClient, ...deps })
         }
         const run = () => void sweep().catch((err: unknown) => console.error('plugin session sweep failed:', (err as Error).message))
         run()

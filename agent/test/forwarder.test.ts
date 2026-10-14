@@ -66,7 +66,7 @@ describe('Registration.terminate', () => {
     const { events, sessions } = ledger()
     const forwarder = await PluginForwarder.start({ sessions })
     forwarders.push(forwarder)
-    const registration = forwarder.register(plugin, '127.0.0.1')
+    const registration = forwarder.register(plugin, '127.0.0.1', { record: true })
     expect((await post(registration.url)).status).toBe(200)
     expect(events).toEqual(['seen memory s-1'])
 
@@ -80,12 +80,37 @@ describe('Registration.terminate', () => {
     expect((await post(registration.url)).status).toBe(404)
   })
 
-  it('records a session once however many responses carry it', async () => {
+  it('a registration that is not recorded leaves no row, and is still terminated', async () => {
     const { seen, plugin } = await upstream()
     const { events, sessions } = ledger()
     const forwarder = await PluginForwarder.start({ sessions })
     forwarders.push(forwarder)
     const registration = forwarder.register(plugin, '127.0.0.1')
+    await post(registration.url)
+    await registration.terminate()
+    expect(events).toEqual([])
+    expect(seen.filter((s) => s.method === 'DELETE')).toHaveLength(1)
+  })
+
+  it("sends the DELETE to the pinned address, never resolving the plugin's name", async () => {
+    const { seen, plugin } = await upstream()
+    const pinned = { ...plugin, url: plugin.url.replace('127.0.0.1', 'hostname.invalid') }
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const registration = forwarder.register(pinned, '127.0.0.1')
+    await post(registration.url)
+    await registration.terminate()
+    const deletes = seen.filter((s) => s.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]?.headers.host).toMatch(/^hostname\.invalid:/)
+  })
+
+  it('records a session once however many responses carry it', async () => {
+    const { seen, plugin } = await upstream()
+    const { events, sessions } = ledger()
+    const forwarder = await PluginForwarder.start({ sessions })
+    forwarders.push(forwarder)
+    const registration = forwarder.register(plugin, '127.0.0.1', { record: true })
     await post(registration.url)
     await post(registration.url, { 'mcp-session-id': 's-1' })
     await registration.terminate()
@@ -98,7 +123,7 @@ describe('Registration.terminate', () => {
     const { events, sessions } = ledger()
     const forwarder = await PluginForwarder.start({ sessions })
     forwarders.push(forwarder)
-    const registration = forwarder.register(plugin, '127.0.0.1')
+    const registration = forwarder.register(plugin, '127.0.0.1', { record: true })
     await post(registration.url)
     expect((await fetch(registration.url, { method: 'DELETE', headers: { 'mcp-session-id': 's-1' } })).status).toBe(200)
     expect(events).toEqual(['seen memory s-1', 'ended memory s-1'])
@@ -111,7 +136,7 @@ describe('Registration.terminate', () => {
     const logs: string[] = []
     const forwarder = await PluginForwarder.start({ log: (m) => logs.push(m) })
     forwarders.push(forwarder)
-    const registration = forwarder.register(plugin, '127.0.0.1')
+    const registration = forwarder.register(plugin, '127.0.0.1', { record: true })
     await post(registration.url)
     const started = Date.now()
     await registration.terminate()

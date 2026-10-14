@@ -4,7 +4,7 @@ import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/prom
 import path from 'node:path'
 import { declaredConfigs } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
-import { type HarnessPlugin, type PluginEndpoint, pluginEndpoint, type PluginForwarder, type Registration } from '../forwarder.js'
+import { type HarnessPlugin, type PluginEndpoint, pluginEndpoint, type PluginForwarder, type Registration, type ForwardOptions } from '../forwarder.js'
 import {
   assertEndpointAllowed,
   harnessToolName,
@@ -69,6 +69,7 @@ export async function forwardPackageServers(
   loaded: readonly LoadedPackage[],
   forwarder: Pick<PluginForwarder, 'register'>,
   resolve: Resolver = systemResolver,
+  options: Pick<ForwardOptions, 'record'> = {},
 ): Promise<PackageServers> {
   const plugins: HarnessPlugin[] = []
   const endpoints: PluginEndpoint[] = []
@@ -123,7 +124,7 @@ export async function forwardPackageServers(
           toolTiers: {},
           disabledTools: [],
         }
-        const registration = forwarder.register(plugin, address)
+        const registration = forwarder.register(plugin, address, options)
         releases.push(registration.release)
         registrations.push(registration)
         if (header) secrets.push(...headerSecretVariants(header.value))

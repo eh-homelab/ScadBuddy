@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { PluginSessions, runPluginSessionSweep, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
+import { endOwnSessions, PluginSessions, runPluginSessionSweep, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
@@ -56,6 +56,53 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0 })
       expect(fake.deletes).toEqual([])
       expect(await left()).toEqual([])
+    })
+
+    it("sends the sweep's DELETE to the checked address, never resolving the plugin's name", async () => {
+      await store.create({ name: 'pinned', url: fake.url.replace('127.0.0.1', 'hostname.invalid'), secret: 'Bearer pin-secret' }, kek)
+      await store.update('pinned', { enabled: true }, kek)
+      await row('pinned', 'p-1', 'replica-dead')
+      await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0, resolve: async () => ['127.0.0.1'] })
+      expect(fake.deletes.map((d) => d.sessionId)).toEqual(['p-1'])
+      expect(await left()).toEqual([])
+    })
+
+    it('sends nothing for a plugin the egress check refuses, and drops its rows', async () => {
+      await store.create({ name: 'refused', url: fake.url.replace('127.0.0.1', 'refused.example') }, undefined)
+      await store.update('refused', { enabled: true }, undefined)
+      await row('refused', 'm-1', 'replica-dead')
+      const log: string[] = []
+      await sweepDeadReplicas(db.sql, new Set(), {
+        plugins: store,
+        kek,
+        graceMs: 0,
+        resolve: async () => ['169.254.169.254'],
+        log: (m) => log.push(m),
+      })
+      expect(fake.deletes).toEqual([])
+      expect(await left()).toEqual([])
+      expect(log.join('\n')).toContain('refused is not an enabled plugin that passes the egress check')
+    })
+
+    it('keeps the row of a DELETE that failed for the next sweep, and gives up on one older than 24 h', async () => {
+      await store.create({ name: 'down', url: 'http://127.0.0.1:1/mcp' }, undefined)
+      await store.update('down', { enabled: true }, undefined)
+      await row('down', 'recent', 'replica-dead')
+      await row('down', 'ancient', 'replica-dead')
+      await db.sql`UPDATE ai_plugin_sessions SET created_at = now() - interval '25 hours' WHERE upstream_session_id = 'ancient'`
+      await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek: undefined, graceMs: 0 })
+      expect(await left()).toEqual(['down/recent'])
+    })
+
+    it("at start, ends this replica's own rows from before, failures included, and no one else's", async () => {
+      await store.create({ name: 'down', url: 'http://127.0.0.1:1/mcp' }, undefined)
+      await store.update('down', { enabled: true }, undefined)
+      await row('memory', 'old-me', 'me')
+      await row('down', 'old-me-failing', 'me')
+      await row('memory', 'other', 'other')
+      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek })).toBe(2)
+      expect(fake.deletes.map((d) => d.sessionId)).toEqual(['old-me'])
+      expect(await left()).toEqual(['memory/other'])
     })
 
     it("leaves a young row alone: its replica's worker may not poll yet", async () => {
