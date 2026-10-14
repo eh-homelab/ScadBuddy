@@ -1716,9 +1716,14 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
     expect(notes).toHaveTextContent("Spool 2 (slot 2) isn't used by the sliced plate")
 
     // Plate 2 is chosen; its slice is still on its way, so plate 1's stays shown, stale.
-    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
-    await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
-    release()
+    // #3209: released however the assertions end, so a failure is not hidden by the
+    // plate-2 request hanging until the test times out.
+    try {
+      await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+      await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
+    } finally {
+      release()
+    }
   }, 20000)
 })
 

@@ -133,7 +133,7 @@ export function PreviewPane({
   }, [colors, slots, tried])
   const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry]))
   const [thumbFailed, setThumbFailed] = useState(false)
-  const departures = sliceDepartures(nozzlePlan, plateSlots, slice)
+  const departures = useMemo(() => sliceDepartures(nozzlePlan, plateSlots, slice), [nozzlePlan, plateSlots, slice])
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">
@@ -254,8 +254,9 @@ export function PreviewPane({
         ) : (
           !slicing && !sliceError && <p className="mt-1 text-[12px] text-muted">Sliced once the choices are made.</p>
         )}
-        {departures.length > 0 && (
-          <ul className={`mt-1 space-y-0.5 text-[12px] text-warn ${stale ? 'opacity-60' : ''}`} data-testid="slice-departures">
+        {/* #3208: hidden while stale, as the grams are: the next slice may say otherwise. */}
+        {!stale && departures.length > 0 && (
+          <ul className="mt-1 space-y-0.5 text-[12px] text-warn" data-testid="slice-departures">
             {departures.map((note) => (
               <li key={note}>{note}</li>
             ))}
