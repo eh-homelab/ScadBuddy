@@ -661,7 +661,7 @@ async def _call_tool(
             )
             raise ToolFailedError(
                 f"{name} was not run: no worker on the agent replica that holds its state "
-                f"picked it up in {start_s}s (it may have been redeployed). {again}"
+                f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
             ) from None
         raise
     return _tool_result(answer)
@@ -693,6 +693,11 @@ async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: 
         except ValueError as err:
             raise ToolFailedError(
                 f"{name} was not run: it is no longer offered since it was approved ({err})."
+            ) from None
+        except ToolFailedError as err:
+            # The approval is spent either way: say the next call is asked again (#3003).
+            raise ToolFailedError(
+                f"{name} was not run: {err} The new call needs approving again."
             ) from None
     return await _call_tool(
         call,

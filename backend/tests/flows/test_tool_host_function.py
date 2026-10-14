@@ -338,6 +338,8 @@ class TurnTools:
         self.host = host
         #: False: every tool is refused as turned off, as after a plugin is disabled.
         self.offered = True
+        #: Set: the tier fails with this message, as a busy agent's answer does.
+        self.tier_fails: str | None = None
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -346,6 +348,8 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
+            if self.tier_fails is not None:
+                raise ApplicationError(self.tier_fails, type="Busy", non_retryable=True)
             if not self.offered or not name.startswith("scadbuddy_http__"):
                 raise ApplicationError(
                     f"{name} is not offered any more: its plugin or setting was turned off",
@@ -441,12 +445,7 @@ async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
         )
         call_id = await outward.approval(run_id)
         served.host = live
-        decide = next(
-            k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE
-        )
-        request = {"run_id": run_id, "call_id": call_id, "approved": True}
-        env = ActivityEnvironment(client=outward.client)
-        await env.run(decide.run, request, await env.run(decide.check, request))
+        await _approve(outward, run_id, call_id)
         run = await outward.finished(run_id)
         if RECORD:
             handle = outward.client.get_workflow_handle(f"flow-{run_id}")
@@ -511,6 +510,23 @@ async def test_an_approved_turn_tool_turned_off_while_it_waited_says_so(
         "scadbuddy_http__http_request was not run: it is no longer offered since it was approved"
         in (run.result or "")
     )
+    assert served.calls == []
+
+
+async def test_an_approved_turn_tools_failed_re_tier_says_it_needs_approving_again(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """#3003 review: a re-tier that fails after the approval spends that approval too, so
+    it says the next call is asked again, as the schedule-to-start path does."""
+    served, queue = turn_tools
+    run_id = await outward.run(script(*_CAUGHT_POST), tools_queue=queue)
+    call_id = await outward.approval(run_id)
+    served.tier_fails = "the agent is restarting"
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    result = run.result or ""
+    assert "scadbuddy_http__http_request was not run: the agent is restarting" in result
+    assert "The new call needs approving again." in result
     assert served.calls == []
 
 

@@ -18,7 +18,9 @@ recorded by `test_tool_host_function.py::test_tooled`); `inputted` on the workfl
 by `test_tool_host_function.py::test_an_outward_turn_tool_waits_for_approval` on that
 code; the test no longer records, as it now runs the patched workflow) and
 `requeued` on #2937's (that queue asked for again once approved, recorded by
-`test_an_approved_turn_tool_runs_on_the_replica_live_once_approved`). Never re-record them.
+`test_an_approved_turn_tool_runs_on_the_replica_live_once_approved` before #3420 raised an
+approved call's schedule-to-start timeout from 60 s to 600 s: replay does not compare
+timeouts, so it still stands for the current code). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
