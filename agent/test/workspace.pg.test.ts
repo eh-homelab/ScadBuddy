@@ -406,6 +406,10 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(humanSize(1)).toBe('1 byte')
       expect(humanSize(5 * 1024 * 1024)).toBe('5.0 MB (5,242,880 bytes)')
       expect(humanSize(3 * 1024 ** 3)).toBe('3.0 GB (3,221,225,472 bytes)')
+      // Rounded before the unit is picked (#2530): never "1024.0 KB" or "1024.0 MB".
+      expect(humanSize(1_048_575)).toBe('1.0 MB (1,048,575 bytes)')
+      expect(humanSize(1024 ** 3 - 1)).toBe('1.0 GB (1,073,741,823 bytes)')
+      expect(humanSize(1023 * 1024)).toBe('1023.0 KB (1,047,552 bytes)')
       expect(await withWorkspaceSize(files, ws, call)).toEqual({ ...call, workspace_size: size })
       // A file that is gone or no longer at that sha256, or a bad path, is said to be; an input with no upload is left alone.
       const stale = await withWorkspaceSize(files, ws, { ...call, workspace_sha256: 'f'.repeat(64) })
@@ -432,6 +436,31 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       })
       expect(JSON.parse(classic.inputSummary)).toEqual({ ...call, workspace_size: size })
       expect(classic.inputHash).toBe(m.approvals.hash('import_model', call))
+
+      // Classic, through the turn's real gate (#2531): SessionManager hands ApprovalService
+      // the session's workspace, so the parked row shows the size read there, never the
+      // model's, and the hash is still over the call's own input.
+      const stop = new AbortController()
+      const gated = { ...call, workspace_size: '1 byte' }
+      const parked = m.approvals
+        .gate({ sessionId, turnId: '22222222-2222-4222-8222-222222222222', requestedBy: browser, secrets: () => [], signal: stop.signal })({
+          toolName: 'import_model',
+          input: gated,
+          toolUseId: 'toolu_gated',
+          tier: 'outward',
+          signal: stop.signal,
+        })
+        .catch(() => undefined)
+      let row: Awaited<ReturnType<typeof m.approvals.list>>[number] | undefined
+      for (let i = 0; i < 250 && !row; i++) {
+        row = (await m.approvals.list(browser, { sessionId, pending: true })).find((a) => a.toolUseId === 'toolu_gated')
+        if (!row) await new Promise((r) => setTimeout(r, 20))
+      }
+      stop.abort()
+      await parked
+      expect(row).toBeDefined()
+      expect(JSON.parse(row!.inputSummary)).toEqual({ ...call, workspace_size: size })
+      expect(row!.inputHash).toBe(m.approvals.hash('import_model', gated))
 
       // /mcp: a prepare outside any session reads the caller's own workspace.
       const principal = { id: 'token:up', kind: 'bearer' as const, tiers: tiersUpTo('outward') }

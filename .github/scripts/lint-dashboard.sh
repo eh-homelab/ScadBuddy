@@ -163,7 +163,7 @@ worker_names=$(
   } | sort -u
 )
 [ -n "$worker_names" ] \
-  || problem "backend/scadbuddy" "the workers have no RenderStage and passes no literal to span()/detached_span()"
+  || problem "backend/scadbuddy" "the workers have no RenderStage and pass no literal to span()/detached_span()"
 api_names=$(span_literals "${api_files[@]}" | sort -u)
 [ -n "$api_names" ] \
   || problem "backend/scadbuddy" "scadbuddy-api passes no literal to span()/detached_span()"

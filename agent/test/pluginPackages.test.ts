@@ -130,6 +130,17 @@ describe('vetting a package', () => {
     expect(v.endpoints).toEqual([{ what: 'MCP server "mem"', url: 'https://mcp.example/mcp/' }])
   })
 
+  it('reads an http server with a null command as the forwarder does: remote, and fine (#2621)', () => {
+    const v = vetPackage(
+      tree({
+        ...GREETER,
+        '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', command: null } } }),
+      }),
+    )
+    expect(v.problems).toEqual([])
+    expect(v.review?.mcp_servers).toEqual([{ name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }])
+  })
+
   const FORM = /YAML form a plugin package may not use/
   const refused: [string, Files, RegExp][] = [
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
@@ -182,6 +193,8 @@ describe('vetting a package', () => {
     ['a $ in an http hook header', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'http', url: 'https://h.example/', headers: { A: '$X' } }] }] } }) }, /Stop http hook references a variable \(\$\) in headers\.A$/m],
     ['an MCP headersHelper', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'http', url: 'https://m.example/', headersHelper: 'id' } } }) }, /headersHelper/],
     ['a legacy SSE MCP server', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'sse', url: 'https://m.example/sse' } } }) }, /only Streamable HTTP/],
+    // #2621: a null command is no command, as the forwarder reads it (mcp.ts), so it is still SSE.
+    ['a legacy SSE MCP server with a null command', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'sse', url: 'https://m.example/sse', command: null } } }) }, /only Streamable HTTP/],
     ['a stdio MCP server', { '.mcp.json': JSON.stringify({ mcpServers: { m: { command: 'node', args: ['x.js'] } } }) }, /stdio/],
     ['dependencies', { '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', dependencies: ['other'] }) }, /dependencies/],
     ['userConfig', { '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', userConfig: {} }) }, /userConfig/],

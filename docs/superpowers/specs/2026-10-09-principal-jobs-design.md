@@ -118,20 +118,19 @@ Under `/api/v1`, feature `scadbuddy/jobs/`, routes `api/jobs.py`:
 
 ## 7. Visibility
 
-- The browser calls the backend directly and sees every job. The backend has no user
-  authentication, so filtering there would not protect anything.
-- Agent principals go through the agent's tools `jobs_list`, `jobs_get` and `jobs_watch`
-  (in `ALL_TOOLS`, so in-process and on `/mcp`, `read` tier). They pin
-  `principal=<caller>` unless the caller holds `outward`.
-- The agent's headless browser can open the Jobs page itself. Its requests carry the
-  agent-actor marker (`X-ScadBuddy-Agent-Session`), which the agent's request guard adds
-  and a page cannot replace (`api/agent_actor.py`). For such a request the jobs routes pin
-  `principal` to that session's owner unless the owner is the browser user, so a
-  `read`-tier token's session cannot list other principals' jobs through the UI.
-- The backend does not otherwise check tiers. `X-ScadBuddy-Agent-Author` labels a
-  request; it does not authenticate it (`core/authorship.py`: "Neither header is
-  authentication"). The pinning in the agent's tools is the boundary for `/mcp` callers.
-  The backend adds no tier header and trusts none.
+- The backend routes and the realtime `activity` topic read everything, as the browser
+  does. The backend has no user authentication, so filtering there would not protect
+  anything (since #2568 no route pins a principal).
+- The agent's `activity_list`, `activity_get` and `activity_watch` tools are the boundary
+  (in `ALL_TOOLS`, so in-process and on `/mcp`, `read` tier). A caller without `outward`
+  sees only its own: they pin `principal=<caller>`, and a row of another principal answers
+  as a missing one.
+- The `browser_*` tools drive the user's own tab and see what the user sees, as on every
+  other page. A caller that can navigate that tab to the Activity page can read it; the
+  tier of `browser_navigate` is what gates that, not a rule about this page.
+- The backend does not check tiers. `X-ScadBuddy-Agent-Author` labels a request; it does
+  not authenticate it (`core/authorship.py`: "Neither header is authentication"). The
+  backend adds no tier header and trusts none.
 
 ## 8. Retention and repair
 
@@ -176,15 +175,13 @@ A top-level **Jobs** page and a bell.
   - each writer upserts its job;
   - the status mapping per source;
   - an unknown facet answers 400;
-  - a headless-browser request (the agent-actor marker) for a token-owned session sees only
-    that owner's jobs;
   - the `ai_operations` listener upserts an agent job, and the repair pass restores one it
     missed;
   - a code-registered kind key starting with `agent.` fails discovery;
   - SSE resumes from `Last-Event-ID`;
   - the sweep deletes, and the repair pass restores a missed row.
 - Agent:
-  - the `jobs_*` tools pin the caller;
+  - the `activity_*` tools pin the caller;
   - `outward` sees every principal;
   - `test/coverage.test.ts` covers the new operations;
   - `AgentOperation` records `principal`, `session` and `via_tool` and sends its NOTIFY;

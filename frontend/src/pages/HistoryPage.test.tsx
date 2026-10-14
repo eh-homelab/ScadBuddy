@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
@@ -24,6 +24,11 @@ vi.mock('../lib/traceAction', async (importOriginal) => {
 })
 import { HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
+
+// Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
+beforeEach(() => {
+  actions.length = 0
+})
 
 function render() {
   return renderPage(

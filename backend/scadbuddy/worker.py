@@ -27,6 +27,7 @@ from temporalio.client import Client
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -152,6 +153,9 @@ def build_worker_deps(
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.
     projection.open(migrate_schema=False)
+    # The `project` activity writes `mark_started`/`finish` here: its state changes reach
+    # activity in the same transaction, and NOTIFY on the API's listeners.
+    projection.activity = ActivityIndex(projection.pool, events=events, metrics=metrics)
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -698,6 +702,8 @@ class PrintWorkerDeps:
     outputs: RemoteOutputs
     rack: RackUsageStore
     metrics: Metrics
+    print_runs: PrintRunStore
+    operations: OperationStore
     activities: list[Callable[..., Any]]
     follow_print: Callable[..., Any]
 
@@ -745,7 +751,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         async with client_for(settings_store.load()) as client:
             return await library_progress(client, subject, links, uploads=uploads)
 
-    print_runs = PrintRunStore(pool, events=events)
+    activity = ActivityIndex(pool, events=events, metrics=metrics)
+    print_runs = PrintRunStore(pool, events=events, activity=activity)
+    operations = OperationStore(pool, events=events, activity=activity)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -780,10 +788,12 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         outputs=outputs,
         rack=rack,
         metrics=metrics,
+        print_runs=print_runs,
+        operations=operations,
         activities=[
             *printing.all(),
             *operation_activities(
-                OperationStore(pool, events=events),
+                operations,
                 settings_store,
                 {kind.name: kind for kind in kinds},
             ),
@@ -973,6 +983,8 @@ def main() -> None:
     queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
+    # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
+    assert queue in SERVICE_NAMES, f"queue {queue!r} has no service name"
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 

@@ -173,6 +173,16 @@ function checkHooksConfig(config: Json, where: string, problems: string[]): void
   }
 }
 
+/**
+ * No command: absent or null, as agent-durable's runner.py `_remote_entry` reads it (#2563).
+ * The one reading the vetting (here and plugins/packages/vet.ts) and the forwarder
+ * (plugins/packages/mcp.ts) share, so an entry is never remote to one and local to
+ * another (#2621).
+ */
+export function noCommand(config: Record<string, unknown>): boolean {
+  return config.command === undefined || config.command === null
+}
+
 function checkMcpMap(map: Json, where: string, problems: string[]): void {
   if (map === undefined) return
   // `.mcp.json` wraps the map in `mcpServers`; a manifest path is the map itself.
@@ -187,7 +197,7 @@ function checkMcpMap(map: Json, where: string, problems: string[]): void {
       typeof server.type === 'string' &&
       REMOTE_MCP_TYPES.has(server.type) &&
       typeof server.url === 'string' &&
-      server.command === undefined
+      noCommand(server)
     if (!remote) problems.push(`${where}: MCP server "${name}" is a local (stdio) server`)
   }
 }

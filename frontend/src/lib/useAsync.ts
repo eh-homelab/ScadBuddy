@@ -105,6 +105,16 @@ export function useAsync<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
 
+  // A background read can land after unmount, when a test's environment may already be
+  // torn down: it then touches nothing, neither the state nor a caller's callbacks.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
   const queued = useRef(false)
   const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
   const failing = useRef<(() => void)[]>([])
@@ -117,6 +127,12 @@ export function useAsync<T>(
     queued.current = true
     queueMicrotask(() => {
       queued.current = false
+      if (!mounted.current) {
+        // Gone: the callers' closures are let go now, not when the hook is collected.
+        accepting.current = undefined
+        failing.current = []
+        return
+      }
       const { load: current, key: at } = latest.current
       const decide = accepting.current
       const fail = failing.current
@@ -124,12 +140,12 @@ export function useAsync<T>(
       const mine = ++sequence.current
       current().then(
         (data) => {
-          if (sequence.current !== mine) return
+          if (!mounted.current || sequence.current !== mine) return
           if (decide && !decide(data)) return
           setSnapshot({ key: at, data })
         },
         (cause: unknown) => {
-          if (sequence.current !== mine) return
+          if (!mounted.current || sequence.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
           // A failed background read keeps what is on screen: the next change reads
           // again. Only a key with nothing to show yet shows the error.

@@ -643,8 +643,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   two differences: a durable subagent has ScadBuddy's own tools
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
-  `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
-  parked for approval, and says which it left out (#2393). The worker check counts only a
+  `allow_refused` package names, a durable turn does not offer the ones that work in the
+  background of a classic turn's Claude Code (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification`), and says which it left out. Every
+  other one is offered, each parked for approval (#2393, below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -831,9 +832,36 @@ package's MCP servers run in the agent as turn tools, as a remote plugin's do. T
 named `plugin_<package>_<server>` and are outward. http ones go through the same
 forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
 local one runs only for a package approved with `allow_refused`, started in the
-package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
-their own activities, and so wait for a human. A durable turn offers those two and parks
-each call for approval. It does not offer the others, and says so in the session. The
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed
+package names, only `Bash` and `PowerShell` can run as the engine's own activities, and so
+wait for a human: the Temporal plugin refuses any other in `tool_activities`
+([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97)).
+A durable turn offers those two and parks each call for approval. The agent provides the
+others as the `builtin` turn tools (`agent/src/builtins/`, #2393), named
+`builtin__<Name>`, each outward and parked like any turn tool, and the turn's system
+prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `system_note`):
+
+- `Read`, `Write`, `Edit`, `Glob`, `Grep` and `NotebookEdit` act on the session's
+  workspace (`ai_session_files`), shown under `/workspace`, which the `workspace_*` tools
+  and the panel's Files see too;
+- `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
+  pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
+  upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
+  a one-shot Claude Code query with no tools, on the session's credential;
+- `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
+  search asked for, and returns its result as it is;
+- `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the
+  workspace file `_claude/tasks.json`, so it lasts the session, not one process;
+- `ReportFindings`, `EnterWorktree`, `ExitWorktree` and `SendMessage` answer as a
+  classic turn's do (there is no git repository and no agent team in either mode).
+
+The one-shot queries' cost is added to the session's `cost_usd`, which its budget reads,
+as a classic turn counts Claude Code's own calls. The inputs are Claude Code's own
+(`src/builtins/schemas.json`, checked against the bundled binary by
+`test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
+answers its wording, measured in a classic turn on Claude Code 2.1.296. `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification` work in the
+background of a classic turn's one Claude Code process and end with it; a durable turn is
+many processes, so they are not offered, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and

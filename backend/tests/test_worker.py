@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, cast, get_args
 
 import httpx
 import psycopg
@@ -1174,6 +1174,21 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         deps.projection.close()
 
 
+@pytest.mark.requires_postgres
+async def test_the_render_workers_projection_writes_activity(
+    settings: Settings, pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """Without it a render's state changes on a worker are missing from activity until
+    the repair sweep."""
+    cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
+    deps, store = worker_module.build_worker_deps(cfg)
+    try:
+        assert deps.projection.activity is not None
+    finally:
+        await store.aclose()
+        deps.projection.close()
+
+
 @pytest.mark.parametrize(
     ("queue", "service"),
     [
@@ -1204,3 +1219,9 @@ def test_each_worker_reports_under_its_deployments_name(
     worker_module.main()
 
     assert named == [service]
+
+
+def test_every_queue_has_a_service_name() -> None:
+    """#2894: a queue added without a ``service.name`` would fail the worker at start
+    with a bare KeyError; here it fails in CI instead."""
+    assert set(worker_module.SERVICE_NAMES) == set(get_args(worker_module.Queue))

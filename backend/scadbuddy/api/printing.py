@@ -22,6 +22,9 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
     CatalogueDep,
@@ -80,6 +83,7 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
 from scadbuddy.library.settings_store import (
@@ -573,6 +577,7 @@ async def post_run(
     response: Response,
     outputs: OutputsDep,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -608,6 +613,7 @@ async def post_run(
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
+        activity=activity,
     )
 
 
@@ -629,6 +635,7 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
+    activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
@@ -760,6 +767,7 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
+    await attribute_request(activity.index, f"print_run:{answer.run.id}")
     if answer.repeated:
         response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})
@@ -799,6 +807,7 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
+    catalogue: CatalogueDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -809,8 +818,15 @@ async def post_check(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    try:
+        # The template's defaults, by-object printing among them (#2976).
+        print_settings = await asyncio.to_thread(catalogue.print_settings, meta.slug)
+    except InvalidModelMetaError:
+        print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
-        return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
+        return await check_for_output(
+            client, outputs, uploads, meta, settings, body, rack=rack, print_settings=print_settings
+        )
 
 
 @router.post(

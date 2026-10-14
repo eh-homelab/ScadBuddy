@@ -10,6 +10,7 @@ import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
 import { addMockOutput, lastArrangeRequest, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ArrangeDialog } from './ArrangeDialog'
 
@@ -385,14 +386,23 @@ describe('ArrangeDialog', () => {
       )
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
-      const { user } = renderPage(
-        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
-      )
-      await user.click(screen.getByRole('button', { name: 'Arrange' }))
-      await user.click(screen.getByRole('button', { name: 'Re-render' }))
-      expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
-        'Nova could not be re-rendered: openscad exited with 1. Nothing was arranged.',
-      )
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(
+          <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
+        )
+        await user.click(screen.getByRole('button', { name: 'Arrange' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
+          'Nova could not be re-rendered: openscad exited with 1. Nothing was arranged.',
+        )
+        // #2892: the span says nothing was arranged, not an ordinary arrange.
+        const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')
+        expect(span?.attributes['scadbuddy.outcome']).toBe('nothing_arranged')
+        expect(span?.attributes['scadbuddy.output_id']).toBeUndefined()
+      } finally {
+        tracing.uninstall()
+      }
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
     })

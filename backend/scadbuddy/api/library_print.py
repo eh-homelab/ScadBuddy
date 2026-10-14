@@ -15,6 +15,8 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
@@ -508,6 +510,7 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
@@ -530,6 +533,7 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
+        activity=activity,
         prepare=prepare,
     )
 
