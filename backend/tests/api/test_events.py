@@ -17,7 +17,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR, AppState, get_fonts, get_libraries
+from scadbuddy.api.deps import STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.events import Event, EventBus, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
@@ -596,9 +596,9 @@ def test_installing_a_font_publishes_font_installed(
     app: FastAPI, client: TestClient, data_dir: Path, events: list[Event]
 ) -> None:
     service = FakeBackedService(data_dir, client=FakeClient())
-    app.dependency_overrides[get_fonts] = lambda: service
-    # The install runs as an operation, which reads the state's, not the dependency
-    # (#1054): without this the real client downloaded Pacifico from GitHub (#3264).
+    # The install runs as an operation, which reads the state's fonts (#1054); the route
+    # resolves no get_fonts, so no override would reach it. Without this the real client
+    # downloaded Pacifico from GitHub (#3264, #3511).
     getattr(app.state, STATE_ATTR).fonts = service
     # No request leaves the test: respx refuses any httpx call it was not told about.
     with respx.mock:
