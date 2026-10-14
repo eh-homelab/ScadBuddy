@@ -53,19 +53,35 @@ function fileRowsOf(files: { file: LibraryEntry; read: LibraryFileObjects }[]) {
   )
 }
 
-/** A file's name without its extension: "bookmark.3mf" is "bookmark". */
+/** A file's name without its extension: "bookmark.3mf" is "bookmark". A sliced file
+ * never reaches Arrange (the Library page leaves them out), so no `.gcode.3mf` case. */
 function stem(filename: string): string {
-  const lower = filename.toLowerCase()
-  const cut = lower.endsWith('.gcode.3mf') ? filename.length - 10 : filename.lastIndexOf('.')
+  const cut = filename.lastIndexOf('.')
   return cut > 0 ? filename.slice(0, cut) : filename
 }
 
-/** "Arrange of A, B and C"; the first three and a count past that; empty with none. */
+/** The longest name the server takes (`ArrangeRequest.name`, `max_length=200`). */
+export const MAX_ARRANGE_NAME = 200
+
+/**
+ * "Arrange of A, B and C"; the first three and a count past that; empty with none. Never
+ * longer than the server takes: fewer names are shown, the rest counted, until it fits,
+ * and a single name too long on its own is cut with an ellipsis. Nothing the user typed
+ * made it, so it must never be the reason the arrange is refused.
+ */
 function arrangeName(names: string[]): string {
   const distinct = [...new Set(names.filter(Boolean))]
   if (distinct.length === 0) return ''
-  const shown = distinct.length > 3 ? [...distinct.slice(0, 3), `${distinct.length - 3} more`] : distinct
-  return `Arrange of ${shown.join(', ')}`
+  for (let count = Math.min(3, distinct.length); count >= 1; count--) {
+    const rest = distinct.length - count
+    const shown = rest > 0 ? [...distinct.slice(0, count), `${rest} more`] : distinct.slice(0, count)
+    const name = `Arrange of ${shown.join(', ')}`
+    if (name.length <= MAX_ARRANGE_NAME) return name
+  }
+  const rest = distinct.length - 1
+  const tail = rest > 0 ? `, ${rest} more` : ''
+  const room = MAX_ARRANGE_NAME - 'Arrange of '.length - tail.length - 1
+  return `Arrange of ${distinct[0]!.slice(0, room)}…${tail}`
 }
 
 /** The templates of `outputs`, first seen first: what the result can be filed under. */
@@ -170,7 +186,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           modelName(slug),
         )
       : []),
-    ...plain.map(({ file }) => stem(file.filename)),
+    // A file whose every row was removed is not in the arrange, so not in its name.
+    ...plain
+      .filter(({ file, read }) => fileRowsOf([{ file, read }]).some((row) => !removed.includes(row.key)))
+      .map(({ file }) => stem(file.filename)),
   ])
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
@@ -513,6 +532,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             </li>
           ))}
         </ul>
+        {/* #2286 — a mis-clicked Remove is undone here, not by closing and starting over. */}
+        {removed.length > 0 && (
+          <Button size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy}>
+            {`Restore ${removed.length} removed ${removed.length === 1 ? 'row' : 'rows'}`}
+          </Button>
+        )}
         {adding === null && (
           <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => setAdding('files')} disabled={busy}>
@@ -586,6 +611,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           id="arrange-name"
           value={name}
           placeholder={defaultName || undefined}
+          maxLength={MAX_ARRANGE_NAME}
           autoFocus
           onChange={(event) => setName(event.target.value)}
           className="sb-field"

@@ -1241,23 +1241,25 @@ export const api = {
   /**
    * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
    * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
-   * its start, as a render is, so a slow start is followed rather than failed.
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
    */
-  arrangeOutputs: (body: ArrangeRequest, requestId: string = newRequestId()) => {
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
     const headers = { 'Idempotency-Key': requestId }
-    return reattach(() =>
-      request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
     )
   },
 
   /**
    * #902 — re-render an output saved before Arrange; poll the job, then the output's
    * `backfill`. #2280 — its render is started like any other, so it is sent again with
-   * the same key while the server is still accepting it.
+   * the same key while the server is still accepting it, until `signal` aborts.
    */
-  backfillOutput: (outputId: string, requestId: string = newRequestId()) => {
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
     const headers = { 'Idempotency-Key': requestId }
-    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }))
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
   },
 
   /**

@@ -124,6 +124,58 @@ describe('arrangeOutputs (#2280)', () => {
       printRunPoll.intervalMs = 1000
     }
   })
+
+  it('stops sending again once its signal aborts (a closed dialog)', async () => {
+    printRunPoll.intervalMs = 20
+    try {
+      let sent = 0
+      server.use(
+        http.post('/api/v1/outputs/arrange', () => {
+          sent++
+          return HttpResponse.json(
+            { type: STILL_ACCEPTING, title: 'Still accepting', status: 503, detail: 'Send it again to follow it.' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }),
+      )
+      const controller = new AbortController()
+      const arranging = api.arrangeOutputs(body, controller.signal)
+      await vi.waitFor(() => expect(sent).toBeGreaterThan(0))
+      controller.abort()
+      await expect(arranging).rejects.toBeDefined()
+      const atAbort = sent
+      await idle(150)
+      expect(sent).toBe(atAbort)
+    } finally {
+      printRunPoll.intervalMs = 1000
+    }
+  })
+
+  it('stops a re-render being accepted once its signal aborts', async () => {
+    printRunPoll.intervalMs = 20
+    try {
+      let sent = 0
+      server.use(
+        http.post('/api/v1/outputs/:id/backfill', () => {
+          sent++
+          return HttpResponse.json(
+            { type: STILL_ACCEPTING, title: 'Still accepting', status: 503, detail: 'Send it again to follow it.' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }),
+      )
+      const controller = new AbortController()
+      const backfilling = api.backfillOutput(nova.id, controller.signal)
+      await vi.waitFor(() => expect(sent).toBeGreaterThan(0))
+      controller.abort()
+      await expect(backfilling).rejects.toBeDefined()
+      const atAbort = sent
+      await idle(150)
+      expect(sent).toBe(atAbort)
+    } finally {
+      printRunPoll.intervalMs = 1000
+    }
+  })
 })
 
 describe('backfillOutputs (#902)', () => {

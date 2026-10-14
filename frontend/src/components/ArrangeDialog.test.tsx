@@ -389,10 +389,10 @@ describe('ArrangeDialog', () => {
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
       const tracing = installTestTracing()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
       try {
-        const { user } = renderPage(
-          <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
-        )
         await user.click(screen.getByRole('button', { name: 'Arrange' }))
         await user.click(screen.getByRole('button', { name: 'Re-render' }))
         expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
@@ -410,7 +410,7 @@ describe('ArrangeDialog', () => {
       // #2286 — tried again from here, at once: no second question.
       const backfill = vi.spyOn(api, 'backfillOutput')
       await user.click(screen.getByRole('button', { name: 'Re-render again' }))
-      await waitFor(() => expect(backfill).toHaveBeenCalledWith(nova.id))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(nova.id, expect.any(AbortSignal)))
       expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
     })
 
@@ -601,6 +601,57 @@ describe('ArrangeDialog', () => {
       await user.click(screen.getByRole('button', { name: 'Arrange' }))
       await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
       expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
+    })
+  })
+
+  describe('the default name (#2286)', () => {
+    const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+    it('stays within the 200 characters the server takes, however long the names', async () => {
+      const onArranged = vi.fn()
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([long])]} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', expect.stringContaining('1 more')),
+      )
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder.length).toBeLessThanOrEqual(200)
+      // The model's name fits; the file that does not is counted rather than cut off.
+      expect(placeholder).toBe('Arrange of Name Keychain, 1 more')
+      expect(screen.getByLabelText('Name')).toHaveAttribute('maxLength', '200')
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe(placeholder)
+    })
+
+    it('cuts a lone name too long to fit, with an ellipsis', async () => {
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      renderPage(<ArrangeDialog open sources={fromFiles([long])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder).toHaveLength(200)
+      expect(placeholder).toMatch(/^Arrange of w+…$/)
+    })
+
+    it('leaves out a library file whose every row was removed, and Restore brings them back', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([wand])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const stemmed = wand.filename.replace(/\.[^.]+$/, '')
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`),
+      )
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${wand.filename}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain')
+      await user.click(screen.getByRole('button', { name: 'Restore 2 removed rows' }))
+      expect(screen.getByLabelText(`Copies of Wand — ${wand.filename}`)).toBeInTheDocument()
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`)
+      expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
     })
   })
 

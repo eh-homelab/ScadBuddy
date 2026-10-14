@@ -136,7 +136,7 @@ export async function runArrange(
   if (!done) {
     // #2283 — every stage says itself, so the last message never stands for the next one.
     opts.onProgress?.(ARRANGE_STAGES.starting)
-    const started = await within(() => api.arrangeOutputs(body))
+    const started = await within(() => api.arrangeOutputs(body, signal))
     signal?.throwIfAborted()
     const job = await waitForJob(started.id, {
       pollMs: opts.pollMs ?? 1000,
@@ -268,7 +268,7 @@ export async function backfillOutputs(
     say('Queuing a re-render…')
     let job
     try {
-      job = await within(() => api.backfillOutput(output.id))
+      job = await within(() => api.backfillOutput(output.id, signal))
     } catch (cause) {
       // Re-rendered since the list was read (a closed dialog's backfill finished). By its
       // code, not the status alone: another 409 is no sign the objects are there (#1007).
