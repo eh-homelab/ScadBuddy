@@ -13,7 +13,8 @@ export function asSliced(plan: NozzlePlan | null | undefined, slice: SlicePrevie
   let moved = false
   const slots = (plan.slots ?? [])
     // A slot this plate's slice does not use has no sliced side; its planned one is not
-    // shown on a line that says "as sliced" (#2737 review).
+    // shown on a line that says "as sliced" (#2737 review). So the line's flow words name
+    // only the sides this plate prints from, which is what "as sliced" means (#3595 review).
     .filter((slot) => sides.has(slot.slot_id))
     .map((slot) => {
       const side = sides.get(slot.slot_id)

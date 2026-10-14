@@ -1846,6 +1846,54 @@ describe('PrintPicker · the nozzles as sliced (#2703)', () => {
     expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:')
     expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
   }, 20000)
+
+  it("drops plate 1's sides as sliced once plate 2 is the one to print (#3595 review)", async () => {
+    // Only the first slice (plate 1's) lands; the rest stay running, so nothing else
+    // could put an as-sliced line back.
+    let first: string | null = null
+    server.use(
+      http.get('/api/v1/print/library/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) => {
+        first ??= String(params['job'])
+        return HttpResponse.json(
+          String(params['job']) === first
+            ? {
+                job_id: Number(params['job']),
+                status: 'completed',
+                print_time_seconds: 2843,
+                filament_used_g: 15.5,
+                slots: [
+                  { slot_id: 1, grams: 12.4, side: 'L' },
+                  { slot_id: 2, grams: 3.1, side: 'R' },
+                ],
+                filament_changes: 1,
+              }
+            : { job_id: Number(params['job']), status: 'running', slots: [] },
+        )
+      }),
+    )
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+
+    await user.click(within(screen.getByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await user.click(await screen.findByRole('button', { name: 'Preview Plate 1' }))
+    expect(screen.getByRole('button', { name: 'Preview Plate 1' })).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).not.toHaveTextContent('Nozzles, as sliced:'))
+  }, 20000)
 })
 
 describe('PrintPicker · Filament profiles (#717)', () => {
