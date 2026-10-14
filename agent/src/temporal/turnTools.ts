@@ -12,11 +12,13 @@ import { harnessToolName } from '../plugins/registry.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
+import type { FlowBlobStore } from './flowBlobs.js'
 import { type FlowRuns, flowOf } from './flowRuns.js'
 import { endClient, type KeptClient, type KeptConnection, neverSent, type SessionClients, sessionGone, transportBroken } from './sessionClients.js'
 import {
   type ApprovalRecords,
   durableSession,
+  flowResult,
   GRANT_REVOKED,
   NOT_APPROVED,
   type ResultBlobs,
@@ -165,6 +167,8 @@ export type TurnToolsDeps = {
   listTimeoutMs?: number | undefined
   /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
   blobs?: ResultBlobs | undefined
+  /** Where a flow's call keeps the images it returned, as its ScadBuddy tools' do (#2578, flowBlobs.ts). */
+  flowBlobs?: FlowBlobStore | undefined
   /** This replica's kept MCP clients, per durable session and plugin (#2581); without it every call opens its own. */
   clients?: SessionClients<ListedTools> | undefined
 }
@@ -610,18 +614,23 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       } finally {
         clearInterval(heartbeat)
       }
-      // The images go to the session's blobs, never into the payload; their names and
-      // the text go through the same scrub.
-      const text = scrub(
-        (reset ? `[${reset}]\n\n` : '') +
-        await resultText(
-          (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
-          deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
-        ),
-      )
+      // The images go to the session's blobs, or a flow's to its run's (#2578), never into
+      // the payload; their names and the text go through the same scrub.
+      const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
+      const flow = caller.context.flow
+      // An errored call keeps no image: nothing would point at it, yet a flow's would count
+      // toward its run's FLOW_IMAGES_MAX.
+      const answer =
+        flow !== undefined && !result.isError
+          ? await flowResult(content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+          : await resultText(
+              content,
+              flow === undefined && deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
+            )
+      const text = scrub((reset ? `[${reset}]\n\n` : '') + (typeof answer === 'string' ? answer : answer.text))
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
-      return text
+      return typeof answer === 'string' ? text : { text, images: answer.images }
     })
   }
 }

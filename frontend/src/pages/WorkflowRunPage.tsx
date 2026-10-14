@@ -211,14 +211,16 @@ function PendingCard({ entry, runId, respond }: CardProps) {
         <form
           onSubmit={(event) => {
             event.preventDefault()
+            if (busy || !text.trim()) return
             void act(() => api.answerFlowRun(runId, entry.call_id, text))
           }}
           className="flex flex-col gap-2"
         >
           <textarea aria-label="Your answer" value={text} onChange={(e) => setText(e.target.value)} className={FIELD} rows={2} />
           <div>
-            <Button type="submit" variant="primary" size="sm" disabled={busy}>
-              Answer
+            {/* #2379: a blank box is not an answer, and the wait is shown while it lands. */}
+            <Button type="submit" variant="primary" size="sm" disabled={busy || !text.trim()}>
+              {busy ? 'Sending…' : 'Answer'}
             </Button>
           </div>
         </form>

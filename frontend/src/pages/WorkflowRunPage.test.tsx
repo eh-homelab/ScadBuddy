@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http } from 'msw'
+import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -65,6 +65,31 @@ describe('WorkflowRunPage', () => {
       { path: '/api/v1/workflow-runs/run-ask/answer', key: expect.stringMatching(KEY), body: { call_id: 'call-2', answer: 'yes' } },
     ])
     expect(screen.queryByLabelText('Your answer')).not.toBeInTheDocument()
+  })
+
+  it('sends no blank answer, and shows the answer in flight (#2379)', async () => {
+    const { user } = render('run-ask')
+    const box = await screen.findByLabelText('Your answer')
+    const answer = screen.getByRole('button', { name: 'Answer' })
+    expect(answer).toBeDisabled()
+    await user.type(box, '   ')
+    expect(answer).toBeDisabled()
+    await user.type(box, '{Enter}')
+    let release!: () => void
+    const landed = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('*/api/v1/workflow-runs/run-ask/answer', async () => {
+        await landed
+        return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+      }),
+    )
+    await user.clear(box)
+    await user.type(box, 'yes')
+    await user.click(answer)
+    expect(await screen.findByRole('button', { name: 'Sending…' })).toBeDisabled()
+    expect(flowRequests()).toEqual([])
+    release()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull())
   })
 
   it('approves an outward call', async () => {
