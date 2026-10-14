@@ -220,23 +220,33 @@ def test_the_grant_waits_for_another_replicas_lock(
     with psycopg.connect(pg_conninfo) as other:  # not autocommit: the lock holds till commit
         other.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
         with ThreadPoolExecutor(1) as pool:
+            pids: list[int] = []
 
             def grant() -> bool:
                 with owner.connection() as conn:
+                    pids.append(conn.info.backend_pid)
                     return grant_render_role(conn, role)
+
+            def waiting() -> bool:
+                return (
+                    bool(pids)
+                    and look.execute(
+                        "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                        " AND pid = %s AND classid::bigint = %s AND objid::bigint = %s"
+                        " AND objsubid = 1",
+                        (pids[0], key >> 32, key & 0xFFFF_FFFF),
+                    ).fetchone()
+                    is not None
+                )
 
             granting = pool.submit(grant)
             with psycopg.connect(pg_conninfo, autocommit=True) as look:
                 deadline = time.monotonic() + 30.0
-                while not look.execute(
-                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-                    " AND database = (SELECT oid FROM pg_database"
-                    " WHERE datname = current_database())"
-                    " AND classid::bigint = %s AND objid::bigint = %s AND objsubid = 1",
-                    (key >> 32, key & 0xFFFF_FFFF),
-                ).fetchone():
+                while not waiting():
                     assert time.monotonic() < deadline, "the grant never waited on the lock"
-                    assert not granting.done(), f"granted without waiting: {granting.exception()}"
+                    if granting.done():
+                        failed = granting.exception()
+                        pytest.fail(f"the grant finished without waiting: {failed or 'granted'}")
                     time.sleep(0.05)
             assert not granting.done()
             other.commit()
