@@ -551,6 +551,79 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     b.close()
   })
 
+  it("pairs neither the row nor its own map when the store declines the compare-and-set (#3478 review)", async () => {
+    const { rows } = sharedRows()
+    let release!: (tabId: string | undefined) => void
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's check is held; every later read reads the table.
+      get: async (sessionId) =>
+        ++reads === 1 ? new Promise<string | undefined>((resolve) => (release = resolve)) : rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    // B pairs while A's check is out, so A's answer is stale when it comes.
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    release(undefined)
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    expect(reads).toBe(1) // no re-read: the store compared
+    // With the row gone, A's answer is its own map's: A never paired it.
+    rows.delete('s-new')
+    expect((await here.sessionTab('s-new')).tabId).toBeUndefined()
+    a.close()
+    b.close()
+  })
+
+  it('pairs only here when the compare-and-set fails, and queues no write that could land later (#3478 review)', async () => {
+    const { rows } = sharedRows()
+    const sets: string[] = []
+    const logged: string[] = []
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        sets.push(`${sessionId}:${tabId}`)
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async () => {
+        throw new Error('session tab write failed')
+      },
+    }
+    const here = new TabHub({ sessionTabs: store, log: (m) => logged.push(m) })
+    await tab(here, TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    await tick()
+    expect(logged.join('\n')).toMatch(/session tab write failed/)
+    expect(sets).toEqual([])
+    expect(rows.has('s-new')).toBe(false)
+    expect(await here.sessionTab('s-new')).toEqual({ tabId: TAB, connected: true })
+    a.close()
+  })
+
   it('pairs nothing when the socket closes while the check is out (#2271)', async () => {
     let answer!: (value: { tabId: string | undefined; connected: boolean }) => void
     const paired: string[] = []

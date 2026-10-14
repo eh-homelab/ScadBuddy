@@ -335,8 +335,14 @@ export class TabHub implements BrowserTabs {
       try {
         if (!(await written)) return false
       } catch (err) {
+        // As pairSession's own failed write: paired here only, and marked unstored
+        // so this replica prefers its map. No unconditional write is queued, which
+        // could overwrite a newer pairing once the store answers again (#3478 review).
         this.logError(err)
-        return this.#pairIfStillHere(sessionId, tabId, seen)
+        if (this.#sessionTabs.get(sessionId) !== seen) return false
+        this.#sessionTabsUnstored.add(sessionId)
+        this.#pairHere(sessionId, tabId)
+        return true
       }
       this.#pairHere(sessionId, tabId)
       return true
