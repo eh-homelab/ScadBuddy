@@ -3,6 +3,7 @@ import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { type PgPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { forgetSubject } from '../src/sessions/forget.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
@@ -120,7 +121,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
       })
 
-      it('cannot load once its subject is forgotten', async () => {
+      it('cannot load rows that survive a forget, once its key is gone (#3316)', async () => {
         const sessionId = randomUUID()
         await store.append({ projectKey, sessionId }, [entry('user')])
         await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${`session-${sessionId}`}`
@@ -192,7 +193,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await store.lastOfType({ projectKey, sessionId }, 'cost-state')).toEqual({ type: 'cost-state' })
       })
 
-      it('refuses to append, and to look up the last of a type, once the subject is forgotten', async () => {
+      it('refuses to append, and to look up the last of a type, for rows that survive a forget (#3316)', async () => {
         const sessionId = randomUUID()
         await store.append({ projectKey, sessionId }, [{ type: 'cost-state', totalCostUSD: 1 }])
         const subject = `session-${sessionId}`
@@ -201,6 +202,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
         keys.forget(subject)
         await expect(store.append({ projectKey, sessionId }, [entry('user')])).rejects.toBeInstanceOf(SubjectForgotten)
         await expect(store.lastOfType({ projectKey, sessionId }, 'cost-state')).rejects.toBeInstanceOf(SubjectForgotten)
+      })
+
+      it('after the real forgetSubject, append refuses and load finds nothing', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [entry('user')])
+        await forgetSubject({ sql: db.sql, keys }, `session-${sessionId}`)
+        await expect(store.append({ projectKey, sessionId }, [entry('user')])).rejects.toBeInstanceOf(SubjectForgotten)
+        expect(await store.load({ projectKey, sessionId })).toBeNull()
       })
 
       it('keeps a mixed batch in order', async () => {

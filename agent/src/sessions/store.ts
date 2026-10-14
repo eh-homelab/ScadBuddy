@@ -65,7 +65,10 @@ const ENTRY_TYPE = /^[a-z][a-z0-9_-]{0,63}$/
 
 type EntryRow = { id: string; uuid: string | null; entry: string | null; sealed: Buffer | null }
 
-const entryContext = (sessionId: string, subpath: string, bound: string): string =>
+export const entryTypeOf = (entry: { type?: unknown }): string | null =>
+  typeof entry.type === 'string' && ENTRY_TYPE.test(entry.type) ? entry.type : null
+
+export const entryContext = (sessionId: string, subpath: string, bound: string): string =>
   `ai_session_entries:${sessionId}:${subpath}:${bound}`
 
 /** The SDK's key as stored: the main transcript is subpath ''. */
@@ -122,7 +125,7 @@ export class PostgresSessionStore implements SessionStore {
           session_id: key.sessionId,
           subpath,
           uuid,
-          entry_type: typeof entry.type === 'string' && ENTRY_TYPE.test(entry.type) ? entry.type : null,
+          entry_type: entryTypeOf(entry),
           sealed: sealBytes(dek, json, entryContext(key.sessionId, subpath, uuid ?? `#${id}`)),
         }
       })

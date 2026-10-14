@@ -30,6 +30,7 @@ import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
@@ -303,6 +304,19 @@ const runtime = await readStartSettings({ database, settings }, console.log)
 // instance, so forgetting a subject drops its key from the one cache.
 const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
 if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
+// Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
+if (database && dataKeys) {
+  void database
+    .ready()
+    .then(async (ready) => {
+      if (!ready) return
+      const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
+      if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
+    })
+    .catch((err: unknown) => console.error('session transcripts: sealing the existing rows failed; retried at the next start:', (err as Error).message))
+} else if (database) {
+  console.warn('session transcripts: no secret key, so the existing rows are not sealed')
+}
 const sessions =
   database && credentials
     ? new SessionManager({
