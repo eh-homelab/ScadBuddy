@@ -53,6 +53,7 @@ from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
+    SLICE_GONE,
     SLICE_LOST,
     AcceptAnswer,
     Checked,
@@ -107,6 +108,12 @@ class Fake:
         self.plates = [1]
         #: Plan plates with no slice plan and no sliced file (#2691 review).
         self.planless = False
+        #: Plan plates that reuse this earlier slice (#2955): a plan, and a sliced file.
+        self.reused: int | None = None
+        #: What the next `print_enqueue`s raise, in order, before one succeeds.
+        self.enqueue_errors: list[ApplicationError] = []
+        #: The library file each `print_enqueue` queued, in order.
+        self.enqueued: list[int] = []
         #: How many of the next `print_insert` attempts fail before one succeeds.
         self.insert_failures = 0
         self.record_error: Exception | None = None
@@ -182,7 +189,11 @@ class Fake:
             copies=1,
             options=PrintOptions(),
             plates=[
-                PlatePlan(plate_id=plate, plan=None if self.planless else PLAN)
+                PlatePlan(
+                    plate_id=plate,
+                    plan=None if self.planless else PLAN,
+                    sliced_file_id=self.reused,
+                )
                 for plate in self.plates
             ],
         )
@@ -211,9 +222,12 @@ class Fake:
     @activity.defn(name="print_enqueue")
     async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
         self.calls.append(f"enqueue:{input.plate_id}")
+        self.enqueued.append(input.sliced)
         await self._gate("enqueue")
         if self.enqueue_error is not None:
             raise self.enqueue_error
+        if self.enqueue_errors:
+            raise self.enqueue_errors.pop(0)
         return QueuedPlate(item_id=50 + input.plate_id)
 
     @activity.defn(name="print_record")
@@ -1203,6 +1217,48 @@ async def test_a_plate_with_nothing_to_slice_fails_the_run_saying_so(
 
     # Recorded as failed, with nothing sliced; the plate is named in the worker's log.
     assert run.status == "failed" and run.error is not None
+    assert fake.slice_starts == 0
+
+
+def _gone() -> ApplicationError:
+    return ApplicationError("the earlier slice is gone", type=SLICE_GONE, non_retryable=True)
+
+
+async def test_a_reused_slice_gone_from_bambuddy_is_sliced_again_and_queued(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    """#2955: the earlier slice a plate reused was deleted before POST /queue/. Bambuddy
+    queued nothing, so the plate is sliced now and that slice queued, rather than the
+    run failing on a file it had no need of."""
+    fake.reused = 77
+    fake.enqueue_errors = [_gone()]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "succeeded"
+    assert [call for call in fake.calls if call.startswith(("slice", "enqueue"))] == [
+        "enqueue:1",
+        "slice_start:1",
+        "slice_wait:9",
+        "enqueue:1",
+    ]
+    assert fake.enqueued == [77, 52]
+    [outcome] = fake.outcomes
+    assert (outcome.slice_job_id, outcome.sliced_library_file_id) == (9, 52)
+
+
+async def test_a_reused_slice_refused_for_another_reason_fails_the_run_unsliced(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    """Only a slice that is gone is sliced again: any other refusal fails as before."""
+    fake.reused = 77
+    fake.enqueue_errors = [ApplicationError("no", type=FAILED, non_retryable=True)]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed"
     assert fake.slice_starts == 0
 
 

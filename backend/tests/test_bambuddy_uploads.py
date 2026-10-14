@@ -103,6 +103,25 @@ async def test_a_slice_of_a_file_no_longer_recorded_is_dropped(
 
 
 @pytest.mark.requires_postgres
+async def test_forgetting_one_slice_keeps_the_copy_and_its_other_slices(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2955: a recorded slice Bambuddy no longer has is forgotten by itself."""
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21, preset_key="1"))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=22, preset_key="1"))
+    await uploads.record("other", copy(11))
+    await uploads.record_sliced("other", 11, SlicedCopy(id=21, preset_key="1"))
+
+    await uploads.forget_slice(OUTPUT, 21)
+
+    [kept] = await uploads.for_output(OUTPUT)
+    assert kept.sliced == [SlicedCopy(id=22, preset_key="1")]
+    [other] = await uploads.for_output("other")
+    assert other.sliced == [SlicedCopy(id=21, preset_key="1")]
+
+
+@pytest.mark.requires_postgres
 async def test_forgetting_a_file_forgets_its_slices(uploads: BambuddyUploadStore) -> None:
     await uploads.record(OUTPUT, copy(11))
     await uploads.record(OUTPUT, copy(12))

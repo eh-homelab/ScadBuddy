@@ -714,10 +714,17 @@ async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_
 class _ManySlices(_Copies):
     """Ten recorded slices of the copy, newest first, none of which Bambuddy still has."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.forgotten: list[int] = []
+
     async def slices_of(
         self, output_id: str, library_file_id: int, preset_key: str
     ) -> list[SlicedCopy]:
         return [SlicedCopy(id=i, file_hash=f"{i:064x}") for i in range(100, 110)]
+
+    async def forget_slice(self, output_id: str, sliced_id: int) -> None:
+        self.forgotten.append(sliced_id)
 
 
 @respx.mock
@@ -728,9 +735,39 @@ async def test_a_reprint_checks_only_the_newest_recorded_slices(bambuddy: Bambud
         return_value=httpx.Response(404, json={"detail": "File not found"})
     )
 
-    reused = await _library(_ManySlices()).recorded_slice(bambuddy, 11, "key")
+    uploads = _ManySlices()
+    reused = await _library(uploads).recorded_slice(bambuddy, 11, "key")
 
     assert reused is None
+    checked = list(range(100, 100 + print_source.MAX_RECORDED_SLICES))
     assert [call.request.url.path.rsplit("/", 1)[-1] for call in gone.calls] == [
-        str(sliced_id) for sliced_id in range(100, 100 + print_source.MAX_RECORDED_SLICES)
+        str(sliced_id) for sliced_id in checked
     ]
+    # Each one gone is forgotten, so the next reprint reads the older ones (#2955).
+    assert uploads.forgotten == checked
+
+
+@respx.mock
+async def test_a_recorded_slice_whose_id_holds_another_file_is_forgotten_and_one_unread_kept(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2955: an id that now holds another file never matches again, so its row goes; a
+    read that failed some other way may answer next time, so its row stays."""
+    respx.get(f"{API}/library/files/100").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 100,
+                "filename": "x.gcode.3mf",
+                "file_type": "gcode.3mf",
+                "file_hash": "f" * 64,
+            },
+        )
+    )
+    respx.get(url__regex=rf"{API}/library/files/10[1-9]$").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    uploads = _ManySlices()
+
+    assert await _library(uploads).recorded_slice(bambuddy, 11, "key") is None
+    assert uploads.forgotten == [100]

@@ -449,6 +449,22 @@ SLICED_RUN = {
 
 
 @respx.mock
+def test_a_sliced_run_of_two_copies_queues_a_quantity_of_two(client: TestClient) -> None:
+    """#3437: a sliced file's copies come from the request through the print options
+    (``request_scope``), as any run's do."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queued = queue_route()
+
+    response = run_library(client, 104, json={**SLICED_RUN, "copies": 2})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["copies"] == 2
+    assert json.loads(queued.calls.last.request.content)["quantity"] == 2
+
+
+@respx.mock
 def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
     """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
     presets' failures, though they are read beside it."""
@@ -556,10 +572,21 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
             sliced_3mf(plates=(1,)),
             2,
             "sliced-plate-missing",
-            "This file holds no plate 2, so plate 1 is queued instead.",
+            "This file holds no plate 2, so plate 1 is queued instead. Held for a manual start.",
             1,
-            False,
+            True,  # another plate than asked for never starts unattended (#3436)
             id="no-such-plate",
+        ),
+        pytest.param(
+            b"not a 3mf",
+            1,
+            "sliced-unchecked",
+            "ScadBuddy could not read this sliced file's settings, so its printer model and"
+            " nozzle were not checked. Held for a manual start: check them before you start"
+            " the print.",
+            1,
+            True,  # nothing was checked, so it is held (#3436)
+            id="unreadable-profile",
         ),
     ],
 )
@@ -897,6 +924,55 @@ def test_a_recorded_slice_bambuddy_no_longer_has_is_sliced_again(client: TestCli
 
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
+    assert sliced.call_count == 2
+
+
+@respx.mock
+def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(client: TestClient) -> None:
+    """#2955: the recorded slice was still in Bambuddy when the reprint was planned, and
+    gone by its POST /queue/, which Bambuddy answers 400 "Library file not found"
+    (``print_queue.py`` at maziggy/bambuddy@943f3587). Read back, it is a 404, so the
+    plate is sliced again and that slice queued; the run does not fail on it."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77, job_id=9)
+    queued = queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    copy_kept(upload)
+
+    kept = {"id": 77, "filename": "sliced.gcode.3mf", "file_type": "gcode.3mf"}
+    respx.get(f"{API}/library/files/77").mock(
+        side_effect=[
+            httpx.Response(200, json={**kept, "file_hash": f"{77:064x}"}),  # the plan
+            httpx.Response(404, json={"detail": "File not found"}),  # the read-back
+        ]
+    )
+    sliced.mock(return_value=httpx.Response(200, json={"job_id": 10, "status": "pending"}))
+    respx.get(f"{API}/slice-jobs/10").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 10, "status": "completed", "result": {"library_file_id": 78}},
+        )
+    )
+    slice_kept(78)
+    queued.mock(
+        side_effect=[
+            httpx.Response(400, json={"detail": "Library file not found"}),
+            queued.return_value,
+        ]
+    )
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert second.status_code == 200, second.text
+    assert second.json()["sliced_library_file_id"] == 78
+    assert second.json()["slice_job_id"] == 10
+    sent = [json.loads(call.request.content)["library_file_id"] for call in queued.calls]
+    assert sent == [77, 77, 78]
     assert sliced.call_count == 2
 
 
@@ -2417,3 +2493,18 @@ def test_a_printer_reporting_no_nozzle_leaves_a_sliced_files_nozzle_unchecked() 
     assert "could not be checked" in warning.message
     assert print_run.sliced_warnings(profile, printer, _status("0.6"), [1]) == []
     assert print_run.sliced_warnings(SlicedProfile(), printer, _status(), [1]) == []
+
+
+def test_another_model_of_the_same_g_code_family_is_said_but_not_held() -> None:
+    """#2956: an X1 Carbon slice on a P1S. Bambuddy dispatches G-code across the X1 and
+    P1 series (``GCODE_COMPAT_FAMILIES``), so the run says so and is not held; a model
+    outside the family still is."""
+    profile = SlicedProfile(printer_model="Bambu Lab X1 Carbon")
+
+    [said] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="P1S"), None, [1])
+    [held] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="H2C"), None, [1])
+
+    assert said.kind == "sliced-same-family"
+    assert said.kind not in print_run.HELD_SLICED_KINDS
+    assert held.kind == "sliced-other-model"
+    assert held.kind in print_run.HELD_SLICED_KINDS

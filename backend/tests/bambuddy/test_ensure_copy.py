@@ -536,3 +536,24 @@ async def test_a_copy_printed_from_or_shared_is_never_replaced(
     await _file(bambuddy, uploads, shared, Target(DEFAULT_PLATE, "0.6"))
     assert bambuddy.deleted == []
     assert sliced.library_file_id in {copy.id for copy in uploads.copies[printed.id]}
+
+
+def test_every_layout_a_slice_depends_on_keys_its_own_copy() -> None:
+    """#3437: a recorded slice is looked up by its copy's id and the preset key, so the
+    copy stands in for the layout. Each part of the layout a slice depends on (the
+    nozzle, the sides it may use, their flow, the filament map) keys a copy of its own,
+    so a slice of one layout is never reused for another."""
+    from scadbuddy.render.bambu3mf import FilamentMap
+
+    base = Target(DEFAULT_PLATE, "0.4")
+    layouts = [
+        base,
+        Target(DEFAULT_PLATE, "0.6"),
+        Target(DEFAULT_PLATE, "0.4", nozzle_stats=("1", "0")),
+        Target(DEFAULT_PLATE, "0.4", nozzle_volume_type=("1", "0")),
+        Target(DEFAULT_PLATE, "0.4", filament_map=FilamentMap(("1", "2"), ("0", "0"))),
+        Target(DEFAULT_PLATE, "0.4", filament_map=FilamentMap(("2", "1"), ("0", "0"))),
+    ]
+    assert len({layout.key for layout in layouts}) == len(layouts)
+    # The same layout is the same copy, so its slice is reused.
+    assert Target(DEFAULT_PLATE, "0.4").key == base.key

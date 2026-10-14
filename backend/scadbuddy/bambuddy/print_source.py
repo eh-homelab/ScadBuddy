@@ -367,8 +367,9 @@ class PrintPipeline:
         # file at its id has the hash it was recorded with. One recorded with none
         # (its read failed, or it predates the check) is never reused.
         known = [sliced for sliced in recorded if sliced.file_hash is not None]
-        # Only the newest few: each is a GET, one after another, and rows of slices
-        # Bambuddy deleted since are never pruned (#2955).
+        # Only the newest few: each is a GET, one after another. A row whose file is
+        # gone, or whose id now holds another file, is forgotten as it is found
+        # (#2955), so the next reprint does not read it again.
         for sliced in known[:MAX_RECORDED_SLICES]:
             try:
                 file = await client.library_file(sliced.id)
@@ -379,6 +380,8 @@ class PrintPipeline:
                     "a recorded slice is not reused",
                     extra={"library_file_id": sliced.id, "status": error.status},
                 )
+                if error.status == status.HTTP_404_NOT_FOUND:
+                    await self.uploads.forget_slice(self.subject.run_subject, sliced.id)
                 continue
             if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
                 return sliced.id
@@ -386,6 +389,7 @@ class PrintPipeline:
                 "a recorded slice's id now holds another file; it is not reused",
                 extra={"library_file_id": sliced.id},
             )
+            await self.uploads.forget_slice(self.subject.run_subject, sliced.id)
         return None
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:

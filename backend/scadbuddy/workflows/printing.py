@@ -53,6 +53,7 @@ with workflow.unsafe.imports_passed_through():
         ACCEPTED_UPDATE,
         PRINT_RUN_WORKFLOW,
         REFUSED,
+        SLICE_GONE,
         SLICE_LOST,
         AcceptAnswer,
         Accepted,
@@ -173,6 +174,10 @@ SLICE_RETRY_PATCH = "print-slice-again-when-lost"
 #: or ScadBuddy's own earlier slice of the copy. Only such a plate asks, and no history
 #: from before it has one.
 SLICED_PATCH = "print-sliced-file"
+#: ``workflow.patched`` id of slicing a plate again when the earlier slice it reused is
+#: gone from Bambuddy as it is queued (#2955). Only a plate that reused a slice and was
+#: refused for it asks; a history from before it recorded the run failed.
+REUSED_GONE_PATCH = "print-slice-again-when-reused-gone"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -429,9 +434,34 @@ class PrintRunWorkflow:
             # A cancel cannot take back a POST /queue/ in flight, so it waits for it: on
             # the last plate the run goes on to succeed (review #1316 (2) 1); before it,
             # the plate is recorded and the run stops (review #1316 (3) 1).
-            queued_plate = await (
-                self._shielded(enqueue) if index == last else self._shielded(enqueue, PLATES_PATCH)
-            )
+            try:
+                queued_plate = await (
+                    self._shielded(enqueue)
+                    if index == last
+                    else self._shielded(enqueue, PLATES_PATCH)
+                )
+            except ActivityError as error:
+                gone = isinstance(error.cause, ApplicationError) and error.cause.type == SLICE_GONE
+                # Only a reused slice is gone this way (`print_enqueue` checks), and the
+                # POST /queue/ that said so queued nothing: slice it now and queue that.
+                if not gone or job_id is not None or not workflow.patched(REUSED_GONE_PATCH):
+                    raise
+                workflow.logger.warning(
+                    "a reused slice is gone from Bambuddy; slicing the plate again",
+                    extra={"plate_id": plate.plate_id, "sliced_library_file_id": sliced},
+                )
+                started, sliced = await self._slice(planned, plate)
+                job_id, preset_key = started.job_id, started.preset_key
+                again = workflow.start_activity(
+                    "print_enqueue",
+                    EnqueueInput(planned=planned, plate=plate, sliced=sliced),
+                    result_type=QueuedPlate,
+                    start_to_close_timeout=SHORT,
+                    retry_policy=ONCE,
+                )
+                queued_plate = await (
+                    self._shielded(again) if index == last else self._shielded(again, PLATES_PATCH)
+                )
             outcome = QueueOutcome(
                 slice_job_id=job_id,
                 sliced_library_file_id=sliced,

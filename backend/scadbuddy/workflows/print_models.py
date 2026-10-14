@@ -36,6 +36,10 @@ FAILED = "PrintFailed"
 #: A slice that left nothing behind (`SliceLostError`, #2081): the workflow starts it
 #: again, a few times, before the run is recorded as failed with the problem.
 SLICE_LOST = "PrintSliceLost"
+#: A reused slice (ScadBuddy's own earlier slice of the copy) that Bambuddy no longer
+#: has when its plate is queued (#2955): nothing was queued, so the workflow slices the
+#: plate again and queues that.
+SLICE_GONE = "PrintSliceGone"
 
 
 class SourceSpec(BaseModel):

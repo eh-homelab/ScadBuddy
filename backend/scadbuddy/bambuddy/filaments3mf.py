@@ -53,9 +53,39 @@ from scadbuddy.render.split import PAINT_ATTRIBUTE
 SLICE_INFO_NAME = "Metadata/slice_info.config"
 #: Bambu Studio's prefix on a printer model in ``project_settings.config``.
 _VENDOR = "BAMBU LAB"
-#: Bambu Studio's names for a model (``printer_model``) that Bambuddy names otherwise
-#: (``Printer.model``), compared as :func:`model_key` leaves them.
-_MODEL_ALIASES = {"X1CARBON": "X1C"}
+#: Every name a model goes by that is not Bambuddy's short name for it, compared as
+#: :func:`model_key` leaves them (#2956). From Bambuddy's own tables, at
+#: maziggy/bambuddy@943f3587 ``backend/app/utils/printer_models.py``:
+#: ``PRINTER_MODEL_MAP`` (Bambu Studio's ``printer_model`` names) and
+#: ``PRINTER_MODEL_ID_MAP`` (the codes a printer announces over SSDP, which Bambuddy
+#: may keep as ``Printer.model``).
+_MODEL_ALIASES = {
+    "X1CARBON": "X1C",
+    "A1M": "A1MINI",
+    "BLP001": "X1C",
+    "BLP002": "X1",
+    "C13": "X1E",
+    "C11": "P1P",
+    "C12": "P1S",
+    "N7": "P2S",
+    "N6": "X2D",
+    "N9": "A2L",
+    "A11": "A1",
+    "A12": "A1MINI",
+    "N1": "A1MINI",
+    "N2S": "A1",
+    "A04": "A1MINI",
+    "O1D": "H2D",
+    "O1E": "H2DPRO",
+    "O2D": "H2DPRO",
+    "O1C": "H2C",
+    "O1C2": "H2C",
+    "O1S": "H2S",
+}
+#: Models whose G-code Bambuddy dispatches to one another (``GCODE_COMPAT_FAMILIES``,
+#: same file): the X1 and P1 series, one 256 mm CoreXY single-nozzle family. Every
+#: other model takes only its own G-code.
+_MODEL_FAMILIES = (frozenset({"X1", "X1C", "X1E", "P1P", "P1S"}),)
 #: Where a plate's index sits in ``Metadata/plate_<n>.gcode``.
 _PLATE_PREFIX = len("Metadata/plate_")
 _GCODE_SUFFIX = -len(".gcode")
@@ -135,6 +165,12 @@ def model_key(model: str | None) -> str | None:
         text = text[len(_VENDOR) :]
     key = "".join(ch for ch in text if ch.isalnum())
     return _MODEL_ALIASES.get(key, key) or None
+
+
+def same_family(a: str | None, b: str | None) -> bool:
+    """Whether two :func:`model_key` keys are different models whose G-code Bambuddy
+    still dispatches across (#2956)."""
+    return a != b and any(a in family and b in family for family in _MODEL_FAMILIES)
 
 
 class LocalFilaments(BaseModel):

@@ -33,7 +33,7 @@ from scadbuddy.bambuddy.dispatch import (
     start_slice,
     wait_slice,
 )
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
 from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
@@ -66,6 +66,7 @@ from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
+    SLICE_GONE,
     SLICE_LOST,
     Checked,
     CheckInput,
@@ -88,6 +89,23 @@ HEARTBEAT_EVERY = 10.0
 #: Seconds ``print_finish`` gives remembering the project, well under its 60 s timeout:
 #: an attempt that timed out would be retried without limit (review #1061).
 REMEMBER_BUDGET = 20.0
+
+
+async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error: ApiError) -> bool:
+    """Whether a refused ``POST /queue/`` was for a reused slice Bambuddy no longer has
+    (#2955). Only a plate that has a slice plan and queued a recorded slice is asked,
+    and only after Bambuddy itself answered with a 4xx: a 5xx or no answer may have
+    queued, and is never sliced again."""
+    reused = input.plate.plan is not None and input.plate.sliced_file_id == input.sliced
+    answer = error.upstream
+    code = answer.status if isinstance(answer, UpstreamAnswer) else None
+    if not reused or code is None or not 400 <= code < 500:
+        return False
+    try:
+        await client.library_file(input.sliced)
+    except ApiError as gone:
+        return gone.status == 404
+    return False
 
 
 @dataclass
@@ -307,16 +325,31 @@ class PrintActivities:
 
     @activity.defn(name="print_enqueue")
     async def enqueue(self, input: EnqueueInput) -> QueuedPlate:
-        """The rack pick, ``POST /queue/`` once, then the picks saved (#836)."""
+        """The rack pick, ``POST /queue/`` once, then the picks saved (#836). A reused
+        slice Bambuddy refuses to queue is read back, and one it no longer has is
+        ``SLICE_GONE``, which the workflow slices again (#2955). Bambuddy answers a
+        deleted library file with 400 "Library file not found" (``print_queue.py`` at
+        maziggy/bambuddy@943f3587), or 404 where the caller may not read it; the read
+        back, not that text, is what decides."""
         try:
             async with client_for(self._settings()) as client:
-                return await queue_plate(
-                    client,
-                    planned=input.planned,
-                    plate=input.plate,
-                    sliced=input.sliced,
-                    rack=self.d.rack,
-                )
+                try:
+                    return await queue_plate(
+                        client,
+                        planned=input.planned,
+                        plate=input.plate,
+                        sliced=input.sliced,
+                        rack=self.d.rack,
+                    )
+                except ApiError as error:
+                    if await _reused_slice_gone(client, input, error):
+                        raise ApplicationError(
+                            f"The earlier slice of plate {input.plate.plate_id} (library file"
+                            f" {input.sliced}) is gone from Bambuddy.",
+                            type=SLICE_GONE,
+                            non_retryable=True,
+                        ) from None
+                    raise
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 

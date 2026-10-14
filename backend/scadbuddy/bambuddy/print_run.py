@@ -59,7 +59,7 @@ from scadbuddy.bambuddy.filaments import (
     queue_filaments,
     read_inventory,
 )
-from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key
+from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key, same_family
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
     last_bed_type,
@@ -1039,7 +1039,7 @@ async def prepare_run(
                 kind="sliced-plate-missing",
                 message=(
                     f"This file holds no plate {request.plate_id}, so plate {laid_out[0]}"
-                    " is queued instead."
+                    " is queued instead. Held for a manual start."
                 ),
             )
         )
@@ -1626,8 +1626,11 @@ def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
     }
 
 
-HELD_SLICED_KINDS = frozenset({"sliced-other-model", "sliced-nozzle-missing"})
-"""Sliced-file warnings that hold the print for a manual start (#2954)."""
+HELD_SLICED_KINDS = frozenset(
+    {"sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked"}
+)
+"""Sliced-file warnings that hold the print for a manual start (#2954): another plate
+than the one asked for, or a file whose fit could not be checked, too (#3436)."""
 
 
 def sliced_warnings(
@@ -1639,14 +1642,35 @@ def sliced_warnings(
     """What to set right before a sliced file prints on ``printer`` (#2671): sliced for
     another model, or for a nozzle diameter the printer does not have. Never a refusal:
     it is queued as it is, held for a manual start (:data:`HELD_SLICED_KINDS`), and the
-    user swaps the nozzle, or picks another printer, before starting it. Only a known
-    mismatch warns, and an unread profile, or a printer that reports no model, says
-    nothing; a printer that reports no nozzles is said to leave the nozzle unchecked."""
+    user swaps the nozzle, or picks another printer, before starting it. A profile that
+    could not be read is held too, as nothing in it was checked (#3436); a printer that
+    reports no model says nothing of the model, and one that reports no nozzles is said
+    to leave the nozzle unchecked. Another model of the same G-code family (the X1 and
+    P1 series) is said, not held: Bambuddy dispatches its G-code across them (#2956)."""
     if profile is None:
-        return []
+        return [
+            FilamentWarning(
+                kind="sliced-unchecked",
+                message=(
+                    "ScadBuddy could not read this sliced file's settings, so its printer"
+                    " model and nozzle were not checked. Held for a manual start: check"
+                    " them before you start the print."
+                ),
+            )
+        ]
     warnings: list[FilamentWarning] = []
     wanted, have = model_key(profile.printer_model), model_key(printer.model)
-    if wanted is not None and have is not None and wanted != have:
+    if same_family(wanted, have):
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-same-family",
+                message=(
+                    f"Sliced for a {profile.printer_model}; {printer.name} is a {printer.model},"
+                    " whose G-code family takes it."
+                ),
+            )
+        )
+    elif wanted is not None and have is not None and wanted != have:
         warnings.append(
             FilamentWarning(
                 kind="sliced-other-model",
