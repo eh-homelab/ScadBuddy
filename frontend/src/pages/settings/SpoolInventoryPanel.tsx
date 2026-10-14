@@ -3,7 +3,7 @@ import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { ClearSwatch, Swatch, UnknownSwatch } from '../../components/print/Swatch'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
-import { spoolColour, spoolName } from '../../lib/filamentColour'
+import { spoolChip, spoolName } from '../../lib/filamentColour'
 import { trayPlace } from '../../lib/filaments'
 
 /** Bambuddy's not-configured refusal: a setup step still to take, not a failure. */
@@ -28,15 +28,12 @@ function where(spool: InventorySpool): string {
   return trayPlace(spool.loaded, { printer: true })
 }
 
-/** Bambuddy's RGBA with a zero alpha: a clear spool, as its own record says. */
-const CLEAR_RGBA = /^#?[0-9a-fA-F]{6}00$/
-
 /** The spool's chip: its colour; a clear one only for a spool recorded clear (alpha 00);
  * otherwise, with no colour recorded or one unreadable, an unknown one. Never black. */
 function colourOf(spool: InventorySpool) {
-  const colour = spoolColour(spool)
-  if (colour) return <Swatch colour={colour.hex} size="sm" />
-  return CLEAR_RGBA.test((spool.rgba ?? '').trim()) ? <ClearSwatch size="sm" /> : <UnknownSwatch size="sm" />
+  const chip = spoolChip(spool)
+  if (chip.kind === 'colour') return <Swatch colour={chip.hex} size="sm" />
+  return chip.kind === 'clear' ? <ClearSwatch size="sm" /> : <UnknownSwatch size="sm" />
 }
 
 /**
@@ -49,6 +46,8 @@ export function SpoolInventoryPanel() {
   const [spools, setSpools] = useState<InventorySpool[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [unconfigured, setUnconfigured] = useState(false)
+  // #3357: a toggle's re-read is in flight, so the table on screen is the last selection.
+  const [reading, setReading] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -60,10 +59,12 @@ export function SpoolInventoryPanel() {
         setSpools([...(view.spools ?? [])].sort(order))
         setError(null)
         setUnconfigured(false)
+        setReading(false)
       },
       (cause: unknown) => {
         if (!live) return
         setSpools(null)
+        setReading(false)
         const notConfigured = cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED
         setUnconfigured(notConfigured)
         setError(
@@ -82,7 +83,18 @@ export function SpoolInventoryPanel() {
     <div data-testid="spool-inventory">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
         <label className="flex items-center gap-2 text-muted">
-          <input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={archived}
+            onChange={(event) => {
+              setArchived(event.target.checked)
+              // #3357: the last answer's error or setup note is not this read's; the
+              // table stays, marked as being read again, until the new one answers.
+              setReading(true)
+              setError(null)
+              setUnconfigured(false)
+            }}
+          />
           Include archived spools
         </label>
         {base && (
@@ -111,7 +123,10 @@ export function SpoolInventoryPanel() {
             {spools.filter((spool) => !spool.archived).length} spools, {(total / 1000).toFixed(2)} kg left
           </p>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-[12.5px]">
+            <table
+              className={`w-full text-left text-[12.5px]${reading ? ' opacity-60' : ''}`}
+              aria-busy={reading}
+            >
               <thead className="text-[11.5px] text-muted">
                 <tr>
                   <th scope="col" className="py-1 pr-3 font-normal">

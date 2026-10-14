@@ -104,10 +104,35 @@ describe('SpoolInventoryPanel (#2351)', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
     expect(screen.getByTestId('spool-15')).toBeInTheDocument()
     expect(screen.queryByText("Reading Bambuddy's inventory…")).toBeNull()
+    // Marked as the last selection's while the re-read is out (#3357).
+    expect(screen.getByRole('table')).toHaveAttribute('aria-busy', 'true')
 
     answer()
     expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
     expect(screen.queryByRole('table')).toBeNull()
+  })
+
+  it("clears a failed read's error as soon as a toggle reads again (#3357)", async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () => HttpResponse.json({ detail: 'Bambuddy timed out' }, { status: 504 })),
+    )
+    const { user } = renderPage(<SpoolInventoryPanel />)
+    expect(await screen.findByTestId('spool-inventory-error')).toHaveTextContent('Bambuddy timed out')
+    let answer = () => {}
+    server.use(
+      http.get('/api/v1/farm/inventory', async () => {
+        await new Promise<void>((resolve) => (answer = resolve))
+        return HttpResponse.json({ spools: [], slots: [] })
+      }),
+    )
+
+    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    // The old error is not this read's, so it goes while the new read is out.
+    expect(screen.queryByTestId('spool-inventory-error')).toBeNull()
+    expect(screen.getByText("Reading Bambuddy's inventory…")).toBeInTheDocument()
+
+    answer()
+    expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
   })
 
   it('draws a spool with no colour recorded as unknown, not clear and not black (#2971 review)', async () => {
