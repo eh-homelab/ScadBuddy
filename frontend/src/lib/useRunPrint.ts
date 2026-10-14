@@ -184,9 +184,7 @@ export function useRunPrint({
         all_plates: plate === 'all',
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
-        ...(printSequence === null ? {} : { print_sequence: printSequence }),
-        ...(supports === null ? {} : { supports }),
-        ...(filamentProfiles.length === 0 ? {} : { filament_profiles: filamentProfiles }),
+        ...sliceOverrides(printSequence, supports, filamentProfiles),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while

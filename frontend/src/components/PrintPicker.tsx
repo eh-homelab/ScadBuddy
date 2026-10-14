@@ -33,7 +33,7 @@ import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
-import { printChoicesOf } from '../lib/printChoices'
+import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
   attachPrintToProject,
@@ -625,12 +625,9 @@ export function PrintPicker({
           rack_algorithm: chosenAlgorithm,
           // #2367: the sequence is a process override, so it changes what the run
           // slices; the check and the background slice must see it as the run does.
-          ...(printSequence === null ? {} : { print_sequence: printSequence }),
-          // #717: a profile left on changes the slice, and Checks says when one can't apply.
-          ...(filamentProfiles.active.length === 0 ? {} : { filament_profiles: filamentProfiles.active }),
-          // #1899: supports are process overrides too; the check and the background
-          // slice must see the ones the run will print with.
-          ...(supports === null ? {} : { supports }),
+          // #1899, #717: supports and the profiles left on are process overrides too, and
+          // Checks says when one can't apply.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
