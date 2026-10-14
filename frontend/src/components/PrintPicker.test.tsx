@@ -2076,6 +2076,23 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     expect(runs.bodies[0]).toMatchObject({ print_sequence: last.print_sequence })
   })
 
+  it('checks and reslices for the chosen supports, as the run will slice them (#2804 review)', async () => {
+    const checks = watch('POST', '/check')
+    const previews = watch('POST', '/preview-slice')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(previews.bodies.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(checks.bodies.at(-1)).not.toHaveProperty('supports')
+    expect(previews.bodies.at(-1)).not.toHaveProperty('supports')
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ supports: { enabled: false } }))
+    await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ supports: { enabled: false } }), {
+      timeout: 5000,
+    })
+  })
+
   it('does not carry over to another source', async () => {
     const { bodies } = watch('POST', '/run')
     const { user, rerender } = renderPicker()

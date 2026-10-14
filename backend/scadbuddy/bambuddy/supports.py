@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
@@ -83,7 +83,11 @@ def _not_applied(message: str) -> FilamentWarning:
 
 
 async def support_overrides(
-    client: BambuddyClient, process: PresetRef | None, wanted: Mapping[str, str]
+    client: BambuddyClient,
+    process: PresetRef | None,
+    wanted: Mapping[str, str],
+    *,
+    read: ReadPresetValues | None = None,
 ) -> tuple[dict[str, ProcessValue], list[FilamentWarning]]:
     """``wanted`` as process overrides in the shape ``process`` stores each setting,
     and a warning for what had to be left out. Never refuses.
@@ -99,7 +103,7 @@ async def support_overrides(
         reason = "no process preset was resolved for this print"
     else:
         try:
-            read = await client.preset_values(process)
+            answer = await (read or client.preset_values)(process)
         except ApiError:
             # Not ``error.detail``: that repeats the operation ("read the values of
             # process preset …"), which the sentence around it already says. Nor
@@ -107,10 +111,10 @@ async def support_overrides(
             # necessarily one Bambuddy sent (#3183).
             reason = "the read failed (Bambuddy unreachable or answering with an error)"
         else:
-            if read.resolved:
-                values = read.values
+            if answer.resolved:
+                values = answer.values
             else:
-                reason = f"Bambuddy could not read them ({read.reason or 'no reason given'})"
+                reason = f"Bambuddy could not read them ({answer.reason or 'no reason given'})"
     if values is None:
         sent: dict[str, ProcessValue] = {k: v for k, v in wanted.items() if k in SCALAR_KEYS}
         withheld = [key for key in wanted if key not in SCALAR_KEYS]

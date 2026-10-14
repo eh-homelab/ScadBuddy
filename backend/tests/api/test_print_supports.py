@@ -204,12 +204,18 @@ def test_a_setting_the_preset_lacks_is_left_out_and_named(client: TestClient, mo
     preset_values({"enable_support": "0", "support_type": "tree(auto)"})
     supports = {"enabled": True, "threshold_angle": 40}
 
-    response = run_print(client, output_id, json={**body(), "supports": supports})
+    request = {**body(), "supports": supports}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
 
     assert response.status_code == 200, response.text
     assert overrides(sliced) == {"enable_support": "1", "support_type": "tree(auto)"}
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
     assert "support_threshold_angle (the process preset has no value" in warning["message"]
+    # Checks says it before Print, as the run will (#2804 review).
+    assert check.status_code == 200, check.text
+    assert warning in check.json()["warnings"]
 
 
 @respx.mock

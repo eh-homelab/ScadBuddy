@@ -81,6 +81,50 @@ def test_a_preview_shows_each_change_against_the_presets_value(client: TestClien
 
 
 @respx.mock
+def test_a_repeated_profile_is_previewed_once(client: TestClient) -> None:
+    """#2804 review: as a run applies a repeated id once, the preview shows it once."""
+    configure(client)
+    h2c_presets()
+    preset_values()
+
+    response = client.post(
+        "/api/v1/print/filament-profiles/preview",
+        json={
+            "choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"},
+            "profiles": ["silk-pla", "silk-pla"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert [preview["profile"]["id"] for preview in response.json()] == ["silk-pla"]
+
+
+@respx.mock
+def test_a_check_and_a_run_read_the_presets_values_once_for_profiles_and_supports(
+    client: TestClient, model: str
+) -> None:
+    """#2804 review: the profiles and the supports change the same process preset, so
+    its values are read once for both, by the check and by the run."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    values = preset_values(
+        {"outer_wall_speed": H2C_OUTER_WALL, "enable_support": "0", "support_type": "tree(auto)"}
+    )
+    slice_routes()
+    queue_route()
+    request = {**body(), "filament_profiles": ["silk-pla"], "supports": {"enabled": True}}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    assert check.status_code == 200, check.text
+    assert values.call_count == 1
+
+    response = run_print(client, output_id, json=request)
+    assert response.status_code == 200, response.text
+    assert values.call_count == 2
+
+
+@respx.mock
 def test_unreadable_values_make_a_profile_unapplicable_saying_why(client: TestClient) -> None:
     configure(client)
     h2c_presets()
@@ -250,5 +294,6 @@ def test_the_presets_values_are_read_once_for_every_profile(client: TestClient) 
         },
     ).json()
 
-    assert [entry["applicable"] for entry in shown] == [True, True]
+    # A repeated id is shown once (#2804 review), and the values are read once.
+    assert [entry["applicable"] for entry in shown] == [True]
     assert values.call_count == 1

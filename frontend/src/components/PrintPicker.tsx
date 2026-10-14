@@ -628,6 +628,9 @@ export function PrintPicker({
           ...(printSequence === null ? {} : { print_sequence: printSequence }),
           // #717: a profile left on changes the slice, and Checks says when one can't apply.
           ...(filamentProfiles.active.length === 0 ? {} : { filament_profiles: filamentProfiles.active }),
+          // #1899: supports are process overrides too; the check and the background
+          // slice must see the ones the run will print with.
+          ...(supports === null ? {} : { supports }),
         }
       : null
   const check = usePrintCheck(source, checkRequest)

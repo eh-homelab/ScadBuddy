@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import sources as src
 from scadbuddy.analyzers.model import Source
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
@@ -149,10 +149,15 @@ def unknown_profiles(ids: list[str]) -> list[str]:
 
 
 async def previews(
-    client: BambuddyClient, process: PresetRef | None, profiles: list[FilamentProfile]
+    client: BambuddyClient,
+    process: PresetRef | None,
+    profiles: list[FilamentProfile],
+    *,
+    read: ReadPresetValues | None = None,
 ) -> list[ProfilePreview]:
     """Each of ``profiles``' changes against ``process``'s values, in their stored shape.
-    The preset's values are read once, whatever the number of profiles."""
+    The preset's values are read once, whatever the number of profiles; ``read`` is a
+    reader shared with the print's other overrides (#2804 review)."""
     if not profiles:
         return []
     if process is None:
@@ -169,7 +174,7 @@ async def previews(
         ]
     why: str | None
     try:
-        values = await client.preset_values(process)
+        values = await (read or client.preset_values)(process)
     except ApiError as error:
         # Unreachable or failing: skip the profiles, never refuse the print for them.
         why = error.detail
@@ -249,7 +254,11 @@ def not_applied(preview: ProfilePreview) -> FilamentWarning:
 
 
 async def profile_overrides(
-    client: BambuddyClient, process: PresetRef | None, profile_ids: list[str]
+    client: BambuddyClient,
+    process: PresetRef | None,
+    profile_ids: list[str],
+    *,
+    read: ReadPresetValues | None = None,
 ) -> tuple[dict[str, ProcessValue], list[FilamentWarning]]:
     """The process overrides of every profile a print applies, each read against the
     print's own process preset in the shape it stores them. A profile that cannot apply
@@ -257,7 +266,7 @@ async def profile_overrides(
     and goes ahead with the preset as it is."""
     merged: dict[str, ProcessValue] = {}
     warnings: list[FilamentWarning] = []
-    for shown in await previews(client, process, [BUILTIN[i] for i in profile_ids]):
+    for shown in await previews(client, process, [BUILTIN[i] for i in profile_ids], read=read):
         if shown.applicable:
             merged.update(overrides(shown))
         else:

@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, read_once
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -717,6 +717,9 @@ async def check_print(
     # for the rack side when the preview picks it a hotend (#1238).
     rack_picked = rack_view is not None and rack_view.position is not None
     objects, clearance = await _sequence_clearance(client, source, request, prepared)
+    # One read of the preset's values for the profiles and the supports (#2804 review).
+    process = process_preset_for(request.choices, prepared.catalogue)
+    read = read_once(client)
     return PrintCheck(
         errors=errors,
         objects=objects,
@@ -736,11 +739,14 @@ async def check_print(
                 )
             ),
             # #717: what the run will say of a profile it cannot apply.
+            *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
+            # #1899: and of a support setting it cannot apply.
             *(
-                await profile_overrides(
+                await support_overrides(
                     client,
-                    process_preset_for(request.choices, prepared.catalogue),
-                    request.filament_profiles,
+                    process,
+                    wanted_settings(source.print_settings, request.supports),
+                    read=read,
                 )
             )[1],
         ],
@@ -1247,8 +1253,10 @@ async def plan_run(
     catalogue = await _catalogue(client)
     process = process_preset_for(choices, catalogue)
     # #717: a profile that cannot apply is skipped with a warning, never refused.
+    # One read of the preset's values for the profiles and the supports (#2804 review).
+    read = read_once(client)
     from_profiles, profile_warnings = await profile_overrides(
-        client, process, request.filament_profiles
+        client, process, request.filament_profiles, read=read
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
@@ -1267,7 +1275,7 @@ async def plan_run(
     )
     # Never refused (#1899): a support setting that cannot be shaped is left out.
     supports, support_warnings = await support_overrides(
-        client, process, wanted_settings(source.print_settings, request.supports)
+        client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
     printed = await source.file_to_print(
         client,

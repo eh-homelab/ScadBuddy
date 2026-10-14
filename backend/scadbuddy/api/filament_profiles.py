@@ -38,7 +38,8 @@ class ProfilePreviewRequest(BaseModel):
         unknown = unknown_profiles(ids or [])
         if unknown:
             raise ValueError(f"no filament profile {', '.join(map(repr, unknown))}")
-        return ids
+        # A repeated id is previewed once, as PrintRunRequest applies it once (#2804 review).
+        return None if ids is None else list(dict.fromkeys(ids))
 
 
 @router.get("", response_model=list[FilamentProfile], summary="Every filament profile")

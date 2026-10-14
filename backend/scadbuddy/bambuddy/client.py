@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -1421,3 +1421,29 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
     """A client built from the stored settings, or a 409 saying what is missing."""
     async with BambuddyClient(BambuddyConfig.from_settings(settings)) as client:
         yield client
+
+
+#: Reads a process preset's values (#717); :func:`read_once` makes one that reads each
+#: preset at most once.
+ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
+
+
+def read_once(client: BambuddyClient) -> ReadPresetValues:
+    """``client.preset_values``, read at most once per preset by whoever shares it
+    (#2804 review): a print's filament profiles and its supports change the same process
+    preset. A failed read fails the same way for every one of them."""
+    read: dict[tuple[str, str], PresetValues | ApiError] = {}
+
+    async def values(process: PresetRef) -> PresetValues:
+        key = (process.source, process.id)
+        if key not in read:
+            try:
+                read[key] = await client.preset_values(process)
+            except ApiError as error:
+                read[key] = error
+        answer = read[key]
+        if isinstance(answer, ApiError):
+            raise answer
+        return answer
+
+    return values
