@@ -32,7 +32,9 @@ Two paths lead there:
   transaction** -- the projection's submit, start and finish
   (`render/projection.py`) -- so the event commits, or is rolled back, with the
   change it describes. It runs in a
-  savepoint: a failing log write is logged and never fails the change.
+  savepoint: a failing log write is logged and never fails the change. The lock is
+  then held until the caller commits; see **Lock order** above for the rows written
+  after it.
 - :meth:`PgNotifyEventBus.publish` is for changes that are not in the database (the
   git-backed catalogue, outputs, settings, fonts). It never blocks and is safe from
   any thread: the event goes into an outbox -- `_Outbox`, the same bounded,
@@ -279,7 +281,11 @@ def hold_event_log(conn: Connection[Any]) -> None:
     holds it while it waits for that row; one that wrote the row first and then
     publishes waits for the lock while holding the row, and Postgres aborts one of the
     two as a deadlock. Taking the lock before such a row keeps one order: the event log
-    first, then rows. Taking it again later in the transaction is free."""
+    first, then rows. Taking it again later in the transaction is free.
+
+    It is a Postgres advisory lock whatever the caller's bus is: the activity index
+    takes it whenever it has events to publish, so a test or wiring with a non-Postgres
+    ``TransactionalEvents`` takes it too, harmlessly."""
     conn.execute(_LOCK_SQL, (EVENT_LOG_LOCK,))
 
 

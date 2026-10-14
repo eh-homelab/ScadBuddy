@@ -24,6 +24,13 @@ describe('DurableSubagentsSetting', () => {
     expect(await api.getDurableSubagents()).toEqual({ url: IN_CLUSTER, peers: ['10.42.0.0/16', '10.43.1.2'] })
   })
 
+  it('reads back the URL as the agent stores it, parsed (#3054)', async () => {
+    expect(await api.putDurableSubagents({ url: 'HTTP://ScadBuddy.svc', peers: [] })).toEqual({
+      url: 'http://scadbuddy.svc/',
+      peers: [],
+    })
+  })
+
   it('saves empty fields as back to loopback', async () => {
     await api.putDurableSubagents({ url: IN_CLUSTER, peers: ['10.42.0.0/16'] })
     const { user } = renderPage(<DurableSubagentsSetting />)

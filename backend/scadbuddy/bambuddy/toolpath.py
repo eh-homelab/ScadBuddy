@@ -57,6 +57,11 @@ _PRINT_END = ("; MACHINE_END_GCODE_START", "; EXECUTABLE_BLOCK_END")
 TRAVEL = 0
 
 
+#: The wire format's version, in its header; `frontend/src/lib/toolpath.ts`'s
+#: `TOOLPATH_VERSION` refuses any other (#3360).
+VERSION = 1
+
+
 @dataclass
 class Toolpath:
     """The segments, and what the header says about them."""
@@ -74,7 +79,7 @@ class Toolpath:
 
     def header(self) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": VERSION,
             "segment_count": self.count,
             "features": self.features,
             "layers": [{"z": round(z, 4), "first_segment": first} for z, first in self.layers],

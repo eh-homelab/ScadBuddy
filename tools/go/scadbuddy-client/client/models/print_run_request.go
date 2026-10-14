@@ -19,6 +19,8 @@ type PrintRunRequest struct {
 	copies PrintRunRequest_PrintRunRequest_copiesable
 	// What the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
 	filament_plan FilamentPlanable
+	// The filament_profiles property
+	filament_profiles []string
 	// A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
 	options PrintOptionsable
 	// The plate_id property
@@ -35,6 +37,8 @@ type PrintRunRequest struct {
 	rack_position PrintRunRequest_PrintRunRequest_rack_positionable
 	// The request_id property
 	request_id PrintRunRequest_PrintRunRequest_request_idable
+	// The supports property
+	supports SupportsChoiceable
 }
 
 // PrintRunRequest_PrintRunRequest_copies composed type wrapper for classes int32, PrintRunRequest_copiesMember1able
@@ -780,6 +784,22 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["filament_profiles"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetFilamentProfiles(res)
+		}
+		return nil
+	}
 	res["options"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintOptionsFromDiscriminatorValue)
 		if err != nil {
@@ -860,6 +880,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["supports"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSupportsChoiceFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSupports(val.(SupportsChoiceable))
+		}
+		return nil
+	}
 	return res
 }
 
@@ -867,6 +897,12 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 // returns a FilamentPlanable when successful
 func (m *PrintRunRequest) GetFilamentPlan() FilamentPlanable {
 	return m.filament_plan
+}
+
+// GetFilamentProfiles gets the filament_profiles property value. The filament_profiles property
+// returns a []string when successful
+func (m *PrintRunRequest) GetFilamentProfiles() []string {
+	return m.filament_profiles
 }
 
 // GetOptions gets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
@@ -917,6 +953,12 @@ func (m *PrintRunRequest) GetRequestId() PrintRunRequest_PrintRunRequest_request
 	return m.request_id
 }
 
+// GetSupports gets the supports property value. The supports property
+// returns a SupportsChoiceable when successful
+func (m *PrintRunRequest) GetSupports() SupportsChoiceable {
+	return m.supports
+}
+
 // Serialize serializes information the current object
 func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
@@ -939,6 +981,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteObjectValue("filament_plan", m.GetFilamentPlan())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetFilamentProfiles() != nil {
+		err := writer.WriteCollectionOfStringValues("filament_profiles", m.GetFilamentProfiles())
 		if err != nil {
 			return err
 		}
@@ -992,6 +1040,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 		}
 	}
 	{
+		err := writer.WriteObjectValue("supports", m.GetSupports())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteAdditionalData(m.GetAdditionalData())
 		if err != nil {
 			return err
@@ -1023,6 +1077,11 @@ func (m *PrintRunRequest) SetCopies(value PrintRunRequest_PrintRunRequest_copies
 // SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it.“force_colour_match“ becomes “force_color_match“ on every override, which isthe flag Bambuddy's scheduler reads to require an exact type+colour match ratherthan merely preferring one. It is off by default because it only bites on amodel-targeted queue item, where insisting can leave the job unschedulable.
 func (m *PrintRunRequest) SetFilamentPlan(value FilamentPlanable) {
 	m.filament_plan = value
+}
+
+// SetFilamentProfiles sets the filament_profiles property value. The filament_profiles property
+func (m *PrintRunRequest) SetFilamentProfiles(value []string) {
+	m.filament_profiles = value
 }
 
 // SetOptions sets the options property value. A sparse overlay on “PrintQueueItemCreate“'s option fields.“extra="forbid"“ on purpose: a misspelled option must 422 rather than beremembered under a name nothing will ever read.
@@ -1065,6 +1124,11 @@ func (m *PrintRunRequest) SetRequestId(value PrintRunRequest_PrintRunRequest_req
 	m.request_id = value
 }
 
+// SetSupports sets the supports property value. The supports property
+func (m *PrintRunRequest) SetSupports(value SupportsChoiceable) {
+	m.supports = value
+}
+
 type PrintRunRequestable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
@@ -1072,6 +1136,7 @@ type PrintRunRequestable interface {
 	GetChoices() PrintChoicesable
 	GetCopies() PrintRunRequest_PrintRunRequest_copiesable
 	GetFilamentPlan() FilamentPlanable
+	GetFilamentProfiles() []string
 	GetOptions() PrintOptionsable
 	GetPlateId() *int32
 	GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable
@@ -1080,10 +1145,12 @@ type PrintRunRequestable interface {
 	GetRackAlgorithm() PrintRunRequest_PrintRunRequest_rack_algorithmable
 	GetRackPosition() PrintRunRequest_PrintRunRequest_rack_positionable
 	GetRequestId() PrintRunRequest_PrintRunRequest_request_idable
+	GetSupports() SupportsChoiceable
 	SetAllPlates(value *bool)
 	SetChoices(value PrintChoicesable)
 	SetCopies(value PrintRunRequest_PrintRunRequest_copiesable)
 	SetFilamentPlan(value FilamentPlanable)
+	SetFilamentProfiles(value []string)
 	SetOptions(value PrintOptionsable)
 	SetPlateId(value *int32)
 	SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable)
@@ -1092,4 +1159,5 @@ type PrintRunRequestable interface {
 	SetRackAlgorithm(value PrintRunRequest_PrintRunRequest_rack_algorithmable)
 	SetRackPosition(value PrintRunRequest_PrintRunRequest_rack_positionable)
 	SetRequestId(value PrintRunRequest_PrintRunRequest_request_idable)
+	SetSupports(value SupportsChoiceable)
 }

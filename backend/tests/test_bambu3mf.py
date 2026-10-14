@@ -1540,10 +1540,8 @@ def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
     )
     assert [plate.name for plate in plates_of(two)] == ["Bins (plate 1)", "Bins (plate 2)"]
     with zipfile.ZipFile(one) as archive:
-        assert (
-            '<metadata key="plater_name" value=""/>'
-            in archive.read("Metadata/model_settings.config").decode()
-        )
+        [plate] = plate_settings(ET.fromstring(archive.read("Metadata/model_settings.config")))
+    assert plate.metadata["plater_name"] == ""  # a one-object plate is left unnamed
 
 
 def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:

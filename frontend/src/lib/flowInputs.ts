@@ -90,7 +90,9 @@ const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
 /**
  * The run's inputs from the form, and what does not parse, by input. A blank input is
- * left out, so the backend fills in its default; a blank required one is an error.
+ * left out, so the backend fills in its default; a blank required one is an error. A
+ * string or array that has a default starts filled with it, so blanking it is a choice:
+ * it is sent empty (`""`, `[]`), never swapped back for the default (#2662).
  */
 export function toInputs(
   fields: InputField[],
@@ -106,7 +108,10 @@ export function toInputs(
     }
     const text = typeof raw === 'string' ? raw : ''
     if (text.trim() === '') {
-      if (field.required && field.default === undefined) errors[field.name] = 'Required'
+      if (field.default != null && !field.enum && (field.type === 'string' || field.type === 'array')) {
+        // A string as typed: spaces someone entered are theirs, not a cleared field.
+        inputs[field.name] = field.type === 'string' ? text : []
+      } else if (field.required && field.default === undefined) errors[field.name] = 'Required'
       continue
     }
     if (field.type === 'array') {

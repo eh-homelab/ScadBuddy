@@ -245,7 +245,9 @@ def test_a_refresh_is_slow_past_its_listeners_liveness_interval(paths: DataPaths
     assert follower.slow_after == 7.5
 
 
-async def test_a_cancelled_refresh_retrieves_its_walks_failure(paths: DataPaths) -> None:
+async def test_a_cancelled_refresh_retrieves_its_walks_failure(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
     """#2617 review: a listener cancelled mid-walk leaves the walk running; its failure
     is retrieved then, not reported as never retrieved."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
@@ -253,9 +255,13 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(paths: DataPaths)
     follower.slow_after = 5.0
     entered = threading.Event()
 
+    release = threading.Event()
+    failing = threading.Event()
+
     def revalidate(model_ids: list[str] | None) -> None:
         entered.set()
-        time.sleep(0.2)
+        release.wait(PROMPTLY)
+        failing.set()
         raise OSError("stale NFS file handle")
 
     follower.revalidate = revalidate  # type: ignore[method-assign]
@@ -263,18 +269,26 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(paths: DataPaths)
     reported: list[dict[str, Any]] = []
     loop.set_exception_handler(lambda _loop, context: reported.append(context))
     try:
-        refreshing = asyncio.create_task(follower.refresh(["keychain"]))
-        await asyncio.to_thread(entered.wait, PROMPTLY)
-        refreshing.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await refreshing
-        del refreshing
-        await asyncio.sleep(0.4)  # the walk ends, failing
-        gc.collect()
-        await asyncio.sleep(0)
+        with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
+            refreshing = asyncio.create_task(follower.refresh(["keychain"]))
+            await asyncio.to_thread(entered.wait, PROMPTLY)
+            refreshing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await refreshing
+            del refreshing
+            # The walk fails only now, after the cancel (#3377: an event, not a sleep).
+            release.set()
+            assert await asyncio.to_thread(failing.wait, PROMPTLY)
+            await _until(
+                lambda: any(r.getMessage().startswith("a cancelled models") for r in caplog.records)
+            )
+            gc.collect()
+            await asyncio.sleep(0)
     finally:
         loop.set_exception_handler(None)
     assert [c["message"] for c in reported] == []
+    [settled] = [r for r in caplog.records if r.getMessage().startswith("a cancelled models")]
+    assert settled.exc_info is not None and isinstance(settled.exc_info[1], OSError)
 
 
 async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(
@@ -329,6 +343,8 @@ async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
     assert [level for level, _ in said] == [logging.WARNING, logging.WARNING]
     assert "still walking" in said[0][1]
     assert said[1][1] == "refreshed the models library"
+    # #3375: the final record says the refresh stalled, so it is not counted twice.
+    assert [getattr(r, "stalled", None) for r in caplog.records] == [None, True]
 
     caplog.clear()
     delay = 0.0
@@ -339,6 +355,30 @@ async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.DEBUG, "refreshed the models library")
     ]
+    assert caplog.records[0].stalled is False  # type: ignore[attr-defined]
+
+
+async def test_a_failed_refresh_still_forgets_but_leaves_head(paths: DataPaths) -> None:
+    """#3375: a walk that raises (a stale NFS handle) still drops what the catalogue
+    caches about those templates; `head` stays on the last commit it revalidated for."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
+    follower.head = "a" * 40
+    forgotten: list[list[str] | None] = []
+
+    def revalidate(model_ids: list[str] | None) -> None:
+        raise OSError("stale NFS file handle")
+
+    class _Catalogue:
+        def forget(self, model_ids: list[str] | None) -> None:
+            forgotten.append(model_ids)
+
+    follower.revalidate = revalidate  # type: ignore[method-assign]
+    follower.catalogue = cast(Catalogue, _Catalogue())
+    with pytest.raises(OSError, match="stale NFS"):
+        await follower._received(encode_change(HeadChange("b" * 40, ["keychain"])))
+    assert forgotten == [["keychain"]]
+    assert follower.head == "a" * 40
 
 
 async def test_the_listener_awaits_a_callback_before_the_next(pg_conninfo: str) -> None:

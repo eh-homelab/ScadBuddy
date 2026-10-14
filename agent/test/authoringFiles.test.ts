@@ -210,7 +210,7 @@ describe('render limits', () => {
   it('a failed settings read keeps the last limits', async () => {
     let fail = false
     const limiter = new RenderLimiter(async () => {
-      if (fail) throw new Error('db down')
+      if (fail) throw Object.assign(new Error('connect ECONNREFUSED postgres://user:secret@db'), { name: 'PoolError' })
       return limits({ concurrent: 3 })
     })
     ;(await limiter.acquire('p'))()
@@ -220,6 +220,9 @@ describe('render limits', () => {
     await limiter.acquire('p')
     await limiter.acquire('p')
     expect(limiter.limits.concurrent).toBe(3)
+    // #1814: the log names the error, never its message.
+    expect(warn).toHaveBeenCalledWith('render limits: could not read the settings, keeping the last (PoolError)')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('secret')
     warn.mockRestore()
   })
 

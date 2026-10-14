@@ -58,6 +58,11 @@ const PutBody = z.strictObject({
         return false
       }
     }, 'must be an http(s) URL')
+    // Stored as WHATWG reads it, so the durable worker's urlsplit reads the same host
+    // (#3054): `http:agent.svc/mcp` or a leading space parse here but not there.
+    .transform((s) => new URL(s).href)
+    // Percent-encoding can lengthen it: the bound is on what is stored.
+    .pipe(z.string().max(2048))
     .nullable(),
   peers: z
     .array(

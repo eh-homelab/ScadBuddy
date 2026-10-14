@@ -1018,8 +1018,10 @@ jobs:
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
   # The LFS fixtures, pulled once per change of them into the Actions cache the four
-  # shards restore from: a miss (a new fixture, or an eviction from the full cache)
-  # costs one ~290 MB pull of the LFS bandwidth quota, not four. A failure here
+  # shards restore from: a new fixture costs one ~290 MB pull of the LFS bandwidth
+  # quota, not four. An entry evicted from the full cache since, or a save that never
+  # landed, is the exception: each shard then pulls them itself, four pulls in all
+  # (#2488). A failure here
   # skips the required backend-pytest, which CI Summary reports as a failure.
   lfs-fixtures:
     name: LFS fixtures

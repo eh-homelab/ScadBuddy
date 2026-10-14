@@ -100,6 +100,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
         transientRetries: null,
         servedBuiltins: [],
         backgroundTasks: false,
+        effort: null,
+        agentType: null,
       },
       slot: createTurnSlot(),
       secrets: [],
@@ -315,6 +317,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
     await credentials.record(stored.id, stored.epoch, { kind: 'disabled', reason: 'revoked' })
     await m.revalidateWarm()
     expect(m.warm.size()).toBe(0)
+  })
+
+  it("a Workflow agent's effort and type recycle the process, and SessionManager.revalidateWarm keeps the new one", async () => {
+    const credentials = fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' })
+    const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, credentials })
+    stops.push(() => m.warm.close())
+    const { session, turn: started } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+    await started!.done
+    expect(runs).toHaveLength(1)
+    // Each one alone recycles: the effort, then the subagent the turn runs as.
+    await db.sql`UPDATE ai_sessions SET agent_effort = 'low' WHERE id = ${session.id}`
+    await (await m.send(session.id, agentA, 'again')).done
+    expect(runs).toHaveLength(2)
+    expect(runs[1]?.effort).toBe('low')
+    await db.sql`UPDATE ai_sessions SET agent_type = 'model-author' WHERE id = ${session.id}`
+    await (await m.send(session.id, agentA, 'and again')).done
+    expect(runs).toHaveLength(3)
+    expect(runs[2]?.agent?.name).toBe('model-author')
+    // The resync assembles the session as its turns do, so the process stays and the next turn reuses it.
+    await m.revalidateWarm()
+    expect(m.warm.size()).toBe(1)
+    await (await m.send(session.id, agentA, 'once more')).done
+    expect(runs).toHaveLength(3)
   })
 
   it('SessionManager.revalidateWarm keeps a process whose assembly still matches, and drops one whose credential was revoked', async () => {

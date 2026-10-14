@@ -1,4 +1,12 @@
-import type { ChoicesView, NozzleChoice, PresetRef, PrintChoices, PrintRunRequest, PrintSequence } from '../api/types'
+import type {
+  ChoicesView,
+  NozzleChoice,
+  PresetRef,
+  PrintChoices,
+  PrintRunRequest,
+  PrintSequence,
+  SupportsChoice,
+} from '../api/types'
 import type { PrintSelection } from './usePrintChoices'
 
 /** Both sides at 0.4 mm, standard flow: the defaults when the server names none. */
@@ -43,10 +51,19 @@ export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
 
 /**
  * The request fields, beside the plan and the choices, that change what a run slices
- * (#2825): today the print sequence, which the backend folds into the process overrides.
- * The check, the background slice and the run all send these, from here, so the slice
- * the dialog reuses is the one the run would make.
+ * (#2825): the print sequence, the supports (#1899) and the filament profiles left on
+ * (#717), which the backend folds into the process overrides. The check, the background
+ * slice and the run all send these, from here, so the slice the dialog reuses is the one
+ * the run would make.
  */
-export function sliceOverrides(printSequence: PrintSequence | null): Pick<PrintRunRequest, 'print_sequence'> {
-  return printSequence === null ? {} : { print_sequence: printSequence }
+export function sliceOverrides(
+  printSequence: PrintSequence | null,
+  supports: SupportsChoice | null = null,
+  filamentProfiles: readonly string[] = [],
+): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles'> {
+  return {
+    ...(printSequence === null ? {} : { print_sequence: printSequence }),
+    ...(supports === null ? {} : { supports }),
+    ...(filamentProfiles.length === 0 ? {} : { filament_profiles: [...filamentProfiles] }),
+  }
 }

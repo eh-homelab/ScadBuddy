@@ -58,6 +58,8 @@ export type VersionFile = Schemas['VersionFile']
 export type VersionDiff = Schemas['VersionDiff']
 
 export type Job = Schemas['JobStatus']
+/** #1899 — a print's own support structures, over the template's `print_settings`. */
+export type SupportsChoice = Schemas['SupportsChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
@@ -82,6 +84,8 @@ export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
 export type ParamPresetDuplicate = Schemas['ParamPresetDuplicate']
 
 export type FontFamily = Schemas['FontFamily']
+/** #2358 — the characters of a text a font has no glyph for (`GET /fonts/glyphs`). */
+export type GlyphCoverage = Schemas['GlyphCoverage']
 export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
@@ -164,12 +168,24 @@ export type FlowGrantRule = Schemas['GrantRule']
 export type FlowGrantArg = Schemas['ArgBound']
 export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
+/** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
+export type FlowTrigger = Schemas['TriggerView']
+export type FlowTriggerCreate = Schemas['TriggerCreate']
+export type FlowTriggerUpdate = Schemas['TriggerUpdate']
+export type FlowTriggerSchedule = Schemas['ScheduleTiming']
+export type FlowTriggerEvent = Schemas['EventTiming']
+export type FlowTriggerFire = Schemas['Fire']
+export type FlowStandingGrant = Schemas['StandingGrantView']
+export type FlowRunTrigger = Schemas['RunTrigger']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
 export type PrintChoices = Schemas['PrintChoices']
+/** #717 — filament profiles: cited process changes suggested for a spool. */
+export type FilamentProfile = Schemas['FilamentProfile']
+export type ProfilePreview = Schemas['ProfilePreview']
 export type NozzleChoice = Schemas['NozzleChoice']
 export type InstalledNozzle = Schemas['InstalledNozzle']
 export type TierOption = Schemas['TierOption']

@@ -20,7 +20,16 @@ function flowWords(plan: NozzlePlan): string {
  * Inland Black → right · 0.4 High Flow". ScadBuddy plans it by material and states it in
  * the file; `stale` dims it while the plan for changed choices is read.
  */
-export function NozzlePlanLine({ plan, stale = false }: { plan: NozzlePlan | null | undefined; stale?: boolean }) {
+export function NozzlePlanLine({
+  plan,
+  stale = false,
+  sliced = false,
+}: {
+  plan: NozzlePlan | null | undefined
+  stale?: boolean
+  /** #2703 — the sides are the slice's (`asSliced`), not the plan's. */
+  sliced?: boolean
+}) {
   if (!plan || (plan.slots ?? []).length === 0) return null
   return (
     <p
@@ -28,7 +37,7 @@ export function NozzlePlanLine({ plan, stale = false }: { plan: NozzlePlan | nul
       data-testid="nozzle-plan"
       aria-busy={stale}
     >
-      <span className="text-muted">Nozzles:</span>
+      <span className="text-muted">{sliced ? 'Nozzles, as sliced:' : 'Nozzles:'}</span>
       {(plan.slots ?? []).map((slot) => (
         <span key={slot.slot_id} className="inline-flex items-center gap-1">
           <Swatch colour={slot.colour} size="sm" />
@@ -89,6 +98,14 @@ export function NozzlePlanStep({ plan, sides, onSide }: StepProps) {
       {plan?.track_switch && (
         <p className="mt-1.5 text-[12px] text-muted">
           The Filament Track Switch feeds any spool to either nozzle.
+        </p>
+      )}
+      {/* #2737 review: say it here, before a slice lands to show it; only for a plan on both
+          sides, as one held to a single side is never regrouped. */}
+      {new Set((plan?.slots ?? []).map((slot) => slot.side)).size > 1 && (
+        <p className="mt-1.5 text-[12px] text-muted" data-testid="nozzle-side-hint">
+          The slicer groups filaments itself to cut purging, so it may put one on the other side: the preview
+          shows where it went once sliced.
         </p>
       )}
     </fieldset>

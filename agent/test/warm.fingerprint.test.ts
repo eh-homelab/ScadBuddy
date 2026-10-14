@@ -22,6 +22,8 @@ const parts: FingerprintParts = {
   transientRetries: null,
   servedBuiltins: [],
   backgroundTasks: false,
+  effort: null,
+  agentType: null,
 }
 
 describe('fingerprint', () => {
@@ -55,6 +57,8 @@ describe('fingerprint', () => {
       transientRetries: 2,
       servedBuiltins: ['WebFetch'],
       backgroundTasks: true,
+      effort: 'low',
+      agentType: 'model-author',
     }
     expect(Object.keys(changed).sort()).toEqual(Object.keys(parts).sort())
     for (const [k, v] of Object.entries(changed)) expect(fingerprint({ ...parts, [k]: v }), k).not.toBe(fingerprint(parts))

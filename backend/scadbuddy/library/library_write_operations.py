@@ -389,8 +389,10 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                     folder_id=body.folder_id,
                     media_type="application/octet-stream",
                 )
+        # Bambuddy's upload response names no folder; the file is where it was asked to go.
+        folder_id = made.folder_id if made.folder_id is not None else body.folder_id
         return LibraryEntryUpdated(
-            id=made.id, filename=made.filename, folder_id=made.folder_id
+            id=made.id, filename=made.filename, folder_id=folder_id
         ).model_dump(mode="json")
 
     def kind(

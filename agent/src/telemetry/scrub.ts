@@ -72,6 +72,15 @@ function withoutHeadMessage(stacktrace: string, message: string): string {
   return stacktrace
 }
 
+/**
+ * What a log line may say of an error (#1814): its name only, never its message, which
+ * can quote a connection string or a query. Every `console.warn` of a caught error goes
+ * through this, so the rule lives in one place.
+ */
+export function errorName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err
+}
+
 /** The V8 frame lines of a Node stack, with the head's `message` cut out first; nothing else. */
 export function framesOnly(stacktrace: string, message?: string): string {
   const text = message ? withoutHeadMessage(stacktrace, message) : stacktrace

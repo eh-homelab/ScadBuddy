@@ -2,7 +2,7 @@
 import { type Span, SpanKind, SpanStatusCode } from '@opentelemetry/api'
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace'
 import { describe, expect, it } from 'vitest'
-import { framesOnly, ScrubbingSpanExporter } from '../src/telemetry/scrub.js'
+import { errorName, framesOnly, ScrubbingSpanExporter } from '../src/telemetry/scrub.js'
 
 // The scrub in front of every exporter (spec 2026-10-01 §6): no exception
 // message, query string or user agent leaves the process, in any form.
@@ -171,6 +171,16 @@ describe('ScrubbingSpanExporter', () => {
     expect(span!.attributes).toEqual({ 'scadbuddy.tool': 'list_models' })
     expect(span!.status.code).toBe(SpanStatusCode.UNSET)
     expect(span!.spanContext().traceId).toMatch(/^[0-9a-f]{32}$/)
+  })
+})
+
+// #1814: what a log line may say of an error.
+describe('errorName', () => {
+  it("is an error's name, never its message, and a thrown non-error's type", () => {
+    const err = new TypeError('connect postgres://user:secret@db')
+    expect(errorName(err)).toBe('TypeError')
+    expect(errorName('postgres://user:secret@db')).toBe('string')
+    expect(errorName(undefined)).toBe('undefined')
   })
 })
 

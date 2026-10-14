@@ -427,11 +427,15 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
   const runId = workflowExecution?.runId ?? ''
   const flow = flowOf(workflowExecution?.workflowId)
   if (flow !== undefined) {
+    // #2258: without it the request id matches no decision (toolActivities.ts flowCaller).
+    if (!runId) {
+      throw ApplicationFailure.nonRetryable(`${name}: flow run ${flow}'s call carries no workflow execution run id`, UNKNOWN_FLOW)
+    }
     const flows = deps.flows
     // A lookup that throws (the database is away) is left to the activity's retries.
-    const owner = flows ? await flows.startedBy(flow) : undefined
+    const owner = flows ? await flows.startedBy(flow, runId) : undefined
     if (!flows || owner === undefined) {
-      throw ApplicationFailure.nonRetryable(`${name}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
+      throw ApplicationFailure.nonRetryable(`${name}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
     }
     return {
       context: { session: `flow-${flow}`, flow, owner },

@@ -8,6 +8,7 @@ recorded after a lost start (`bambuddy/lost_slices.py`).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -17,9 +18,10 @@ from typing import Any, cast
 import pytest
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.bambuddy import lost_slices
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SliceLostError, SliceStarted
-from scadbuddy.bambuddy.lost_slices import GIVE_UP_AFTER, sweep_lost_slices
+from scadbuddy.bambuddy.lost_slices import GIVE_UP_AFTER, STARTS_KEPT, sweep_lost_slices
 from scadbuddy.bambuddy.models import LibraryFile, SliceJob, SliceResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LostStart, PreviewSlice
 from scadbuddy.core.problems import ApiError
@@ -41,6 +43,11 @@ class Starts:
     #: Job id -> when it was recorded (a run's start or a background slice).
     jobs: dict[int, datetime] = field(default_factory=dict)
     finished: list[int] = field(default_factory=list)
+    pruned: list[datetime] = field(default_factory=list)
+
+    async def prune_slice_starts(self, before: datetime) -> int:
+        self.pruned.append(before)
+        return 0
 
     async def lost_starts(self) -> list[LostStart]:
         return [row for row in self.lost if row.id not in self.finished]
@@ -199,16 +206,81 @@ async def test_with_nothing_started_since_it_waits_then_gives_up() -> None:
     assert store.finished == [1]
 
 
-async def test_bambuddy_unreachable_keeps_the_lost_start_for_the_next_sweep() -> None:
+async def test_bambuddy_unreachable_keeps_the_lost_start_for_the_next_sweep(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class Down(Jobs):
         async def slice_job(self, job_id: int) -> SliceJob:
+            self.read.append(job_id)
             raise ApiError(503, "Bambuddy is down")
 
     store = lost_at()
     store.jobs[11] = T0 + timedelta(minutes=1)
+    bambuddy = Down()
 
-    assert await sweep(Down(), store) == 0
+    with caplog.at_level(logging.WARNING, logger=lost_slices.__name__):
+        assert await sweep(bambuddy, store) == 0
     assert store.finished == []
+    # Bambuddy failing stops this lost start's look at once: one read, one warning,
+    # not one per job beside it (#3013 review).
+    assert len(bambuddy.read) == 1
+    assert len(caplog.records) == 1
+
+
+async def test_a_job_bambuddy_refuses_alone_does_not_stop_the_look_beside_it() -> None:
+    """A 4xx other than 404 is about that one job: the jobs after it are still read."""
+
+    class Forbids(Jobs):
+        async def slice_job(self, job_id: int) -> SliceJob:
+            if job_id == 9:
+                self.read.append(job_id)
+                raise ApiError(403, "not yours")
+            return await super().slice_job(job_id)
+
+    store = lost_at()
+    store.jobs[11] = T0 + timedelta(minutes=1)
+    bambuddy = Forbids()
+    j = job(10, sliced=502)
+    bambuddy.jobs[10] = j
+    bambuddy.files[502] = "sliced-502.gcode.3mf"
+
+    assert await sweep(bambuddy, store) == 1
+    assert bambuddy.deleted == [502]
+    assert store.finished == []
+
+
+async def test_a_failed_delete_keeps_the_files_already_removed_counted() -> None:
+    """#2911: jobs 9 and 10 are both the lost start's; 10's file cannot be deleted. 9's
+    removal still counts, and the lost start is looked at again next sweep."""
+
+    class Refuses(Jobs):
+        async def delete_library_file(self, file_id: int) -> bool:
+            if file_id == 502:
+                raise ApiError(503, "Bambuddy is busy")
+            return await super().delete_library_file(file_id)
+
+    store = lost_at()
+    store.jobs[11] = T0 + timedelta(minutes=1)
+    bambuddy = Refuses()
+    for j in (job(9, sliced=501), job(10, sliced=502)):
+        bambuddy.jobs[j.id or 0] = j
+        assert j.result is not None and j.result.library_file_id is not None
+        bambuddy.files[j.result.library_file_id] = j.result.name or ""
+
+    assert await sweep(bambuddy, store) == 1
+    assert bambuddy.deleted == [501]
+    assert store.finished == []
+
+
+async def test_each_sweep_forgets_slice_starts_past_their_use() -> None:
+    """#2911: answered and swept starts would otherwise only grow."""
+    store = Starts()
+    now = T0 + timedelta(days=3)
+
+    await sweep(world(), store, now=now)
+
+    assert store.pruned == [now - STARTS_KEPT]
+    assert GIVE_UP_AFTER + timedelta(minutes=30) < STARTS_KEPT
 
 
 # The activity records every start, and a lost one.
@@ -339,3 +411,25 @@ async def test_the_store_keeps_lost_starts_and_the_jobs_beside_them(
 
     await uploads.finish_lost_start(lost.id)
     assert await uploads.lost_starts() == []
+
+
+@pytest.mark.requires_postgres
+async def test_the_store_prunes_only_slice_starts_older_than_asked(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2911: old starts, answered or lost, go; recent ones stay for the sweep."""
+    await uploads.record_slice_start(COPY, 21)
+    await uploads.record_slice_start(COPY, None)
+    with uploads._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_slice_starts SET created_at = created_at - interval '2 days'"
+            " WHERE job_id = 21 OR job_id IS NULL"
+        )
+    await uploads.record_slice_start(COPY, 22)
+    [old_lost] = await uploads.lost_starts()
+
+    pruned = await uploads.prune_slice_starts(old_lost.created_at + timedelta(days=1))
+
+    assert pruned == 2
+    assert await uploads.lost_starts() == []
+    assert await uploads.slice_jobs_recorded([21, 22], old_lost.created_at) == {22}

@@ -72,6 +72,8 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     transientRetries: null,
     servedBuiltins: [],
     backgroundTasks: false,
+    effort: null,
+    agentType: null,
   }
   /** A turn's assembly, as TurnRunner.assemble gives it; `release` is a spy. */
   const assembled = (change: Partial<FingerprintParts> = {}): AssembledTurn => ({

@@ -641,9 +641,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     list as a workspace file), each outward, and the listing's `system_note` tells the
     model; `src/builtins/schemas.json` is Claude Code's own input schemas
     (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
-    `CronList`, `ScheduleWakeup` and `TaskStop` are the session's own in both modes
+    `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
     (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
-    `agent-tools` that sends the prompt when due and the session is idle; a classic turn
+    `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source
+    runs where the session's Bash runs, the replica's own queue or agent-durable's
+    `scadbuddy_durable/background.py`, its events in `ai_background_events`; a Workflow's
+    script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
+    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; a classic turn
     gets them as the in-process `builtin` server in place of Claude Code's, which end
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API

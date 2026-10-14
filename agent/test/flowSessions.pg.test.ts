@@ -15,7 +15,7 @@ import {
   TURN_FAILED,
   type TurnAnswer,
 } from '../src/temporal/flowSessions.js'
-import { NOT_FOR_FLOWS } from '../src/temporal/toolActivities.js'
+import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from '../src/temporal/toolActivities.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // A flow's `agent(...)` and `ask_session(...)` (#1057, phase 6g): the activities on
@@ -56,10 +56,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     return id
   }
 
-  function env(workflowId = `flow-${runId}`) {
+  function env(workflowId = `flow-${runId}`, execution = 'wr1') {
     return new MockActivityEnvironment({
       activityId: 'turn-agent-c1',
-      workflowExecution: { workflowId, runId: 'wr1' },
+      workflowExecution: { workflowId, runId: execution },
       activityType: FLOW_SESSION_TURN,
       taskQueue: 'agent-tools',
     })
@@ -121,6 +121,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect([err.type, err.nonRetryable, err.message]).toEqual([TURN_FAILED, true, 'the turn was interrupted'])
   })
 
+  // #2277: a session deleted mid-wait never logs its result; the step ends rather than wait out its timeout.
+  it('ends the wait, refused, when the session is deleted while its turn runs', async () => {
+    const sid = await session()
+    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
+    await log.append(sid, [event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'go', author: owner }), ...say(sid, 'm1', 'working')])
+    // The wait's reads of the log, counted, so the delete lands once it is polling: a
+    // timer cannot tell that it has started at all.
+    let reads = 0
+    const counted = Object.assign((...args: Parameters<typeof t.db.sql>) => {
+      if (args[0].join('').includes('ai_session_events')) reads += 1
+      return t.db.sql(...args)
+    }, t.db.sql) as unknown as typeof t.db.sql
+    const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql), pollMs: 20 })
+    const waiting = env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' })
+    // Its first read found the turn; the second is the loop, polling past it.
+    await expect.poll(() => reads).toBeGreaterThanOrEqual(2)
+    await t.db.sql`DELETE FROM ai_sessions WHERE id = ${sid}`
+    const err = await failure(waiting)
+    expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])
+  })
+
   it("lets a flow talk only to a durable session its starter owns", async () => {
     expect(await check(await session())).toEqual({ session_id: expect.any(String), mode: 'durable' })
     for (const sid of [await session({ mode: 'classic' }), await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {
@@ -129,6 +150,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       const waited = await failure(turn(sid, 't1'))
       expect(waited.type).toBe(SESSION_REFUSED)
     }
+  })
+
+  // #2258: as flowCaller and turnCaller refuse it, never looked up as execution ''.
+  it("refuses a call that carries no execution run id", async () => {
+    const sid = await session()
+    const err = await failure(env(undefined, '').run(acts[FLOW_SESSION_CHECK]!, { session_id: sid }))
+    expect([err.type, err.nonRetryable]).toEqual([UNKNOWN_FLOW, true])
+    expect(err.message).toMatch(/carries no workflow execution run id/)
   })
 
   it('serves only flow runs', async () => {
