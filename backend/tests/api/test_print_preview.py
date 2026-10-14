@@ -142,6 +142,75 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
 
 
 @respx.mock
+def test_a_background_slice_totals_its_slots_not_bambuddys_first_filament(
+    client: TestClient, model: str
+) -> None:
+    """#2450: Bambuddy's ``filament_used_g`` is the first filament's grams alone, so the
+    dialog's "Filament" read less than the slots listed above it."""
+    output_id = prepared(client, model)
+    slots = [(1, 5.2), (2, 5.6), (3, 0.3)]
+    # Registered first, so it answers for the sliced file ahead of the copy's route.
+    respx.get(f"{API}/library/files/{SLICED}/filament-requirements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": SLICED,
+                "filaments": [
+                    {"slot_id": slot, "used_grams": grams, "used_in_plate": True}
+                    for slot, grams in slots
+                ],
+            },
+        )
+    )
+    upload_route()
+    run_routes()
+    job = Job()
+    job.body["result"] = {**job.body["result"], "filament_used_g": 5.2}  # type: ignore[dict-item]
+    job.routes()
+    sliced_routes()
+
+    start_slice(client, output_id, body())
+    answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
+
+    assert [slot["grams"] for slot in answer["slots"]] == [5.2, 5.6, 0.3]
+    assert answer["filament_used_g"] == pytest.approx(11.1)
+
+
+@respx.mock
+def test_a_background_slice_with_a_slot_of_unknown_grams_gives_bambuddys_total(
+    client: TestClient, model: str
+) -> None:
+    """#2702 review: a slot without grams cannot be summed, so the total falls back to
+    Bambuddy's own figure rather than to a sum that leaves that slot out."""
+    output_id = prepared(client, model)
+    respx.get(f"{API}/library/files/{SLICED}/filament-requirements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": SLICED,
+                "filaments": [
+                    {"slot_id": 1, "used_grams": 5.2, "used_in_plate": True},
+                    # Bambuddy's 0 for a slot it has no grams for reads as unknown.
+                    {"slot_id": 2, "used_grams": 0, "used_in_plate": True},
+                ],
+            },
+        )
+    )
+    upload_route()
+    run_routes()
+    job = Job()
+    job.body["result"] = {**job.body["result"], "filament_used_g": 5.2}  # type: ignore[dict-item]
+    job.routes()
+    sliced_routes()
+
+    start_slice(client, output_id, body())
+    answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
+
+    assert [slot["grams"] for slot in answer["slots"]] == [5.2, None]
+    assert answer["filament_used_g"] == 5.2
+
+
+@respx.mock
 def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     client: TestClient, model: str
 ) -> None:

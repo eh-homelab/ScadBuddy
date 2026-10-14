@@ -32,7 +32,8 @@ export const AUDIT_PAGE = 25
 
 const KIND_LABEL: Record<AuditKind, string> = {
   tool_call: 'Tool calls',
-  resource: 'MCP resources',
+  // #2373 — the panel's session actions (fork, rename, archive) share this kind.
+  resource: 'Sessions & resources',
   approval: 'Approvals',
   credential: 'Credentials',
   plugin: 'Plugins',
@@ -54,8 +55,15 @@ const OUTCOME_LABEL: Record<AuditOutcome, string> = {
 const SURFACE_LABEL: Record<AuditEntry['surface'], string> = {
   harness: 'assistant',
   mcp: 'MCP',
-  http: 'Settings',
+  // #2373 — every browser route: Settings, and the panel's approvals, answers and sessions.
+  http: 'the app',
   system: 'ScadBuddy',
+}
+
+/** #2373 — a session action recorded as a resource row. */
+const SESSION_ACTION: Record<string, string> = {
+  session_fork: 'Session fork',
+  session_update: 'Session update',
 }
 
 /** `mcp__scadbuddy__print_output` → `print_output`; other names as they are. */
@@ -70,7 +78,7 @@ function describe(entry: AuditEntry): string {
     case 'approval':
       return `Approval ${entry.action}`
     case 'resource':
-      return `Resource ${entry.action}`
+      return SESSION_ACTION[entry.action] ?? `Resource ${entry.action}`
     case 'memory':
       return entry.action === 'recall' ? 'Memory recall' : entry.action === 'retain' ? 'Memory save' : `Memory ${entry.action}`
     case 'http':

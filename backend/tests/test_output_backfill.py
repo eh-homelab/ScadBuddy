@@ -22,8 +22,10 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
 from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, OutputEvent
+from scadbuddy.library import backfill as backfill_module
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
+    AmbiguousOutputError,
     attach_backfills,
     attach_job_backfills,
     choose_output,
@@ -177,6 +179,49 @@ async def test_the_output_is_matched_by_its_recorded_parts(tmp_path: Path) -> No
     assert choose_output(job, None) == written  # one output: that one
 
 
+async def test_outputs_with_the_same_parts_are_told_apart_by_their_saved_index(
+    tmp_path: Path,
+) -> None:
+    """#1007 item 2: a pipeline writing several outputs from one set of Parts. The Parts
+    match both, so the index the output recorded when saved picks; without one, neither
+    is given, rather than whichever comes first."""
+    _, job, written = await finished_job(tmp_path, job_id="j1")
+    twin = written.model_copy(update={"name": "second layout"})
+    both = job.model_copy(update={"outputs": [written, twin]})
+    second = written.record.model_copy(update={"output_index": 1})
+    assert choose_output(both, second) is twin
+    assert choose_output(both, written.record.model_copy(update={"output_index": 0})) is written
+    with pytest.raises(AmbiguousOutputError):
+        choose_output(both, written.record)  # saved before the index was recorded
+
+
+async def test_a_saved_output_records_which_of_its_jobs_outputs_it_is(tmp_path: Path) -> None:
+    paths, job, written = await finished_job(tmp_path, job_id="j1")
+    twin = written.model_copy(update={"name": "second layout"})
+    store = OutputStore(paths)
+    saved = store.create(job.model_copy(update={"outputs": [written, twin]}), index=1)
+    record = store.record(saved.id)
+    assert record is not None and record.output_index == 1
+
+
+@pytest.mark.requires_postgres
+async def test_an_ambiguous_rerender_fails_the_backfill_and_says_why(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    (store.directory(old.id) / "record.json").write_text(
+        written.record.model_dump_json(), encoding="utf-8"
+    )
+    twin = written.model_copy(update={"name": "second layout"})
+    rerender = job.model_copy(update={"outputs": [written, twin]})
+    with store_pool(pg_conninfo) as pool:
+        assert attach_backfills(store, BlobRefs(pool), _jobs(rerender)) == 0
+    state = store.backfill(old.id)
+    assert state is not None and state.error is not None and "several outputs" in state.error
+    assert store.manifest(old.id) == []
+
+
 def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
     """A second output saved before manifests, of the same render, both waiting on it."""
     first = store.ids_for("demo")[0]
@@ -310,6 +355,31 @@ async def test_a_job_that_does_not_validate_is_retried_not_failed(
         assert store.backfill(old.id) == BackfillState(job_id=job.id)  # still pending
         assert attach_backfills(store, refs, _jobs(job)) == 1
     assert store.manifest(old.id) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_a_job_that_never_validates_logs_its_trace_once(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1007 re-review: retried every pass, a row that never validates logged a full
+    trace each time. Once per job, then a warning."""
+    backfill_module._unreadable_jobs.clear()
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+
+    def unreadable(job_id: str) -> Job:
+        Job.model_validate({"id": job_id})
+        raise AssertionError("unreachable")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="scadbuddy.library.backfill"),
+        store_pool(pg_conninfo) as pool,
+    ):
+        for _ in range(3):
+            assert attach_backfills(store, BlobRefs(pool), unreadable) == 0
+    mine = [r for r in caplog.records if r.name == "scadbuddy.library.backfill"]
+    assert [r.exc_info is not None for r in mine] == [True, False, False]
+    assert [r.levelno for r in mine] == [logging.ERROR, logging.WARNING, logging.WARNING]
 
 
 @pytest.mark.requires_postgres

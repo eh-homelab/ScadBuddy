@@ -349,6 +349,18 @@ export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Pr
   tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
 }
 
+/**
+ * An attention request's `stop` or `wait` timer ended the turn (#815), not a
+ * user's Stop: the session's `interrupted` error says why (#1206).
+ */
+class AttentionStop extends Error {}
+
+/** The `interrupted` error's message: why, when an attention request's timer ended the turn. */
+function interruptedMessage(signal: AbortSignal): string {
+  const reason: unknown = signal.reason
+  return reason instanceof AttentionStop ? `the turn ended: ${reason.message}` : 'the turn was interrupted'
+}
+
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
   return reason instanceof Error ? reason.message : 'the turn was interrupted'
@@ -523,11 +535,22 @@ export type SessionRecord = {
  * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
  * query's `total_cost_usd` does not hold that part.
  */
-type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
+type ClaimedSession = SessionRecord & {
+  unpricedCostUsd: number
+  /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
+  claimedAt: string
+}
 
-const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
+/**
+ * The claim's `updated_at` as `claimedAt`: ISO 8601 in UTC at Postgres's microseconds,
+ * whatever the connection's `DateStyle` and `TimeZone` (a plain `::text` follows them).
+ */
+export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
+
+const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  claimedAt: row.claimed_at,
 })
 
 export type TurnOutcome =
@@ -1259,13 +1282,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1303,13 +1326,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1507,6 +1530,8 @@ export class SessionManager {
       parent: otelContext.active(),
       // Each tool's tier for its span (TierResolver takes an optional input).
       tierOf: (name) => eventTierOf(name) ?? 'outward',
+      // What finish() subtracts for the audit row, so the span's cost is this turn's (#2376).
+      before: { costUsd: session.ownCostUsd, turns: session.turns },
     })
     // The turn's span ends whatever happens below, even if a cleanup step or
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
@@ -1764,9 +1789,9 @@ export class SessionManager {
               secrets: () => secrets,
               signal: controller.signal,
               // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-              stopTurn: (why) => controller.abort(new Error(why)),
+              stopTurn: (why) => controller.abort(new AttentionStop(why)),
               // The claim set updated_at = now(): the turn's start by the database's clock.
-              turnStartedAt: new Date(session.updatedAt),
+              turnStartedAt: session.claimedAt,
             })
           : undefined
         const run: Omit<HarnessRun, 'credential'> = {
@@ -1917,6 +1942,7 @@ export class SessionManager {
         session,
         turnId,
         stopped,
+        stopped === undefined ? undefined : interruptedMessage(controller.signal),
         result,
         result && stopped === undefined ? refused : undefined,
         failure,
@@ -1997,6 +2023,8 @@ export class SessionManager {
     session: ClaimedSession,
     turnId: string,
     stopped: string | undefined,
+    /** The `interrupted` error's message when `stopped`: an attention timer's says so (#1206). */
+    interrupted: string | undefined,
     result: SDKResultMessage | undefined,
     /** The failed model request `result` reports, when it reports one (fallback.ts `onRefused`). */
     refused: Refused | undefined,
@@ -2059,7 +2087,7 @@ export class SessionManager {
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
       // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
@@ -2099,7 +2127,7 @@ export class SessionManager {
         costUsd = session.ownCostUsd + cutUsd
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       }
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else {
       status = 'failed'

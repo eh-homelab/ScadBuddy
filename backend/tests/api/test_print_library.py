@@ -38,6 +38,7 @@ from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.test_clearance import two_objects_3mf
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -1418,3 +1419,58 @@ def test_a_library_print_runs_when_bambuddy_cannot_read_its_filaments(
         "/api/v1/library/files/67/filament-requirements",
         "/api/v1/library/files/141/filament-requirements",
     }, asked
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("sequence", "warned"), [("by object", True), ("by layer", False), (None, False)]
+)
+def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
+    client: TestClient, tmp_path: Path, sequence: str | None, warned: bool
+) -> None:
+    """#956: two objects 15 mm apart on an H2C, whose toolhead needs 49 mm. Printing by
+    object, the check warns and refuses nothing; by layer it has nothing to say."""
+    configure(client)
+    download = library_file(89, content=two_objects_3mf(tmp_path / "bins.3mf", apart=15))
+    run_routes()
+    sliced = slice_routes()
+    request = {**body(), **({"print_sequence": sequence} if sequence else {})}
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+
+    assert check.status_code == 200, check.text
+    kinds = [warning["kind"] for warning in check.json()["warnings"]]
+    assert check.json()["errors"] == []
+    assert ("sequence-clearance" in kinds) is warned
+    assert check.json()["objects"] == (2 if warned else None)
+    assert not sliced.called
+    # #2976: by object or not, the file is downloaded as often: once for its slots, once
+    # for the nozzle check, whose read the objects come from.
+    assert download.call_count == 2
+
+
+@respx.mock
+def test_a_by_object_check_of_every_plate_names_each_plate_and_counts_none(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#2976: checking every plate at once, each plate's clash is named, and no one
+    plate's object count stands for all of them."""
+    configure(client)
+    library_file(
+        89,
+        content=two_objects_3mf(tmp_path / "bins.3mf", apart=15, plates=2),
+        plates="library-plates-multi.json",
+    )
+    run_routes()
+    slice_routes()
+
+    check = client.post(
+        "/api/v1/print/library/89/check",
+        json={**body(), "print_sequence": "by object", "all_plates": True},
+    )
+
+    assert check.status_code == 200, check.text
+    clashes = [w["message"] for w in check.json()["warnings"] if w["kind"] == "sequence-clearance"]
+    assert any("Plate 1" in message for message in clashes), clashes
+    assert any("Plate 2" in message for message in clashes), clashes
+    assert check.json()["objects"] is None

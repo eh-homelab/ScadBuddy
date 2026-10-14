@@ -30,7 +30,7 @@ import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
-import { checkPlan, withSlicedGrams } from '../lib/filaments'
+import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -986,6 +986,17 @@ export function PrintPicker({
                             : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
                       }
                       colors={previewColors}
+                      toolpathUrl={
+                        // #2072 — the background slice's toolpaths, while they are of the
+                        // choices on screen and of the plate this dialog shows. A multi-plate
+                        // output's dialog shows every plate, which no one plate's slice is.
+                        previewSlice.result &&
+                        !previewSlice.stale &&
+                        !(source.kind === 'output' && picker.plates.length > 1) &&
+                        previewPlate === (plate === 'all' ? 1 : plate)
+                          ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
+                          : null
+                      }
                     />
                   )}
                 </div>
@@ -1055,7 +1066,11 @@ export function PrintPicker({
                         />
                       )}
 
-                      <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+                      <PrintSequenceStep
+                        value={printSequence}
+                        onChange={setPrintSequence}
+                        objects={check.current ? (check.verdict?.objects ?? null) : null}
+                      />
 
                       {given?.kind === 'output' && (
                         <SlicerDefaults
@@ -1116,6 +1131,12 @@ export function PrintPicker({
                 plan={plan}
                 colors={previewColors}
                 slice={previewSlice.result}
+                nozzlePlan={previewSlice.plan}
+                plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
+                  plates: picker.plates.length,
+                  chosen: plate,
+                  sliced: previewSlice.plateId,
+                })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
                 sliceError={previewSlice.error}

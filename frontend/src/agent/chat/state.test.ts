@@ -436,6 +436,23 @@ describe('chatReducer', () => {
     expect(state.activeId).toBe('s1')
   })
 
+  it('#2371 — keeps a known title and status when opening a chat replays its log', () => {
+    const listed = run([
+      server({
+        type: 'sessions.snapshot',
+        sessions: [{ sessionId: 'x', title: 'Renamed', origin: 'chat', owner: you, status: 'done' }],
+      }),
+    ])
+    const replayed = run(
+      [server({ type: 'session.started', sessionId: 'x', origin: 'chat', owner: you, title: 'The first prompt' })],
+      listed,
+    )
+    expect(replayed.sessions.x).toMatchObject({ title: 'Renamed', status: 'done' })
+    // A session the panel has not heard of takes the event's title, and is running.
+    const fresh = run([server({ type: 'session.started', sessionId: 'y', origin: 'chat', owner: you, title: 'Hello' })], listed)
+    expect(fresh.sessions.y).toMatchObject({ title: 'Hello', status: 'running' })
+  })
+
   it('records a handoff', () => {
     const state = run(
       [

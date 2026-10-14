@@ -83,6 +83,7 @@ from scadbuddy.bambuddy.projects import (
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
 from scadbuddy.library.settings_store import (
@@ -806,6 +807,7 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
+    catalogue: CatalogueDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -816,8 +818,15 @@ async def post_check(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    try:
+        # The template's defaults, by-object printing among them (#2976).
+        print_settings = await asyncio.to_thread(catalogue.print_settings, meta.slug)
+    except InvalidModelMetaError:
+        print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
-        return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
+        return await check_for_output(
+            client, outputs, uploads, meta, settings, body, rack=rack, print_settings=print_settings
+        )
 
 
 @router.post(

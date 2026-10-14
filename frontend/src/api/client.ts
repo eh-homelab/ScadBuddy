@@ -1441,6 +1441,14 @@ export const api = {
   getLibraryPreviewSlice: (fileId: number, jobId: number) =>
     request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
 
+  /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
+  previewToolpathUrl: (outputId: string, jobId: number) =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+
+  /** #2072 — as `previewToolpathUrl`, for a library file's. */
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
    * on the person's own "yes".

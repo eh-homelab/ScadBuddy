@@ -70,6 +70,10 @@ RENDER_ROWS: Mapping[str, str] = {
     "activity": "id LIKE 'render:%'",
 }
 
+#: `pg_advisory_xact_lock` key for `grant_render_role` ("SCADRNDR" in ASCII), so two
+#: API replicas starting together never race on its policies.
+GRANT_LOCK = 0x5343_4144_524E_4452
+
 #: Seconds between looks while the worker waits for the API's migrations or grants.
 READY_POLL = 5.0
 
@@ -87,6 +91,7 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
     if not _role_exists(conn, role):
         return False
     with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
         conn.execute(
             sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
                 sql.Identifier(_current_schema(conn)), sql.Identifier(role)
@@ -111,7 +116,8 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
     permissive policy, keeps every other non-owner role (a separately credentialed print
     or projects worker) unrestricted, since with row security on and no policy a role
     sees no row. The role's policy is named by its predicate, so a changed predicate
-    replaces the old one rather than leaving it in force."""
+    replaces the old one rather than leaving it in force (and so does af75581's
+    unsuffixed ``only_<role>``)."""
     existing = {
         row[0]
         for row in conn.cursor(row_factory=tuple_row).execute(
@@ -129,7 +135,8 @@ def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> No
         )
     prefix = f"only_{role}_"
     policy = prefix + hashlib.sha256(rows.encode()).hexdigest()[:8]
-    for stale in sorted(p for p in existing if p.startswith(prefix) and p != policy):
+    stale_policies = (p for p in existing if p.startswith(prefix) or p == f"only_{role}")
+    for stale in sorted(p for p in stale_policies if p != policy):
         conn.execute(
             sql.SQL("DROP POLICY {} ON {}").format(sql.Identifier(stale), sql.Identifier(table))
         )

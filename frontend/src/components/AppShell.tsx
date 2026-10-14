@@ -30,6 +30,7 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
+import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { Toasts } from './ui/Toasts'
@@ -107,6 +108,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       setOpenRequest(null)
     }
   }, [shown])
+  // #2372 — nor does it come back on the chat a reload would have restored.
+  useEffect(() => {
+    if (off) rememberSession(null)
+  }, [off])
   // #815 — what waits on the user (approvals, questions, attention requests), shown on the
   // toggle so a closed panel (or a background session's, which never reaches this tab's
   // socket) still says so.
@@ -127,6 +132,21 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
   // has no room beside it and covers it.
   const panelOverlays = useMediaQuery(PANEL_OVERLAYS_QUERY)
+
+  // #2372 — a reload reopens the panel this tab had open, once the assistant is known to
+  // be there, without taking the focus from the page. Remembered from then on.
+  const reopen = useRef<boolean | null>(panelWasOpen())
+  useEffect(() => {
+    if (reopen.current === null || !ai.available) return
+    if (reopen.current) {
+      setMounted(true)
+      setOpen(true)
+    }
+    reopen.current = null
+  }, [ai.available])
+  useEffect(() => {
+    if (reopen.current === null) rememberPanelOpen(open)
+  }, [open])
 
   const openPanel = useCallback(() => {
     setMounted(true)

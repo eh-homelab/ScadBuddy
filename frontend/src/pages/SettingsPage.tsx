@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useLocation } from 'react-router'
 import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
@@ -55,6 +54,7 @@ import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
+import { useSectionNav } from './settings/sectionNav'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -144,6 +144,9 @@ function baseline(settings: Settings, name: FieldName): string {
   return serverValue(settings, name)
 }
 
+/** Each section's id, in page order: what the section nav marks as in view. */
+const SECTION_IDS: readonly string[] = SECTIONS.map((section) => section.id)
+
 type Problem = { problem: string }
 
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
@@ -181,6 +184,10 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     if (raw.trim() === '') return { problem: 'Enter a value, or reset it to the deployment value.' } satisfies Problem
     const number = Number(raw)
     if (!Number.isFinite(number)) return { problem: 'Enter a number.' } satisfies Problem
+    // #2348 — none of them takes a negative, and a count is whole; the API checks each
+    // field's own bounds too and names the field it refuses.
+    if (number < 0) return { problem: 'Enter 0 or more.' } satisfies Problem
+    if (kind === 'count' && !Number.isInteger(number)) return { problem: 'Enter a whole number.' } satisfies Problem
     return number
   }
   // Text: empty clears it, which beats the deployment's value until it is reset.
@@ -257,13 +264,13 @@ export function SettingsPage() {
   }, [settings])
 
   // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list)
-  // opens Settings at it, once the sections are rendered.
-  const { hash } = useLocation()
+  // opens Settings at it, once the sections are rendered; #2345/#2346 — scrolling only
+  // the pane, kept in view while the sections above it load, and a section link moves
+  // focus to the section and puts it in the address.
+  const pane = useRef<HTMLDivElement>(null)
+  const sectionNav = useRef<HTMLElement>(null)
   const loaded = Boolean(settings)
-  useEffect(() => {
-    if (!loaded || hash.length < 2) return
-    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
-  }, [loaded, hash])
+  const { current: currentSection, go: goToSection } = useSectionNav(pane, sectionNav, SECTION_IDS, loaded)
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {
@@ -653,8 +660,14 @@ export function SettingsPage() {
   const unit = value('display_unit') as DisplayUnit
 
   return (
-    <div className="sb-settings h-full overflow-y-auto">
-      <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur">
+    // `relative`: the sr-only boxes inside are placed in the pane, not the document,
+    // which they otherwise made taller than the window, so the window scrolled (#2345).
+    <div ref={pane} className="sb-settings relative h-full overflow-y-auto">
+      <nav
+        ref={sectionNav}
+        aria-label="Settings sections"
+        className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur"
+      >
         {/* #969: wraps from sm up so every section shows at a glance; on a phone it
             scrolls sideways, with a fade on the right edge to say there is more. */}
         <ul className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 py-2 text-[12px] [mask-image:linear-gradient(to_right,black_85%,transparent)] sm:flex-wrap sm:justify-center sm:overflow-visible sm:[mask-image:none]">
@@ -662,11 +675,12 @@ export function SettingsPage() {
             <li key={section.id} className="shrink-0">
               <a
                 href={`#${section.id}`}
+                aria-current={currentSection === section.id ? 'location' : undefined}
                 onClick={(event) => {
                   event.preventDefault()
-                  document.getElementById(section.id)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+                  goToSection(section.id)
                 }}
-                className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink"
+                className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink aria-[current=location]:bg-surface-2 aria-[current=location]:text-ink"
               >
                 {section.title}
                 {sectionDirty(section.id) && (
@@ -1472,15 +1486,3 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
   )
 }
 
-/**
- * The section a URL hash names. A malformed escape (a truncated or hand-edited link,
- * `#%E0%A4%A`) makes `decodeURIComponent` throw, which inside the effect took the whole
- * page down (#2113); the raw text is used instead, which simply matches no section.
- */
-function sectionId(hash: string): string {
-  try {
-    return decodeURIComponent(hash.slice(1))
-  } catch {
-    return hash.slice(1)
-  }
-}

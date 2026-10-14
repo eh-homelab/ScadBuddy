@@ -147,17 +147,25 @@ async function showAdvanced() {
 }
 
 /** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
+/** The matching requests' URLs and bodies as they start, and how many have been
+ *  answered: a test that ends on a request waits for its answer, or the request is
+ *  aborted at teardown and the next test's fetch can miss MSW. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
-  const bodies: Record<string, unknown>[] = []
-  const urls: string[] = []
-  server.events.on('request:start', async ({ request }) => {
+  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
+  const matches = (request: Request) => {
     const path = new URL(request.url).pathname
-    if (request.method === method && path.startsWith(prefix) && path.endsWith(suffix)) {
-      urls.push(request.url)
-      if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
+    return request.method === method && path.startsWith(prefix) && path.endsWith(suffix)
+  }
+  server.events.on('request:start', async ({ request }) => {
+    if (matches(request)) {
+      seen.urls.push(request.url)
+      if (method !== 'GET') seen.bodies.push((await request.clone().json()) as Record<string, unknown>)
     }
   })
-  return { bodies, urls }
+  server.events.on('response:mocked', ({ request }) => {
+    if (matches(request)) seen.answered += 1
+  })
+  return seen
 }
 
 beforeEach(() => resetMockState())
@@ -559,6 +567,9 @@ describe('PrintPicker', () => {
       expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
     )
     expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    // The new output is checked again first; Print is disabled until it is, and a click
+    // on it then does nothing (seen under load: the run was never sent).
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
@@ -1656,6 +1667,57 @@ describe('PrintPicker · grams from the background slice (#2365)', () => {
     )
     expect(screen.queryByText(/3\.3 g for 1 copy/)).toBeNull()
     plateTwoSlice.release()
+  }, 20000)
+})
+
+describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
+  it("drops no slot for the plate just chosen while another plate's slice is still shown", async () => {
+    let release = () => {}
+    const plateTwo = new Promise<void>((resolve) => (release = resolve))
+    const planned = (slot_id: number, side: 'L' | 'R') => ({ slot_id, side, name: `Spool ${slot_id}`, by_hand: false })
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.post('/api/v1/print/outputs/:id/preview-slice', async ({ request }) => {
+        const body = (await request.clone().json()) as { plate_id?: number }
+        if (body.plate_id === 2) await plateTwo
+        return HttpResponse.json({
+          job_id: 7700 + (body.plate_id ?? 1),
+          plate_id: body.plate_id ?? 1,
+          nozzle_plan: {
+            left_flow: 'standard',
+            right_flow: 'standard',
+            size: '0.4',
+            summary: 'Two nozzles',
+            track_switch: false,
+            slots: [planned(1, 'L'), planned(2, 'R')],
+          },
+        })
+      }),
+      // Plate 1's slice used slot 1 alone: on plate 1, slot 2 is truly dropped.
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 600,
+          filament_used_g: 3,
+          slots: [{ slot_id: 1, grams: 3, side: 'L' }],
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const notes = await screen.findByTestId('slice-departures', {}, { timeout: 8000 })
+    expect(notes).toHaveTextContent("Spool 2 (slot 2) isn't used by the sliced plate")
+
+    // Plate 2 is chosen; its slice is still on its way, so plate 1's stays shown, stale.
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
+    release()
   }, 20000)
 })
 
@@ -3421,6 +3483,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+    await waitFor(() => expect(runs.answered).toBe(1))
   })
 })
 
