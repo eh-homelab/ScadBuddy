@@ -1056,20 +1056,25 @@ async def _attributed(
     """``analysis`` with its weak joints naming their scene objects, when the output is
     a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
     arranged output's objects were moved off the scene's frame, so it is left as it is,
-    as is one whose revision cannot be read."""
+    as is one whose revision is not a commit or cannot be read."""
     if not analysis.weak_joints:
         return analysis
     if await asyncio.to_thread(outputs.arranged_from, output_id):
         return analysis
     meta = await asyncio.to_thread(outputs.get, output_id)
     version = meta.model_version
-    requested = (
-        version if version is not None and re.fullmatch(COMMIT_ID_PATTERN, version) else None
-    )
+    if version is None or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        # No revision to read the scene at: the live scene may have been edited since
+        # the render, and would name the wrong object.
+        logger.info("weak joints of %s left unattributed: no commit recorded", output_id)
+        return analysis
     try:
-        directory, _ = await source_directory(meta.slug, requested, paths=paths, history=history)
+        directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
     except (GitError, RevisionNotFoundError, SnapshotUnavailableError, OSError) as error:
         logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
+        return analysis
+    if not directory.is_dir():
+        logger.warning("weak joints of %s left unattributed: %s is gone", output_id, meta.slug)
         return analysis
     return await asyncio.to_thread(attribute, analysis, directory)
 

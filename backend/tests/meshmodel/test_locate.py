@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
 import trimesh
 from pydantic import TypeAdapter
 
 from scadbuddy.meshmodel.edits import Edit, apply_edits
 from scadbuddy.meshmodel.locate import attribute, object_at
 from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import SCENE_NAME, Scene, Transform, load_scene, value
 from scadbuddy.render.geometry import analyze_geometry
 from scadbuddy.render.objects3mf import ReadObject
@@ -70,3 +73,30 @@ def test_attribute_leaves_a_hand_edited_or_plain_model_alone(tmp_path: Path) -> 
     carrots(tmp_path, count=1, mesh=carrot())
     (tmp_path / "model.scad").write_text("cube(1);\n")
     assert attribute(analysis, tmp_path) == analysis
+
+
+def test_a_suggestion_cuts_a_moved_and_turned_object_at_the_joints_world_centroid(
+    tmp_path: Path,
+) -> None:
+    """The suggestion is in world coordinates; applied to an object that is turned and
+    moved, the cut must land on the weak joint, not on the object's own frame's z."""
+    scene = carrots(tmp_path, count=1, mesh=carrot())
+    moved = scene.objects[0].model_copy(
+        update={"transform": Transform(translate=(40.0, -15.0, 0.0), rotate=(0.0, 90.0, 0.0))}
+    )
+    scene = scene.model_copy(update={"objects": [moved]})
+    m, t = placement(moved)
+    load = part_loader(tmp_path)
+    # The carrot lying on its side: its neck (object z 30..35) is world x 30..35.
+    world = trimesh.Trimesh(
+        vertices=np.asarray(load(moved.parts[0].mesh).vertices) @ m.T + t,
+        faces=load(moved.parts[0].mesh).faces,
+        process=False,
+    )
+    [joint] = analyze_geometry([ColourPart(1, "Body", ORANGE, world)]).weak_joints
+    assert object_at(scene, load, joint.centroid) == "o1"
+    edit = {**joint.suggestion.model_dump(), "object": "o1"}
+    split = apply_edits(scene, EDITS.validate_python([edit]), load)
+    cut = split.objects[0].ops[-1]
+    local = np.asarray([value(x) for x in cut.point])  # type: ignore[union-attr]
+    assert m @ local + t == pytest.approx(joint.centroid, abs=1e-6)

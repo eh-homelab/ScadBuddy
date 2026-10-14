@@ -798,24 +798,83 @@ def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: b
     return str(created["id"])
 
 
+COMMIT = "c" * 40
+
+
+def _recorded_at(paths: DataPaths, model: str, output: str, version: str | None) -> None:
+    """The output's meta.json as if it had been rendered at ``version``."""
+    path = paths.output_dir(model, output) / "meta.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["model_version"] = version
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _live_directory(monkeypatch: pytest.MonkeyPatch, paths: DataPaths, model: str) -> None:
+    """The test library has no git history, so a commit id has no export to read: the
+    revision's directory is the live one."""
+
+    async def live(slug: str, requested: str | None, **_: Any) -> tuple[Any, str | None]:
+        return paths.model_dir(model), requested
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", live)
+
+
+def _joint_object(client: TestClient, output: str) -> str | None:
+    response = client.get(f"/api/v1/outputs/{output}/geometry")
+    assert response.status_code == 200
+    [joint] = response.json()["weak_joints"]
+    found: str | None = joint["suggestion"]["object"]
+    return found
+
+
 def test_a_mesh_models_weak_joint_names_its_scene_object(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    _live_directory(monkeypatch, paths, model)
     [joint] = client.get(f"/api/v1/outputs/{output}/geometry").json()["weak_joints"]
     assert joint["suggestion"]["object"] == "o1"
     assert joint["suggestion"]["edit"] == "split_at_plane"
 
 
 def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A template's render, and an arranged output (its objects moved off the scene's
     frame): the joint is reported, with no object rather than a wrong one."""
+    _live_directory(monkeypatch, paths, model)
     plain = _carrot_output(client, model, paths, scene=False)
-    [joint] = client.get(f"/api/v1/outputs/{plain}/geometry").json()["weak_joints"]
-    assert joint["suggestion"]["object"] is None
+    _recorded_at(paths, model, plain, COMMIT)
+    assert _joint_object(client, plain) is None
     arranged = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, arranged, COMMIT)
     (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
-    [joint] = client.get(f"/api/v1/outputs/{arranged}/geometry").json()["weak_joints"]
-    assert joint["suggestion"]["object"] is None
+    assert _joint_object(client, arranged) is None
+
+
+def test_a_weak_joint_names_no_object_when_the_render_recorded_no_commit(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A content hash or no version at all: the live scene may have been edited since
+    the render, so naming its objects could name the wrong one."""
+    _live_directory(monkeypatch, paths, model)
+    output = _carrot_output(client, model, paths, scene=True)
+    assert json.loads((paths.output_dir(model, output) / "meta.json").read_text())[
+        "model_version"
+    ] == source_version(paths.model_dir(model))
+    assert _joint_object(client, output) is None
+    _recorded_at(paths, model, output, None)
+    assert _joint_object(client, output) is None
+
+
+def test_a_weak_joint_names_no_object_when_its_revision_or_model_is_gone(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    # No such revision to export: the answer is still the analysis.
+    assert _joint_object(client, output) is None
+    _live_directory(monkeypatch, paths, model)
+    shutil.rmtree(paths.model_dir(model))
+    assert _joint_object(client, output) is None
