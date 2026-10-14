@@ -1,9 +1,13 @@
-import { useEffect, useId, useRef } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router'
+import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { editPath, modelPath } from '../../lib/deeplink'
 import { useAsync } from '../../lib/useAsync'
+import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
+import { Spinner } from '../ui/Spinner'
 
 type Kind = SessionResource['type']
 
@@ -123,6 +127,135 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
   }
 }
 
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+/** The summary's buckets, in the order the line names them; anything else is an "other change". */
+const BUCKETS: ReadonlyArray<{ one: string; many: string; holds: (e: Entry) => boolean }> = [
+  { one: 'new model', many: 'new models', holds: (e) => e.type === 'model' && e.actions[0] === 'created' },
+  { one: 'model deleted', many: 'models deleted', holds: (e) => e.type === 'model' && e.actions.at(-1) === 'deleted' },
+  { one: 'preset saved', many: 'presets saved', holds: (e) => e.type === 'preset' && e.actions.at(-1) !== 'deleted' },
+  { one: 'render', many: 'renders', holds: (e) => e.type === 'render_job' },
+  { one: 'output saved', many: 'outputs saved', holds: (e) => e.type === 'output' && e.actions[0] === 'created' },
+  { one: 'print queued', many: 'prints queued', holds: (e) => e.type === 'print' && e.actions[0] === 'created' },
+]
+
+/**
+ * One plain line of what the session did, #931's "3 revisions to *x*, 1 output, 1 print
+ * queued": its new versions per model, then models, presets, renders, outputs and
+ * prints, and the rest as "other changes". print_output records a print run beside the
+ * queue item it made, so a run counts only when no queue item was recorded.
+ */
+function summary(all: readonly Entry[]): string {
+  const parts: string[] = []
+  const counted = new Set<Entry>()
+  const versions = new Map<string, number>()
+  for (const e of all) {
+    if (e.type !== 'revision' || !e.model) continue
+    versions.set(e.model, (versions.get(e.model) ?? 0) + 1)
+    counted.add(e)
+  }
+  for (const [model, n] of versions) parts.push(`${count(n, 'new version', 'new versions')} of ${model}`)
+  const runsOnly = !all.some((e) => e.type === 'print')
+  for (const { one, many, holds } of BUCKETS) {
+    const items = all.filter(
+      (e) => !counted.has(e) && (holds(e) || (one === 'print queued' && runsOnly && e.type === 'print_run')),
+    )
+    if (items.length > 0) parts.push(count(items.length, one, many))
+    for (const e of items) counted.add(e)
+  }
+  // A run beside its queue item is the same print, not another change.
+  const rest = all.filter((e) => !counted.has(e) && !(e.type === 'print_run' && !runsOnly)).length
+  if (rest > 0) parts.push(count(rest, 'other change', 'other changes'))
+  return parts.join(', ')
+}
+
+/**
+ * The models this session can put back: each one it made new versions of, where the
+ * first of them names the version it came from, and that the session neither made nor
+ * deleted. Restoring that version adds a new version, so nothing is lost.
+ */
+function undoable(rows: readonly SessionResource[]): { model: string; before: string }[] {
+  const first = new Map<string, string | null>()
+  const skip = new Set<string>()
+  for (const r of rows) {
+    if (r.type === 'model' && r.id !== null && r.action !== 'modified') skip.add(r.id)
+    if (r.type === 'revision' && r.model && !first.has(r.model)) first.set(r.model, r.before)
+  }
+  const out: { model: string; before: string }[] = []
+  for (const [model, before] of first) if (before !== null && !skip.has(model)) out.push({ model, before })
+  return out
+}
+
+/** "Undo changes to <model>": restores the version before the session, after a confirm. */
+function UndoModel({ model, before, onDone }: { model: string; before: string; onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  function close() {
+    if (busy) return
+    setOpen(false)
+    setError(null)
+  }
+
+  async function confirm() {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.restoreVersion(model, before)
+      setDone(true)
+      setOpen(false)
+      onDone()
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.detail : 'Could not undo the changes; try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (done) {
+    return (
+      <p role="status" className="text-muted">
+        <span className="font-mono">{model}</span> is back to how it was before this chat.
+      </p>
+    )
+  }
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} className="text-accent underline">
+        Undo changes to <span className="font-mono">{model}</span>
+      </button>
+      <Dialog
+        open={open}
+        title={`Undo this chat's changes to ${model}?`}
+        onClose={close}
+        footer={
+          <>
+            <Button variant="ghost" onClick={close} disabled={busy}>
+              Cancel
+            </Button>
+            <Button onClick={() => void confirm()} disabled={busy} {...USER_ONLY}>
+              {busy ? <Spinner /> : 'Undo changes'}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[13px] text-muted">
+          <span className="font-mono text-ink">{model}</span> goes back to how it was before this
+          chat changed it. It is saved as a new version, so the chat&apos;s changes stay in the
+          model&apos;s history and can be brought back.
+        </p>
+        {error && (
+          <p role="alert" className="mt-3 text-[13px] text-warn">
+            {error}
+          </p>
+        )}
+      </Dialog>
+    </>
+  )
+}
+
 interface Props {
   sessionId: string
   /** Changes when the session may have touched more (its status moved or a tool call finished), so the list reads again. */
@@ -156,8 +289,20 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
     return <p className="px-3 py-2 text-[12px] text-muted">Nothing changed by this session yet.</p>
   }
 
+  const undo = undoable(data.resources)
+
   return (
     <div className="max-h-56 space-y-2 overflow-y-auto px-3 py-2 text-[12px]">
+      <p className="text-ink">{summary(all)}</p>
+      {undo.length > 0 && (
+        <ul className="space-y-0.5">
+          {undo.map((u) => (
+            <li key={u.model}>
+              <UndoModel model={u.model} before={u.before} onDone={refresh} />
+            </li>
+          ))}
+        </ul>
+      )}
       {GROUPS.map(({ type, label }) => {
         const items = all.filter((e) => e.type === type)
         if (items.length === 0) return null

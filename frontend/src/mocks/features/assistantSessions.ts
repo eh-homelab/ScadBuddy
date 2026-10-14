@@ -29,6 +29,7 @@
 import { HttpResponse, http } from 'msw'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
 import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
+import { versionIds } from '../fixtures'
 
 const base = '/api/v1/ai'
 
@@ -41,11 +42,12 @@ const DEFAULTS: SessionLimits = { budget_usd: 1, max_turns: 25 }
 const EXTERNAL_RESOURCES: readonly SessionResource[] = [
   {
     type: 'revision',
-    id: '3f9c2a1b7d4e',
+    id: versionIds.binTall,
     action: 'created',
     model: 'gridfinity-bin',
-    before: null,
-    after: '3f9c2a1b7d4e',
+    // The version before it, in the versions mock, so the panel's undo restores it.
+    before: versionIds.binFirst,
+    after: versionIds.binTall,
     tool: 'update_source',
     at: '2026-10-03T09:00:00.000Z',
   },

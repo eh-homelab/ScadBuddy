@@ -731,7 +731,7 @@ describe('assistant panel', () => {
     const revisions = await within(panel).findByRole('group', { name: 'Revisions' })
     expect(within(revisions).getByRole('link', { name: /3f9c2a1/ })).toHaveAttribute(
       'href',
-      '/m/gridfinity-bin?version=3f9c2a1b7d4e',
+      '/m/gridfinity-bin?version=3f9c2a1b7d4e3f9c2a1b7d4e3f9c2a1b7d4e3f9c',
     )
 
     await user.click(touched)

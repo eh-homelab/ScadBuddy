@@ -1,8 +1,10 @@
 import { act, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { api } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { setSessionResources } from '../../mocks/features/assistantSessions'
+import { versionIds } from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { SessionTouched } from './SessionTouched'
@@ -231,6 +233,82 @@ describe('SessionTouched', () => {
     const outputs = await screen.findByRole('group', { name: 'Outputs' })
     expect(within(outputs).getByRole('link', { name: new RegExp(outputId) })).toHaveAttribute('href', `/edit/${outputId}`)
     expect(within(group('Revisions')).getByRole('link')).toHaveTextContent(/^0123456 · bin$/)
+  })
+
+  it('sums up the session in one plain line', async () => {
+    setSessionResources('sess-sum', [
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'keychain', tool: 'update_source' }),
+      row({ type: 'revision', id: 'b'.repeat(40), model: 'keychain', tool: 'apply_patch' }),
+      row({ type: 'revision', id: 'c'.repeat(40), model: 'bin', tool: 'apply_patch' }),
+      row({ type: 'render_job', id: 'job-1', model: 'keychain', tool: 'render_model' }),
+      row({ type: 'output', id: 'out-1', model: 'keychain', tool: 'save_output' }),
+      // One print: its run and its queue item.
+      row({ type: 'print_run', id: 'run-1', before: 'out-1', tool: 'print_output' }),
+      row({ type: 'print', id: '77', before: 'out-1', tool: 'print_output' }),
+      row({ type: 'setting', id: 'last_project', action: 'modified', tool: 'set_last_project' }),
+      row({ type: 'unclassified', id: null, tool: 'browser_click' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-sum" />)
+    expect(
+      await screen.findByText(
+        '2 new versions of keychain, 1 new version of bin, 1 render, 1 output saved, 1 print queued, 2 other changes',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('counts a print run as the print when no queue item was recorded', async () => {
+    setSessionResources('sess-run', [
+      row({ type: 'model', id: 'bin', model: 'bin', tool: 'create_model' }),
+      row({ type: 'print_run', id: 'run-1', before: 'out-1', tool: 'print_output' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-run" />)
+    expect(await screen.findByText('1 new model, 1 print queued')).toBeInTheDocument()
+  })
+
+  it('puts a model back to how it was before the session, as a new version, after a confirm', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-undo', [
+      row({ type: 'revision', id: versionIds.raised, model: 'name-keychain', before: versionIds.edited, tool: 'apply_patch' }),
+      row({ type: 'revision', id: 'f'.repeat(40), model: 'name-keychain', before: versionIds.raised, tool: 'apply_patch' }),
+    ])
+    const restore = vi.spyOn(api, 'restoreVersion')
+    renderPage(<SessionTouched sessionId="sess-undo" />)
+
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
+    const dialog = await screen.findByRole('dialog', { name: "Undo this chat's changes to name-keychain?" })
+    expect(dialog).toHaveTextContent('saved as a new version')
+    await user.click(within(dialog).getByRole('button', { name: 'Undo changes' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('name-keychain is back to how it was before this chat.')
+    // The version before the session's first change, not the one between its changes.
+    expect(restore).toHaveBeenCalledWith('name-keychain', versionIds.edited)
+    restore.mockRestore()
+  })
+
+  it('says why an undo failed, and keeps the dialog open', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-undo', [
+      row({ type: 'revision', id: 'f'.repeat(40), model: 'name-keychain', before: 'e'.repeat(40), tool: 'apply_patch' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-undo" />)
+
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Undo changes' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Revision not found')
+  })
+
+  it('offers no undo for a model the session made or deleted, or a change with no earlier version', async () => {
+    setSessionResources('sess-none', [
+      row({ type: 'model', id: 'new-bin', model: 'new-bin', tool: 'create_model' }),
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'new-bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+      row({ type: 'revision', id: 'c'.repeat(40), model: 'gone', before: 'd'.repeat(40), tool: 'apply_patch' }),
+      row({ type: 'model', id: 'gone', model: 'gone', action: 'deleted', tool: 'delete_model' }),
+      row({ type: 'revision', id: 'e'.repeat(40), model: 'old', before: null, tool: 'update_source' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-none" />)
+    await screen.findByRole('group', { name: 'Revisions' })
+    expect(screen.queryByRole('button', { name: /Undo changes/ })).toBeNull()
   })
 
   it('does not link a revision whose model is unknown', async () => {
