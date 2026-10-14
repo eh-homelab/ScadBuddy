@@ -902,6 +902,7 @@ async def post_library_run(
         store=store,
         paths=paths,
         budget=budget,
+        downloads=downloads,
         response=response,
     )
 
@@ -915,6 +916,7 @@ async def start_library_run(
     store: SettingsStore,
     paths: DataPaths,
     budget: ReadBudget,
+    downloads: DownloadCache | None,
     response: Response | None = None,
 ) -> PrintRun:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route

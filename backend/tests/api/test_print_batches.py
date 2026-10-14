@@ -359,7 +359,7 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
         filename="a",
         request=PrintRunRequest.model_validate(SLICED_RUN),
     )
-    result = await print_batches._queue_one("b1", item, 0, *([None] * 5))  # type: ignore[arg-type]
+    result = await print_batches._queue_one("b1", item, 0, *([None] * 6))  # type: ignore[arg-type]
     assert result.status == outcome
 
 

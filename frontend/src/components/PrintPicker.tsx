@@ -855,6 +855,9 @@ export function PrintPicker({
       projectId,
       options,
       printSequence,
+      // What Print would send (#1899, #717): a batch step keeps them for Queue all.
+      supports,
+      filamentProfiles: filamentProfiles.active,
       rackPosition,
       rackAlgorithm: chosenAlgorithm,
     })

@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.components import component_dep
-from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
+from scadbuddy.api.deps import (
+    DownloadsDep,
+    PathsDep,
+    PrintRunsDep,
+    ReadBudgetDep,
+    SettingsStoreDep,
+)
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
 from scadbuddy.api.printing import ACCEPT_BUDGET
@@ -259,6 +265,7 @@ async def post_batch_queue(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     from_position: Annotated[int, Query(ge=0)] = 0,
 ) -> PrintBatch | JSONResponse:
     """Starts each file's library run, in order, and records what happened to each: the
@@ -311,7 +318,9 @@ async def post_batch_queue(
         if not await batches.record_outcome(batch_id, item.position, sending, if_unchanged=item):
             continue  # its choices changed since the read: the next Queue all sends them
         starting = time.monotonic()
-        outcome = await _queue_one(batch_id, item, attempt, runs, activity, store, paths, budget)
+        outcome = await _queue_one(
+            batch_id, item, attempt, runs, activity, store, paths, budget, downloads
+        )
         slowest = max(slowest, time.monotonic() - starting)
         await batches.record_outcome(batch_id, item.position, outcome)
     done = await _batch(batches, batch_id)
@@ -341,6 +350,7 @@ async def _queue_one(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
 ) -> BatchOutcome:
     if item.request is None:
         return UNCHOSEN
@@ -355,6 +365,7 @@ async def _queue_one(
             store=store,
             paths=paths,
             budget=budget,
+            downloads=downloads,
         )
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
