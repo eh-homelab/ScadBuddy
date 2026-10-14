@@ -37,7 +37,7 @@ import trimesh
 
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.meshmodel.edits import MeshOf, transform_matrix
-from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Part,
@@ -225,7 +225,9 @@ def _source(
         if part.painted and part.mesh not in paints and part.mesh not in unreadable:
             try:
                 raw = json.loads((directory / paint_file(part)).read_text(encoding="utf-8"))
-                paints[part.mesh] = Paint(tuple(raw["codes"]), tuple(raw["colours"]))
+                paint = Paint(tuple(raw["codes"]), tuple(raw["colours"]))
+                paint.used()  # a code naming an extruder past its colours is no painting
+                paints[part.mesh] = paint
             except (OSError, ValueError, KeyError, TypeError):
                 unreadable.add(part.mesh)
     palette = tuple(dict.fromkeys(c.upper() for p in paints.values() for c in p.colours))
@@ -278,7 +280,7 @@ def carry_paint(
     if text_sha256((directory / SOURCE_NAME).read_text(encoding="utf-8")) != scene.generated_sha256:
         return carried, [HAND_EDITED]
     scene = with_params(scene, params)
-    mesh_of = part_loader(directory)
+    mesh_of = mesh_loader(directory)
     warnings = paint_warnings(scene)
     for index, part in enumerate(parts):
         if part.negative:

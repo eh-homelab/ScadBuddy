@@ -27,6 +27,3 @@ def mesh_loader(directory: Path) -> MeshOf:
         return cache[path]
 
     return mesh_of
-
-
-part_loader = mesh_loader

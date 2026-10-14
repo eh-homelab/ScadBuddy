@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tarfile
 import zipfile
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -19,6 +21,7 @@ from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.inputs import InputsError
+from scadbuddy.render.jobs import SnapshotUnavailableError
 from scadbuddy.render.objects3mf import ReadObject
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
@@ -877,4 +880,35 @@ def test_a_weak_joint_names_no_object_when_its_revision_or_model_is_gone(
     assert _joint_object(client, output) is None
     _live_directory(monkeypatch, paths, model)
     shutil.rmtree(paths.model_dir(model))
+    assert _joint_object(client, output) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GitError("git failed"),
+        GitTimeoutError("slow"),
+        RevisionNotFoundError("gone"),
+        SnapshotUnavailableError("no history"),
+        tarfile.ReadError("damaged"),
+        OSError("disk"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_a_weak_joint_is_unattributed_when_the_revision_cannot_be_read(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """Everything `source_directory` raises for a deleted model or a missing revision
+    costs the object name, never the geometry read."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+
+    async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
+        raise error
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", refuse)
     assert _joint_object(client, output) is None

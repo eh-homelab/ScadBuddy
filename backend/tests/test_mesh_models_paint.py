@@ -16,7 +16,7 @@ from pydantic import TypeAdapter
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits
-from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.paint import paint_file
 from scadbuddy.meshmodel.scene import SCENE_NAME, Scene, dump_scene, text_sha256
 from scadbuddy.render.objects3mf import read_objects
@@ -91,7 +91,7 @@ async def test_the_anchored_carrots_painted_leaves_print_green(tmp_path: Path) -
     _, scene = opened(CARROT, directory)
     small, mesh, z, neck = carrot_neck(directory, scene)
     edit = neck_anchor(small, z, neck)
-    anchored = apply_edits(scene, EDITS.validate_python([edit]), part_loader(directory))
+    anchored = apply_edits(scene, EDITS.validate_python([edit]), mesh_loader(directory))
     only = [o for o in anchored.objects if o.id == small.id]
     compiled_into(directory, anchored.model_copy(update={"objects": only}))
 

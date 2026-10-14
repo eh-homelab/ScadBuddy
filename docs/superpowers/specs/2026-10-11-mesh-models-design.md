@@ -261,8 +261,9 @@ runs only when the model has a scene with a painted part (built as a stage of th
 
 1. Read the source part's mesh and `.paint.json` (codes per source face), and the
    object's ops and transform, from the revision.
-2. For each output triangle of that part's colour solid, transform its centroid back
-   into the source mesh's frame and find the nearest source face (a numpy nearest-triangle search, `render/meshmatch.py`: trimesh's proximity queries need rtree, which is not installed).
+2. For each output triangle of that part's colour solid, find the nearest source face in world
+   coordinates (the source part's mesh is placed there by its object's transform, as built in
+   `meshmodel/paint.py` `_source`; the output is not transformed back) (a numpy nearest-triangle search, `render/meshmatch.py`: trimesh's proximity queries need rtree, which is not installed).
    - The output triangle is the same triangle (all three vertices within 1e-4 mm of the
      source face's): it takes the source code verbatim, so painting finer than the
      triangle survives.
@@ -334,7 +335,12 @@ the volume above is the layer areas above times the layer height; and the sugges
 whose record names a commit (`meshmodel/locate.py`), null otherwise. The analysis examines
 at most 64 pieces (largest by volume, `MAX_WEAK_PIECES`), measures at most 80 sections
 (`MAX_WEAK_ATTEMPTS`) and reports at most 20 joints (`MAX_WEAK_JOINTS`), all in
-`render/geometry.py`.
+`render/geometry.py`. A piece taller than 400 mm is cut into at most 2000 layers
+(`MAX_WEAK_LAYERS`), so its layers are thicker than 0.2 mm (the window stays 2 mm). Only
+layers with a full window of the piece below them are candidates, so a ball's or a
+cone's rounded bottom is not a joint (near the top the 1 cm³ above rules a tip out). An
+exposed cut point's attribution (`locate.object_at`) uses the scene's own value, not the
+render's parameters, like the mirror note in §7.
 
 ## 10. Testing
 

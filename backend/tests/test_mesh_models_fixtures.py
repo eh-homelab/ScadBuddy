@@ -15,7 +15,7 @@ from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.locate import object_at
-from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import Scene, SceneObject, SceneSource, value
 from scadbuddy.meshmodel.section import Section, measure
@@ -159,7 +159,7 @@ def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -
 def placed_parts(scene: Scene, directory: Path) -> list[ColourPart]:
     """What the op-free render's solids are, without openscad: each colour's parts at
     their objects' places (measured identical to the render, meshmodel/paint.py)."""
-    load = part_loader(directory)
+    load = mesh_loader(directory)
     by_colour: dict[str, list[trimesh.Trimesh]] = {}
     for obj in scene.objects:
         m, t = placement(obj)
@@ -196,7 +196,7 @@ def test_the_carrot_gardens_suggested_splits_name_their_carrots_and_fit(tmp_path
     """The carrot loop (spec §9): each weak joint's suggestion, sent to edit_scene with
     the object `object_at` names, splits that carrot with a joint that fits."""
     _, scene = opened(CARROT, tmp_path)
-    load = part_loader(tmp_path)
+    load = mesh_loader(tmp_path)
     joints = analyze_geometry(placed_parts(scene, tmp_path)).weak_joints
     named = {object_at(scene, load, joint.centroid): joint for joint in joints}
     painted = {o.id for o in scene.objects if any(p.painted for p in o.parts)}

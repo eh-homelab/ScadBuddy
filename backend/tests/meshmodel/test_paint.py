@@ -6,6 +6,7 @@ coordinates, to 6 decimals, each starting at another vertex."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ import trimesh
 from scadbuddy.meshmodel import paint as paint_module
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.ingest import scene_from_objects
-from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.paint import (
     HAND_EDITED,
     OLD_PAINT_NOTE,
@@ -91,7 +92,7 @@ def rendered(
     """What OpenSCAD's op-free render of the scene's ``colour`` parts looks like: world
     coordinates to 6 decimals, each face starting at another vertex; wound the other
     way where the object is mirrored (``mirror``), as the render re-orients it."""
-    load = part_loader(directory)
+    load = mesh_loader(directory)
     meshes = []
     for obj in scene.objects:
         m, t = placement(obj)
@@ -111,7 +112,7 @@ def rendered(
 
 
 def world_triangles(directory: Path, scene: Scene) -> np.ndarray:
-    load = part_loader(directory)
+    load = mesh_loader(directory)
     out = []
     for obj in scene.objects:
         m, t = placement(obj)
@@ -317,6 +318,19 @@ def test_an_unreadable_painting_is_a_warning_not_a_failure(tmp_path: Path) -> No
     assert len(warnings) == 1 and "missing or unreadable" in warnings[0]
 
 
+def test_a_painting_naming_an_extruder_it_has_no_colour_for_costs_only_that_part(
+    tmp_path: Path,
+) -> None:
+    scene = written(tmp_path, body())
+    output = rendered(tmp_path, scene, ORANGE)
+    path = tmp_path / "meshes" / "o1-p1.paint.json"
+    document = json.loads(path.read_text())
+    path.write_text(json.dumps({**document, "colours": document["colours"][:1]}))
+    found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
+    assert found == [None]
+    assert len(warnings) == 1 and "o1 p1" in warnings[0] and "own colour" in warnings[0]
+
+
 def _cap_output(tmp_path: Path) -> tuple[trimesh.Trimesh, Source]:
     scene = written(tmp_path, body())
     _, codes = painted_box()
@@ -327,7 +341,7 @@ def _cap_output(tmp_path: Path) -> tuple[trimesh.Trimesh, Source]:
         faces=output.faces,
         process=False,
     )
-    mesh = part_loader(tmp_path)("meshes/o1-p1.3mf")
+    mesh = mesh_loader(tmp_path)("meshes/o1-p1.3mf")
     source = Source(np.asarray(mesh.vertices), np.asarray(mesh.faces), codes, (ORANGE, GREEN))
     return shifted, source
 

@@ -14,7 +14,7 @@ import numpy as np
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.meshmodel.edits import MeshOf
 from scadbuddy.meshmodel.frames import unit
-from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import SCENE_NAME, Cut, Scene, load_scene, text_sha256, value
 from scadbuddy.render.geometry import GeometryAnalysis
@@ -69,7 +69,7 @@ def attribute(analysis: GeometryAnalysis, directory: Path) -> GeometryAnalysis:
         source = (directory / SOURCE_NAME).read_text(encoding="utf-8")
         if text_sha256(source) != scene.generated_sha256:
             return analysis
-        mesh_of = part_loader(directory)
+        mesh_of = mesh_loader(directory)
         joints = [
             joint.model_copy(
                 update={

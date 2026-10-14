@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tarfile
 import zipfile
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -1070,7 +1071,18 @@ async def _attributed(
         return analysis
     try:
         directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
-    except (GitError, RevisionNotFoundError, SnapshotUnavailableError, OSError) as error:
+    except (
+        # What `source_directory` raises: `last_commit` and `export` (GitError, its
+        # timeout and unavailable kinds), a revision or model path absent at the commit
+        # (RevisionNotFoundError, as a deleted model's older one can be), no history to
+        # export from (SnapshotUnavailableError), and the extraction or the move into
+        # place (a damaged tar, OSError).
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
         logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
         return analysis
     if not directory.is_dir():
