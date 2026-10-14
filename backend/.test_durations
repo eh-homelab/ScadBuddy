@@ -1247,6 +1247,7 @@
     "tests/api/test_previews.py::test_boot_renders_each_model_without_a_thumbnail_once": 2.426631953999845,
     "tests/api/test_previews.py::test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back": 1.6640054229998213,
     "tests/api/test_previews.py::test_previews_can_be_turned_off": 2.061452393999957,
+    "tests/api/test_previews.py::test_previews_off_leaves_no_backfill_schedule": 3.42,
     "tests/api/test_previews.py::test_the_preview_is_never_listed_as_an_output": 1.378367737000076,
     "tests/api/test_previews.py::test_the_upload_answers_while_the_render_is_still_running": 2.0108098160000054,
     "tests/api/test_previews.py::test_turning_previews_off_hides_the_ones_already_rendered": 2.599177058999885,
