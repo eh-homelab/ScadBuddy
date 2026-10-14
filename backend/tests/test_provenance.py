@@ -524,6 +524,33 @@ def test_a_print_setting_takes_the_shape_the_project_stores_it_in() -> None:
     assert settings["enable_support"] == "1"
 
 
+def test_print_settings_list_one_entry_per_filament_of_a_multi_filament_project() -> None:
+    """#2869: ``different_settings_to_system`` is the process's edits, then one empty
+    entry per ``filament_settings_id``, then the printer's, however many filaments."""
+    before = {
+        "filament_settings_id": ["Bambu PLA Basic @BBL H2C"] * 3,
+        "layer_height": "0.2",
+        "print_settings_id": "0.20mm Standard @BBL H2C",
+    }
+
+    settings = json.loads(
+        provenance.with_print_settings(
+            json.dumps(before).encode(), {"enable_prime_tower": "1", "wall_loops": "3"}
+        )
+    )
+
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wall_loops",
+        "",
+        "",
+        "",
+        "",
+    ]
+    assert (settings["enable_prime_tower"], settings["wall_loops"]) == ("1", "3")
+    added = {"enable_prime_tower", "wall_loops", "different_settings_to_system"}
+    assert {key: value for key, value in settings.items() if key not in added} == before
+
+
 def test_print_settings_change_no_other_part(written: Path) -> None:
     with zipfile.ZipFile(written) as archive:
         before = {name: archive.read(name) for name in archive.namelist()}
