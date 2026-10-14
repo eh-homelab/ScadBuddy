@@ -490,14 +490,17 @@ def suggest(
 
     This only fills the picker in so the common case needs no clicks; it decides
     nothing. A spool already taken by an earlier slot is not offered again, because a
-    two-colour plate opening with the same spool in both slots reads as a bug.
+    two-colour plate opening with the same spool in both slots reads as a bug, except
+    as below for a slot that declares no material.
 
     A slot that declares no material (every generated template's) stays in the plate's
-    material family (#2461): the declared ones, else the family of the best match on
-    the plate. Opening a PLA print with an unloaded TPU in one slot looks deliberate,
-    for the reason :func:`_match_score` gives for PETG in a PLA slot. Such a slot with no
-    free spool of that family shares a loaded one already chosen whose colour fits, and
-    is otherwise left for the user.
+    material family (#2461): the declared ones, else the family that matches the most
+    slots with a loaded spool, then the most slots at all, then the best match (#2850).
+    One PETG loaded beside the PLA does not make a mostly-PLA plate a PETG one because
+    it is the closest colour for a single slot. Opening a PLA print with an unloaded
+    TPU in one slot looks deliberate, for the reason :func:`_match_score` gives for PETG
+    in a PLA slot. Such a slot with no free spool of that family shares a loaded one
+    already chosen whose colour fits, and is otherwise left for the user.
     """
     scored = [
         (score, index, option)
@@ -506,8 +509,7 @@ def suggest(
         if (score := _match_score(slot, option, printer_id=printer_id)) is not None
     ]
     declared = {family(slot.material) for slot in slots if slot.material}
-    anchor = min(scored, key=lambda row: (row[0], row[1]), default=None)
-    families = declared or ({family(anchor[2].material)} if anchor is not None else set())
+    families = declared or _anchor_family(scored, printer_id)
     taken: set[int] = set()
     chosen: list[SlotChoice] = []
     for slot in slots:
@@ -534,6 +536,32 @@ def suggest(
         elif shared is not None:
             chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
     return chosen
+
+
+def _anchor_family(
+    scored: list[tuple[float, int, SpoolOption]], printer_id: int | None
+) -> set[str]:
+    """The family an all-undeclared plate is suggested in (#2850): the one whose
+    spools match the most slots with a loaded spool, then the most slots at all, then
+    the best single match."""
+    loaded: dict[str, set[int]] = {}
+    matched: dict[str, set[int]] = {}
+    best: dict[str, tuple[float, int]] = {}
+    for score, index, option in scored:
+        kind = family(option.material)
+        matched.setdefault(kind, set()).add(index)
+        loaded.setdefault(kind, set())
+        if _loaded_here(option, printer_id):
+            loaded[kind].add(index)
+        best[kind] = min(best.get(kind, (score, index)), (score, index))
+    if not matched:
+        return set()
+    return {
+        min(
+            matched,
+            key=lambda kind: (-len(loaded[kind]), -len(matched[kind]), best[kind]),
+        )
+    }
 
 
 def _loaded_here(option: SpoolOption, printer_id: int | None) -> bool:

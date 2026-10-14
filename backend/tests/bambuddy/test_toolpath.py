@@ -90,6 +90,45 @@ def test_past_the_bound_only_whole_layers_are_kept() -> None:
     assert path.count == 5, "the second layer is left out whole"
 
 
+#: The end of a Bambu Studio file as `GCode.cpp` writes it (L3383-L3428 at
+#: bambulab/BambuStudio@79df7ae3): the custom role, the end-code marker, the filament and
+#: machine end code, the M73 placeholder, then the executable block's end.
+END_OF_FILE = b"""\
+;FEATURE: Custom
+; MACHINE_END_GCODE_START
+; filament end gcode
+G1 Z1.0 F900 ; lift
+G1 X65 Y245 F12000 ; park
+G1 Y265 F3000
+M73 P100 R0
+; EXECUTABLE_BLOCK_END
+"""
+
+
+def test_the_end_code_is_not_drawn() -> None:
+    """#2885: Bambu Studio puts its machine end code (lift, park) before
+    ``; EXECUTABLE_BLOCK_END``, so the print ends at ``; MACHINE_END_GCODE_START``."""
+    body = GCODE.split(b"; EXECUTABLE_BLOCK_END")[0]
+    path = parse(body + END_OF_FILE)
+
+    assert segments(path) == segments(parse(GCODE))
+    assert all(max(s[1], s[4]) < 245 for s in segments(path)), "the park move is not drawn"
+
+
+def test_the_speed_scale_is_of_the_moves_drawn() -> None:
+    """#2885: a cut layer's fastest move does not set the Speed view's scale."""
+    # The cut layer's fast move is drawn first, then the bound is met on the next one.
+    fast_last_layer = GCODE.replace(
+        b"G3 X100 Y120 I0 J5 E1 F3000", b"G1 X100 Y130 E1 F60000\nG1 X90 Y130 E1 F3000"
+    )
+    assert parse(fast_last_layer).max_speed == 1000
+
+    path = parse(fast_last_layer, max_segments=7)
+
+    assert path.truncated
+    assert path.max_speed == 200
+
+
 def test_absolute_extrusion_draws_only_what_extrudes() -> None:
     path = parse(
         b"M82\n; CHANGE_LAYER\n; FEATURE: Inner wall\n"

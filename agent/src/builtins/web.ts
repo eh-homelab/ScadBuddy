@@ -71,7 +71,6 @@ async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; fina
       timeout_ms: FETCH_TIMEOUT_MS,
     },
     {
-      saveDir: '',
       secrets: ctx.secrets,
       audit: ctx.audit,
       actor: ctx.actor,

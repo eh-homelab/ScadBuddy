@@ -203,9 +203,10 @@ def test_the_keychain_pre_selects_the_closest_blue_and_pink() -> None:
     assert chosen == {1: 5, 2: 3}
 
 
-def test_one_spool_is_never_pre_selected_for_two_slots() -> None:
-    """A two-colour plate opening with the same spool in both slots reads as a bug,
-    unless it is a loaded spool shared in place of another material (#2461)."""
+def test_one_spool_is_not_pre_selected_for_two_slots_with_a_free_one() -> None:
+    """A two-colour plate opening with the same spool in both slots reads as a bug. An
+    undeclared slot may still share a loaded spool rather than take another material:
+    test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu (#2461)."""
     built = options(
         requirements=[SlotNeed(slot_id=1, colour="#0047BB"), SlotNeed(slot_id=2, colour="#0047BB")]
     )
@@ -922,3 +923,46 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     assert not reading.done()
     reading.set_result(None)
     assert await reading is None
+
+
+def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> None:
+    """#2850: the family came from the single best match, so a PETG loaded beside the
+    PLA and closest to one slot left every other undeclared slot empty."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(3, "C02E20FF"),  # PLA red, loaded
+        _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded, an exact match
+    ]
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(3, 1), _loaded(5, 2)],
+        requirements=[
+            SlotNeed(slot_id=1, colour="#3F8E43"),
+            SlotNeed(slot_id=2, colour="#263238"),
+            SlotNeed(slot_id=3, colour="#C12E1F"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {2: 1, 3: 3}
+
+
+def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
+    """#2850: with a slot declaring PLA, an undeclared one is suggested a PLA, not the
+    PETG that matches its colour exactly."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(3, "3F8E43FF"),  # PLA green, on the shelf
+        _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded
+    ]
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(5, 1)],
+        requirements=[
+            SlotNeed(slot_id=1, material="PLA", colour="#1A1A1A"),
+            SlotNeed(slot_id=2, colour="#3F8E43"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 1, 2: 3}

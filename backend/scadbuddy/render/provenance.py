@@ -18,6 +18,7 @@ import json
 import os
 import re
 import struct
+import sys
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -157,6 +158,16 @@ _LOCAL_SIGNATURE = b"PK\x03\x04"
 _ENCRYPTED = 0x1
 
 
+RAW_COPY_CHECKED = (3, 12)
+"""The CPython minor whose `zipfile` internals :func:`_copy_raw` was checked against
+(#2910). On any other, the stamp reads and writes each entry again instead, and
+``test_the_raw_copy_is_checked_on_this_python`` fails until it is checked again."""
+
+
+def _raw_copy_checked() -> bool:
+    return sys.version_info[:2] == RAW_COPY_CHECKED
+
+
 def _copy_raw(source: BinaryIO, info: zipfile.ZipInfo, target: zipfile.ZipFile) -> None:
     """Append ``info``'s entry to ``target`` as its compressed bytes stand (#2755).
 
@@ -164,7 +175,8 @@ def _copy_raw(source: BinaryIO, info: zipfile.ZipInfo, target: zipfile.ZipFile) 
     again, and a saved 3MF is mostly mesh objects the stamp never touches: rewriting
     them cost seconds of CPU per save (3.5 s for a 14 MB arranged 3MF in the API pod).
     The entry keeps its CRC and sizes, so a reader verifies it exactly as before. It
-    writes through the `ZipFile`'s own file and bookkeeping, as `writestr` does."""
+    writes through the `ZipFile`'s own file and bookkeeping, as `writestr` does: private
+    state, which is why it runs only on :data:`RAW_COPY_CHECKED` (#2910)."""
     source.seek(info.header_offset)
     header = _LOCAL_HEADER.unpack(source.read(_LOCAL_HEADER.size))
     if header[0] != _LOCAL_SIGNATURE:
@@ -212,10 +224,11 @@ def stamp(
             zipfile.ZipFile(raw) as archive,
             zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as written,
         ):
+            raw_copy = _raw_copy_checked()
             for info in archive.infolist():
                 settings = info.filename == PROJECT_SETTINGS_NAME and bool(print_settings)
                 changed = info.filename == ROOT_MODEL or settings
-                if not changed and not info.flag_bits & _ENCRYPTED:
+                if raw_copy and not changed and not info.flag_bits & _ENCRYPTED:
                     _copy_raw(raw, info, written)
                     continue
                 payload = archive.read(info.filename)
