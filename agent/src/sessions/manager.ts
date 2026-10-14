@@ -1057,7 +1057,10 @@ export class SessionManager {
       const session = await this.row(entry.sessionId)
       if (!session) return undefined
       const parts = entry.turn.fingerprintParts
-      const fresh = await this.runner.assemble({ ...session, unpricedCostUsd: 0 }, parts.tiers ? { tiers: parts.tiers as Tier[] } : {})
+      const fresh = await this.runner.assemble({ ...session, unpricedCostUsd: 0 }, parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
+        // A rate-limited credential is still the one a healthy process runs on.
+        includeCooling: true,
+      })
       fresh.fingerprintParts.transientRetries = parts.transientRetries
       return fresh
     })

@@ -109,7 +109,7 @@ export type AttemptOutcome =
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
   /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
-  candidates(): Promise<PooledCredential[]>
+  candidates(options?: { includeCooling?: boolean }): Promise<PooledCredential[]>
   /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
@@ -541,8 +541,12 @@ export class CredentialPool implements CredentialSource {
     this.log = options.log ?? ((line) => console.warn(line))
   }
 
-  /** Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none. */
-  async candidates(): Promise<PooledCredential[]> {
+  /**
+   * Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none.
+   * `includeCooling` also lists a rate-limited one (the warm resync looks for the credential a process
+   * runs on, which a cooldown does not end); a disabled one is never listed.
+   */
+  async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
     const kek = this.kek
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
     // One SELECT for every row, its state, epoch and sealed secret together:
@@ -551,7 +555,7 @@ export class CredentialPool implements CredentialSource {
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {
-      if (c.status !== 'active' || !credential) continue
+      if (!credential || (c.status !== 'active' && !(options.includeCooling && c.status === 'cooling_down'))) continue
       out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))

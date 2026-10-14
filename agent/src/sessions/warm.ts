@@ -359,6 +359,8 @@ export class WarmSessions {
                 (slot.candidate === undefined || (c.id === slot.candidate.id && c.epoch === slot.candidate.epoch)),
             )
             const apart = (parts: FingerprintParts) => fingerprint({ ...parts, credentialId: '', credentialUpdatedAt: '' })
+            // An empty candidate pool (a credential outage) finds none: every idle process goes within one
+            // interval, and that is intended: none of them can be vouched for while nothing is usable.
             if (!spawned) reason = 'credential'
             else if (apart(fresh.fingerprintParts) !== apart(entry.turn.fingerprintParts)) reason = 'fingerprint'
             else

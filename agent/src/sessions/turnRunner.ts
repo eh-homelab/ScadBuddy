@@ -219,7 +219,7 @@ export class TurnRunner {
     this.deps = deps
   }
 
-  async assemble(session: ClaimedSession, principal: TurnPrincipal): Promise<AssembledTurn> {
+  async assemble(session: ClaimedSession, principal: TurnPrincipal, options: { includeCooling?: boolean } = {}): Promise<AssembledTurn> {
     const id = session.id
     const slot = createTurnSlot()
     const registryTierOf = this.deps.tierOf ?? (() => undefined)
@@ -250,7 +250,7 @@ export class TurnRunner {
       // The credentials first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
-      const candidates = await this.deps.credentials.candidates()
+      const candidates = await this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined)
       secrets = candidates.map((c) => c.credential.secret)
       builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
       forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined

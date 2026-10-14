@@ -1,6 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SettingsStore } from '../src/credentials.js'
+import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { CredentialPool } from '../src/harness/fallback.js'
+import { kekFromBase64 } from '../src/secrets.js'
 import type { Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { userMessage } from '../src/harness/inbox.js'
@@ -178,6 +180,32 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
     await vi.waitFor(() => expect(warm.size()).toBe(1))
   })
 
+  it('a reconnect evicts every idle process even when no setting changed, and leaves a running turn alone', async () => {
+    await db.sql.unsafe(`CREATE TABLE events (
+      seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_id text NOT NULL UNIQUE, kind text NOT NULL,
+      at timestamptz NOT NULL, logged_at timestamptz NOT NULL DEFAULT now(), payload jsonb NOT NULL)`)
+    const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, retryMaxMs: 100, log: () => {} })
+    stops.push(() => listener.close())
+    sync(listener)
+    listener.start()
+    await listener.ready()
+    const [a, b, c] = [randomUUID(), randomUUID(), randomUUID()]
+    await turn(a)
+    await turn(b)
+    const running = await warm.acquire(c, await assembled(), credential, 1)
+    running.entry.inbox.push(userMessage('hello'))
+    expect(warm.size()).toBe(3)
+
+    // Nothing stored changed (the max stays 8): only the eviction a missed NOTIFY could have carried.
+    await listener.dropConnectionForTest()
+    await vi.waitFor(() => expect(warm.size()).toBe(1), { timeout: 5000 })
+    expect(running.entry.turn.release).not.toHaveBeenCalled()
+    const kept = await warm.acquire(c, await assembled(), credential, 1).catch((err: unknown) => err)
+    expect(kept).toMatchObject({ name: 'WarmBusyError' })
+    await warm.settle(running.entry, await nextResult(running.entry.iterator))
+    expect(warm.size()).toBe(1)
+  })
+
   it('a real listener that dropped and came back runs the same recovery', async () => {
     await db.sql.unsafe(`CREATE TABLE events (
       seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_id text NOT NULL UNIQUE, kind text NOT NULL,
@@ -263,6 +291,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
       throw new Error('no credential')
     })
     expect(warm.size()).toBe(0)
+  })
+
+  it('SessionManager.revalidateWarm keeps a process whose credential is cooling down, which the pool no longer lists', async () => {
+    const kek = kekFromBase64(randomBytes(32).toString('base64'))
+    const credentials = new CredentialStore(db.sql)
+    const stored = await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-cooling' }, kek)
+    const pool = new CredentialPool({ repo: credentials, kek: { ok: true, kek }, log: () => {} })
+    const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, credentials: pool })
+    stops.push(() => m.warm.close())
+    const { turn: started } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+    await started!.done
+    expect(m.warm.size()).toBe(1)
+    await credentials.record(stored.id, stored.epoch, { kind: 'cooling_down', until: new Date(Date.now() + 3_600_000), reason: 'rate limited' })
+    await expect(pool.candidates()).rejects.toThrow()
+    await m.revalidateWarm()
+    expect(m.warm.size()).toBe(1)
+    // Disabled for good: the process goes.
+    await credentials.record(stored.id, stored.epoch, { kind: 'disabled', reason: 'revoked' })
+    await m.revalidateWarm()
+    expect(m.warm.size()).toBe(0)
   })
 
   it('SessionManager.revalidateWarm keeps a process whose assembly still matches, and drops one whose credential was revoked', async () => {
