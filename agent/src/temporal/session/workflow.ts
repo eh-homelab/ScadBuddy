@@ -144,15 +144,18 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   }
 
   async function runTurn(current: TurnStart, continuation: Continuation | undefined): Promise<{ outcome: TurnOutcome; message?: string }> {
+    // Taken first: a Stop that lands while the settings are read ends the turn before it runs,
+    // and its message is spent with it, never run as the next turn (STOPPED_BEFORE_RUN).
+    const sent = message
+    message = undefined
     const settings = await local[SESSION_SETTINGS_ACTIVITY]()
     if (interrupted !== undefined) return { outcome: 'interrupted' }
     const input: SessionTurnInput = {
       sessionId: start.session_id,
       turnId: current.turn_id,
-      ...(message ? { message } : {}),
+      ...(sent ? { message: sent } : {}),
       ...(continuation ? { continuation } : {}),
     }
-    message = undefined
     running = new CancellationScope()
     let outcome: { outcome: TurnOutcome; message?: string }
     try {
@@ -214,6 +217,8 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     }
     if (message === undefined) {
       await condition(allHandlersFinished)
+      // An `end` handled during that wait is not lost.
+      if (ended && message === undefined) return
       if (message === undefined) {
         const next: SessionStart = { ...start, ...(home ? { host_queue: home } : {}) }
         delete next.turn

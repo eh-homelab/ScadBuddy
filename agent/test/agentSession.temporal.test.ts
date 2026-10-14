@@ -62,6 +62,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let finished: FinishTurnInput[]
   let runTurn: (input: SessionTurnInput) => Promise<SessionTurnResult>
   let finish: (args: FinishTurnInput) => Promise<boolean>
+  let settings: () => Promise<typeof RUNTIME_DEFAULTS>
+  let settingsRead: number
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -77,7 +79,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         ...workflows,
       })
     workers = [
-      await make(SESSION_QUEUE, { [SESSION_SETTINGS_ACTIVITY]: async () => RUNTIME_DEFAULTS }, { workflowBundle: bundle }),
+      await make(SESSION_QUEUE, { [SESSION_SETTINGS_ACTIVITY]: async () => settings() }, { workflowBundle: bundle }),
       await make(
         TASK_QUEUE,
         {
@@ -101,6 +103,11 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   beforeEach(() => {
     turns = []
     finished = []
+    settingsRead = 0
+    settings = async () => {
+      settingsRead++
+      return RUNTIME_DEFAULTS
+    }
     runTurn = async () => ({ status: 'done', hostQueue: '' })
     finish = async (args) => {
       finished.push(args)
@@ -236,6 +243,35 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('spends the message of a turn stopped before it ran: it is never run, and the session goes on idle', async () => {
+    const id = randomUUID()
+    const slow = held()
+    settings = async () => {
+      settingsRead++
+      await slow.promise
+      return RUNTIME_DEFAULTS
+    }
+    await send(env.client, id, message('t1', 'never runs'))
+    await poll(() => settingsRead, 1)
+    const first = await runIdOf(id)
+    await handleOf(id).signal('interrupt', { reason: 'stop' })
+    // A local activity holds its workflow task; past 80% of the task's 10 s the SDK hands the
+    // task back, and the Stop is delivered while the settings are still being read.
+    await new Promise((resolve) => setTimeout(resolve, 9_000))
+    slow.release()
+    await poll(() => finished.map((f) => f.outcome), ['interrupted'])
+    expect(turns).toEqual([])
+    await poll(async () => (await runIdOf(id)) !== first, true)
+    expect(await handleOf(id).query(TURN_QUERY)).toBeNull()
+    // Idle, not running the stopped message: the next send is the next turn.
+    settings = async () => RUNTIME_DEFAULTS
+    await send(env.client, id, message('t2', 'runs'))
+    await poll(() => finished.map((f) => f.turnId), ['t1', 't2'])
+    expect(turns.map((t) => t.message?.text)).toEqual(['runs'])
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('ends a turn whose activity raises BudgetExhausted `budget_exhausted`', async () => {
     const id = randomUUID()
     runTurn = async () => {
@@ -353,6 +389,24 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       // And a session first sent to now is the new type.
       const fresh = await m.start(browser, { origin: 'chat', prompt: 'three' })
       expect(await describe_(fresh.session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+    })
+
+    it('keeps a session that existed before the migration, with offset 0 and a Python workflow, DurableSession with the flag set', async () => {
+      await flag('unified')
+      const m = await durableManager()
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      // As a row from before the column: no runtime, nothing output yet, its workflow running.
+      await db.sql`UPDATE ai_sessions SET runtime = NULL, durable_offset = 0 WHERE id = ${session.id}`
+      await env.client.workflow.start('DurableSession', { workflowId: sessionWorkflowId(session.id), taskQueue: STANDIN_QUEUE, args: [{}] })
+      const migration = await readFile(new URL('../src/db/migrations/20261014T0837Z_session_runtime.sql', import.meta.url), 'utf8')
+      for (const statement of migration.replace(/^--.*$/gm, '').split(';').map((x) => x.trim()).filter((x) => x.startsWith('UPDATE'))) {
+        await db.sql.unsafe(statement)
+      }
+      expect(await runtimeOf(session.id)).toBe('durable')
+      await m.send(session.id, browser, 'hello')
+      expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
+      expect(await runtimeOf(session.id)).toBe('durable')
+      expect(turns).toEqual([])
     })
 
     it('refuses to fork a unified session, whatever its state, writing nothing', async () => {
