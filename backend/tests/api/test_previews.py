@@ -140,6 +140,7 @@ async def _schedule_gone(state: AppState, schedule_id: str) -> None:
     """Return once the Schedule is deleted, within ~30 s."""
     assert state.temporal is not None
     handle = state.temporal.get_schedule_handle(schedule_id)
+    last: RPCError | None = None
     for _ in range(600):
         try:
             await handle.describe()
@@ -148,8 +149,10 @@ async def _schedule_gone(state: AppState, schedule_id: str) -> None:
             # client connects) is not, so it is read again.
             if error.status == RPCStatusCode.NOT_FOUND:
                 return
+            last = error
         await asyncio.sleep(0.05)
-    raise AssertionError(f"{schedule_id} was never deleted")
+    # The last error says whether Temporal kept failing or the Schedule really stayed.
+    raise AssertionError(f"{schedule_id} was never deleted (last error: {last!r})")
 
 
 def backfilled(client: TestClient, state: AppState, runs: int = 1) -> None:
