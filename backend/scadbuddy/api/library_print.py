@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -172,8 +172,12 @@ async def get_library_names(
     """Each file's name and folder, in the order asked (a repeated id once), read from
     Bambuddy one file at a time, so a page that labels a few ids (Settings → Remembered
     choices, #2349) need not list the whole library. A file Bambuddy no longer has is
-    ``name: null``; any other failure is the route's."""
+    ``name: null``; any other failure is the route's, and cancels the other reads before
+    the client closes. When several files are asked and Bambuddy has none of them, that
+    reads as a misrouted base URL rather than every file deleted, so it is a 502: a page
+    then shows the ids, never "deleted file" on every row, which invites a wrong Forget."""
     gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    unique = list(dict.fromkeys(ids))
     async with client_for(store.load()) as client:
 
         async def one(file_id: int) -> LibraryFileName:
@@ -186,7 +190,19 @@ async def get_library_names(
                     return LibraryFileName(id=file_id, name=None)
             return LibraryFileName(id=file_id, name=file.filename, folder_id=file.folder_id)
 
-        return list(await asyncio.gather(*(one(file_id) for file_id in dict.fromkeys(ids))))
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(one(file_id)) for file_id in unique]
+        except BaseExceptionGroup as group_error:
+            # The read's own error (the 401 that is a 409, say), not an ExceptionGroup.
+            raise group_error.exceptions[0] from None
+    names = [task.result() for task in tasks]
+    if len(names) > 1 and all(file.name is None for file in names):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Bambuddy has none of these library files; is its URL right?",
+        )
+    return names
 
 
 @router.post(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -45,6 +47,50 @@ def test_any_other_failure_is_the_routes(client: TestClient) -> None:
 
     assert response.status_code == 409
     assert "API key" in response.json()["detail"]
+
+
+@respx.mock
+def test_a_failure_cancels_the_other_reads_before_the_client_closes(client: TestClient) -> None:
+    """A read still waiting when another fails is cancelled, not left to fail later
+    against a closed client with an exception nothing retrieves."""
+    configure(client)
+    outcome: list[str] = []
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+        outcome.append("finished")
+        return _file(720, "late.3mf", 1)
+
+    respx.get(f"{API}/library/files/720").mock(side_effect=slow)
+    respx.get(f"{API}/library/files/719").mock(return_value=httpx.Response(401, json={}))
+
+    response = client.get("/api/v1/print/library/names?ids=720&ids=719")
+
+    assert response.status_code == 409
+    assert outcome == ["cancelled"]
+
+
+@respx.mock
+def test_every_file_missing_is_a_misrouted_bambuddy_not_every_file_deleted(
+    client: TestClient,
+) -> None:
+    configure(client)
+    gone = httpx.Response(404, json={"detail": "Not Found"})
+    respx.get(f"{API}/library/files/719").mock(return_value=gone)
+    respx.get(f"{API}/library/files/89").mock(return_value=gone)
+
+    response = client.get("/api/v1/print/library/names?ids=719&ids=89")
+
+    assert response.status_code == 502
+    assert "URL" in response.json()["detail"]
+    # One file asked and gone is just that file deleted.
+    single = client.get("/api/v1/print/library/names?ids=719")
+    assert single.status_code == 200
+    assert single.json() == [{"id": 719, "name": None, "folder_id": None}]
 
 
 def test_takes_one_to_a_hundred_ids(client: TestClient) -> None:
