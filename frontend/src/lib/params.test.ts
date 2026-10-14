@@ -57,6 +57,7 @@ describe('colour order', () => {
 describe('extrudersOf, by colour', () => {
   it('shares an extruder between a name and its hex, and pads nothing', () => {
     const schema: CustomizerSchema = {
+      ...keychainSchema,
       parameters: ['a', 'b', 'c', 'd'].map((name) => ({ name, type: 'color', initial: '#000000', group: 'Colours' })),
     }
     const values = { a: 'red', b: '#FF0000', c: '#RREEDD', d: '#RR0000' }
