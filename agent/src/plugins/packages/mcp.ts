@@ -4,7 +4,7 @@ import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/prom
 import path from 'node:path'
 import { declaredConfigs, noCommand } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
-import type { HarnessPlugin, PluginForwarder } from '../forwarder.js'
+import { type HarnessPlugin, type PluginEndpoint, pluginEndpoint, type PluginForwarder } from '../forwarder.js'
 import {
   assertEndpointAllowed,
   harnessToolName,
@@ -38,6 +38,8 @@ import type { LoadedPackage } from './install.js'
 
 export type PackageServers = {
   plugins: HarnessPlugin[]
+  /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
+  endpoints?: PluginEndpoint[]
   problems: string[]
   /** The header values and the forwarder URLs, for redaction. */
   secrets: string[]
@@ -67,6 +69,7 @@ export async function forwardPackageServers(
   resolve: Resolver = systemResolver,
 ): Promise<PackageServers> {
   const plugins: HarnessPlugin[] = []
+  const endpoints: PluginEndpoint[] = []
   const problems: string[] = []
   const secrets: string[] = []
   const releases: (() => void)[] = []
@@ -122,10 +125,11 @@ export async function forwardPackageServers(
         if (header) secrets.push(...headerSecretVariants(header.value))
         secrets.push(registration.url)
         plugins.push({ name, url: registration.url, toolTiers: {}, disabledTools: [] })
+        endpoints.push(pluginEndpoint(plugin))
       }
     }
   }
-  return { plugins, problems, secrets, release: () => releases.forEach((r) => r()) }
+  return { plugins, endpoints, problems, secrets, release: () => releases.forEach((r) => r()) }
 }
 
 /** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */
