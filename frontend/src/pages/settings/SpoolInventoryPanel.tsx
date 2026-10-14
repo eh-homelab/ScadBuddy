@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { ClearSwatch, Swatch, UnknownSwatch } from '../../components/print/Swatch'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
@@ -8,8 +8,6 @@ import { trayPlace } from '../../lib/filaments'
 import { Card } from '@/components/ui/card'
 import { LoadingLines, SwitchField } from '../../components/settings/form'
 
-/** Bambuddy's not-configured refusal: a setup step still to take, not a failure. */
-const NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
 
 /** Loaded spools first, then by material, brand and colour. */
 function order(a: InventorySpool, b: InventorySpool): number {
@@ -67,7 +65,7 @@ export function SpoolInventoryPanel() {
         if (!live) return
         setSpools(null)
         setReading(false)
-        const notConfigured = cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED
+        const notConfigured = cause instanceof ApiError && cause.problem.type === BAMBUDDY_NOT_CONFIGURED
         setUnconfigured(notConfigured)
         setError(
           notConfigured ? null : cause instanceof ApiError ? cause.detail : "Bambuddy's inventory could not be read.",
