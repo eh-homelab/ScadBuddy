@@ -15,6 +15,7 @@ import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { wasSent } from '../lib/sent'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
@@ -64,7 +65,8 @@ export function HistoryPage() {
   async function remove(id: string, deleteInboxCopies = false) {
     setDeleting(id)
     try {
-      await api.deleteOutput(id, deleteInboxCopies)
+      // A user action of its own in Tempo (#2292), the delete its child.
+      await traceAction('delete', { 'scadbuddy.output_id': id }, () => api.deleteOutput(id, deleteInboxCopies))
       outputsState.setData((outputsState.data ?? []).filter((o) => o.id !== id))
       setPicked((current) => current.filter((p) => p !== id))
       setConfirmFor(undefined)

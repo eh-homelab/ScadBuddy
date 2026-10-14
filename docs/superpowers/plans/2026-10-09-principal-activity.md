@@ -78,9 +78,9 @@ postgres.js, zod (agent); React 19, Vite, msw, vitest, Playwright (frontend).
    first principal; the joiner gets the same id back. Pin it: Task 4 test
    `test_coalesced_render_keeps_first_principal`.
 2. **The agent's tables are absent (agent not deployed) or Postgres lacks `ai_sessions`.**
-   Expected: `/activity` lists backend kinds, no 500; a headless-marker request with no
-   `ai_sessions` row is pinned to an impossible principal (sees nothing), not everything.
-   Pin it: Task 7 tests `test_facets_without_agent_tables`, `test_unknown_session_sees_nothing`.
+   Expected: `/activity` lists backend kinds, no 500. (The headless-marker pinning planned
+   here was dropped after #2568: the routes read everything and only the `activity_*`
+   tools pin, spec §7.) Pin it: Task 7 test `test_facets_without_agent_tables`.
 3. **A facet filter on a kind that does not declare it, or a misspelled param
    (`stauts=failed`).** Expected: 400 naming it, not an unfiltered list. Pin it: Task 7
    `test_unknown_param_is_400`.
@@ -2057,7 +2057,7 @@ test.describe('activity', () => {
 
 - Spec coverage: §3 record → T1/T2; §4 registry → T3, agent kinds T10; §5 writers →
   T4/T5/T6, failure isolation T2; §6 API → T7 (SSE replaced, deviation 2;
-  `Job-Location` → `Activity-Location`, T7); §7 visibility → T7 (headless), T11 (tiers);
+  `Job-Location` → `Activity-Location`, T7); §7 visibility → T11 (the `activity_*` tools pin; routes read everything after #2568);
   §8 retention/repair → T8; §9 UI → T12–T15; §10 errors → T7; §11 testing → each task.
 - #1960's review: unknown params checked explicitly (T7); agent workflow change shown
   replay-safe with a second fixture (T10); session owner columns named and verified (T7);

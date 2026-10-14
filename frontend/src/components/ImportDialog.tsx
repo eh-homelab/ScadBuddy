@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { Button } from './ui/Button'
@@ -38,6 +38,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
   const [wait, setWait] = useState(0)
   /** The last import was refused for a spent budget, so the button offers it again. */
   const [busy, setBusy] = useState(false)
+  const inFlight = useRef(false)
 
   useEffect(() => {
     if (wait <= 0) return
@@ -50,7 +51,10 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     // Enter submits the form too: an import in flight and the wait hold it as they
     // hold the button. Each call mints its own Idempotency-Key, so a second Enter
     // would be a second import.
-    if (!url.trim() || importing || wait > 0) return
+    // `importing` is this render's: two submits in one tick both see it false, so the
+    // ref, set at once, holds the second (#2558).
+    if (!url.trim() || importing || inFlight.current || wait > 0) return
+    inFlight.current = true
     setImporting(true)
     setError(null)
     setBusy(false)
@@ -68,6 +72,7 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
       setBusy(seconds !== undefined)
       setWait(Math.ceil(seconds ?? 0))
     } finally {
+      inFlight.current = false
       setImporting(false)
     }
   }

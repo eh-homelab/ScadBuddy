@@ -12,6 +12,22 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
+    reason:
+      "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
+      'ffmpeg (#2360). An agent watches the timelapse itself through get_print_timelapse.',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames/{index}',
+    reason:
+      "One timelapse still as a JPEG (#2512), the print page's poster and seek strip. An agent watches the " +
+      'timelapse itself through get_print_timelapse.',
+  },
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
     reason:
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
@@ -212,6 +228,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   ...(
     [
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}/toolpath',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The background slice's toolpath (#2072): binary float32 segments the plate preview draws as its " +
+      'Speed, Movement and Layers views. It is for drawing, not reading; get the slice\'s grams, time and ' +
+      'filament changes from the print check.',
+  })),
+  ...(
+    [
       'POST /api/v1/print/outputs/{output_id}/preview-slice',
       'POST /api/v1/print/library/{file_id}/preview-slice',
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
@@ -229,6 +257,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+  },
+  {
+    operation: 'GET /api/v1/print/printers/now',
+    reason:
+      "The Prints page's \"Now printing\" strip (#977). An agent already reads each printer's live state, " +
+      'job and progress through get_print_targets, and its camera through get_printer_camera.',
   },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',

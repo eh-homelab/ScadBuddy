@@ -336,3 +336,38 @@ describe('handoff offers (#1284)', () => {
     expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
   })
 })
+
+describe('a reload (#2372)', () => {
+  it('reopens the panel this tab had open, on the chat it showed', async () => {
+    const before = await openParent()
+    before.unmount()
+
+    renderShell()
+    expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeVisible()
+    expect(await screen.findByText(PARENT_REPLY)).toBeInTheDocument()
+    expect(activeTitle()).toHaveTextContent(PARENT)
+    expect(sentOf('session.attach').at(-1)).toEqual({ v: 1, type: 'session.attach', sessionId: EXTERNAL_SESSION_ID })
+  })
+
+  it('leaves a closed panel closed, and opens it on the chat it last showed', async () => {
+    const before = await openParent()
+    await before.user.click(screen.getByRole('button', { name: 'Close assistant' }))
+    before.unmount()
+
+    const { user } = renderShell()
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).toBeNull()
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    expect(await screen.findByText(PARENT_REPLY)).toBeInTheDocument()
+    expect(activeTitle()).toHaveTextContent(PARENT)
+  })
+})
+
+describe('the chat header (#2380)', () => {
+  it('keeps the title a readable width: the badges and actions wrap under it rather than squeeze it', async () => {
+    await openParent()
+    // flex-1 alone is a 0% basis, so the row never wrapped and the title took the squeeze.
+    expect(activeTitle()).toHaveClass('min-w-[min(12rem,100%)]')
+    expect(activeTitle()).not.toHaveClass('min-w-0')
+    expect(screen.getByTestId('active-session-header')).toHaveClass('flex-wrap')
+  })
+})

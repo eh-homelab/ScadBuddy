@@ -63,6 +63,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     updatedAt: now,
     archivedAt: null,
     unpricedCostUsd: 0,
+    claimedAt: now,
   }
   const principal: TurnPrincipal = {}
   const runner = new TurnRunner({

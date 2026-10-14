@@ -55,6 +55,7 @@ from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
 AUTHOR_HEADER = "x-scadbuddy-agent-author"
 AUTHOR_SESSION_HEADER = "x-scadbuddy-agent-author-session"
+TOOL_HEADER = "x-scadbuddy-agent-tool"
 
 AGENT_AUTHOR_NAME = "ScadBuddy agent"
 AGENT_AUTHOR_EMAIL = "agent@scadbuddy.localhost"
@@ -74,6 +75,8 @@ _SESSION = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 class AgentAuthor:
     principal: str | None
     session: str | None
+    #: The agent tool that made the call (``X-ScadBuddy-Agent-Tool``), for activity.
+    tool: str | None = None
 
 
 _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", default=None)
@@ -102,15 +105,20 @@ class InvalidAuthorError(ValueError):
 def author_from(headers: Headers) -> AgentAuthor | None:
     principal = headers.get(AUTHOR_HEADER)
     session = headers.get(AUTHOR_SESSION_HEADER)
+    tool = headers.get(TOOL_HEADER)
     if principal is None and session is None:
-        return None
+        return None  # a tool alone labels nothing
     if principal is not None and not _PRINCIPAL.match(principal):
         raise InvalidAuthorError(
             f"{AUTHOR_HEADER} must be 1 to {MAX_PRINCIPAL} printable characters, no spaces"
         )
+    if tool is not None and not _PRINCIPAL.match(tool):
+        raise InvalidAuthorError(
+            f"{TOOL_HEADER} must be 1 to {MAX_PRINCIPAL} printable characters, no spaces"
+        )
     if session is not None and not _SESSION.match(session):
         raise InvalidAuthorError("the agent session id must be 1 to 64 of [A-Za-z0-9_-]")
-    return AgentAuthor(principal=principal, session=session)
+    return AgentAuthor(principal=principal, session=session, tool=tool)
 
 
 class AgentAuthorship:

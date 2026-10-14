@@ -210,7 +210,8 @@ change a jointed half's scale: the other half's cut and the joint's root are num
 their own, so one side would move without the other, and a joint's size would skip the
 fit check. Scale before splitting. `lay_flat`'s drop to the bed counts what ops add (a
 peg, an `add`), and `largest_flat` never picks a cut face carrying a peg, which would
-put the peg into the bed. The peg's fit is checked once, when the split is made: a later
+put the peg into the bed. `largest_flat` measures the printed parts only, so a face a
+negative part cuts into (a recess in a base) counts at its whole area (#2516). The peg's fit is checked once, when the split is made: a later
 edit to an earlier op that changes the section there (an `add` across the plane, a
 parameter on an earlier cut) is not checked again, and the render is the check.
 

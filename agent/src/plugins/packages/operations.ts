@@ -106,6 +106,7 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
 
   const install: OperationKind = {
     name: INSTALL_KIND,
+    label: 'Install plugin package',
     subject: (request) => hostOf((request.source as { url?: unknown } | undefined)?.url),
     check: (request) =>
       refusing(async () => {
@@ -126,6 +127,7 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
 
   const repin: OperationKind = {
     name: REPIN_KIND,
+    label: 'Re-pin plugin package',
     subject: (request) => String(request.name),
     check: (request) =>
       refusing(async () => {

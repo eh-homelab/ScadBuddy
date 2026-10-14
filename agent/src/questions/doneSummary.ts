@@ -100,7 +100,7 @@ function section(title: string, touches: readonly DoneTouch[]): string {
 }
 
 /** The touch was made inside one of the away windows: while nobody answered. */
-export function inAway(t: DoneTouch, away: readonly AwayWindow[]): boolean {
+export function inAway(t: Pick<DoneTouch, 'at'>, away: readonly AwayWindow[]): boolean {
   return away.some((w) => t.at >= w.from && (w.until === null || t.at < w.until))
 }
 
@@ -162,7 +162,7 @@ export async function loadDoneSummary(
   tx: TransactionSql,
   sessionId: string,
   turnId: string,
-  since: Date,
+  since: string,
   secrets: readonly string[],
 ): Promise<{ summary: string; unattended: boolean }> {
   // Each window closes at the user's first reply in that request's own turn: an
@@ -189,17 +189,31 @@ export async function loadDoneSummary(
     WHERE q.session_id = ${sessionId} AND q.turn_id IN (SELECT id FROM turns) AND q.kind = 'attention' AND q.outcome = 'timed_out'
     ORDER BY q.created_at, q.id`
   const windows = away.map((w) => ({ requestId: w.id, from: w.away_from, until: w.away_until }))
-  const from = windows.reduce((earliest, w) => (w.from < earliest ? w.from : earliest), since)
+  // `since` is compared in SQL, at Postgres's microseconds: as a JS Date it is
+  // rounded down to the millisecond, which lets in a touch made in the last
+  // fraction of a millisecond before the claim (#1383). Cast through text:
+  // postgres.js serializes a timestamptz parameter through a Date too.
+  const earliest = windows.reduce<Date | null>((e, w) => (e === null || w.from < e ? w.from : e), null)
   const rows = await tx<
-    { at: Date; tool: string; resource_type: string; resource_id: string | null; action: string; model_slug: string | null }[]
+    {
+      at: Date
+      in_turn: boolean
+      tool: string
+      resource_type: string
+      resource_id: string | null
+      action: string
+      model_slug: string | null
+    }[]
   >`
-    SELECT at, tool, resource_type, resource_id, action, model_slug FROM ai_session_resources
-    WHERE session_id = ${sessionId} AND at >= ${from}
+    SELECT at, at >= ${since}::text::timestamptz AS in_turn, tool, resource_type, resource_id, action, model_slug
+    FROM ai_session_resources
+    WHERE session_id = ${sessionId} AND (at >= ${since}::text::timestamptz OR at >= ${earliest ?? null}::timestamptz)
     ORDER BY id`
   // Before `since` the touches are the parked turns', and only their unattended
   // ones carry over: attended work before the approval is not this turn's to
   // report, nor sectioned by how its windows happen to fall.
   const touches = rows
+    .filter((r) => r.in_turn || inAway({ at: r.at }, windows))
     .map((r) => ({
       at: r.at,
       tool: r.tool,
@@ -208,6 +222,5 @@ export async function loadDoneSummary(
       action: r.action,
       model: r.model_slug,
     }))
-    .filter((t) => t.at >= since || inAway(t, windows))
   return { summary: doneSummary(touches, windows, secrets), unattended: touches.some((t) => inAway(t, windows)) }
 }

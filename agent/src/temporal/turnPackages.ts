@@ -200,17 +200,18 @@ export function localPackageServers(loaded: readonly LoadedPackage[], problems: 
   return servers
 }
 
-/** Built-ins a durable session runs in its segment and cannot ask a human about first. */
+/** Built-ins the Temporal plugin runs as their own activities, so a call can wait for a human. */
 const PARKABLE_BUILTINS = new Set(['Bash', 'PowerShell'])
 
 /**
  * An allowed package's built-ins that a durable session cannot offer: every call of one
- * is outward (run.ts `builtinTools`), and only Bash and PowerShell run as their own
- * activities, which can wait for a human (the Temporal plugin's `tool_activities`).
+ * is outward (run.ts `builtinTools`). Only Bash and PowerShell run as their own
+ * activities, which can wait for a human (the Temporal plugin's `tool_activities`); the
+ * agent provides others as turn tools (`provided`, builtins/server.ts, #2393).
  */
-export function unparkableBuiltins(pkg: TurnPackage): string[] {
-  return pkg.builtin_tools.filter((t) => !PARKABLE_BUILTINS.has(t) && !OFFERED.has(t))
+export function unparkableBuiltins(pkg: TurnPackage, provided: ReadonlySet<string>): string[] {
+  return pkg.builtin_tools.filter((t) => !PARKABLE_BUILTINS.has(t) && !OFFERED.has(t) && !provided.has(t))
 }
 
-/** What every durable turn's Claude Code has already (the Skill and Agent tools, read). */
-const OFFERED = new Set(['Skill', 'Agent'])
+/** What every durable turn's Claude Code has already (the Skill and Agent tools; Task is Agent's old name). */
+const OFFERED = new Set(['Skill', 'Agent', 'Task'])

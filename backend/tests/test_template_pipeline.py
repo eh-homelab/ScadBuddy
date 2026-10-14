@@ -18,6 +18,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.render import jobs
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.projection import workflow_id_for
 from scadbuddy.store.local import LocalBlobStore
@@ -31,6 +32,7 @@ from scadbuddy.workflows.models import (
     PieceResult,
     PlateSize,
     Projection,
+    RenderMainResult,
     piece_key,
 )
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
@@ -245,6 +247,26 @@ async def test_a_waiter_trusts_a_piece_for_its_whole_retried_budget(
     # Three attempts each, 2 s then 4 s of backoff between them.
     retried = sum((3 * stage + timedelta(seconds=6) for stage in stages), timedelta())
     assert pipelines._waiter_recheck() == retried + pipelines.SHORT
+
+
+def test_render_solids_has_an_openscad_budget_per_plate_and_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#956 review: a layout renders each plate's each declared object on its own, so a
+    16-object template outran one openscad run's budget."""
+    openscad = timedelta(seconds=100)
+    monkeypatch.setattr(pipelines, "_openscad_timeout", lambda: openscad)
+    assert pipelines._pieces(RenderMainResult()) == 1
+    assert pipelines._pieces(RenderMainResult(plates=2, objects=3)) == 6
+    assert pipelines._solids_timeout(6) == 6 * openscad + 3 * pipelines.TRANSFER
+    assert pipelines._solids_timeout() == openscad + 3 * pipelines.TRANSFER
+    # A template's echo cannot stretch the budget past what the layout accepts.
+    huge = RenderMainResult(plates=10**9, objects=10**9)
+    assert pipelines._pieces(huge) == jobs.MAX_PLATES * jobs.MAX_OBJECTS
+    assert (pipelines.PIECE_PLATES_CAP, pipelines.PIECE_OBJECTS_CAP) == (
+        jobs.MAX_PLATES,
+        jobs.MAX_OBJECTS,
+    )
 
 
 async def test_ctx_activity_passes_parts_and_returns_json(tmp_path: Path) -> None:
