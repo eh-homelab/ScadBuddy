@@ -33,7 +33,6 @@ import {
   defaultValues,
   diffFromDefaults,
   outOfRange,
-  paramLabel,
   rangeProblem,
   sameValues,
   type ParamValues,
@@ -952,7 +951,7 @@ export function CustomizePage() {
       upToDate={current}
       // A template UI may show no field by that name: its problem is said as it stands.
       blockedReason={
-        unrenderable ? (customUi ? (invalid ?? undefined) : `Fix ${paramLabel(unrenderable)} first`) : undefined
+        unrenderable ? (customUi ? (invalid ?? undefined) : `Fix ${unrenderable.caption || unrenderable.name} first`) : undefined
       }
       output={output}
       capture={capture}
