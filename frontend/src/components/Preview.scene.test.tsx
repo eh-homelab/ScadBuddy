@@ -1,7 +1,7 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as THREE from 'three'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { BoundingBox, Job } from '../api/types'
 import { BBOX_OBJECT } from '../lib/snapshot'
 import { Preview } from './Preview'
@@ -15,6 +15,8 @@ const scene = vi.hoisted(() => ({
   orbit: {} as { maxDistance?: number },
   /** #2364 — a mesh loaded from a URL, where one is wanted; else a stand-in. */
   meshes: new Map<string, THREE.Object3D>(),
+  /** URLs whose load fails, as a 404 or a bad mesh does. */
+  failing: new Set<string>(),
 }))
 
 vi.mock('@react-three/fiber', () => ({
@@ -23,6 +25,7 @@ vi.mock('@react-three/fiber', () => ({
     (_loader: unknown, url: string) => {
       const pending = scene.pending.get(url)
       if (pending) throw pending.promise
+      if (scene.failing.has(url)) throw new Error(`could not load ${url}`)
       return { scene: scene.meshes.get(url) ?? { clone: () => ({ url }) } }
     },
     { clear: () => {} },
@@ -216,6 +219,44 @@ describe('Preview scene (#364)', () => {
     rerender(<Preview job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
     expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
     expect(picker).toBeInTheDocument()
+  })
+
+  it("names each plate by its own index, not its place in the list (#2914)", async () => {
+    const plates = [2, 5].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=5', alone)
+    const user = userEvent.setup()
+    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+
+    const picker = screen.getByRole('group', { name: 'Plates shown' })
+    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['All', '2', '5'])
+    await user.click(screen.getByRole('button', { name: 'Plate 5 alone' }))
+    expect(screen.getByRole('button', { name: 'Plate 5 alone' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('goes back to every plate when one plate cannot be shown alone, and says so (#2914)', async () => {
+    const plates = [1, 2].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    scene.failing.add('/api/v1/jobs/a/preview.glb?plate=2')
+    onTestFinished(() => scene.failing.clear())
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const user = userEvent.setup()
+    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+
+    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Plate 2 could not be shown alone; showing all plates.')
+    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getAllByTestId('plate-label')).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
   it('offers no plate picker for a one-plate render', () => {
