@@ -362,6 +362,45 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (1)')
   })
 
+  it('follows a Queue all that answers before its last file, from where it stopped (#2951)', async () => {
+    const batch = await newBatch(89, 91)
+    for (const position of [0, 1])
+      await api.putPrintBatchItem(batch.id, position, { request: { ...REQUEST }, skipped: false, removed: false })
+    const chosen = await api.putPrintBatchStep(batch.id, 2)
+    const started = (n: number) => ({ status: 'started', run_id: `run-${n}`, detail: null, attempt: 0 })
+    const sent: (string | null)[] = []
+    server.use(
+      http.post(`/api/v1/print/batches/${batch.id}/queue`, ({ request }) => {
+        const from = new URL(request.url).searchParams.get('from_position')
+        sent.push(from)
+        if (from === null)
+          return HttpResponse.json(
+            { batch: { ...chosen, items: [{ ...chosen.items[0], outcome: started(0) }, chosen.items[1]] }, next_position: 1 },
+            { status: 202 },
+          )
+        return HttpResponse.json({
+          ...chosen,
+          status: 'queued',
+          items: chosen.items.map((item, n) => ({ ...item, outcome: started(n) })),
+        })
+      }),
+      http.get('/api/v1/print/runs/:id', ({ params }) =>
+        HttpResponse.json({
+          id: params.id,
+          subject: 'library:89',
+          output_id: 'library:89',
+          status: 'running',
+          created_at: '2026-10-13T00:00:00Z',
+        }),
+      ),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await user.click(await screen.findByTestId('batch-queue-all'))
+
+    await screen.findByRole('dialog', { name: 'Batch print queued' })
+    expect(sent).toEqual([null, '1'])
+  })
+
   it('forgets the batch on Cancel', async () => {
     const onClose = vi.fn()
     const batch = await newBatch(89, 91)

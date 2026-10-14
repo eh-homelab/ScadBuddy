@@ -72,6 +72,7 @@ import type {
   NewBatchFile,
   BatchChoice,
   PrintBatch,
+  BatchQueueProgress,
   ModelSummary,
   ModelVersion,
   Output,
@@ -1856,9 +1857,25 @@ export const api = {
       body: JSON.stringify(choice),
     }),
 
-  /** #2672 — starts each chosen file's library run and says what happened to each. */
-  queuePrintBatch: (batchId: string) =>
-    request<PrintBatch>(`/print/batches/${seg(batchId)}/queue`, { method: 'POST' }),
+  /**
+   * #2672 — starts each chosen file's library run and says what happened to each. A
+   * request answers in time rather than for every file: a 202 says where to go on from,
+   * and this follows it to the end (#2951), handing each step's batch to `onProgress`.
+   */
+  queuePrintBatch: async (batchId: string, onProgress?: (batch: PrintBatch) => void): Promise<PrintBatch> => {
+    let from = 0
+    for (;;) {
+      const query = from === 0 ? '' : `?from_position=${from}`
+      const answer = await requestWithStatus<PrintBatch | BatchQueueProgress>(
+        `/print/batches/${seg(batchId)}/queue${query}`,
+        { method: 'POST' },
+      )
+      if (answer.status !== 202) return answer.body as PrintBatch
+      const progress = answer.body as BatchQueueProgress
+      onProgress?.(progress.batch)
+      from = progress.next_position
+    }
+  },
 
   /** #2672 — forgets the batch; whatever it queued stays queued. */
   deletePrintBatch: (batchId: string) =>

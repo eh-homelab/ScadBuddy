@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -21,6 +23,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
 from scadbuddy.api.library_print import post_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
+from scadbuddy.api.printing import ACCEPT_BUDGET
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PrintBatchesDep
 from scadbuddy.batches.store import (
@@ -184,9 +187,31 @@ async def put_batch_item(
     return updated
 
 
+#: How long one Queue all request goes on starting files (#2951). Each file's start can
+#: take up to ``ACCEPT_BUDGET``, and a batch holds up to ``MAX_BATCH_FILES``, so one
+#: request for them all could outlast a proxy's timeout while the server went on queueing.
+#: A file is started only while its start still fits, and every request starts one.
+QUEUE_BUDGET_S = 30.0
+
+
+class BatchQueueProgress(BaseModel):
+    """Queue all stopped before the last file, to answer in time (#2951): send the same
+    request again with ``from_position`` to go on from where it stopped."""
+
+    batch: PrintBatch
+    next_position: int
+
+
 @router.post(
     "/{batch_id}/queue",
     response_model=PrintBatch,
+    responses={
+        status.HTTP_202_ACCEPTED: {
+            "model": BatchQueueProgress,
+            "description": "Not every file was sent yet: POST again with `from_position` "
+            "set to `next_position`.",
+        }
+    },
     summary="Queue every chosen file of a batch print",
 )
 async def post_batch_queue(
@@ -197,7 +222,8 @@ async def post_batch_queue(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
-) -> PrintBatch:
+    from_position: Annotated[int, Query(ge=0)] = 0,
+) -> PrintBatch | JSONResponse:
     """Starts each file's library run, in order, and records what happened to each: the
     run it started (follow it at ``GET /print/runs/{id}``), the refusal, or that it has
     no choices yet. Skipped and removed files are left out. One file's refusal never
@@ -209,18 +235,34 @@ async def post_batch_queue(
     queued batch is not refused here, so a retried Queue all (a reload mid-request)
     answers with the batch as it stands rather than a 409: every started file is left
     as it is, so it queues nothing twice. A batch with every file skipped or removed has
-    nothing to queue (422)."""
+    nothing to queue (422).
+
+    One request starts files for only so long (``QUEUE_BUDGET_S``, at least one file),
+    then answers 202 with the batch and the ``next_position`` to send from: the same
+    request with ``from_position`` goes on from there, so a file refused earlier in the
+    same Queue all is not sent twice in it. Nothing goes on in the background: a request
+    that is not followed leaves the rest unsent, for the next Queue all (#2951)."""
     batch = await _read_runs(batches, runs.store, await _batch(batches, batch_id))
     if all(item.skipped or item.removed for item in batch.items):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Every file is skipped or removed, so there is nothing to queue.",
         )
+    began, sent = time.monotonic(), 0
     for item in batch.items:
-        if item.skipped or item.removed:
+        if item.position < from_position or item.skipped or item.removed:
             continue
         if item.outcome is not None and item.outcome.status == "started":
             continue
+        if sent and time.monotonic() - began + ACCEPT_BUDGET > QUEUE_BUDGET_S:
+            # Its start might not fit: answer now, and the next request starts it.
+            progress = BatchQueueProgress(
+                batch=await _batch(batches, batch_id), next_position=item.position
+            )
+            return JSONResponse(
+                progress.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED
+            )
+        sent += 1
         attempt = _attempt(item)
         # Pending while it is sent, so a PUT of its choices cannot land under the send:
         # the choices sent are the ones recorded (#2718 review).

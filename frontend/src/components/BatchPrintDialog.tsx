@@ -266,7 +266,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
     setQueueing(true)
     setError(null)
     try {
-      setBatch(await api.queuePrintBatch(batchId))
+      setBatch(await api.queuePrintBatch(batchId, setBatch))
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Could not queue the batch print.')
     } finally {

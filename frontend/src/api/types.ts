@@ -226,6 +226,8 @@ export type BatchChoice = Schemas['BatchChoice']
 export type BatchSummary = Schemas['BatchSummary']
 export type BatchOutcome = Schemas['BatchOutcome']
 export type NewBatchFile = Schemas['NewBatchFile']
+/** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
+export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>

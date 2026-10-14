@@ -159,6 +159,50 @@ def test_queue_all_runs_each_chosen_file_and_reports_each(client: TestClient) ->
 
 
 @respx.mock
+def test_queue_all_answers_in_time_and_is_followed_from_where_it_stopped(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2951: one request starts files only while it can still answer in time, then says
+    where to go on from; the follow-up starts the rest and never re-sends a file it
+    refused earlier in the same Queue all. With no time left, each request starts one."""
+    monkeypatch.setattr(print_batches, "QUEUE_BUDGET_S", 0.0)
+    configure(client)
+    sliced_file(104)
+    sliced_file(105)
+    gone = respx.get(f"{API}/library/files/109").mock(return_value=httpx.Response(404))
+    run_routes()
+    queued = queue_route()
+    batch = new_batch(client, 104, 109, 105)
+    for position in range(3):
+        choose(client, batch["id"], position, request=SLICED_RUN)
+    queue = f"{BATCHES}/{batch['id']}/queue"
+
+    first = client.post(queue)
+    assert first.status_code == 202, first.text
+    assert first.json()["next_position"] == 1
+    assert [i["outcome"] and i["outcome"]["status"] for i in first.json()["batch"]["items"]] == [
+        "started",
+        None,
+        None,
+    ]
+    second = client.post(queue, params={"from_position": 1})
+    assert second.status_code == 202, second.text
+    assert second.json()["next_position"] == 2
+    refused_reads = gone.call_count
+    last = client.post(queue, params={"from_position": 2})
+
+    assert last.status_code == 200, last.text
+    done = last.json()
+    assert [i["outcome"]["status"] for i in done["items"]] == ["started", "refused", "started"]
+    assert done["status"] == "open"  # the refused file can be edited and sent again
+    assert gone.call_count == refused_reads  # not sent twice in the one Queue all
+    for n in (0, 2):
+        assert follow_run(client, done["items"][n]["outcome"]["run_id"])["status"] == "succeeded"
+    assert queued.call_count == 2
+    assert client.post(queue, params={"from_position": -1}).status_code == 422
+
+
+@respx.mock
 def test_queue_all_sent_again_queues_nothing_twice(client: TestClient) -> None:
     """A Queue all retried (a reload mid-request, a second press) leaves a started file
     as it is."""
