@@ -43,7 +43,8 @@ export type DurableSubagentsRouteDeps = {
 
 const MAX_PEERS = 32
 // The broadest range a peer entry may name: a /8 (v4) or /32 (v6). `0.0.0.0/0` would open
-// the route to every network peer, leaving only the token.
+// the route to every network peer, leaving only the token. An IPv6 range over the
+// IPv4-mapped block (MAPPED) takes the IPv4 floor inside it: a /104 (96 + 8).
 const MIN_PREFIX = { 4: 8, 6: 32 } as const
 
 const PutBody = z.strictObject({
@@ -111,14 +112,28 @@ function stored(raw: unknown): DurableSubagentsView {
   }
 }
 
+// The last refused stored value warned about, so a refused setting logs once, not per call.
+let warnedRefused: string | undefined
+
 /**
  * The peers besides loopback that the subagent route answers. A stored value this route
- * could not have written answers none (loopback only).
+ * could not have written answers none (loopback only), and says so once in the log.
  */
 export async function subagentPeers(settings: SettingsRepo | undefined): Promise<BlockList | undefined> {
   if (!settings) return undefined
   const { peers } = stored(await settings.get<unknown>(SETTING_DURABLE_SUBAGENTS))
-  return peers.length === 0 || !peers.every(isPeer) ? undefined : peerList(peers)
+  if (peers.length === 0) return undefined
+  const refused = peers.filter((p) => !isPeer(p))
+  if (refused.length === 0) return peerList(peers)
+  const key = refused.join(' ')
+  if (warnedRefused !== key) {
+    warnedRefused = key
+    console.warn(
+      `durable subagents: stored peers ${JSON.stringify(refused)} are not addresses or allowed ranges; ` +
+        'answering loopback only until Settings → Durable subagents is saved again',
+    )
+  }
+  return undefined
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'

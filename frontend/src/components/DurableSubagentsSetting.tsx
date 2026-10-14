@@ -80,7 +80,7 @@ export function DurableSubagentsSetting() {
           A durable session&apos;s subagents call ScadBuddy&apos;s tools on the assistant service. Leave both empty when
           the durable worker runs beside the assistant (the same pod). When it runs on its own, set the URL it reaches
           the assistant at, and the addresses or CIDR ranges it calls from, separated by commas (no range broader than
-          a /8, or an IPv6 /32). Each call still needs a token for one running turn, and a network policy that lets
+          a /8, or an IPv6 /32; one inside ::ffff:0:0/96, the IPv4-mapped block, no broader than a /104). Each call still needs a token for one running turn, and a network policy that lets
           only the durable worker reach the assistant&apos;s port is required: a pod range also holds the ingress&apos;s
           pods. Applies from the next turn.
         </p>

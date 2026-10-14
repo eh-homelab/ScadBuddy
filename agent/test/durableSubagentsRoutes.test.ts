@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { inBlockList, originPolicy } from '../src/http/origins.js'
 import {
   DURABLE_SUBAGENTS_PATH,
@@ -144,6 +144,19 @@ describe('subagentPeers', () => {
     expect(await subagentPeers(repo({ url: null, peers: ['0.0.0.0/0'] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['::ffff:0.0.0.0/96'] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['10.42.0.0/16,10.43.0.0/16'] }).settings)).toBeUndefined()
+  })
+
+  it('says once in the log that a stored value was refused', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { settings } = repo({ url: null, peers: ['10.42.0.0/16', '10.0.0.0/7'] })
+      expect(await subagentPeers(settings)).toBeUndefined()
+      expect(await subagentPeers(settings)).toBeUndefined()
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toContain('["10.0.0.0/7"]')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('is the stored ranges', async () => {
