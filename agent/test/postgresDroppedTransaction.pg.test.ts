@@ -41,7 +41,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`a transaction whose connection is dropped${
     // The transaction fails as soon as its connection closes, before its callback ends.
     await expect(tx).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })
     settle(release)
-    // Long enough for the rollback or commit postgres.js then writes to have gone out.
+    // Long enough for the rollback or commit postgres.js then writes to have gone out:
+    // connection.js defers each write through one setImmediate (nextWriteTimer), so the
+    // throw this test catches lands within these turns. A shorter wait would pass
+    // without ever reaching the write.
     for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
