@@ -24,6 +24,7 @@ const PAGES = [
   '/workflows/flows/def-swap',
   '/workflows/runs/run-done',
   '/settings',
+  '/activity',
 ]
 
 for (const path of PAGES) {
