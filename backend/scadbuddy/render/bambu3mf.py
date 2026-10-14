@@ -303,11 +303,16 @@ def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
 
 
 def root_model(
-    plates: Sequence[PlateParts], model_name: str, offsets: Sequence[Sequence[float]]
+    plates: Sequence[PlateParts],
+    model_name: str,
+    offsets: Sequence[Sequence[float]],
+    *,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
     objects: list[str] = []
     items: list[str] = []
-    for assemblies, offset in zip(_assemblies(plates), offsets, strict=True):
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for assemblies, offset in zip(each_plate, offsets, strict=True):
         translation = " ".join(_number(value) for value in offset)
         for assembly in assemblies:
             components = "".join(
@@ -350,10 +355,17 @@ def _subtype(part: ColourPart) -> str:
     return "negative_part" if part.negative else "normal_part"
 
 
-def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
+def model_settings(
+    plates: Sequence[PlateParts],
+    model_name: str,
+    *,
+    covers: bool,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
+) -> str:
     objects: list[str] = []
     plate_entries: list[str] = []
-    for plate_index, assemblies in enumerate(_assemblies(plates), start=1):
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for plate_index, assemblies in enumerate(each_plate, start=1):
         instances: list[str] = []
         for assembly in assemblies:
             entries = "".join(
@@ -379,10 +391,16 @@ def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: boo
                 '   <metadata key="instance_id" value="0"/>\n'
                 "  </model_instance>\n"
             )
+        # A plate of several objects is named as a plate, not as every object's name
+        # joined (#2874 review: a 20-copy plate). One object leaves it to Bambu Studio,
+        # as the file always did.
+        plater_name = (
+            _assembly_name(model_name, plate_index, len(plates)) if len(assemblies) > 1 else ""
+        )
         plate_entries.append(
             " <plate>\n"
             f'  <metadata key="plater_id" value="{plate_index}"/>\n'
-            '  <metadata key="plater_name" value=""/>\n'
+            f'  <metadata key="plater_name" value={quoteattr(plater_name)}/>\n'
             '  <metadata key="locked" value="false"/>\n'
             f"{_cover_metadata(plate_index) if covers else ''}"
             f"{''.join(instances)}"
@@ -735,19 +753,27 @@ def write_plates_3mf(
         for index, placement in enumerate(placements, start=1)
     ]
     ids = _object_ids(plates)
+    # Once, for both files that number the objects, so their ids cannot drift apart.
+    assemblies = _assemblies(plates)
     entries: list[tuple[str, bytes]] = [
         (name, payload.encode("utf-8"))
         for name, payload in (
             ("[Content_Types].xml", _content_types(covers=covers)),
             ("_rels/.rels", _package_rels(covers=covers)),
-            (ROOT_MODEL_NAME, root_model(plates, model_name, offsets)),
+            (
+                ROOT_MODEL_NAME,
+                root_model(plates, model_name, offsets, assemblies_by_plate=assemblies),
+            ),
             ("3D/_rels/3dmodel.model.rels", _model_rels(ids[-1].stop - 1)),
             *(
                 (f"3D/Objects/object_{index}.model", object_model(part, index))
                 for each, numbers in zip(plates, ids, strict=True)
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
-            (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
+            (
+                MODEL_SETTINGS_NAME,
+                model_settings(plates, model_name, covers=covers, assemblies_by_plate=assemblies),
+            ),
             (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
@@ -1063,6 +1089,9 @@ def replate_3mf(
             if len(each.assembly_ids) > 1 and each.extruders is not None:
                 tower = len(each.extruders | painted) > 1
             else:
+                # One object; or several whose model_settings name no extruders, so the
+                # filaments are unknown and a tower is reserved whenever there is more
+                # than one part: room to spare rather than a plate that will not slice.
                 tower = len(each.object_files) > 1
             placement = place_on_plate(bounds, plate, tower=tower)
         except PlateFitError as error:
