@@ -33,6 +33,8 @@ export const MAX_ACTIVE = 10
 export const MAX_EVENTS = 200
 /** One event's text at most (its lines past this are cut). */
 export const EVENT_MAX_CHARS = 8000
+/** One recorded notice at most, wrapper included (the column's cap): its text is cut first (monitor.ts eventNotice). */
+export const NOTICE_MAX_CHARS = 16384
 
 type Row = {
   id: string
@@ -141,7 +143,7 @@ export class BackgroundTaskStore {
   async appendEvent(taskId: string, text: string): Promise<boolean> {
     const rows = await this.#sql`
       INSERT INTO ai_background_events (task_id, text)
-      SELECT ${taskId}, ${text.slice(0, EVENT_MAX_CHARS)}
+      SELECT ${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)}
       WHERE (SELECT count(*) FROM ai_background_events WHERE task_id = ${taskId}) < ${MAX_EVENTS}
       RETURNING seq`
     return rows.length === 1
@@ -149,7 +151,7 @@ export class BackgroundTaskStore {
 
   /** Records a monitor's last notice (its end), past MAX_EVENTS. */
   async appendNotice(taskId: string, text: string): Promise<void> {
-    await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, EVENT_MAX_CHARS)})`
+    await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)})`
   }
 
   /** A task's events not yet sent to its session, oldest first. */

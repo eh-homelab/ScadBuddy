@@ -16,6 +16,8 @@ export const MONITOR_MAX_MS = 1_800_000
 export const BATCH_MS = 200
 /** One event's text at most: a longer line, or batch, is cut (store.ts EVENT_MAX_CHARS). */
 export const EVENT_CHARS = 8000
+/** What a cut line or event ends with; a cut one is EVENT_CHARS long with it. */
+const CUT = ' […cut]'
 
 /**
  * Splits a stream into lines, never holding more than EVENT_CHARS of one: a longer line
@@ -34,7 +36,7 @@ export function lineSplitter(onLine: (line: string) => void): { push(chunk: stri
         if (!dropping) {
           line += part
           if (line.length > EVENT_CHARS) {
-            onLine(`${line.slice(0, EVENT_CHARS)} […cut]`)
+            onLine(`${line.slice(0, EVENT_CHARS - CUT.length)}${CUT}`)
             line = ''
             dropping = true
           }
@@ -95,7 +97,10 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
     }
     const flush = () => {
       timer = undefined
-      if (!batch.length) return
+      if (!batch.length) {
+        dropped = 0
+        return
+      }
       const text = batch.join('\n') + (dropped ? `\n[…${dropped} more line${dropped === 1 ? '' : 's'} in this batch cut]` : '')
       batch = []
       batchChars = 0
@@ -108,8 +113,8 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
         .catch((err: unknown) => kill({ outcome: 'failed', reason: `an event could not be recorded: ${(err as Error).message}` }))
     }
     const lines = lineSplitter((line) => {
-      // One batch is one event: past EVENT_CHARS its lines are counted, not kept.
-      if (batchChars + line.length > EVENT_CHARS) dropped += 1
+      // One batch is one event: past EVENT_CHARS its lines are counted, not kept; its first line always is.
+      if (batch.length && batchChars + line.length > EVENT_CHARS) dropped += 1
       else {
         batch.push(line)
         batchChars += line.length + 1
@@ -228,7 +233,9 @@ const notification = (taskId: string, summary: string, event: string) =>
 
 /** One event, as Claude Code's notification of it. */
 export function eventNotice(taskId: string, description: string, text: string): string {
-  return notification(taskId, `Monitor event: "${description}"`, text)
+  // The text is cut, not the notice, so the notice keeps its closing tags (store.ts NOTICE_MAX_CHARS).
+  const event = text.length > EVENT_CHARS ? `${text.slice(0, EVENT_CHARS - CUT.length)}${CUT}` : text
+  return notification(taskId, `Monitor event: "${description}"`, event)
 }
 
 /** The watch's end, with how many events it made. */
