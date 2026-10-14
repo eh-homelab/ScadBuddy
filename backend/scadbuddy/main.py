@@ -336,6 +336,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
             )
         else:
+            failed = False
             try:
                 removed = await sweep_content(
                     state.store.content, state.refs, grace=state.config.job_ttl
@@ -345,12 +346,25 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
                     removed += await backend.sweep_unrecorded(cutoff=cutoff)
+            except BaseException:
+                # BaseException on purpose: a cancelled sweep must stay cancelled, not be
+                # replaced by the trim's own failure below.
+                failed = True
+                raise
             finally:
                 # Both steps above need Bambuddy (a stale blob's release is a round
                 # trip too): one that is down must not stop the local cache being
                 # trimmed, or it grows for as long as Bambuddy stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
-                    await asyncio.to_thread(state.store.blobs.evict)
+                    try:
+                        await asyncio.to_thread(state.store.blobs.evict)
+                    except Exception:
+                        # Under a Bambuddy failure, logged on its own and that failure
+                        # goes on (#2560): raised here it would replace it, left only
+                        # as __context__. Alone, it is the sweep's failure.
+                        if not failed:
+                            raise
+                        logger.exception("could not trim the worker cache")
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
