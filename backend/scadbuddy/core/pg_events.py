@@ -33,9 +33,8 @@ Two paths lead there:
   (`render/projection.py`) -- so the event commits, or is rolled back, with the
   change it describes. It runs in a
   savepoint: a failing log write is logged and never fails the change. The lock is
-  then held until the caller commits, so it is the transaction's last write: a row
-  written after it waits on other transactions while they wait on the lock, a
-  deadlock (`render/projection.py` once published before its activity row).
+  then held until the caller commits; see **Lock order** above for the rows written
+  after it.
 - :meth:`PgNotifyEventBus.publish` is for changes that are not in the database (the
   git-backed catalogue, outputs, settings, fonts). It never blocks and is safe from
   any thread: the event goes into an outbox -- `_Outbox`, the same bounded,
