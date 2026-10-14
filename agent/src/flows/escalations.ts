@@ -406,14 +406,17 @@ export class Escalations {
       steps: Parameters<typeof ownStep>[0] | null
       live: string[]
     }[]
+    // One predicate for both uses, so they cannot drift (#3494 review): the call's hop
+    // has not timed out by Postgres's clock (#3411), and a malformed hop_until is that
+    // call skipped, never a failed scan of every run.
+    const hopLive = this.#deps.sql`CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
+                                   THEN (w->>'hop_until')::timestamptz > now() ELSE false END`
     try {
       rows = await this.#deps.sql`
         SELECT id, workflow_run_id, started_by, waiting_on, steps,
-               -- The calls whose hop has not timed out, by Postgres's clock (#3411). A
-               -- malformed hop_until is a call skipped, never a failed scan of every run.
+               -- The calls whose hop is live (hopLive).
                (SELECT coalesce(jsonb_agg(w->>'call_id'), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w
-                 WHERE CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
-                            THEN (w->>'hop_until')::timestamptz > now() ELSE false END) AS live
+                 WHERE ${hopLive}) AS live
         FROM workflow_runs r
         WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
           -- Before the limit: runs whose calls were all delivered already, still at hop
@@ -422,8 +425,7 @@ export class Escalations {
             SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
             WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval'
               -- A call whose hop timed out, not moved on yet, yields nothing (#3411).
-              AND CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
-                       THEN (w->>'hop_until')::timestamptz > now() ELSE false END
+              AND ${hopLive}
               AND NOT EXISTS (
                 SELECT 1 FROM ai_escalation_deliveries d
                 WHERE d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w->>'call_id')))
@@ -438,6 +440,7 @@ export class Escalations {
       const { session, principal } = run.started_by
       if (typeof session !== 'string' || !isUuid(session) || typeof principal !== 'string') continue
       for (const w of run.waiting_on) {
+        // A call in `live` always has a hop_until; the test stays for its type, a string.
         if (w.kind !== 'approval' || w.hop !== 'parent' || !w.hop_until || !run.live.includes(w.call_id)) continue
         out.push({
           session,

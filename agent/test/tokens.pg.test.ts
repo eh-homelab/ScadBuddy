@@ -131,9 +131,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await store.liveTier('not-a-uuid')).toBeNull()
       const tiers = liveTokenTiers(store)
       expect(await tiers({ kind: 'bearer', id: `token:${expiring.record.id}` })).toEqual([])
+      expect(await tiers({ kind: 'oidc', id: 'oidc:https://idp.example/#alice' })).toBeUndefined()
+    })
 
-      // #3494 review: with no `now`, expiry is Postgres's clock, not a skewed replica's.
+    it("judges a live tier's expiry by Postgres's clock when no time is given (#3494)", async () => {
       const soon = await store.mint({ name: 's', tier: 'write', expiresAt: new Date(Date.now() + 5 * 60_000) })
+      // This replica's clock runs 15 minutes fast: past the expiry, which has not passed.
       vi.useFakeTimers({ toFake: ['Date'] })
       vi.setSystemTime(Date.now() + 15 * 60_000)
       try {
@@ -141,7 +144,6 @@ describe.skipIf(!TEST_DATABASE_URL)(
       } finally {
         vi.useRealTimers()
       }
-      expect(await tiers({ kind: 'oidc', id: 'oidc:https://idp.example/#alice' })).toBeUndefined()
     })
 
     it('records last use, and never moves it backwards', async () => {

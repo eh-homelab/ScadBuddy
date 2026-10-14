@@ -394,7 +394,12 @@ type EscalationInfo = Pick<FlowPending, 'hop' | 'hop_until' | 'reason' | 'propos
   hops: readonly { hop: string; action: string; actor: string }[]
 }
 
-/** Whether `at` has passed, re-rendering when it does (#3350); false for no time. */
+/**
+ * Whether `at` has passed, re-rendering when it does (#3350); false for no time. By the
+ * browser's clock, which the agent no longer trusts for the hop itself (#3411): a fast one
+ * hides the "you may decide it now" notice early. It says nothing the run page's decision
+ * does not, so that is accepted.
+ */
 function usePassed(at: string | null | undefined): boolean {
   const due = at ? Date.parse(at) : Number.NaN
   const [passed, setPassed] = useState(() => Number.isFinite(due) && due <= Date.now())
