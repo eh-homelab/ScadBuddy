@@ -2,6 +2,7 @@ import { useId, useState } from 'react'
 import { ApiError, api } from '../../api/client'
 import type { FontFamily, InstalledFamily, Param } from '../../api/types'
 import { cssFontFamily, formatFontValue, parseFontValue, preferredStyle } from '../../lib/fonts'
+import { forgetGlyphAnswers, useMissingGlyphs } from '../../lib/useMissingGlyphs'
 import { Field } from './Field'
 import { FontPicker } from './FontPicker'
 
@@ -54,6 +55,10 @@ export function FontWidget({
 
   const label = param.caption ?? param.name
   const { family, style } = parseFontValue(value)
+  // #2358 — characters of the model's text this font has no glyph for: the render
+  // leaves them out without a word. Not asked while the family is not installed, which
+  // the error above says instead.
+  const lacking = useMissingGlyphs(value, sampleText, missing.length === 0)
 
   const choices = fonts.flatMap((font) =>
     font.styles.length > 0
@@ -64,6 +69,7 @@ export function FontWidget({
     justInstalled[family] ?? fonts.find((font) => font.family === family)?.styles ?? []
 
   function onPicked(installed: InstalledFamily): void {
+    forgetGlyphAnswers()
     const names = installed.styles ?? []
     setJustInstalled((current) => ({ ...current, [installed.family]: names }))
     onChange(formatFontValue(installed.family, preferredStyle(names)))
@@ -83,6 +89,7 @@ export function FontWidget({
     try {
       const installed = await api.installFont(missingFamily)
       setJustInstalled((current) => ({ ...current, [installed.family]: installed.styles ?? [] }))
+      forgetGlyphAnswers()
       onInstalled?.(installed)
     } catch (cause) {
       setInstallError({
@@ -111,7 +118,7 @@ export function FontWidget({
           spellCheck={false}
           placeholder="Family:style=Bold"
           aria-invalid={error ? true : undefined}
-          aria-describedby={error ? `${id}-error` : undefined}
+          aria-describedby={error ? `${id}-error` : lacking.length > 0 ? `${id}-glyphs` : undefined}
           style={{ fontFamily: cssFontFamily(family) }}
           onChange={(event) => onChange(event.target.value)}
           className="sb-field"
@@ -124,6 +131,13 @@ export function FontWidget({
           Browse
         </button>
       </div>
+
+      {lacking.length > 0 && (
+        <p id={`${id}-glyphs`} role="status" data-testid="font-lacks" className="mt-1 text-[12px] text-warn">
+          {family} has no glyph for {lacking.join(' ')}; {lacking.length === 1 ? 'it is' : 'they are'} left out
+          of the print.
+        </p>
+      )}
 
       {missing.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-2">

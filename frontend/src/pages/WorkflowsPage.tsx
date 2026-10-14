@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { Link, NavLink, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { FlowRun, FlowSummary } from '../api/types'
+import type { FlowRun, FlowSummary, FlowTrigger } from '../api/types'
 import { FlowActions } from '../components/flows/FlowActions'
 import { StartRun } from '../components/flows/StartRun'
+import { TriggerList } from '../components/flows/Triggers'
 import { timeAgo } from '../lib/format'
 import {
   actorText,
@@ -30,7 +31,8 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
  * each waits on. `?session=` keeps the runs one assistant session started (F2). Answers
  * and approvals are given on a run's own page. #2350 — the Flows tab
  * (`/workflows/flows`) lists every registered flow. #2485 — each can be archived or
- * deleted there; Show archived lists those too, deleted ones with Restore.
+ * deleted there; Show archived lists those too, deleted ones with Restore. #2484 — each
+ * flow's triggers under it: when one fires next, its last run, and pause or resume.
  */
 export function WorkflowsPage({ tab = 'runs' }: { tab?: 'runs' | 'flows' }) {
   return (
@@ -96,6 +98,8 @@ function Runs() {
 function Flows() {
   const [archived, setArchived] = useState(false)
   const flows = useAsync(() => api.listFlows({ archived }), [archived])
+  // One read of every trigger, shown under its flow.
+  const triggers = useAsync(() => api.listFlowTriggers(), [])
   const toggle = (
     <label className="mb-3 flex w-fit items-center gap-2 text-[13px] text-muted">
       <input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} />
@@ -133,7 +137,15 @@ function Flows() {
       ) : (
         <ul aria-label="Flows" className="divide-y divide-line rounded-[8px] border border-line">
           {flows.data.map((latest) => (
-            <FlowRow key={latest.name} latest={latest} onChanged={() => flows.refresh()} />
+            <FlowRow
+              key={latest.name}
+              latest={latest}
+              triggers={(triggers.data ?? []).filter((t) => t.name === latest.name)}
+              onChanged={() => {
+                flows.refresh()
+                triggers.refresh()
+              }}
+            />
           ))}
         </ul>
       )}
@@ -141,7 +153,15 @@ function Flows() {
   )
 }
 
-function FlowRow({ latest, onChanged }: { latest: FlowSummary; onChanged: () => void }) {
+function FlowRow({
+  latest,
+  triggers,
+  onChanged,
+}: {
+  latest: FlowSummary
+  triggers: FlowTrigger[]
+  onChanged: () => void
+}) {
   const state = flowStateText(latest)
   return (
     <li data-flow={latest.name} className="flex flex-col gap-1.5 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
@@ -162,6 +182,11 @@ function FlowRow({ latest, onChanged }: { latest: FlowSummary; onChanged: () => 
           Registered by {actorText(latest.created_by)}
           {state && `. ${state}, ${timeAgo((latest.deleted_at ?? latest.archived_at)!)}`}
         </p>
+        {triggers.length > 0 && (
+          <div className="mt-1.5">
+            <TriggerList triggers={triggers} onChanged={onChanged} compact />
+          </div>
+        )}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         {/* #2483: a flow's inputs are asked for before it starts. */}

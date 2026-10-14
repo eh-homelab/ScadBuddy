@@ -443,8 +443,7 @@ describe('LibraryUpgrade', () => {
     expect(reads).toBe(2)
   })
 
-  // The reload after a removal re-lists the rows from scratch: a refusal shown beside
-  // another row is not kept next to a row that may now be removable.
+  // A refusal shown beside another row is not kept next to a row that may now be removable.
   it("drops another row's refusal once a removal goes through", async () => {
     const [a, b] = ['deadbeef', 'feedface'].map((c) => ({ name: 'BOSL2', commit: c.repeat(5), used_by: [] }))
     setMockUnusedCheckouts([a!, b!])
@@ -462,8 +461,6 @@ describe('LibraryUpgrade', () => {
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
     expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef')
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 feedfac' }))
-    // The reload shows its loading state first, which has no list at all: wait for the
-    // re-listed rows, not merely for the removed one to be gone.
     await waitFor(() => {
       const left = screen.getByRole('list', { name: 'Checkouts no model uses' })
       expect(within(left).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual([
@@ -471,6 +468,18 @@ describe('LibraryUpgrade', () => {
       ])
     })
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('keeps the chosen library on screen while a removal re-lists the checkouts', async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    const { user } = renderPage(<LibraryUpgrade />)
+    await user.selectOptions(await screen.findByLabelText('Library'), 'BOSL2')
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    // No "Loading libraries" in between: the library, its checks and ticks stay.
+    expect(screen.queryByText('Loading libraries')).toBeNull()
+    expect(screen.getByLabelText('Library')).toHaveValue('BOSL2')
   })
 
   it("says why a removal was refused, and keeps the row", async () => {

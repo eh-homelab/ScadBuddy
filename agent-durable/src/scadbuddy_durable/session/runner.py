@@ -73,7 +73,9 @@ from temporalio.claude_agent_sdk import (
 
 # Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
 # as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
-# HeldText stops holding anything, with no error.
+# HeldText stops holding anything, with no error. Guarded by the tests
+# test_the_plugins_runner_publishes_text_through_the_held_contextvar and
+# test_a_refused_credentials_scripted_notice_never_reaches_the_transcript (#3383).
 from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
@@ -101,6 +103,22 @@ def _http_url(value: object) -> TypeGuard[str]:
     except ValueError:
         return False
     return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+#: Schemes a refused URL may be named by. Any other "scheme" may be part of the URL:
+#: urlsplit reads ``localhost:8081/mcp``'s host as its scheme.
+NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", "wss"})
+
+
+def _url_problem(value: str) -> str:
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "unparseable"
+    if parts.scheme not in ("http", "https"):
+        return f"scheme {parts.scheme!r}" if parts.scheme in NAMED_SCHEMES else "no scheme"
+    return "no host"
 
 
 IMAGES_SERVER = "scadbuddy_images"
@@ -153,9 +171,10 @@ _FINAL = re.compile(
 # subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
 # words with the amount that follows, and only at the start: the SDK raises them as
 # "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
-# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
-# error's text is the session's content, and one that quotes the subtype or the words,
-# even the whole phrase, is not the cap (#2675).
+# (claude-agent-sdk 0.2.164, the pin in pyproject.toml: claude_agent_sdk/_internal/
+# query.py:523 builds that prefix; check it on every bump), the CLI's own errors first.
+# The rest of an error's text is the session's content, and one that quotes the subtype
+# or the words, even the whole phrase, is not the cap (#2675).
 _BUDGET_REACHED = re.compile(
     r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
 )
@@ -524,6 +543,8 @@ class ScadBuddyRunner:
         self._plugin_dir = plugin_dir
         self._package_root = package_root
         self._subagent_url = subagent_url
+        # The refused stored URL last warned of: warned once, not on every segment.
+        self._refused_url: str | None = None
         # Read once, at the first segment that gives subagents: the files are the image's.
         self._agents_dir = agents_dir
         self._agents: dict[str, AgentDefinition] | None = None
@@ -574,8 +595,18 @@ class ScadBuddyRunner:
         url = stored.get("url") if isinstance(stored, dict) else None
         if not _http_url(url):
             # The agent's route stores only an http(s) URL; a row written any other way
-            # does not reach the subagents' definitions (#2883).
+            # does not reach the subagents' definitions (#2883). Said, so an operator
+            # sees why the setting has no effect; the URL itself is never logged (#3054).
+            if isinstance(url, str) and url and url != self._refused_url:
+                self._refused_url = url
+                logger.warning(
+                    "the stored subagent server URL is not an http(s) URL with a host (%s);"
+                    " using the worker's own",
+                    _url_problem(url),
+                )
             url = self._subagent_url
+        else:
+            self._refused_url = None
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
@@ -679,6 +710,16 @@ class ScadBuddyRunner:
                     type(err).__name__,
                     len(error_text(err).encode()),
                 )
+                if _BUDGET_REACHED.match(str(err)):
+                    # The cap raised rather than returned: today the plugin returns it,
+                    # but a raised one is the same cap, charged and ended the same way
+                    # as the returned one above, never a failure (#3356).
+                    return SegmentOutput(
+                        session_id=inp.session_id,
+                        is_error=True,
+                        error=BUDGET_EXHAUSTED,
+                        cost_usd=max(_cost(err), left),
+                    )
                 if credentials_fault(err) and i + 1 < len(credentials):
                     if held is not None:
                         # Mostly the refusal notice. A fault mid-segment also drops real
@@ -716,6 +757,8 @@ class ScadBuddyRunner:
                 if token is not None:
                     _EMIT.reset(token)
                 if held is not None:
+                    # Not a leak: a failure that is not the credential's ends the turn on
+                    # this credential, so what it said is the turn's and is published.
                     held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 

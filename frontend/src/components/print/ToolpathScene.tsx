@@ -3,7 +3,15 @@ import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { cameraFraming } from '../../lib/previewFrame'
-import { STRIDE, TRAVEL, printedUpTo, toolpathLines, type Toolpath, type ToolpathView } from '../../lib/toolpath'
+import {
+  STRIDE,
+  TRAVEL,
+  layerDrawCount,
+  printedUpTo,
+  toolpathLines,
+  type Toolpath,
+  type ToolpathView,
+} from '../../lib/toolpath'
 
 type Props = {
   path: Toolpath
@@ -70,9 +78,7 @@ function ToolpathLines({ path, view, layer }: Omit<Props, 'background'>) {
   const upTo = useMemo(() => (view === 'layers' ? printedUpTo(path) : null), [path, view])
   useEffect(() => () => geometry.dispose(), [geometry])
   useEffect(() => {
-    const lines = upTo === null || layer === null ? undefined : upTo[Math.min(layer, upTo.length - 1)]
-    // Two vertices a line.
-    geometry.setDrawRange(0, lines === undefined ? Infinity : 2 * lines)
+    geometry.setDrawRange(0, layerDrawCount(upTo, layer))
     invalidate()
   }, [geometry, upTo, layer, invalidate])
 

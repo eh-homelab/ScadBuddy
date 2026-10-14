@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
-import { Route, Routes, useParams } from 'react-router'
+import { Route, Routes, useNavigate, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import type * as embed from '../lib/embed'
@@ -40,6 +40,16 @@ function render(archiveId: number | string) {
       <Route path="/m/:slug/versions" element={<Landed name="versions" />} />
     </Routes>,
     { route: `/prints/${archiveId}` },
+  )
+}
+
+/** Goes to another print while the detail page stays mounted. */
+function NextPrint() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate('/prints/91')}>
+      Next print
+    </button>
   )
 }
 
@@ -300,6 +310,83 @@ describe('PrintDetailPage (#311)', () => {
     const files = await section('Files')
     expect(within(files).getByText('Library file')).toBeInTheDocument()
     expect(within(files).getByText('spool-lock.3mf')).toBeInTheDocument()
+  })
+
+  it('starts each library print on its image, even in the same mounted page (#2915)', async () => {
+    const base = prints.find((print) => print.archive_id === 35)!
+    const libraryPrint = (archiveId: number, fileId: number) => ({
+      ...base,
+      archive_id: archiveId,
+      output_id: null,
+      slug: null,
+      library_file_id: fileId,
+      params_diff: null,
+      provenance: null,
+      files: [
+        {
+          kind: 'preview_glb',
+          name: 'plate.glb',
+          size: null,
+          url: `/api/v1/print/library/${fileId}/preview.glb?plate=1`,
+        },
+      ],
+      links: { ...base.links, customize_url: null },
+    })
+    server.use(
+      http.get('/api/v1/prints/:id', ({ params }) =>
+        HttpResponse.json(params['id'] === '90' ? libraryPrint(90, 89) : libraryPrint(91, 88)),
+      ),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route
+          path="/prints/:archiveId"
+          element={
+            <>
+              <PrintDetailPage />
+              <NextPrint />
+            </>
+          }
+        />
+      </Routes>,
+      { route: '/prints/90' },
+    )
+    await user.click(within(await section('Library file')).getByRole('button', { name: 'Show in 3D' }))
+    expect(await screen.findByTestId('preview')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Next print' }))
+
+    const plate = await screen.findByRole('img', { name: 'Plate 1 of the library file' })
+    expect(plate).toHaveAttribute('src', '/api/v1/print/library/88/plates/1/thumbnail')
+    expect(screen.queryByTestId('preview')).not.toBeInTheDocument()
+  })
+
+  it('shows a placeholder, not a broken image, for a plate image that will not load (#2915)', async () => {
+    const base = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/90', () =>
+        HttpResponse.json({
+          ...base,
+          archive_id: 90,
+          output_id: null,
+          slug: null,
+          library_file_id: 89,
+          params_diff: null,
+          provenance: null,
+          files: [
+            { kind: 'preview_glb', name: 'p.glb', size: null, url: '/api/v1/print/library/89/preview.glb?plate=2' },
+          ],
+          links: { ...base.links, customize_url: null },
+        }),
+      ),
+    )
+    render(90)
+    const plate = await section('Library file')
+    fireEvent.error(within(plate).getByRole('img', { name: 'Plate 2 of the library file' }))
+
+    expect(within(plate).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(plate).getByText('No image of plate 2')).toBeInTheDocument()
+    expect(within(plate).getByRole('button', { name: 'Show in 3D' })).toBeInTheDocument()
   })
 
   it('links the template', async () => {

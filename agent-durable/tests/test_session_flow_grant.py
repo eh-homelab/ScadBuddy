@@ -134,6 +134,62 @@ async def test_a_flow_turns_call_inside_the_grant_runs_with_no_entry(
     await base._replays(harness, handle)
 
 
+async def test_a_flow_turns_plugin_tool_call_inside_the_grant_runs_with_no_entry(
+    harness: base.Harness, agent_db: Conn, connect: Connect, granted: GrantCheck
+) -> None:
+    """#2649: a turn tool (a plugin's, or http_request) is described with an input hash
+    like ScadBuddy's own, so a run grant that names it covers it in a flow turn, and its
+    approval is bound to that hash: one of its own, not the grant reply's."""
+    described = "d" * 64
+    harness.stand_in.turn_offered = [base.NOTES_POST]
+    harness.stand_in.input_hashes["notes__post"] = described
+    granted.use_hash = described
+    sid, handle = await harness.session(agent_db)
+    await send_flow(handle, "post it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
+    [checked] = granted.checked
+    assert (checked["tool"], checked["args"]) == ("notes__post", {"method": "POST", "body": "x"})
+    cur = await agent_db.execute(
+        "SELECT outcome, responder FROM ai_input_responses WHERE request_id = %s",
+        (checked["request_id"],),
+    )
+    assert await cur.fetchall() == [
+        ("approved", {"kind": "run_grant", "id": "g1", "label": "Run grant"})
+    ]
+    cur = await agent_db.execute(
+        "SELECT action, principal_kind, principal_id, input_hash FROM ai_audit"
+        " WHERE request_id = %s AND kind = 'approval'",
+        (checked["request_id"],),
+    )
+    assert await cur.fetchall() == [("approved", "run_grant", "g1", described)]
+    log = base._types(await events(agent_db, sid))
+    assert "approval.required" not in log and "input.resolved" not in log
+    await base._replays(harness, handle)
+
+
+async def test_a_grant_used_for_another_input_does_not_admit_a_plugin_tools_call(
+    harness: base.Harness, agent_db: Conn, granted: GrantCheck
+) -> None:
+    """#2649: the recorded use must be for this call's own input hash; a verdict for
+    another input parks the turn tool's call, as it does ScadBuddy's own."""
+    harness.stand_in.turn_offered = [base.NOTES_POST]
+    harness.stand_in.input_hashes["notes__post"] = "d" * 64
+    granted.use_hash = "e" * 64
+    sid, handle = await harness.session(agent_db)
+    await send_flow(handle, "post it")
+    [entry] = await base._parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    # Consulted and refused, not skipped: a plugin tool that never asked would park too.
+    [checked] = granted.checked
+    assert checked["tool"] == "notes__post"
+    cur = await agent_db.execute(
+        "SELECT count(*) FROM ai_input_responses WHERE session_id = %s", (sid,)
+    )
+    assert await cur.fetchone() == (0,)
+
+
 async def test_a_turn_the_person_sends_is_no_flow_turn(
     harness: base.Harness, agent_db: Conn, granted: GrantCheck
 ) -> None:

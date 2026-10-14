@@ -11,7 +11,7 @@ export const backgroundWorkflowId = (sessionId: string, taskId: string) => `bgta
 
 /** What runs the tasks: Temporal in the service (temporal.ts), a stand-in in tests. */
 export type TaskRunner = {
-  start(task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void>
+  start(task: Pick<BackgroundTask, 'id' | 'kind' | 'sessionId'>): Promise<void>
   /** Cancels a task's workflow; one that is not running is left as it is. */
   cancel(task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void>
   /** Ends a task's workflow at once, running nothing more (the session is being forgotten). */

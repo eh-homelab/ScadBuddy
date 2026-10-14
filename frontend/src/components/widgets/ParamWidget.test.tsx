@@ -432,6 +432,69 @@ describe('color', () => {
     expect(onChange).toHaveBeenLastCalledWith('#AABBCC')
   })
 
+  // #2357 — "red" was sent as "#RREEDD" and "#12" as "#120000": a value that is no
+  // colour is never padded into one.
+  it('turns a colour name into its hex', async () => {
+    const { onChange, user } = setup(param, '#1B6CA8')
+    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('red')
+    expect(onChange).not.toHaveBeenCalled()
+    await user.tab()
+    expect(onChange).toHaveBeenLastCalledWith('#FF0000')
+    expect(hex).toHaveValue('#FF0000')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it.each([['blah'], ['#12'], ['#GGG']])('keeps %j as typed and says it is no colour', async (typed) => {
+    const { onChange, user } = setup(param, '#1B6CA8')
+    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    await user.tripleClick(hex)
+    await user.keyboard(typed)
+    await user.tab()
+    expect(onChange).toHaveBeenLastCalledWith(typed.toUpperCase())
+    expect(hex).toHaveValue(typed.toUpperCase())
+    expect(hex).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Plate must be a colour')
+  })
+
+  it('sends nothing while a hex is half typed, and takes a whole one at once', async () => {
+    const { onChange, user } = setup(param, '#1B6CA8')
+    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('#00FF0')
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.keyboard('0')
+    expect(onChange).toHaveBeenLastCalledWith('#00FF00')
+  })
+
+  it('takes a hex typed without its #, sending it with one', async () => {
+    const { onChange, user } = setup(param, '#1B6CA8')
+    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('F00')
+    await user.tab()
+    expect(onChange).toHaveBeenLastCalledWith('#FF0000')
+  })
+
+  it('drops a half-typed draft when the value is set from outside', async () => {
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    const view = render(
+      <ParamWidget slug="name-keychain" param={param} value="#1B6CA8" fonts={fonts} onChange={onChange} />,
+    )
+    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('#00FF')
+    // A preset applied while the box still has focus.
+    view.rerender(<ParamWidget slug="name-keychain" param={param} value="#123456" fonts={fonts} onChange={onChange} />)
+    expect(hex).toHaveValue('#123456')
+    await user.tab()
+    expect(onChange).not.toHaveBeenCalledWith('#00FF')
+    expect(onChange).toHaveBeenLastCalledWith('#123456')
+  })
+
   it('pairs a colour picker with the hex field', () => {
     const { container } = render(
       <ParamWidget

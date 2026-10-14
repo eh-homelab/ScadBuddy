@@ -378,6 +378,9 @@ def test_a_repair_commits_each_row_it_restores(pg_pool: PgPool, index: ActivityI
             finished_at=found["finished_at"],
         )
 
+    with pg_pool.connection() as conn:
+        # What this relies on: the repair's own pool commits each row's transaction.
+        assert conn.autocommit, "the repair's pool is no longer autocommit"
     restored = index._repair_source(
         DAY, "print_run:", "print_runs", "r.id, r.created_at, r.finished_at", build
     )

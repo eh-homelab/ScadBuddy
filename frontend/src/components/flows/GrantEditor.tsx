@@ -2,7 +2,17 @@ import { useMemo, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
 import type { BambuddyTargets, FlowGrantRule, FlowGrantSpec, ModelSummary } from '../../api/types'
-import { BOUNDS, type Bound, grantProblems, type HostFn, HOUR, isUnbounded, MAX_GRANT_MS, unboundedText } from '../../lib/grants'
+import {
+  BOUNDS,
+  type Bound,
+  grantProblems,
+  type HostFn,
+  HOUR,
+  isUnbounded,
+  MAX_GRANT_MS,
+  MAX_STANDING_GRANT_MS,
+  unboundedText,
+} from '../../lib/grants'
 import { useAsync, type AsyncState } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -132,6 +142,8 @@ interface Props {
   busy?: boolean
   onSubmit: (spec: FlowGrantSpec) => void
   onCancel?: () => void
+  /** #2484 — a trigger's standing grant: up to 30 days, 7 by default, and no starting session to ask. */
+  standing?: boolean
 }
 
 /**
@@ -154,13 +166,24 @@ export function GrantEditor(props: Props) {
   return <Form {...props} outwardTools={host.data.tools.filter((t) => t.tier === 'outward').map((t) => t.name)} />
 }
 
-function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: Props & { outwardTools: string[] }) {
+function Form({
+  initial,
+  submitLabel,
+  busy,
+  onSubmit,
+  onCancel,
+  standing = false,
+  outwardTools,
+}: Props & { outwardTools: string[] }) {
+  const maxMs = standing ? MAX_STANDING_GRANT_MS : MAX_GRANT_MS
   const printers = useAsync(() => api.getBambuddyTargets(), [])
   const models = useAsync(() => api.listModels(), [])
   const [rows, setRows] = useState(() => initialRows(initial, outwardTools))
-  const [expires, setExpires] = useState(() => localInput(initial?.expires_at ?? Date.now() + 24 * HOUR))
+  const [expires, setExpires] = useState(() =>
+    localInput(initial?.expires_at ?? Date.now() + (standing ? 7 * 24 : 24) * HOUR),
+  )
   const [sessions, setSessions] = useState(initial?.sessions ?? false)
-  const [askStarter, setAskStarter] = useState(initial?.ask_starter_session ?? true)
+  const [askStarter, setAskStarter] = useState(standing ? false : (initial?.ask_starter_session ?? true))
   // The picker's range, from when the form opened; the check below is against now.
   const [openedAt] = useState(() => Date.now())
 
@@ -173,7 +196,7 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
   }
   const outward = useMemo(() => new Set(outwardTools), [outwardTools])
   const typing = typingProblems(rows)
-  const problems = [...typing, ...(typing.length > 0 ? [] : grantProblems(spec, new Date(), outward))]
+  const problems = [...typing, ...(typing.length > 0 ? [] : grantProblems(spec, new Date(), outward, maxMs))]
 
   const update = (key: string, change: Partial<RowDraft>) =>
     setRows((current) => current.map((r) => (r.key === key ? { ...r, ...change } : r)))
@@ -209,7 +232,7 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
           aria-label="Expires"
           value={expires}
           min={localInput(openedAt)}
-          max={localInput(openedAt + MAX_GRANT_MS)}
+          max={localInput(openedAt + maxMs)}
           onChange={(e) => setExpires(e.target.value)}
           className={FIELD}
         />
@@ -218,10 +241,12 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
         <input type="checkbox" checked={sessions} onChange={(e) => setSessions(e.target.checked)} />
         Extends to the sessions it starts
       </label>
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={askStarter} onChange={(e) => setAskStarter(e.target.checked)} />
-        Ask the starting session first
-      </label>
+      {!standing && (
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={askStarter} onChange={(e) => setAskStarter(e.target.checked)} />
+          Ask the starting session first
+        </label>
+      )}
       {problems.length > 0 && (
         <ul role="alert" className="list-disc pl-5 text-warn">
           {problems.map((p) => (

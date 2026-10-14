@@ -29,6 +29,18 @@ export type BackgroundTask = {
 
 /** At most this many tasks active in one session at once. */
 export const MAX_ACTIVE = 10
+/** A monitor that makes more events than this is stopped ("Monitors that produce too many events are automatically stopped"). */
+export const MAX_EVENTS = 200
+/** One event's text at most (its lines past this are cut). */
+export const EVENT_MAX_CHARS = 8000
+/** One recorded notice at most, wrapper included (the column's cap): its text is cut first (monitor.ts eventNotice). */
+export const NOTICE_MAX_CHARS = 16384
+/**
+ * One delivery's events at most, by their recorded text: MAX_EVENTS of NOTICE_MAX_CHARS
+ * would be ~3 MB in one message, past any context, and a classic session would then
+ * fail every turn after it on the same transcript. The rest go in the next delivery.
+ */
+export const DELIVER_MAX_CHARS = 64_000
 
 type Row = {
   id: string
@@ -131,5 +143,53 @@ export class BackgroundTaskStore {
       UPDATE ai_background_tasks SET state = ${state}, detail = ${detail ?? null}, next_at = NULL, updated_at = now()
       WHERE id = ${id} AND state = 'active' RETURNING id`
     return rows.length === 1
+  }
+
+  /** Records one event of a monitor; false once it has MAX_EVENTS (it is then stopped). */
+  async appendEvent(taskId: string, text: string): Promise<boolean> {
+    const rows = await this.#sql`
+      INSERT INTO ai_background_events (task_id, text)
+      SELECT ${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)}
+      WHERE (SELECT count(*) FROM ai_background_events WHERE task_id = ${taskId}) < ${MAX_EVENTS}
+      RETURNING seq`
+    return rows.length === 1
+  }
+
+  /** Records a monitor's last notice (its end), past MAX_EVENTS. */
+  async appendNotice(taskId: string, text: string): Promise<void> {
+    await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)})`
+  }
+
+  /**
+   * A task's events not yet sent to its session, oldest first, as many as fit in
+   * `maxChars` of text, and always the oldest one (a notice is at most NOTICE_MAX_CHARS).
+   */
+  async pendingEvents(taskId: string, maxChars = DELIVER_MAX_CHARS): Promise<{ seq: string; text: string }[]> {
+    return this.#sql<{ seq: string; text: string }[]>`
+      SELECT seq::text AS seq, text FROM (
+        SELECT seq, text,
+          sum(length(text)) OVER (ORDER BY seq) AS through,
+          row_number() OVER (ORDER BY seq) AS n
+        FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL
+      ) pending
+      WHERE n = 1 OR through <= ${maxChars}
+      ORDER BY seq`
+  }
+
+  /** How many of a task's events are not yet sent to its session. */
+  async pendingCount(taskId: string): Promise<number> {
+    const [row] = await this.#sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL`
+    return row?.n ?? 0
+  }
+
+  async delivered(taskId: string, upTo: string): Promise<void> {
+    await this.#sql`
+      UPDATE ai_background_events SET delivered_at = now() WHERE task_id = ${taskId} AND seq <= ${upTo} AND delivered_at IS NULL`
+  }
+
+  async eventCount(taskId: string): Promise<number> {
+    const [row] = await this.#sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId}`
+    return row?.n ?? 0
   }
 }

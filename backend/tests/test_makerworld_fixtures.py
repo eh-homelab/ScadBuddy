@@ -37,7 +37,12 @@ def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -> None:
     # Every fixture reads since #2337; a refusal is the reader's own tests' to pin (#2490).
+    # Read whole, as read_objects takes bytes: unlike the hash above, this holds a file
+    # of up to 98 MB in memory, one per xdist worker.
     expected = entry["arrange_reads"]
+    assert "refused" not in expected, (
+        f"{entry['file']}: the manifest records a refusal; pin it in the reader's tests"
+    )
     objects = read_objects(makerworld_path(entry["file"]).read_bytes(), ReadBudget())
     assert {
         "objects": len(objects),

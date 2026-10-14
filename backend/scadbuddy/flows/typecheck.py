@@ -33,11 +33,12 @@ class ScriptProblem(BaseModel):
 
 
 async def check_script(
-    script: str, inputs_schema: dict[str, Any] | None = None
+    script: str, inputs_schema: dict[str, Any] | None = None, *, stored: bool = False
 ) -> list[ScriptProblem]:
     """Every problem with `script` and, when the flow declares inputs, with its inputs
-    schema (#2483), against which `inputs()` is typed; empty when it may run."""
-    if inputs_schema is not None and (found := schema_problems(inputs_schema)):
+    schema (#2483), against which `inputs()` is typed; empty when it may run. ``stored``
+    for a registered version starting: see :func:`schema_problems`."""
+    if inputs_schema is not None and (found := schema_problems(inputs_schema, stored=stored)):
         return [ScriptProblem(message=message, file=INPUTS_FILE) for message in found]
     if len(script.encode()) > MAX_SCRIPT_BYTES:
         return [ScriptProblem(message="script is over 64 KiB")]

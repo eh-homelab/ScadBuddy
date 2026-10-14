@@ -15,7 +15,7 @@ import {
 } from './session.js'
 import SCHEMAS from './schemas.json' with { type: 'json' }
 import { type WebContext, webFetch, webSearch } from './web.js'
-import { type BackgroundContext, cronCreate, cronDelete, cronList, scheduleWakeup, taskStop } from './background.js'
+import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
 
 // A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
@@ -37,7 +37,7 @@ export type BuiltinContext = {
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
-export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'TaskStop']
+export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
 
 const noTasks = (): BuiltinResult => ({ text: 'This session cannot keep background tasks.', isError: true })
 const withTasks =
@@ -207,8 +207,24 @@ export const BUILTINS: Record<string, Builtin> = {
     }),
     run: withTasks(scheduleWakeup),
   },
+  Monitor: {
+    description:
+      "Claude Code's Monitor: starts a background watch that streams events. With `command`, a shell script (bash, in the same " +
+      'directory as this session\'s Bash) whose stdout lines are the events, batched within 200 ms, and whose exit ends the watch; ' +
+      'filter it to the lines you would act on (grep --line-buffered), covering failures as well as success. With `ws`, a WebSocket ' +
+      'whose text frames are the events. It expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than ' +
+      '200 events is stopped. Events reach you as a new message once the session is idle. Use TaskStop to cancel it early. For one ' +
+      'notification ("tell me when X is ready"), prefer a command that exits when the condition holds.',
+    input: z.object({
+      description: z.string(),
+      timeout_ms: z.number().optional(),
+      command: z.string().optional(),
+      ws: z.object({ url: z.string(), protocols: z.array(z.string()).optional() }).optional(),
+    }),
+    run: withTasks(monitor),
+  },
   TaskStop: {
-    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job or wakeup) by its ID.",
+    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup or monitor) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
     run: withTasks(taskStop),
   },

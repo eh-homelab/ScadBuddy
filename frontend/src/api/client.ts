@@ -1,5 +1,8 @@
 import type {
   InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -23,6 +26,7 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  GlyphCoverage,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -116,7 +120,11 @@ import type {
   FlowRunStarted,
   FlowRunView,
   FlowState,
+  FlowStandingGrant,
   FlowSummary,
+  FlowTrigger,
+  FlowTriggerCreate,
+  FlowTriggerUpdate,
   FlowVersion,
   Operation,
   OperationAccepted,
@@ -848,6 +856,36 @@ export const api = {
   revokeFlowGrant: (id: string) =>
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
 
+  // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
+  // as whoever made it. A standing grant is approved as sent from here; only a person
+  // approves or declines an agent's.
+  /** The newest 200, the route's most. */
+  listFlowTriggers: (name?: string) =>
+    request<FlowTrigger[]>(`/flow-triggers?limit=200${name ? `&name=${encodeURIComponent(name)}` : ''}`),
+  getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
+  createFlowTrigger: (body: FlowTriggerCreate) =>
+    request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
+  updateFlowTrigger: (id: string, body: FlowTriggerUpdate) =>
+    request<FlowTrigger>(`/flow-triggers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  pauseFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/pause`, { method: 'POST' }),
+  resumeFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/resume`, { method: 'POST' }),
+  deleteFlowTrigger: (id: string) => request<void>(`/flow-triggers/${seg(id)}`, { method: 'DELETE' }),
+  /** `seen` is the trigger's as it was shown: the server refuses (409) when it changed since. */
+  attachFlowTriggerGrant: (id: string, spec: FlowGrantSpec, seen: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, seen }),
+    }),
+  approveFlowTriggerGrant: (id: string, seen: string, spec?: FlowGrantSpec) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec, seen } : { seen }),
+    }),
+  declineFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
 
@@ -1472,6 +1510,16 @@ export const api = {
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
 
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
+
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
@@ -1792,6 +1840,10 @@ export const api = {
     }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
+
+  /** #2358 — the characters of `text` the font has no glyph for, which a render leaves out. */
+  getGlyphs: (font: string, text: string) =>
+    request<GlyphCoverage>(`/fonts/glyphs?${new URLSearchParams({ font, text })}`),
 
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
   listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {

@@ -468,6 +468,8 @@ export class TurnRunner {
                                 owner: session.owner,
                                 tz: this.deps.background.tz,
                                 now: () => new Date(),
+                                // A Monitor's command runs where this turn's Bash runs: this replica.
+                                commandQueue: this.deps.background.commandQueue,
                               },
                             }
                           : {}),

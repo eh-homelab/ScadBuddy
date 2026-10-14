@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -188,6 +189,17 @@ class _Unreachable(BambuddyContentBackend):
         raise OSError("Bambuddy is down")
 
 
+class _Reachable(BambuddyContentBackend):
+    """A Bambuddy whose unrecorded-upload sweep works, and records that it ran."""
+
+    def __init__(self) -> None:
+        self.swept = 0
+
+    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+        self.swept += 1
+        return []
+
+
 @pytest.mark.parametrize("failing", ["sweep_content", "sweep_unrecorded"])
 async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
     monkeypatch: pytest.MonkeyPatch, failing: str
@@ -211,3 +223,68 @@ async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
     with pytest.raises(OSError, match="down"):
         await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
     assert cache.evicted == 1
+
+
+class _FailingCache(CachedBlobStore):
+    """A worker cache whose trim fails."""
+
+    def __init__(self) -> None:
+        pass
+
+    def evict(self, *, now: float | None = None) -> list[str]:
+        raise RuntimeError("the cache disk is full")
+
+
+def _sweep_state(cache: CachedBlobStore, backend: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        store=SimpleNamespace(content=SimpleNamespace(backend=backend), blobs=cache),
+        refs=object(),
+        config=SimpleNamespace(job_ttl=86400),
+    )
+
+
+async def test_a_failing_trim_does_not_hide_the_bambuddy_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2560: each failure is logged on its own, and the Bambuddy one is what fails
+    the Schedule's activity, not the trim raised over it."""
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        raise OSError("Bambuddy is down")
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    with pytest.raises(OSError, match="down"):
+        await main._sweep_blobs_logged(_sweep_state(_FailingCache(), _Unreachable()))  # type: ignore[arg-type]
+    logged = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
+    assert isinstance(logged["could not trim the worker cache"], RuntimeError)
+    assert isinstance(logged["could not sweep unreferenced blobs"], OSError)
+
+
+async def test_a_failing_trim_alone_fails_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both Bambuddy steps succeed, then the trim fails: that is the sweep's failure
+    (review #2984: a real backend, so `sweep_unrecorded` runs too)."""
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    backend = _Reachable()
+    with pytest.raises(RuntimeError, match="disk is full"):
+        await main._sweep_blobs_logged(_sweep_state(_FailingCache(), backend))  # type: ignore[arg-type]
+    assert backend.swept == 1
+
+
+async def test_a_cancelled_sweep_stays_cancelled_when_the_trim_also_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #2984: the `BaseException` branch. A cancellation propagates as itself,
+    and the trim's own failure under it is only logged."""
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    with pytest.raises(asyncio.CancelledError):
+        await main._sweep_blobs_logged(_sweep_state(_FailingCache(), _Reachable()))  # type: ignore[arg-type]
+    logged = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
+    assert isinstance(logged["could not trim the worker cache"], RuntimeError)

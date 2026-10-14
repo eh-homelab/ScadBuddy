@@ -5,6 +5,7 @@ import type { FlowDefinition, FlowRegister, FlowScriptProblem, FlowVersion } fro
 import { FlowActions } from '../components/flows/FlowActions'
 import { FlowScript } from '../components/flows/FlowScript'
 import { StartRun } from '../components/flows/StartRun'
+import { FlowTriggers } from '../components/flows/Triggers'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { parseSchemaText, schemaText } from '../lib/flowInputs'
@@ -181,6 +182,13 @@ export function FlowPage() {
                   <ScriptEditor key={flow.data.id} flow={flow.data} onSaved={(saved) => void navigate(flowPath(saved.id))} />
                 )}
               </section>
+              {/* #2484: its schedules and event triggers, each pinned to a version. */}
+              <FlowTriggers
+                name={flow.data.name}
+                definitionId={flow.data.id}
+                schema={flow.data.inputs_schema ?? null}
+                disabled={state !== null}
+              />
               {versions.data && versions.data.length > 0 && (
                 <Compare
                   key={`${id}:${versions.data.length}`}

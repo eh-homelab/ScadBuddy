@@ -451,8 +451,10 @@ def _authors_3mf(tmp_path: Path) -> bytes:
 
 
 def _sliced_3mf() -> bytes:
-    """The same bytes on every call: a name alone stamps each entry with the current
-    time, so two calls a second apart differed and a test comparing them flaked."""
+    """The same bytes on every call. A name alone stamps each entry with the current
+    time, which the zip header stores at 2-second resolution, so two calls differed
+    only when they straddled a 2-second boundary, and a test comparing them flaked.
+    A pinned date_time makes every build byte-identical."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, text in (

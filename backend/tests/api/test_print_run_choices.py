@@ -211,6 +211,10 @@ def test_a_templates_print_settings_reach_the_slice(
     declare_print_settings(paths, model, {"enable_support": "0", "enable_prime_tower": "1"})
     upload_route()
     run_routes()
+    # A support setting is written in the preset's shape, so the preset is read (#1899).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {"enable_support": "0"}})
+    )
     sliced = slice_routes()
     queue_route()
 
@@ -1683,6 +1687,23 @@ def test_the_check_warns_of_a_plate_the_printer_does_not_take(
         f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type="Supertack Plate")
     )
     assert "plate-not-listed" not in [w["kind"] for w in fine.json()["warnings"]]
+
+
+@respx.mock
+def test_a_run_records_a_plate_the_printer_does_not_take(client: TestClient, model: str) -> None:
+    """#2858: the run's warnings, not only the check's, name a plate the H2C does not
+    take, judged against the printer's model as the run resolved it."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(bed_type="Cool Plate"))
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "plate-not-listed"]
+    assert "does not list Cool Plate among its plates" in warning["message"]
 
 
 @respx.mock

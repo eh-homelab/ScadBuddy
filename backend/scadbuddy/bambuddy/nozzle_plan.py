@@ -41,8 +41,12 @@ CLI source (``src/BambuStudio.cpp``, the 02.08 tree the deployed
   one-plate library file as plate 0 (#2180), so the plan writes it too.
 * ``extruder_nozzle_stats`` offer exactly the sides the plan uses. On 2026-09-28 (#745)
   the deployed slicer was measured not to follow a Manual map while the stats offered
-  both sides; if it still does not, its Auto For Flush grouping is held to the same
-  sides by the stats, and with both offered it spreads the colours as the plan does.
+  both sides, a full-length one included; its Auto For Flush grouping is held to the
+  same sides by the stats. So the stats steer it and the map does not: with one side
+  offered every filament prints there, but with both offered the slicer chooses which
+  filaments share a hotend (preview-slice 37 put two blacks on the right, where the plan
+  split them), and a side chosen by hand is not kept either. The print dialog therefore
+  shows the sides a slice of the choices used once it lands (#2703).
 """
 
 from __future__ import annotations

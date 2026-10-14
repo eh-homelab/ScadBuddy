@@ -1,5 +1,3 @@
-import type { Resolver } from '../http/egress.js'
-import { webFetchEgressHook } from './webFetchEgress.js'
 import path from 'node:path'
 import {
   type CanUseTool,
@@ -14,6 +12,7 @@ import {
   type SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
+import type { Resolver } from '../http/egress.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
   type ApprovalGate,
@@ -23,6 +22,7 @@ import {
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
+import { webFetchEgressHook } from './webFetchEgress.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
 import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
 import { declaresRemoteServers } from '../plugins/packages/mcp.js'

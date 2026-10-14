@@ -74,7 +74,7 @@ import { AgentWorker } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
-import { DurableTurns } from './sessions/durable.js'
+import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
@@ -298,7 +298,10 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
-// A session's background tasks (CronCreate, ScheduleWakeup, TaskStop), in either mode:
+// This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
+// Monitor commands, which run where its turns' Bash runs.
+const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+// A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
 // payloads are task ids only, so its client has no codec.
 const backgroundTasks =
@@ -362,7 +365,7 @@ const sessions =
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
         // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
-        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
+        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: HOST_QUEUE } } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -490,6 +493,7 @@ if (database) {
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -531,7 +535,8 @@ const turnToolDeps = temporal
               builtins: {
                 files: workspace,
                 audit,
-                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
+                // A durable session's Monitor commands run in agent-durable, where its Bash does.
+                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: DURABLE_TASK_QUEUE } } : {}),
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
@@ -570,6 +575,11 @@ const turnToolDeps = temporal
     }
   : undefined
 
+// One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
+const background =
+  backgroundTasks && sessions
+    ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
+    : undefined
 const temporalWorker =
   temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
@@ -610,9 +620,7 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
-          ...(backgroundTasks && sessions
-            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone() })
-            : {}),
+          ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -629,7 +637,12 @@ const hostWorker =
         address: temporal.address,
         namespace: config.temporalNamespace,
         taskQueue: HOST_QUEUE,
-        activities: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        activities: {
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
+          // A classic session's Monitor commands, in its directory on this replica.
+          ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
+        },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
