@@ -186,6 +186,12 @@ def test_a_changed_row_predicate_replaces_the_old_policy(
 ) -> None:
     monkeypatch.setattr(worker_role, "RENDER_ROWS", {"activity": "id LIKE 'render:x%'"})
     with owner.connection() as conn:
+        # af75581 named the policy without a suffix; it goes too.
+        conn.execute(
+            sql.SQL(
+                "CREATE POLICY {} ON activity AS RESTRICTIVE TO {} USING (id LIKE 'render:%')"
+            ).format(sql.Identifier(f"only_{role}"), sql.Identifier(role))
+        )
         assert grant_render_role(conn, role)
         conn.execute(
             "INSERT INTO activity (id, kind, status, title, source, source_id) VALUES"
@@ -197,7 +203,7 @@ def test_a_changed_row_predicate_replaces_the_old_policy(
             for r in conn.execute(
                 "SELECT policyname FROM pg_policies WHERE tablename = 'activity'"
                 " AND policyname LIKE %s",
-                (f"only_{role}_%",),
+                (f"only_{role}%",),
             )
         ]
     assert len(mine) == 1
