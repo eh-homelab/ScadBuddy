@@ -399,9 +399,10 @@ describe('PrintDetailPage (#311)', () => {
     const { user } = render(35)
     const files = await section('Files')
     const rows = within(files).getAllByRole('listitem')
-    // The ScadBuddy 3MF, its preview mesh, the sliced file and the parameters.
-    expect(rows).toHaveLength(4)
-    expect(rows[0]).toHaveTextContent('ScadBuddy 3MF')
+    // The editable 3MF, its preview mesh, the sliced file, the parameters, then (#894)
+    // the finish photo and the timelapse.
+    expect(rows).toHaveLength(6)
+    expect(rows[0]).toHaveTextContent('Editable model (3MF)')
     expect(rows[0]).toHaveTextContent('48 kB')
     expect(rows[2]).toHaveTextContent('Sliced file')
     expect(rows[2]).toHaveTextContent('2.1 MB')
@@ -412,6 +413,126 @@ describe('PrintDetailPage (#311)', () => {
     )
     expect(requested).toContain('/api/v1/prints/35/files/sliced')
     server.events.removeAllListeners()
+  })
+
+  it('gives each file an icon of its kind, a friendly label over its name, and a download of its own (#894)', async () => {
+    render(35)
+    const files = await section('Files')
+    const rows = within(files).getAllByRole('listitem')
+    expect(rows.map((row) => row.querySelector('[data-testid^="file-icon-"]')?.getAttribute('data-testid'))).toEqual([
+      'file-icon-output_3mf',
+      'file-icon-preview_glb',
+      'file-icon-sliced',
+      'file-icon-parameters',
+      'file-icon-photo',
+      'file-icon-timelapse',
+    ])
+    expect(
+      within(rows[1]!).getByRole('button', { name: '3D preview, name-keychain-reagan.glb, open' }),
+    ).toBeInTheDocument()
+    expect(within(rows[1]!).getByRole('button', { name: 'Download name-keychain-reagan.glb' })).toBeInTheDocument()
+  })
+
+  it('opens a file in the app without downloading it (#894)', async () => {
+    const { user } = render(35)
+    const files = await section('Files')
+    const open = (name: RegExp) => user.click(within(files).getByRole('button', { name }))
+
+    await open(/^3D preview, .*, open$/)
+    let dialog = await screen.findByRole('dialog', { name: '3D preview' })
+    expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
+    await user.keyboard('{Escape}')
+
+    await open(/^Sliced file, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Sliced file' })
+    expect(within(dialog).getByRole('img', { name: 'Keychain' })).toHaveAttribute('src', '/api/v1/prints/35/plates/1/thumbnail')
+    expect(within(dialog).getByLabelText('Slicing summary')).toHaveTextContent('Slot 2PLA · 5.02 g')
+    await user.keyboard('{Escape}')
+
+    await open(/^Parameters, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+    const table = within(dialog).getByRole('table', { name: 'Parameters' })
+    expect(within(table).getByText('(changed from the default)', { exact: false })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await open(/^Photo, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Photo' })
+    expect(within(dialog).getByRole('img')).toHaveAttribute('src', expect.stringContaining('/api/v1/prints/35/photos/'))
+    await user.keyboard('{Escape}')
+
+    await open(/^Timelapse, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Timelapse' })
+    expect(within(dialog).getByLabelText('Timelapse')).toHaveAttribute('src', '/api/v1/prints/35/timelapse')
+    expect(downloadBlob).not.toHaveBeenCalled()
+  })
+
+  it('opens the editable 3MF: its mesh and colours, and its plates only when there are several (#894)', async () => {
+    const { user } = render(35)
+    const files = await section('Files')
+    const open = () => user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+
+    await open()
+    let dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
+    const colours = outputs[0]!.colors ?? []
+    expect(colours.length).toBeGreaterThan(0)
+    for (const colour of colours) expect(within(dialog).getByTitle(colour.toUpperCase())).toBeInTheDocument()
+    expect(within(dialog).queryByRole('list', { name: 'Plates' })).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+    )
+    await open()
+    dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    const plates = await within(dialog).findByRole('list', { name: 'Plates' })
+    expect(within(plates).getAllByRole('img').map((img) => img.getAttribute('src'))).toEqual([
+      `/api/v1/outputs/${REAGAN}/plates/1/thumbnail`,
+      `/api/v1/outputs/${REAGAN}/plates/2/thumbnail`,
+    ])
+  })
+
+  it('opens the editable 3MF without a mesh when its 3D preview is gone', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, files: done.files.filter((file) => file.kind !== 'preview_glb') }),
+      ),
+    )
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    await within(dialog).findByTitle((outputs[0]!.colors ?? [])[0]!.toUpperCase())
+    expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
+  })
+
+  it('copies the parameters as JSON, and says so when there is no clipboard', async () => {
+    // user-event stands in a clipboard of its own.
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+    let dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+    await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+    expect(await within(dialog).findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    expect(JSON.parse(await navigator.clipboard.readText())).toMatchObject({ name: 'Reagan' })
+    await user.keyboard('{Escape}')
+
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    try {
+      await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+      dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+      await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('could not be copied here')
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+    }
   })
 
   it('downloads the parameters as JSON', async () => {
