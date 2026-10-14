@@ -1555,6 +1555,25 @@ def test_a_check_of_a_plan_with_no_slots_does_not_fail_on_the_inventory(
     assert check.status_code == 200, check.text
 
 
+@respx.mock
+def test_a_check_of_a_plan_with_slots_fails_when_the_inventory_cannot_be_read(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2733 review: deliberately, a plan with slots needs the inventory for its spool
+    warnings, so a failed assignments read fails the check, as it would fail the run,
+    rather than passing it with the warnings silently missing."""
+    output_id = two_colour_output(client, model, paths)
+    upload_route()
+    run_routes()
+    _status(**WIRED)
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code >= 500, check.text
+    assert check.headers["content-type"].startswith("application/problem+json")
+
+
 def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
     response: httpx.Response = client.post(
         f"/api/v1/print/outputs/{output_id}/check",

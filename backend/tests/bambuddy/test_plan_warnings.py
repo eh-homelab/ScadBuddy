@@ -71,6 +71,22 @@ def test_the_mosaic_plan_of_2461_is_flagged_twice() -> None:
     assert found[1].message.startswith("This print mixes PLA and TPU.")
 
 
+def test_three_families_are_named_in_order() -> None:
+    """#2733 review: the list wording past two families."""
+    found = plan_warnings(
+        plan(1, 2, 3),
+        (
+            [spool(1), spool(2, "PETG"), spool(3, "TPU 95A")],
+            [loaded(1, 0), loaded(2, 1), loaded(3, 2)],
+        ),
+        printer_id=1,
+        printer_name=None,
+        status=None,
+    )
+    assert [w.kind for w in found] == ["mixed-materials"]
+    assert found[0].message.startswith("This print mixes PLA, PETG and TPU.")
+
+
 def test_one_family_all_loaded_says_nothing() -> None:
     # PLA and PLA Matte are one family.
     assert kinds(1, 3, assignments=[loaded(1, 0), loaded(3, 1)]) == []

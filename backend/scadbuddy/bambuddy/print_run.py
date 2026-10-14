@@ -825,7 +825,11 @@ def plan_warnings(
     it by name.
 
     The picker still says ``not-loaded`` under the slot. Checks saying it too is on
-    purpose: Checks is the list read before Print, so do not dedupe either away."""
+    purpose: Checks is the list read before Print, so do not dedupe either away.
+
+    Every slot of ``plan`` counts toward the mix: the dialog's plan holds only the
+    chosen plate's slots, or every plate's for "all plates" (``useFilamentPlan``, pinned
+    by its "a plate change seeds only slots new to it" test)."""
     spools, assignments = inventory
     chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
     options = build_options(
