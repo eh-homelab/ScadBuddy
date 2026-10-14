@@ -123,6 +123,12 @@ func (m *V1PrintLibraryRequestBuilder) Move() *V1PrintLibraryMoveRequestBuilder 
 	return NewV1PrintLibraryMoveRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
+// Names the names property
+// returns a *V1PrintLibraryNamesRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Names() *V1PrintLibraryNamesRequestBuilder {
+	return NewV1PrintLibraryNamesRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // Rename the rename property
 // returns a *V1PrintLibraryRenameRequestBuilder when successful
 func (m *V1PrintLibraryRequestBuilder) Rename() *V1PrintLibraryRenameRequestBuilder {
