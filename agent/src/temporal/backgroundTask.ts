@@ -152,6 +152,9 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
 /** A Workflow script's run: as long as its agents take, past any one worker (its journal resumes it). */
 const scripts = proxyActivities<{ wf_run(input: { taskId: string }): Promise<WorkflowOutcome> }>({
   startToCloseTimeout: '6 hours',
+  // wf_run stops itself at the task's expiry (6 hours after it was started); this bounds the
+  // retries of one whose worker died, which would otherwise each get 6 hours more.
+  scheduleToCloseTimeout: '370 minutes',
   heartbeatTimeout: '1 minute',
   retry: { initialInterval: '5s', maximumAttempts: 3 },
 })
@@ -185,5 +188,6 @@ async function scriptRun(taskId: string, retryMs: number): Promise<void> {
     }
     if (sent.result === 'busy') await sleep(retryMs)
   }
-  await acts.bg_finish({ taskId, state: outcome.status === 'completed' ? 'done' : 'failed', detail: outcome.status })
+  const detail = outcome.status === 'failed' && outcome.expired ? 'expired' : outcome.status
+  await acts.bg_finish({ taskId, state: outcome.status === 'completed' ? 'done' : 'failed', detail })
 }

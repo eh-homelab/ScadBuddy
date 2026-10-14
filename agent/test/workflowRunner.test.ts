@@ -80,6 +80,9 @@ describe('running one', () => {
   it('stops a loop that never awaits, and a run that is aborted', async () => {
     const { h } = host()
     expect(await run('while (true) {}', h)).toEqual({ ok: false, error: expect.stringMatching(/interrupted/i) })
+    // A loop after an await runs in a job the host drains: it is stopped all the same, and the run settles.
+    const after = await Promise.race([run(`await agent('x'); while (true) {}`, h), new Promise((r) => setTimeout(() => r('hung'), 15_000))])
+    expect(after).toEqual({ ok: false, error: expect.stringMatching(/interrupted/i) })
     const abort = new AbortController()
     setTimeout(() => abort.abort(new Error('stopped')), 50)
     await expect(runScript('await new Promise(() => {}); return 1', null, h, abort.signal)).rejects.toThrow('stopped')

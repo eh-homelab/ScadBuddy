@@ -539,6 +539,10 @@ export type SessionRecord = {
  */
 type ClaimedSession = SessionRecord & {
   unpricedCostUsd: number
+  /** A Workflow agent's chat (startChild): its own model, effort and subagent definition. */
+  agentModel: string | null
+  agentEffort: EffortLevel | null
+  agentType: string | null
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -549,9 +553,14 @@ type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+
+const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  agentModel: row.agent_model,
+  agentEffort: row.agent_effort,
+  agentType: row.agent_type,
   claimedAt: row.claimed_at,
 })
 
@@ -1316,13 +1325,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1360,13 +1369,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1767,17 +1776,15 @@ export class SessionManager {
             }
           }
         }
-        const [cwd, resume, settingModel, httpSetting, [agentSettings]] = await Promise.all([
+        const [cwd, resume, settingModel, httpSetting] = await Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-          // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
-          this.deps.sql<{ agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }[]>`
-            SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${id}`,
         ])
-        const model = agentSettings?.agent_model ?? settingModel
-        const agentDefinition = agentSettings?.agent_type ? (await loadAgentDefinitions())[agentSettings.agent_type] : undefined
+        // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
+        const model = session.agentModel ?? settingModel
+        const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
         // The http_request tool (#827): on unless the setting is `false`. Its
         // saved bodies live in the session's own directory, and it never sees
         // the turn's secrets except to refuse a request that carries one.
@@ -1850,9 +1857,9 @@ export class SessionManager {
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(agentSettings?.agent_effort ? { effort: agentSettings.agent_effort } : {}),
+          ...(session.agentEffort ? { effort: session.agentEffort } : {}),
           // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
-          ...(agentDefinition ? { agent: { name: agentSettings!.agent_type!, definition: agentDefinition } } : {}),
+          ...(agentDefinition && session.agentType ? { agent: { name: session.agentType, definition: agentDefinition } } : {}),
           ...(this.deps.mcpServers || http || served.length
             ? {
                 mcpServers: {

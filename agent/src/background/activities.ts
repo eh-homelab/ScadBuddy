@@ -45,7 +45,7 @@ export type WorkflowUsage = { agents: number; done: number; errors: number; empt
 /** How a Workflow's script ended (`gone`: its task ended before it ran). */
 export type WorkflowOutcome =
   | { status: 'completed'; result: unknown; usage: WorkflowUsage }
-  | { status: 'failed'; error: string; usage: WorkflowUsage }
+  | { status: 'failed'; error: string; usage: WorkflowUsage; expired?: true }
   | { status: 'gone' }
 
 /** How long a fire waits for a busy session before it gives that occurrence up. */
@@ -301,7 +301,13 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       const t = await deps.store.get(input.taskId)
       if (!t || t.state !== 'active') return { status: 'gone' }
       const ctx = Context.current()
-      const signal = ctx.cancellationSignal
+      // Stopped by a cancel, or at the task's expiry (WORKFLOW_EXPIRY_MS): its agents with it.
+      const stop = new AbortController()
+      const onCancel = () => stop.abort(ctx.cancellationSignal.reason)
+      ctx.cancellationSignal.addEventListener('abort', onCancel, { once: true })
+      const expired = new Error('the workflow expired after 6 hours')
+      const expiry = t.expiresAt ? setTimeout(() => stop.abort(expired), Math.max(0, t.expiresAt.getTime() - Date.now())) : undefined
+      const signal = stop.signal
       const started = Date.now()
       const usage: WorkflowUsage = { agents: 0, done: 0, errors: 0, empty: 0, durationMs: 0 }
       const ended = (o: { status: 'completed'; result: unknown } | { status: 'failed'; error: string }): WorkflowOutcome => ({
@@ -370,9 +376,15 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       const beat = setInterval(() => ctx.heartbeat(), 5000)
       try {
         const out = await runScript(String(t.spec.body), t.spec.args ?? null, host, signal)
+        if (signal.reason === expired) throw expired
         return ended(out.ok ? { status: 'completed', result: out.result } : { status: 'failed', error: out.error })
+      } catch (err) {
+        if (signal.reason !== expired) throw err
+        return { status: 'failed', error: expired.message, usage: { ...usage, durationMs: Date.now() - started }, expired: true }
       } finally {
         clearInterval(beat)
+        clearTimeout(expiry)
+        ctx.cancellationSignal.removeEventListener('abort', onCancel)
       }
     },
 

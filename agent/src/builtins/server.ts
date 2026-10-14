@@ -244,7 +244,7 @@ export const BUILTINS: Record<string, Builtin> = {
     run: withTasks(workflow),
   },
   TaskStop: {
-    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup or monitor) by its ID.",
+    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
     run: withTasks(taskStop),
   },
@@ -320,7 +320,7 @@ export function classicBuiltinServer(
 export function classicBuiltinNote(names: readonly string[]): string {
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
-    ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+    ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
       'session as a new message when it is due and the session is idle.'
     : ''
   return (

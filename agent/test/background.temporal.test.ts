@@ -64,6 +64,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
           run: async (call) => {
             expect(call.sessionId).toBe(sessionId)
             ran.push({ prompt: call.prompt, opts: call.opts as Record<string, unknown> })
+            if (call.prompt === 'hang') {
+              await new Promise((r) => call.signal.addEventListener('abort', r, { once: true }))
+              return { ok: false, result: null, error: 'stopped' }
+            }
             await new Promise((r) => setTimeout(r, 20))
             return agentAnswer(call.prompt)
           },
@@ -137,13 +141,14 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
   }, 60_000)
 
-  const runWorkflow = async (body: string, extra: Record<string, unknown> = {}) => {
+  const runWorkflow = async (body: string, extra: Record<string, unknown> = {}, expiresAt?: Date) => {
     const t = (await store.create({
       sessionId,
       kind: 'workflow',
       description: 'probe it',
       spec: { name: 'probe', description: 'probe it', body, args: { x: 1 }, scriptPath: '/workspace/_claude/workflows/probe-wf_x.js', ...extra },
       createdBy: browser,
+      ...(expiresAt ? { expiresAt } : {}),
     }))!
     await (
       await env.client.workflow.start(BACKGROUND_WORKFLOW, {
@@ -178,6 +183,14 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(ran.map((r) => r.prompt)).toEqual(['new'])
     expect(unwrapUntrusted(sent[1]!)).toContain('<result>["did one","did new"]</result>')
     expect(await store.get(again.id)).toMatchObject({ state: 'done' })
+  }, 60_000)
+
+  it('stops a run at its expiry, its agents with it, and says so', async () => {
+    const started = Date.now()
+    const t = await runWorkflow(`const a = await agent('hang'); return a`, {}, new Date(Date.now() + 1500))
+    expect(Date.now() - started).toBeLessThan(20_000)
+    expect(unwrapUntrusted(sent[0]!)).toContain('<status>failed</status>\n<summary>Dynamic workflow "probe it" failed</summary>\n<error>the workflow expired after 6 hours</error>')
+    expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'expired' })
   }, 60_000)
 
   it('reports a failed agent as null and a script that throws as failed', async () => {
