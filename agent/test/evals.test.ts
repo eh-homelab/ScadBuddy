@@ -384,7 +384,7 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
         { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
         { text: 'Split and rendered.' },
       ])
-      expect(failed).toEqual(['split the carrot at its neck with a keyed joint'])
+      expect(failed).toEqual(['fixed the carrot at its neck (a keyed split, or an anchor through it)'])
     }
   }, 180_000)
 
@@ -402,10 +402,68 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       { text: 'Done.' },
     ])
     expect(failed).toEqual([
-      'split the carrot at its neck with a keyed joint',
-      'laid the leaves half flat',
+      'fixed the carrot at its neck (a keyed split, or an anchor through it)',
       'rendered the carrot after its last scene edit, and saved that render',
       'kept editing it as a scene (no eject_scene, no update_source)',
     ])
+  }, 90_000)
+
+  const ANCHOR = { edit: 'add', object: 'o1', primitive: 'cylinder', size: [3, 3, 12], at: [0, 0, 32.5], colour: '#F08A24' }
+  const anchored = (add: Record<string, unknown>) => (own: ScriptedTurn[]) => [
+    own[0]!,
+    own[1]!,
+    { tool: 'edit_scene', input: { slug: 'carrot', edits: [add] } },
+    own[3]!,
+    own[4]!,
+    { text: 'Anchored.' },
+  ]
+
+  it('carrot: an anchor through the neck passes, with no lay_flat, and clears the weak joint', async () => {
+    const { failed, outcome } = await play(carrotWeakNeck, anchored(ANCHOR))
+    expect(failed).toEqual([])
+    const last = outcome.toolCalls.filter((c) => c.tool === 'analyze_geometry').at(-1)
+    expect(JSON.parse(last?.result ?? '{}').untrusted_data.content.weak_joints).toEqual([])
+  }, 90_000)
+
+  it('control: an anchor that misses the neck fails the fix check', async () => {
+    for (const add of [{ ...ANCHOR, at: [0, 0, 10] }, { ...ANCHOR, at: [8, 0, 32.5] }, { ...ANCHOR, size: [3, 3, 2] }]) {
+      const { failed } = await play(carrotWeakNeck, anchored(add))
+      expect(failed).toEqual(['fixed the carrot at its neck (a keyed split, or an anchor through it)'])
+    }
+  }, 270_000)
+
+  it('control: a split of the wrong object fails the fix check', async () => {
+    for (const object of ['o2', 'o9']) {
+      const { failed } = await play(carrotWeakNeck, (own) => [
+        own[0]!,
+        own[1]!,
+        { tool: 'edit_scene', input: { slug: 'carrot', edits: [{ ...NECK_SPLIT, object }, LAY_FLAT] } },
+        own[3]!,
+        { text: 'Split.' },
+      ])
+      expect(failed).toContain('fixed the carrot at its neck (a keyed split, or an anchor through it)')
+    }
+  }, 180_000)
+
+  it('control: a lay_flat of a nonexistent object fails the lay-flat check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      own[1]!,
+      { tool: 'edit_scene', input: { slug: 'carrot', edits: [NECK_SPLIT, { ...LAY_FLAT, object: 'o9' }] } },
+      own[3]!,
+      { text: 'Split.' },
+    ])
+    expect(failed).toEqual(['laid the other half flat after a split (none needed for an anchor)'])
+  }, 90_000)
+
+  it('control: a render with save_output false fails the saved check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      own[1]!,
+      own[2]!,
+      { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: false } },
+      { text: 'Done.' },
+    ])
+    expect(failed).toEqual(['rendered the carrot after its last scene edit, and saved that render'])
   }, 90_000)
 })

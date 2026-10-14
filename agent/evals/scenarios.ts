@@ -1,4 +1,4 @@
-import { CABLE_LABEL_SOURCE, CARROT_NECK, EvalBackend, OUTWARD_ROUTES, splitsTheNeck } from './backend.js'
+import { CABLE_LABEL_SOURCE, anchorsTheNeck, CARROT_NECK, EvalBackend, OUTWARD_ROUTES, splitsTheNeck } from './backend.js'
 import { repoSources, scoreCitations, type SuggestionScore } from './citations.js'
 import { isRed, KEYCHAIN_HEIGHTS, keychainProblems, type RenderedJob, type ScenarioBackend } from './render.js'
 import { type Check, type Outcome, registryName, type Scenario } from './runner.js'
@@ -501,21 +501,22 @@ export const carrotWeakNeck: Scenario = {
   checks: [
     ...INVARIANTS,
     {
-      name: 'split the carrot at its neck with a keyed joint',
+      name: 'fixed the carrot at its neck (a keyed split, or an anchor through it)',
       run: (o) => {
         const edits = carrotEdits(o)
-        return edits.some((e) => e.object === 'o1' && splitsTheNeck(e))
+        return edits.some((e) => (e.object === 'o1' && splitsTheNeck(e)) || anchorsTheNeck(e))
           ? true
-          : `no split_at_plane of o1 with a joint, level through z ${CARROT_NECK[0]} to ${CARROT_NECK[1]}; edits: ${JSON.stringify(edits)}`
+          : `no split_at_plane of o1 with a joint, level through z ${CARROT_NECK[0]} to ${CARROT_NECK[1]}, and no add on o1 spanning it; edits: ${JSON.stringify(edits)}`
       },
     },
     {
-      name: 'laid the leaves half flat',
+      name: 'laid the other half flat after a split (none needed for an anchor)',
       run: (o) => {
         const edits = carrotEdits(o)
-        const split = edits.findIndex((e) => e.object === 'o1' && e.edit === 'split_at_plane')
-        const flat = edits.findIndex((e, i) => i > split && e.edit === 'lay_flat' && e.object !== 'o1')
-        return split >= 0 && flat > split ? true : `edits: ${edits.map((e) => `${String(e.edit)} ${String(e.object)}`).join(', ') || 'none'}`
+        const split = edits.findIndex((e) => e.object === 'o1' && splitsTheNeck(e))
+        if (split < 0) return true
+        const flat = edits.findIndex((e, i) => i > split && e.edit === 'lay_flat' && e.object === 'o2')
+        return flat > split ? true : `edits: ${edits.map((e) => `${String(e.edit)} ${String(e.object)}`).join(', ')}`
       },
     },
     {

@@ -174,6 +174,37 @@ export function splitsTheNeck(edit: Record<string, unknown>): boolean {
   return z! > CARROT_NECK[0] && z! < CARROT_NECK[1] && length > 0 && Math.abs(nz!) / length >= 0.9
 }
 
+/**
+ * An `add` of a cube or cylinder on the carrot's object `o1` that anchors the leaves through
+ * the neck: its axis is z (no rotation), its z-extent covers the whole neck (CARROT_NECK),
+ * and its centre is within half the neck's length of the neck's axis (x 0, y 0), the
+ * tolerance the neck's own size gives (its radius is of that order: 3 mm for 5 mm).
+ */
+export function anchorsTheNeck(edit: Record<string, unknown>): boolean {
+  if (edit.edit !== 'add' || edit.object !== 'o1') return false
+  if (edit.primitive !== 'cylinder' && edit.primitive !== 'cube') return false
+  const size = edit.size
+  if (!Array.isArray(size) || size.length !== 3) return false
+  const at = edit.at === undefined ? [0, 0, 0] : edit.at
+  if (!Array.isArray(at) || at.length !== 3) return false
+  const rotate = edit.rotate === undefined ? [0, 0, 0] : edit.rotate
+  if (!Array.isArray(rotate) || rotate.length !== 3 || rotate.some((a) => a !== 0)) return false
+  const [x, y, z] = at as number[]
+  const height = (size as number[])[2]!
+  const tolerance = (CARROT_NECK[1] - CARROT_NECK[0]) / 2
+  return (
+    z! - height / 2 <= CARROT_NECK[0] &&
+    z! + height / 2 >= CARROT_NECK[1] &&
+    Math.abs(x!) <= tolerance &&
+    Math.abs(y!) <= tolerance
+  )
+}
+
+/** An edit that leaves the carrot's neck no longer a weak joint: a jointed split of `o1` through it, or an anchor. */
+export function fixesTheNeck(edit: Record<string, unknown>): boolean {
+  return (edit.object === 'o1' && splitsTheNeck(edit)) || anchorsTheNeck(edit)
+}
+
 function defaultModels(): EvalModel[] {
   return [
     {
@@ -524,7 +555,7 @@ export class EvalBackend implements ScenarioBackend {
   private geometry(job: EvalJob) {
     const model = this.models.get(job.slug)
     const edits = (model?.sceneEdits ?? []).slice(0, job.edits).flat()
-    const weak = model?.scene && !edits.some(splitsTheNeck) ? [CARROT_WEAK_JOINT] : []
+    const weak = model?.scene && !edits.some(fixesTheNeck) ? [CARROT_WEAK_JOINT] : []
     const box = { min: [-10, -10, 0], max: [10, 10, 45], size: [20, 20, 45] }
     return {
       version: 3,
