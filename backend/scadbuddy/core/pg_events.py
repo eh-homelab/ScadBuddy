@@ -279,7 +279,11 @@ def hold_event_log(conn: Connection[Any]) -> None:
     holds it while it waits for that row; one that wrote the row first and then
     publishes waits for the lock while holding the row, and Postgres aborts one of the
     two as a deadlock. Taking the lock before such a row keeps one order: the event log
-    first, then rows. Taking it again later in the transaction is free."""
+    first, then rows. Taking it again later in the transaction is free.
+
+    It is a Postgres advisory lock whatever the caller's bus is: the activity index
+    takes it whenever it has events to publish, so a test or wiring with a non-Postgres
+    ``TransactionalEvents`` takes it too, harmlessly."""
     conn.execute(_LOCK_SQL, (EVENT_LOG_LOCK,))
 
 
