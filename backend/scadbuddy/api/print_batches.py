@@ -380,12 +380,21 @@ async def _queue_one(
         # the same request_id sent again follows it. The rest of the batch still goes
         # out, and the next Queue all retries this one (#2718 review).
         logger.exception("batch %s file %s: starting its run failed", batch_id, item.position)
-        return BatchOutcome(
-            status="pending",
-            detail="ScadBuddy could not start this file's print. Queue all again to retry.",
-            attempt=attempt,
-        )
+        prior = item.outcome
+        if prior is not None and prior.status == "pending" and prior.detail == NOT_STARTED:
+            # The same request failed this way twice: a fault, not an outage, so it would
+            # stay pending for good, and a pending file can be neither edited, skipped
+            # nor removed, nor its batch cancelled. Refused, it can (#2718 review).
+            return BatchOutcome(status="refused", detail=NOT_STARTED_AGAIN, attempt=attempt)
+        return BatchOutcome(status="pending", detail=NOT_STARTED, attempt=attempt)
     return BatchOutcome(status="started", run_id=run.id, attempt=attempt)
+
+
+NOT_STARTED = "ScadBuddy could not start this file's print. Queue all again to retry."
+NOT_STARTED_AGAIN = (
+    "ScadBuddy could not start this file's print, twice. Check Bambuddy's queue, then"
+    " edit, skip or remove the file."
+)
 
 
 def batch_request_id(batch_id: str, item: BatchItem, attempt: int = 0) -> str:

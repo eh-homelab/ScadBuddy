@@ -363,6 +363,33 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
     assert result.status == outcome
 
 
+@respx.mock
+def test_a_file_that_fails_to_start_twice_is_refused_so_it_can_be_left(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2718 review: an error that is not an answer leaves the file pending, which keeps
+    it from being edited, skipped or removed and its batch from Cancel. The same request
+    failing that way again is a fault, not an outage: refused, the file can be left."""
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("the run store went away")
+
+    monkeypatch.setattr(print_batches, "start_library_run", broken)
+    configure(client)
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    queue = f"{BATCHES}/{batch['id']}/queue"
+
+    first = client.post(queue).json()["items"][0]["outcome"]
+    assert first["status"] == "pending"
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={"skipped": True}).status_code == 409
+
+    again = client.post(queue).json()["items"][0]["outcome"]
+
+    assert again["status"] == "refused"
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={"skipped": True}).status_code == 200
+
+
 def test_a_files_press_is_its_choices() -> None:
     """The same choices are the same run (a repeat re-attaches); changed ones after a
     refusal are a new one."""
