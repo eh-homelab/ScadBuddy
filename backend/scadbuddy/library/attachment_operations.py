@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.attachments import (
 )
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
+from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelNotFoundError, ModelRecord, TooManyMediaError
@@ -63,7 +64,7 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
     cache = components.get(ARCHIVE_CACHE)
     store = components.get(PRINT_ATTACHMENTS)
 
-    async def _archive_of_print(archive_id: int) -> Any:
+    async def _archive_of_print(archive_id: int) -> ArchiveDetail:
         if await state.print_links.linked(archive_id) is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"print {archive_id} is not ScadBuddy's")
         settings = await asyncio.to_thread(state.settings_store.load)
@@ -126,26 +127,39 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
                     library_file_id=copy,
                     filename=request["filename"],
                     size_bytes=request["size"],
-                    caption=request["caption"] or None,
+                    # Stripped as a PATCH strips it: a blank caption is none (#3402).
+                    caption=(request["caption"] or "").strip() or None,
                 )
             )
         except TooManyAttachmentsError:
             # Another upload filled the print meanwhile: take this one's files off again.
-            settings = await asyncio.to_thread(state.settings_store.load)
-            async with client_for(settings) as client:
-                await attachments.remove(
-                    client,
-                    Attachment(
-                        id=0,
-                        archive_id=archive_id,
-                        kind=request["kind"],
-                        archive_photo=photo,
-                        library_file_id=copy,
-                        filename=request["filename"],
-                        size_bytes=request["size"],
-                    ),
+            # A failure there still answers the 409, and names what it left (#3402).
+            try:
+                settings = await asyncio.to_thread(state.settings_store.load)
+                async with client_for(settings) as client:
+                    await attachments.remove(
+                        client,
+                        Attachment(
+                            id=0,
+                            archive_id=archive_id,
+                            kind=request["kind"],
+                            archive_photo=photo,
+                            library_file_id=copy,
+                            filename=request["filename"],
+                            size_bytes=request["size"],
+                        ),
+                    )
+                    cache.forget(client, archive_id)
+            except Exception:
+                logger.warning(
+                    "an attachment past the cap could not be taken off Bambuddy again",
+                    exc_info=True,
+                    extra={
+                        "archive_id": archive_id,
+                        "archive_photo": photo,
+                        "library_file_id": copy,
+                    },
                 )
-                cache.forget(client, archive_id)
             raise _too_many_attachments() from None
         except Exception:
             # Uploaded but not recorded: name what is left in Bambuddy so it can be found.
@@ -205,8 +219,11 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
         return {}
 
     async def _download(found: Attachment, to: Path) -> int:
-        """The attachment's bytes, streamed from Bambuddy to ``to``: their size."""
+        """The attachment's bytes, streamed from Bambuddy to ``to``: their size. Refused
+        past the upload cap as they stream: the copy in Bambuddy's library may have been
+        replaced since it was uploaded (#3401)."""
         size = 0
+        cap = state.settings.media_upload_max_bytes
         settings = await asyncio.to_thread(state.settings_store.load)
         async with (
             client_for(settings) as client,
@@ -216,8 +233,13 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
         ):
             with to.open("xb") as out:
                 async for chunk in upstream.aiter_bytes():
-                    await asyncio.to_thread(out.write, chunk)
                     size += len(chunk)
+                    if size > cap:
+                        raise ApiError(
+                            status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"the attachment is now over the {cap:,}-byte upload limit",
+                        )
+                    await asyncio.to_thread(out.write, chunk)
         return size
 
     def _add_media(slug: str, media: StagedMedia, caption: str) -> ModelRecord:
@@ -236,6 +258,9 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
         route never saw the end, is still marked once the copy lands (#2831 review)."""
         found = await _promotable(request)
         slug = request["slug"]
+        # Marked before the copy, and unmarked if it does not land: marked after, a failure
+        # between the two left a copy that a second promote copied again (#3401).
+        await store.promoted(found.archive_id, found.id, slug)
         staging = state.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
         staging.mkdir(parents=True)
         try:
@@ -257,10 +282,12 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
             media = StagedMedia(path=staged, kind=media_kind, extension=extension)
             # A git commit, and a move of up to a gigabyte: a cancel waits for both.
             record = await to_thread_to_end(partial(_add_media, slug, media, found.caption or ""))
+        except BaseException:
+            await store.unpromoted(found.archive_id, found.id, slug)
+            raise
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, True)
         emit(state.events, ModelEvent(kind="model.updated", slug=slug))
-        await store.promoted(found.archive_id, found.id, slug)
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped
 

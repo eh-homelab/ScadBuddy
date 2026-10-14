@@ -107,6 +107,10 @@ class AttachmentStore:
         """Note that ``slug``'s gallery has a copy."""
         await asyncio.to_thread(self._promoted, archive_id, attachment_id, slug)
 
+    async def unpromoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+        """Take back ``promoted``: the copy did not land."""
+        await asyncio.to_thread(self._unpromoted, archive_id, attachment_id, slug)
+
     async def remove(self, attachment_id: int) -> None:
         await asyncio.to_thread(self._remove, attachment_id)
 
@@ -192,6 +196,14 @@ class AttachmentStore:
                 (slug, archive_id, attachment_id, slug),
             )
 
+    def _unpromoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE print_attachments SET promoted_to = array_remove(promoted_to, %s)"
+                " WHERE archive_id = %s AND id = %s",
+                (slug, archive_id, attachment_id),
+            )
+
     def _remove(self, attachment_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM print_attachments WHERE id = %s", (attachment_id,))
@@ -227,8 +239,10 @@ async def sweep_gone_archives(client: BambuddyClient, store: AttachmentStore) ->
 
 
 #: One lock per project while its ``Media/`` is looked for and made, so two prints of a
-#: project attached at once make one folder, not two: their operations' subjects are
-#: per print. Held only while some upload needs it.
+#: project attached at once in this process make one folder: their operations' subjects
+#: are per print. It is per replica: two replicas can each make one, and `media_folder`
+#: then keeps using the lowest id, so attachments stay together and the other folder is
+#: left empty (#3046). Held only while some upload needs it.
 _MEDIA_LOCKS: weakref.WeakValueDictionary[tuple[str, int], asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )

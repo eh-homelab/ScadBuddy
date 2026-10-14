@@ -79,10 +79,41 @@ class Bambuddy:
         )
 
 
-def linked(client: TestClient, model: str, **archive: Any) -> None:
+def linked(client: TestClient, model: str, **archive: Any) -> str:
+    """Print 35, linked to a new output of ``model``: the output's id."""
     configure(client)
-    link(client, make_output(client, model), 35)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
     mock_archive(35, **archive)
+    return output_id
+
+
+def _state(client: TestClient) -> AppState:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state
+
+
+def _full_print(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Print 35 at the cap, after an upload's check saw it empty: the race at insert."""
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+    for n in range(MAX_ATTACHMENTS):
+        asyncio.run(
+            store.add(
+                Attachment(
+                    id=0,
+                    archive_id=35,
+                    kind="video",
+                    library_file_id=1000 + n,
+                    filename=f"{n}.webm",
+                    size_bytes=1,
+                )
+            )
+        )
+
+    async def none_yet(archive_id: int) -> list[Attachment]:
+        return []
+
+    monkeypatch.setattr(store, "for_archive", none_yet)
 
 
 def attach(client: TestClient, name: str, data: bytes, caption: str = "") -> httpx.Response:
@@ -423,27 +454,7 @@ def test_the_attachment_cap_holds_at_insert_and_the_late_upload_is_taken_off(
     refuses the one past the cap, and its files come off Bambuddy again."""
     linked(client, model)
     bambuddy = Bambuddy(media_exists=True)
-    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    store = state.components.get(PRINT_ATTACHMENTS)
-    for n in range(MAX_ATTACHMENTS):
-        asyncio.run(
-            store.add(
-                Attachment(
-                    id=0,
-                    archive_id=35,
-                    kind="video",
-                    library_file_id=1000 + n,
-                    filename=f"{n}.webm",
-                    size_bytes=1,
-                )
-            )
-        )
-
-    async def none_yet(archive_id: int) -> list[Attachment]:
-        return []
-
-    # The check ran before the others landed.
-    monkeypatch.setattr(store, "for_archive", none_yet)
+    _full_print(client, monkeypatch)
 
     refused = attach(client, "p.png", PNG)
 
@@ -516,3 +527,141 @@ def test_the_sweep_forgets_nothing_without_bambuddys_own_404(
 
     store = state.components.get(PRINT_ATTACHMENTS)
     assert len(asyncio.run(store.for_archive(36))) == 1
+
+
+@respx.mock
+def test_a_late_upload_whose_cleanup_fails_is_still_a_409_and_names_what_it_left(
+    client: TestClient,
+    model: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3402: the cleanup after a lost cap race is best-effort; its failure neither
+    hides the 409 nor goes unlogged."""
+    caplog.set_level(logging.WARNING, logger="scadbuddy.library.attachment_operations")
+    linked(client, model)
+    bambuddy = Bambuddy(media_exists=True)
+    bambuddy.photo_delete.mock(return_value=httpx.Response(500, json={"detail": "down"}))
+    _full_print(client, monkeypatch)
+
+    refused = attach(client, "p.png", PNG)
+
+    assert refused.status_code == 409, refused.text
+    left = [r for r in caplog.records if "could not be taken off" in r.getMessage()]
+    assert [(r.archive_id, r.archive_photo, r.library_file_id) for r in left] == [  # type: ignore[attr-defined]
+        (35, "ab12cd34.png", 501)
+    ]
+
+
+@respx.mock
+def test_a_blank_caption_is_stored_as_none_on_upload_too(client: TestClient, model: str) -> None:
+    """#3402: an upload strips its caption as PATCH does."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+
+    added = attach(client, "p.png", PNG, "   ")
+
+    assert added.status_code == 201, added.text
+    assert added.json()["caption"] is None
+
+
+@respx.mock
+def test_a_promote_whose_mark_fails_copies_nothing_and_can_be_sent_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3401: the mark goes first, so a promote that fails between mark and copy leaves no
+    unmarked copy for a second promote to copy again."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+    attachment = attach(client, "p.png", PNG, "Real print").json()
+    respx.get(f"{API}/library/files/501/download").mock(
+        return_value=httpx.Response(200, content=PNG)
+    )
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+    promoted = store.promoted
+    calls = 0
+
+    async def fails_once(archive_id: int, attachment_id: int, slug: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("the database went away")
+        await promoted(archive_id, attachment_id, slug)
+
+    monkeypatch.setattr(store, "promoted", fails_once)
+    url = f"{URL}/{attachment['id']}/promote"
+
+    failed = client.post(url, json={"slug": model}, headers=press())
+    assert failed.status_code >= 500, failed.text
+    assert client.get(f"/api/v1/models/{model}").json()["media"] == []
+
+    again = client.post(url, json={"slug": model}, headers=press())
+    assert again.status_code == 200, again.text
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+
+
+@respx.mock
+def test_a_promote_whose_copy_fails_is_not_left_marked(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3401: marked first, so a copy that does not land takes the mark back."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+    attachment = attach(client, "p.png", PNG, "Real print").json()
+    respx.get(f"{API}/library/files/501/download").mock(
+        return_value=httpx.Response(200, content=PNG)
+    )
+
+    def no_room(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(_state(client).catalogue, "add_media", no_room)
+
+    failed = client.post(f"{URL}/{attachment['id']}/promote", json={"slug": model}, headers=press())
+
+    assert failed.status_code >= 500, failed.text
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["media"]["attachments"][0]["promoted_to"] == []
+
+
+@respx.mock
+def test_a_promote_of_a_file_grown_past_the_upload_cap_is_refused_as_it_streams(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3401: the copy in Bambuddy's library can be replaced after the upload; the
+    download stops at the cap rather than filling the cache volume."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+    attachment = attach(client, "p.png", PNG, "Real print").json()
+    respx.get(f"{API}/library/files/501/download").mock(
+        return_value=httpx.Response(200, content=PNG + b"\x00" * 4096)
+    )
+    state = _state(client)
+    monkeypatch.setattr(
+        state, "settings", state.settings.model_copy(update={"media_upload_max_bytes": len(PNG)})
+    )
+
+    refused = client.post(
+        f"{URL}/{attachment['id']}/promote", json={"slug": model}, headers=press()
+    )
+
+    assert refused.status_code == 413, refused.text
+    assert "upload limit" in refused.json()["detail"]
+    assert client.get(f"/api/v1/models/{model}").json()["media"] == []
+
+
+@respx.mock
+def test_a_print_no_link_names_any_more_loses_its_attachments(
+    client: TestClient, model: str
+) -> None:
+    """#3047: deleting the last output linked to a print forgets the print's attachment
+    rows with its link; Bambuddy's files stay."""
+    output_id = linked(client, model)
+    bambuddy = Bambuddy(media_exists=True)
+    assert attach(client, "p.png", PNG).status_code == 201
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+
+    asyncio.run(_state(client).print_links.delete_outputs([output_id]))
+
+    assert asyncio.run(store.for_archive(35)) == []
+    assert not bambuddy.photo_delete.called and not bambuddy.library_delete.called
