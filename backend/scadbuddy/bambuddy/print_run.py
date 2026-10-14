@@ -97,6 +97,12 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.supports import (
+    SUPPORT_KEYS,
+    SupportsChoice,
+    support_overrides,
+    wanted_settings,
+)
 from scadbuddy.bambuddy.trays import (
     colour_word,
     tray_colours,
@@ -774,6 +780,17 @@ async def check_print(
                 if inventory is not None
                 else []
             ),
+            # #717: what the run will say of a profile it cannot apply.
+            *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
+            # #1899: and of a support setting it cannot apply.
+            *(
+                await support_overrides(
+                    client,
+                    process,
+                    wanted_settings(source.print_settings, request.supports),
+                    read=read,
+                )
+            )[1],
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,

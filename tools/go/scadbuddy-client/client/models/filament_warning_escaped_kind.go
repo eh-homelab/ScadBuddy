@@ -32,7 +32,7 @@ const (
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "slice-reused", "mixed-materials"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "slice-reused", "mixed-materials"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
