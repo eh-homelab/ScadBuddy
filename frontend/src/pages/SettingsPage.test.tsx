@@ -26,7 +26,7 @@ async function enter(user: UserEvent, field: HTMLElement, text: string) {
  * ran into their 5 s under load (#1485); so buttons are looked for in their section.
  */
 function region(name: string): HTMLElement {
-  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
   if (!section) throw new Error(`no section headed ${name}`)
   return section
 }

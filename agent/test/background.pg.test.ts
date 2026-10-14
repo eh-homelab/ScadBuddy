@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
@@ -232,14 +233,14 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const dir = await mkdtemp(path.join(os.tmpdir(), 'bg-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'loop' }))
-    const pkg = { name: 'loop', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['CronCreate', 'Read'] }
+    const pkg = { name: 'loop', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['CronCreate', 'Monitor', 'Read'] }
     const scripted = scriptedRunner(() => ({ reply: 'ok' }))
     const classic = manager({
       sql: db.sql,
       paths: await tempPaths(),
       run: scripted.runner,
       packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
-      background: { tasks, tz: 'UTC' },
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
     })
     const { session } = await classic.start(browser, { origin: 'chat' })
     await classic.send(session.id, browser, 'loop it')
@@ -248,6 +249,13 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(run.builtinTools).toEqual(['Read'])
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('CronCreate (mcp__builtin__CronCreate)')
+    // The turn's Monitor runs its command on this replica's own queue, where the turn's Bash runs.
+    const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+    const watch = (await turnClient.callTool({ name: 'Monitor', arguments: { description: 'log', command: 'tail -f x.log', timeout_ms: 60_000 } })) as {
+      content: { text: string }[]
+    }
+    expect((await store.get(idOf(watch.content[0]!.text)))!.spec).toMatchObject({ queue: 'agent-tools.pod-b' })
+    await turnClient.close()
     classic.abortAll()
   })
 

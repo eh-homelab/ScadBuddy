@@ -402,8 +402,8 @@ type WarmEntry = {
     `agent/src/temporal/sessionClients.ts:5-27`).
   - **LRU.** Past `warm_max_per_replica`, a setting with default **8** (D3, decided). An
     idle process is about 206 MiB (E6), so 8 is about 1.6 GiB before remote MCP
-    connections. The agent container's limit rises from 2Gi (§2.4) to **8Gi** in a
-    clusters PR that lands with Phase 2. A replica reads the setting when it starts and on
+    connections. The agent container's memory request rises from 512Mi to **2Gi** and
+    its limit from 2Gi (§2.4) to **8Gi**, in a clusters PR that lands with Phase 2. A replica reads the setting when it starts and on
     `NOTIFY scadbuddy_settings`. A lowered cap evicts idle entries down to it, and never
     one with a turn running.
   - **Explicit**, on:
@@ -871,8 +871,9 @@ done. Their conversation exists only in workflow state.
 - **The `Recreate` deploy restarts every turn** (§5.5) until Phase 11 versions the queues
   and moves the pod to `RollingUpdate` (D6).
 - **Warm memory.** 8 × about 206 MiB, plus remote MCP connections and the service itself,
-  against the 8Gi limit (D3). The memory request stays at 512Mi, so a node's scheduler sees
-  only the request. The clusters PR checks the nodes' allocatable memory for 3 × 8Gi
+  against the 8Gi limit (D3). The memory request rises to 2Gi, which covers 8 warm
+  processes, but a node's scheduler sees only the request. The clusters PR checks the
+  nodes' allocatable memory for 3 × 2Gi requests and 3 × 8Gi
   limits before it raises the limit.
 - **SDK `sessionStore` is `@alpha`** (`sdk.d.ts:1826-1834`). Classic has relied on it
   since #828 (`8ee7a89f4`), with eager flush. Task 1.1's pinned tests catch a behaviour change at a bump.
@@ -884,7 +885,8 @@ done. Their conversation exists only in workflow state.
 - **D1. Classic is retired as a mode** (§10.1). There is no Temporal-free driver.
 - **D2. `park_hold_seconds`** defaults to 300 s and is a setting (§5.4).
 - **D3. Warm cache.** `warm_max_per_replica` defaults to **8** and is a setting. The agent
-  container's memory limit rises to **8Gi** (a clusters PR, with Phase 2; §5.3).
+  container's memory request rises to **2Gi** and its limit to **8Gi** (a clusters PR, with
+  Phase 2; §5.3).
 - **D4. `AUTO_UPGRADE` plus continue-as-new per turn** (§5.1).
 - **D5. Turn wall clock.** `turn_max_seconds` defaults to 7200 (2 h) and is a setting
   (§5.2).

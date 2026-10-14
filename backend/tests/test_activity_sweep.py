@@ -346,3 +346,40 @@ async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> No
     with pytest.raises(RuntimeError, match="database down"):
         await main._sweep_activity_logged(state)
     assert index.calls == []
+
+
+def test_a_repair_commits_each_row_it_restores(pg_pool: PgPool, index: ActivityIndex) -> None:
+    """A restore takes the event log's lock, held to commit: one transaction over the
+    whole pass would hold every publisher up until its end. Each row commits as it goes,
+    so the next row's build already sees the last one from another connection."""
+    with pg_pool.connection() as conn:
+        for run in ("p1", "p2"):
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status, workflow_id,"
+                " workflow_run_id, slug) VALUES (%s, 'abc', %s, 'running', %s, 'r', 'demo')",
+                (run, f"k-{run}", f"print-{run}"),
+            )
+    seen: list[int] = []
+
+    def build(found: Any) -> ActivityRow:
+        with pg_pool.connection() as probe:
+            count = probe.execute(
+                "SELECT count(*) AS n FROM activity WHERE id LIKE 'print_run:%'"
+            ).fetchone()
+        seen.append(0 if count is None else count["n"])
+        return ActivityRow(
+            id=f"print_run:{found['id']}",
+            kind="print_run",
+            status="running",
+            title="t",
+            source="print_runs",
+            source_id=found["id"],
+            created_at=found["created_at"],
+            finished_at=found["finished_at"],
+        )
+
+    restored = index._repair_source(
+        DAY, "print_run:", "print_runs", "r.id, r.created_at, r.finished_at", build
+    )
+    assert restored == 2
+    assert seen == [0, 1]

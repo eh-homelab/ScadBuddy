@@ -95,8 +95,17 @@ export function LibraryPage() {
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
   // reopening the dialog on a fresh copy of the file, which then reads everything
-  // twice (#2361).
-  const printListed = printParam !== null && (listing?.files ?? []).some((file) => file.id === printParam)
+  // twice (#2361). While a listing is read again (Advanced, a reload) there is none on
+  // screen, so the last one's answer holds; else the file alone is read meanwhile (#2822).
+  const [listedPrint, setListedPrint] = useState<number | null>(null)
+  const seenPrint =
+    listing === null
+      ? listedPrint
+      : printParam !== null && (listing.files ?? []).some((file) => file.id === printParam)
+        ? printParam
+        : null
+  if (seenPrint !== listedPrint) setListedPrint(seenPrint)
+  const printListed = printParam !== null && seenPrint === printParam
   const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
