@@ -279,6 +279,13 @@ class DownloadCache:
         out.close()
         return None
 
+    def size(self, sha256: str) -> int | None:
+        """The kept entry's size; None when there is none, or the volume cannot say."""
+        try:
+            return self.path(sha256).stat().st_size
+        except OSError:
+            return None
+
     def has(self, sha256: str) -> bool:
         return self.path(sha256).is_file()
 

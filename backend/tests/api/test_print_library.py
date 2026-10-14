@@ -4,23 +4,28 @@ any print is (#1752): only how its 3MF is obtained differs from an output's."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
 import json
 import time
 import zipfile
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import respx
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
@@ -1786,6 +1791,8 @@ def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
     assert second.headers["content-length"] == str(len(content))
     # Served whole from the cache, a resume is still a ranged ask Bambuddy answers.
     assert second.headers["accept-ranges"] == "bytes"
+    # Its hash names the bytes, so a browser can revalidate it (#2821 review).
+    assert second.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
     assert download.call_count == 2
     assert download.calls[-1].request.headers["range"] == "bytes=0-3"
     assert ranged.status_code == 200
@@ -1874,6 +1881,95 @@ def test_a_library_file_not_yet_kept_is_streamed_while_it_is_kept(
 
 
 @respx.mock
+def test_a_library_file_bambuddy_sends_encoded_is_never_kept(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body sent with a Content-Encoding is not the bytes the hash names (#2821
+    review): it is passed on as Bambuddy sent it, and no fill is started for it."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    encoded = gzip.compress(content)
+    respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=encoded, headers={"content-encoding": "gzip"})
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.headers["content-encoding"] == "gzip"
+    assert served.content == content
+    assert fills == []
+    assert not downloads.has(sha)
+
+
+@respx.mock
+def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hit is copied whole before its first byte (#2821 review): past
+    CACHED_COPY_MAX_BYTES the file streams from Bambuddy instead, and is not kept again."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.put(sha, content)
+    assert downloads.has(sha)
+    monkeypatch.setattr(library_print, "CACHED_COPY_MAX_BYTES", len(content) - 1)
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert download.call_count == 1
+    assert fills == []
+
+
+@respx.mock
+def test_the_hash_read_before_a_download_is_its_own_span(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    """The extra call to Bambuddy before every whole-file download shows in a trace,
+    with whether it found a hash to keep the file under (#2821 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    assert client.get("/api/v1/print/library/89/file").status_code == 200
+
+    (read,) = [s for s in spans.get_finished_spans() if s.name == "library.file_hash"]
+    assert read.attributes is not None
+    assert read.attributes["scadbuddy.library.file_id"] == 89
+    assert read.attributes["scadbuddy.cache.cacheable"] is True
+
+
+@respx.mock
 def test_a_failed_read_of_the_files_hash_is_a_miss_and_the_file_still_served(
     client: TestClient, app: FastAPI
 ) -> None:
@@ -1911,6 +2007,32 @@ async def test_a_streamed_file_sent_as_memoryviews_is_kept_whole(tmp_path: Path)
 
     assert b"".join(sent) == content
     assert downloads.path(sha).read_bytes() == content
+
+
+async def test_a_browser_gone_midway_leaves_no_partial_behind(tmp_path: Path) -> None:
+    """A dropped download is a cancelled scope, where every await raises again (#2821
+    review): the fill is closed before anything is awaited, so its partial goes with it
+    rather than waiting for a prune."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        try:
+            yield content[:10]
+            yield content[10:]
+        finally:
+            # Closing Bambuddy's response is awaited, and is where the cancel lands.
+            await asyncio.sleep(0)
+
+    with anyio.CancelScope() as scope:
+        async with aclosing(_kept_as_sent(downloads, sha, chunks())) as sent:
+            async for _ in sent:
+                scope.cancel()
+                break
+
+    assert scope.cancelled_caught
+    assert list(downloads.root.iterdir()) == []
 
 
 @respx.mock
