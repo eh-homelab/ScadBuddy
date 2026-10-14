@@ -658,7 +658,7 @@ async def get_library_choices(
             remembered=remembered,
             printer_id=printer_id,
             rack=rack,
-            catalogues=CatalogueStore(store.pool),
+            catalogues=CatalogueStore(store.pool, store.kek),
         )
 
 

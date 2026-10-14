@@ -566,6 +566,11 @@ class SettingsStore:
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
+    @property
+    def kek(self) -> Kek | None:
+        """The server's secret key, or None when none is configured."""
+        return self._kek
+
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
         """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a
         connection and every statement after it share one deadline. A pool wait that runs

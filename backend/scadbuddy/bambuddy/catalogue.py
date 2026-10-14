@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import time
 from dataclasses import dataclass
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -30,6 +33,7 @@ from scadbuddy.bambuddy.models import (
     PresetCatalogue,
     PresetRef,
 )
+from scadbuddy.core.secrets import Kek
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +154,12 @@ def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> _Catalogu
 #: seconds to answer, so every dialog open paid seconds for the same answer. Past it,
 #: the kept one is still served and a fresh read runs behind it (#2978).
 CATALOGUE_TTL = 120.0
+#: After a refresh fails, how long a stale open serves what this process holds without
+#: reading the shared row or Bambuddy again: a Bambuddy that keeps failing would
+#: otherwise cost every open a load and validation of the whole catalogue.
+REFRESH_BACKOFF = 60.0
+#: The HKDF label of the key a row's key is an HMAC under.
+ROW_KEY_INFO = b"scadbuddy:bambuddy_preset_catalogues:key:v1"
 
 
 @dataclass(frozen=True)
@@ -163,16 +173,31 @@ class CatalogueStore:
 
     The API runs several processes, so one kept in memory alone was almost never the
     one a reopen landed on, and every open read Bambuddy's 1 MB ``/slicer/presets``.
-    Rows are keyed by a hash of the Bambuddy URL and key, never the key itself."""
+    Rows are keyed by a hash of the Bambuddy URL and key, never the key itself: an HMAC
+    under a key derived from the server's secret key when there is one, so a short API
+    key cannot be guessed back from a database dump; a plain SHA-256 without one."""
 
-    def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
+    def __init__(self, pool: ConnectionPool[Connection[DictRow]], kek: Kek | None = None) -> None:
         self._pool = pool
+        self._row_secret = (
+            None
+            if kek is None
+            else HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=ROW_KEY_INFO).derive(
+                kek.key
+            )
+        )
 
-    async def load(self, key: str) -> _Kept | None:
-        return await asyncio.to_thread(self._load, key)
+    def row_key(self, config: BambuddyConfig) -> str:
+        text = f"{config.base_url}\0{config.api_key or ''}".encode()
+        if self._row_secret is None:
+            return hashlib.sha256(text).hexdigest()
+        return hmac.new(self._row_secret, text, hashlib.sha256).hexdigest()
 
-    async def save(self, key: str, kept: _Kept) -> None:
-        await asyncio.to_thread(self._save, key, kept)
+    async def load(self, config: BambuddyConfig) -> _Kept | None:
+        return await asyncio.to_thread(self._load, self.row_key(config))
+
+    async def save(self, config: BambuddyConfig, kept: _Kept) -> None:
+        await asyncio.to_thread(self._save, self.row_key(config), kept)
 
     def _load(self, key: str) -> _Kept | None:
         with self._pool.connection() as conn:
@@ -204,9 +229,13 @@ class CatalogueStore:
 
 _cached: dict[str, _Kept] = {}
 _refreshing: dict[str, asyncio.Task[None]] = {}
+#: When each Bambuddy's last refresh failed, by :func:`time.monotonic`.
+_failed: dict[str, float] = {}
 
 
 def _key(config: BambuddyConfig) -> str:
+    """This process's key for a Bambuddy; never stored (the shared row's is
+    :meth:`CatalogueStore.row_key`)."""
     return hashlib.sha256(f"{config.base_url}\0{config.api_key or ''}".encode()).hexdigest()
 
 
@@ -215,7 +244,7 @@ async def _read(client: BambuddyClient, store: CatalogueStore | None, key: str) 
     _cached[key] = kept
     if store is not None:
         try:
-            await store.save(key, kept)
+            await store.save(client.config, kept)
         except Exception:  # the dialog still has it; the next open reads Bambuddy again
             logger.warning(
                 "the preset catalogue could not be kept for other replicas", exc_info=True
@@ -233,8 +262,11 @@ def _refresh(config: BambuddyConfig, store: CatalogueStore | None, key: str) -> 
         try:
             async with BambuddyClient(config) as fresh:
                 await _read(fresh, store, key)
-        except Exception:  # the kept one stays; the next stale open tries again
+        except Exception:  # the kept one stays; a stale open after REFRESH_BACKOFF tries again
+            _failed[key] = time.monotonic()
             logger.warning("refreshing the preset catalogue failed", exc_info=True)
+        else:
+            _failed.pop(key, None)
         finally:
             _refreshing.pop(key, None)
 
@@ -254,9 +286,11 @@ async def cached_catalogue(
     with what they resolve, still read the catalogue fresh. A failed read is not kept."""
     key = _key(client.config)
     kept = _cached.get(key)
+    if kept is not None and time.monotonic() - _failed.get(key, -REFRESH_BACKOFF) < REFRESH_BACKOFF:
+        return kept.catalogue
     if store is not None and (kept is None or time.time() - kept.read_at >= CATALOGUE_TTL):
         # Another replica may have read it since.
-        shared = await store.load(key)
+        shared = await store.load(client.config)
         if shared is not None and (kept is None or shared.read_at > kept.read_at):
             kept = _cached[key] = shared
     if kept is None:
@@ -267,14 +301,19 @@ async def cached_catalogue(
 
 
 async def settle_refreshes() -> None:
-    """Wait for every background read: tests and shutdown."""
+    """Wait for every background read. For tests: the app's shutdown does not wait, and
+    a refresh it cuts short loses only a cache update."""
     while _refreshing:
         await asyncio.gather(*list(_refreshing.values()), return_exceptions=True)
 
 
 def forget_catalogues() -> None:
-    """Drop every kept catalogue, and stop every refresh: each test starts with none."""
+    """Drop every kept catalogue, and stop every refresh: each test starts with none.
+    A refresh left on an earlier test's loop is only dropped: cancelling it there would
+    raise, as that loop is closed."""
     for task in _refreshing.values():
-        task.cancel()
+        if not task.get_loop().is_closed():
+            task.cancel()
     _refreshing.clear()
     _cached.clear()
+    _failed.clear()

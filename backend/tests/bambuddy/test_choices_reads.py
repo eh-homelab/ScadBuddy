@@ -15,12 +15,13 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy import catalogue, choices
-from scadbuddy.bambuddy.catalogue import CatalogueStore, cached_catalogue
+from scadbuddy.bambuddy.catalogue import CatalogueStore, _Kept, cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.conftest import PgPool
@@ -211,6 +212,106 @@ async def test_the_shared_catalogue_never_stores_the_api_key(
         ).fetchall()
     assert len(rows) == 1
     assert "s3cret" not in rows[0]["key"] + rows[0]["body"]
+
+
+def _read_at(pool: PgPool) -> float:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT extract(epoch FROM read_at) AS read_at FROM bambuddy_preset_catalogues"
+        ).fetchone()
+    assert row is not None
+    return float(row["read_at"])
+
+
+@respx.mock
+async def test_a_stale_shared_catalogue_is_served_and_read_again_for_every_replica(
+    bambuddy: BambuddyClient, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another replica's open finds the shared row past the TTL: it answers with that
+    row at once, and its refresh writes a newer one back for the rest. An older read
+    saved after never replaces it (``WHERE read_at <``)."""
+    presets, _ = _preset_routes()
+    store = CatalogueStore(pg_pool)
+    first = await cached_catalogue(bambuddy, store)
+    written = _read_at(pg_pool)
+
+    catalogue.forget_catalogues()
+    monkeypatch.setattr(catalogue, "CATALOGUE_TTL", 0.0)
+    assert await cached_catalogue(bambuddy, store) == first
+    assert presets.call_count == 1
+    await catalogue.settle_refreshes()
+
+    assert presets.call_count == 2
+    refreshed = _read_at(pg_pool)
+    assert refreshed > written
+    await store.save(bambuddy.config, _Kept(written, first))
+    assert _read_at(pg_pool) == refreshed
+
+
+@respx.mock
+async def test_a_failed_refresh_is_not_retried_or_reloaded_on_every_open(
+    bambuddy: BambuddyClient, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While Bambuddy keeps failing, a stale open serves what this process holds, and
+    neither loads the shared row nor reads Bambuddy again until REFRESH_BACKOFF passes."""
+    presets, _ = _preset_routes()
+    store = CatalogueStore(pg_pool)
+    first = await cached_catalogue(bambuddy, store)
+    presets.mock(return_value=httpx.Response(500))
+    loads = 0
+    load = store.load
+
+    async def counted(config: object) -> object:
+        nonlocal loads
+        loads += 1
+        return await load(config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "load", counted)
+    monkeypatch.setattr(catalogue, "CATALOGUE_TTL", 0.0)
+    assert await cached_catalogue(bambuddy, store) == first
+    await catalogue.settle_refreshes()
+    assert (presets.call_count, loads) == (2, 1)
+
+    for _ in range(3):
+        assert await cached_catalogue(bambuddy, store) == first
+    await catalogue.settle_refreshes()
+    assert (presets.call_count, loads) == (2, 1)
+
+    monkeypatch.setattr(catalogue, "REFRESH_BACKOFF", 0.0)
+    await cached_catalogue(bambuddy, store)
+    await catalogue.settle_refreshes()
+    assert (presets.call_count, loads) == (3, 2)
+
+
+async def test_with_a_server_key_the_row_is_keyed_by_an_hmac_under_it(
+    bambuddy: BambuddyClient, pg_pool: PgPool
+) -> None:
+    """A short API key cannot be guessed back from a dump's row key without the
+    server's secret key."""
+    kek = Kek(id="k", key=b"\1" * 32)
+    keyed = CatalogueStore(pg_pool, kek)
+    plain = CatalogueStore(pg_pool).row_key(bambuddy.config)
+    other = CatalogueStore(pg_pool, Kek(id="o", key=b"\2" * 32)).row_key(bambuddy.config)
+    assert len({keyed.row_key(bambuddy.config), plain, other}) == 3
+
+    with respx.mock:
+        _preset_routes()
+        await cached_catalogue(bambuddy, keyed)
+    with pg_pool.connection() as conn:
+        rows = conn.execute("SELECT key FROM bambuddy_preset_catalogues").fetchall()
+    assert [row["key"] for row in rows] == [keyed.row_key(bambuddy.config)]
+
+
+def test_forgetting_drops_a_refresh_left_on_a_closed_loop() -> None:
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(asyncio.sleep(3600))
+    loop.run_until_complete(asyncio.sleep(0))  # started, and waiting on the closed loop
+    loop.close()
+    catalogue._refreshing["earlier test"] = task
+
+    catalogue.forget_catalogues()
+
+    assert catalogue._refreshing == {}
 
 
 @respx.mock
