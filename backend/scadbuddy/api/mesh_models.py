@@ -237,7 +237,10 @@ async def create_from_upload(
 @router.get(
     "/models/{slug}/scene",
     response_model=SceneView,
-    responses={404: {"description": "No such model, or it is not a mesh model"}},
+    responses={
+        404: {"description": "No such model, or it is not a mesh model"},
+        422: {"description": "Its scene.json is not a valid scene: eject it or restore a version"},
+    },
     summary="A mesh model's scene",
 )
 async def get_scene(slug: SlugPath, catalogue: CatalogueDep) -> SceneView:
