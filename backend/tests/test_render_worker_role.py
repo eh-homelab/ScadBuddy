@@ -7,10 +7,10 @@ import asyncio
 import hashlib
 import json
 import socket
+import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -213,9 +213,12 @@ def test_a_changed_row_predicate_replaces_the_old_policy(
         assert [r["id"] for r in conn.execute("SELECT id FROM activity")] == ["render:x1"]
 
 
-def test_the_grant_waits_for_another_replicas(owner: Pool, role: str, pg_conninfo: str) -> None:
+def test_the_grant_waits_for_another_replicas_lock(
+    owner: Pool, role: str, pg_conninfo: str
+) -> None:
+    key = worker_role.GRANT_LOCK
     with psycopg.connect(pg_conninfo) as other:  # not autocommit: the lock holds till commit
-        other.execute("SELECT pg_advisory_xact_lock(%s)", (worker_role.GRANT_LOCK,))
+        other.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
         with ThreadPoolExecutor(1) as pool:
 
             def grant() -> bool:
@@ -223,8 +226,19 @@ def test_the_grant_waits_for_another_replicas(owner: Pool, role: str, pg_conninf
                     return grant_render_role(conn, role)
 
             granting = pool.submit(grant)
-            with pytest.raises(FuturesTimeout):
-                granting.result(timeout=1.0)
+            with psycopg.connect(pg_conninfo, autocommit=True) as look:
+                deadline = time.monotonic() + 30.0
+                while not look.execute(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                    " AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database())"
+                    " AND classid::bigint = %s AND objid::bigint = %s",
+                    (key >> 32, key & 0xFFFF_FFFF),
+                ).fetchone():
+                    assert time.monotonic() < deadline, "the grant never waited on the lock"
+                    assert not granting.done()
+                    time.sleep(0.05)
+            assert not granting.done()
             other.commit()
             assert granting.result(timeout=30.0)
 
