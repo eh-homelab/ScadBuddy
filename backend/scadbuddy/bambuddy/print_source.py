@@ -123,6 +123,11 @@ class PrintSource(Protocol):
         which prints as it is."""
         ...
 
+    async def fetched_3mf(self, client: BambuddyClient) -> bytes | None:
+        """:meth:`fetch_3mf`, read once for the source and kept: what a check that also
+        reads the file (#956) reads, rather than download it again (#2976)."""
+        ...
+
     async def states_nozzles(self, client: BambuddyClient) -> bool:
         """Whether the file sliced states the side the slicer may use (#834) and each
         side's flow (#484), as chosen: anything but a 3MF nothing can be stated into
@@ -312,6 +317,9 @@ class PrintPipeline:
 
     async def states_nozzles(self: _Fetching, client: BambuddyClient) -> bool:
         return (await PrintPipeline._fetch(self, client)).stated
+
+    async def fetched_3mf(self: _Fetching, client: BambuddyClient) -> bytes | None:
+        return (await PrintPipeline._fetch(self, client)).payload
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
         uploads, settings = PrintPipeline._stores(self)
@@ -701,6 +709,16 @@ class LibrarySource(PrintPipeline):
             return await asyncio.to_thread(
                 stl_3mf, payload, model_name=_file_stem(self.filename) or "model"
             )
+        except MemoryError:
+            # Deliberately the same fallback (#2502): the STL prints as it is, which
+            # Bambuddy's slicer reads itself, so a print needs no wrap. Unlike Arrange's
+            # read (:meth:`write_3mf`) nothing here is kept as the file's refusal, so
+            # there is nothing to protect by refusing; only the log names the cause.
+            logger.warning(
+                "ran out of memory wrapping the STL; printing it as it is",
+                extra={"library_file_id": self.file_id, "error": "MemoryError"},
+            )
+            return None
         except Exception as exc:
             # Untrusted bytes: whatever the mesh reader refuses, the STL prints as it is.
             logger.warning(

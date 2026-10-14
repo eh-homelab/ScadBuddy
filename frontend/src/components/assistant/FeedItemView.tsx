@@ -170,7 +170,8 @@ function attentionTimer(a: Exclude<NonNullable<QuestionItem['attention']>, DoneA
     case 'stop':
       return `No reply ${when}: it stops.`
     case 'wait':
-      return `It waits for you until ${when.replace(/^by /, '')}, then stops.`
+      // #1220: the wait is the turn's, and a restart of ScadBuddy ends the turn.
+      return `It waits for you until ${when.replace(/^by /, '')}, then stops. A restart of ScadBuddy stops it sooner.`
   }
 }
 

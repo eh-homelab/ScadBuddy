@@ -373,12 +373,20 @@ it off when approving the grant), an outside call goes there first.
   `DurableTurns.send`. The turn runs at the owner's default tiers, as a browser turn
   does (#2320).
 - **The answer** is one tool, `escalation_respond(request_id, action, input?, reason?)`,
-  `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. Its route,
-  `POST /api/v1/ai/escalations/{request_id}`, dispatches on the id's prefix as the
-  pending-input route does: `durable:` to the child's `respond` Update with role
-  `parent`; `flow:` to the backend's `POST /workflow-runs/{id}/escalations/{call_id}`,
+  `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. It dispatches on the
+  id's prefix as the pending-input route does: `durable:` to the agent's
+  `flows/escalations.ts` (`pass_up` moves the row in Postgres; `deny` is the child's
+  `respond` Update with role `parent`; `narrow` is refused, a tool call is never
+  narrowed); `flow:` to the backend's `POST /workflow-runs/{id}/escalations/{call_id}`,
   sent with the session's author header, which the backend authorises against
-  `started_by.session` and the entry's hop.
+  `started_by.session` and the entry's hop. **There is no HTTP route of its own**
+  (#2482): the caller is the session its turn runs in (the tool context's session, set
+  by the session manager or the session's workflow), which no HTTP request can show,
+  and on `/mcp` the tool refuses for want of one. A child's entry records its parent
+  (`ai_pending_input.parent_session`, `parent_principal`) from `flow_grant_check`'s
+  verdict, which reads the run's `started_by`; the tool requires the caller's session to
+  be it, still owned (not archived, not handed off) by that principal, and the caller to
+  be its owner.
 - **Cost.** Each delivery is a turn of the starter session, paid from its budget
   (`budget_root_id`, #823). A session out of budget, archived, deleted, or whose owner
   changed by handoff is skipped: its entries go to the person at once.
@@ -440,8 +448,9 @@ its child sessions' parked calls from flow turns, and a requested grant.
   - a flow-own entry: `workflow_runs.waiting_on[]` gains `hop`, `hop_until`,
     `proposal` (narrowed args) and `reason`, written by the backend;
   - a child entry: `ai_pending_input` gains `flow_run_id`, `hop`, `hop_until`,
-    `proposal`, `outside_reason` and `hops`, written by `open_input` and the agent's
-    `EscalationService`.
+    `parent_session`, `parent_principal`, `outside_reason`, `hops` and `delivered_at`,
+    written by `open_input` and the agent's `flows/escalations.ts` (no `proposal`: a
+    child's call is never narrowed).
   So routes authorise on it (§4.2), and nothing in a workflow changes when an entry moves.
 - **Timeouts follow the run's approval timeout at each hop** (`approval_timeout_s`, the
   run's resolved value; 10-01 §7.3 and `workflow_runs.approval_timeout_s`):

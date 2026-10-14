@@ -10,11 +10,14 @@ uses these helpers.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import send
 from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -154,6 +157,36 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     assert "pipeline_nozzle_diameter" not in body
     assert not local.called
     assert not pipeline.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_the_upload_is_laid_out_off_the_event_loop(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2354: an output's first dialog uploads it, and laying the 3MF out for the
+    printer held the event loop ~23 s, stalling every other request."""
+    on_loop: list[bool] = []
+    real = send._laid_out_for
+
+    def watched(payload: bytes, target: send.Target) -> bytes:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(payload, target)
+
+    monkeypatch.setattr(send, "_laid_out_for", watched)
+    output_id = prepared(client, model)
+    upload_route()
+    inventory_routes()
+    nozzle_routes()
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert on_loop == [False]
 
 
 @pytest.mark.requires_postgres

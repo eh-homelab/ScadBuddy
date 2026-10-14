@@ -33,6 +33,9 @@ ACCEPTED_UPDATE = "accepted"
 REFUSED = "PrintRefused"
 #: The same after the record exists: the run is recorded as failed with the problem.
 FAILED = "PrintFailed"
+#: A slice that left nothing behind (`SliceLostError`, #2081): the workflow starts it
+#: again, a few times, before the run is recorded as failed with the problem.
+SLICE_LOST = "PrintSliceLost"
 
 
 class SourceSpec(BaseModel):

@@ -95,3 +95,70 @@ export function blobNames(events: readonly ServerEvent[]): string[] {
   }
   return [...names]
 }
+
+// A durable session's fork (#2688). Its conversation is the transcript its workflow holds
+// (DurableSession's `fork_point` Query), and its panel replies are `durable-<offset>`: the
+// live `text` event they come from names no transcript entry (agent-durable
+// session/events.py). Each such event is one text block of a main-chain assistant entry,
+// in order, so the replies are matched to the entries by their text.
+
+/** The longest text a durable `text` event carries, in code points (the plugin's FIELD_LIMIT). */
+export const DURABLE_TEXT_MAX = 32 * 1024
+
+/** Entry types the engine resumes from (the plugin's `_TRANSCRIPT_TYPES`). */
+const TRANSCRIPT_TYPES = new Set(['user', 'assistant', 'attachment', 'system'])
+
+const isTranscript = (e: SessionStoreEntry): boolean =>
+  typeof e.uuid === 'string' && TRANSCRIPT_TYPES.has(e.type) && e.isSidechain !== true
+
+function sameText(entry: string, event: string): boolean {
+  if (entry === event) return true
+  // A text past the cap reaches the log cut to its first DURABLE_TEXT_MAX code points.
+  return [...event].length === DURABLE_TEXT_MAX && entry.startsWith(event)
+}
+
+/**
+ * The parent's finished replies, by panel message id, each mapped to the uuid of the
+ * transcript entry holding its text, in the order they were written. A reply whose text
+ * the transcript does not hold next (an attempt that never committed: a retried
+ * segment's, a stopped turn's) is left out. When the next entry is not it, a later entry
+ * is taken only if no other remaining entry has the same text, so a reply is never
+ * matched to an entry another reply could be.
+ */
+export function durableReplies(entries: readonly SessionStoreEntry[], events: readonly ServerEvent[]): Map<string, string> {
+  const texts: { uuid: string; text: string }[] = []
+  for (const e of entries) {
+    if (e.type !== 'assistant' || !isTranscript(e)) continue
+    for (const block of blocksOf(e) as { type?: unknown; text?: unknown }[]) {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) texts.push({ uuid: e.uuid!, text: block.text })
+    }
+  }
+  const replies = new Map<string, string>()
+  const written = new Map<string, string>()
+  let next = 0
+  for (const e of events) {
+    if (e.type === 'assistant.text.delta') written.set(e.messageId, (written.get(e.messageId) ?? '') + e.delta)
+    if (e.type !== 'assistant.text.done') continue
+    const text = written.get(e.messageId) ?? ''
+    const rest = texts.slice(next)
+    let at = rest[0] && sameText(rest[0].text, text) ? 0 : -1
+    if (at < 0) {
+      const matches = rest.flatMap((t, i) => (sameText(t.text, text) ? [i] : []))
+      if (matches.length === 1) at = matches[0]!
+    }
+    if (at < 0) continue
+    replies.set(e.messageId, rest[at]!.uuid)
+    next += at + 1
+  }
+  return replies
+}
+
+/**
+ * The entries through `uuid` (inclusive): a reply's entry, or the workflow's checkpoint,
+ * which names whatever entry its runner committed last. Undefined when no main-chain
+ * entry has it.
+ */
+export function entriesThrough(entries: readonly SessionStoreEntry[], uuid: string): SessionStoreEntry[] | undefined {
+  const at = entries.findIndex((e) => e.uuid === uuid && e.isSidechain !== true)
+  return at < 0 ? undefined : entries.slice(0, at + 1)
+}

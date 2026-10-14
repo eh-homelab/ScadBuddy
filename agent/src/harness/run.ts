@@ -1,3 +1,5 @@
+import type { Resolver } from '../http/egress.js'
+import { webFetchEgressHook } from './webFetchEgress.js'
 import path from 'node:path'
 import {
   type CanUseTool,
@@ -147,6 +149,12 @@ export type HarnessRun = {
    */
   builtinTools?: string[]
   /**
+   * Built-ins a nested one-shot query gets on its own, without a package
+   * (builtins/nested.ts: a durable turn's WebSearch runs Claude Code's). Tiered by
+   * `tierOf` like any other tool, so one it does not allow is refused.
+   */
+  nestedTools?: string[]
+  /**
    * ScadBuddy's own plugin (ownPlugin.ts `OWN_PLUGIN_DIR`, #896), vetted like
    * `pluginPaths`. Loading it gives the run the Skill and Agent tools, at
    * `read`, so its skills and subagents can be used; a run without it has no
@@ -215,6 +223,8 @@ export type HarnessRun = {
   traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+  /** The resolver WebFetch's egress check uses (webFetchEgress.ts); the system's when omitted. */
+  resolve?: Resolver
 }
 
 /** The permission seam's PreToolUse hook first, then the memory hooks, then the trace hooks, by event. */
@@ -397,6 +407,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
         {
           PreToolUse: [
             makePreToolUseHook(tierOf, run.onDecision, gate),
+            // Claude Code's own WebFetch, which an allowed package may be given, fetches
+            // where the agent's egress check does not reach; this checks it first.
+            webFetchEgressHook(run.resolve),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],
         },
@@ -437,6 +450,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
+      ...(run.nestedTools ?? []),
     ]),
   ]
   if (builtins.length) options.tools = builtins

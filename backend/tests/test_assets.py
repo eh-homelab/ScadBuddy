@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from PIL import Image, PngImagePlugin
 
 from scadbuddy.library.assets import (
     MAX_ASSET_BYTES,
+    MAX_PNG_PIXELS,
     MAX_PNG_SIDE,
     NOT_SAMPLES,
     AssetNotFoundError,
@@ -204,8 +207,44 @@ def test_a_png_declaring_too_many_pixels_is_refused_before_decoding(store: Asset
 
 
 def test_a_truncated_png_is_refused(store: AssetStore) -> None:
-    with pytest.raises(AssetRejectedError, match="could not be decoded"):
+    with pytest.raises(AssetRejectedError, match="not a readable PNG"):
         store.put(png_bytes(32, 32)[:60], "cut.png")
+
+
+def test_an_undecodable_png_is_refused_without_pillows_text(
+    store: AssetStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A PNG signature followed by text. Pillow's own text (in prod "cannot identify image
+    # file <_io.BytesIO object at 0x...>") goes to the log, never to the user (#2383).
+    data = b"\x89PNG\r\n\x1a\n" + b"not really a picture " * 15
+    with caplog.at_level("INFO"), pytest.raises(AssetRejectedError) as refused:
+        store.put(data, "bad.png")
+    assert str(refused.value) == "the file is not a readable PNG; re-export it as PNG and try again"
+    logged = [r for r in caplog.records if r.getMessage() == "a PNG upload could not be decoded"]
+    assert len(logged) == 1
+    # Pillow's own words for these bytes, exactly: what the user is spared goes to the log.
+    with pytest.raises(OSError) as pillow, Image.open(io.BytesIO(data)) as image:
+        image.load()
+    assert getattr(logged[0], "error", None) == str(pillow.value)
+
+
+def _png_header(width: int, height: int) -> bytes:
+    """A PNG that declares ``width`` x ``height`` (1-bit grey) and holds no pixels."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+
+
+def test_a_png_pillow_refuses_as_a_bomb_is_refused_as_too_large(store: AssetStore) -> None:
+    # Over twice Pillow's MAX_IMAGE_PIXELS: refused at open, before the pixel check.
+    with pytest.raises(AssetRejectedError) as refused:
+        store.put(_png_header(20_000, 20_000), "bomb.png")
+    assert str(refused.value) == f"the PNG is too large; at most {MAX_PNG_PIXELS} pixels are read"
 
 
 def test_an_oversized_upload_is_refused(store: AssetStore) -> None:

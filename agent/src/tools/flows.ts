@@ -3,7 +3,10 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { answered, command } from './command.js'
 import { page, PAGED, pageInput } from './pagination.js'
-import { defineTool, json, text, type Tool } from './registry.js'
+import { EscalationError, ESCALATION_ACTIONS } from '../flows/escalations.js'
+import { parseRequestId } from '../gate/ids.js'
+import { isUuid } from '../harness/stateDirs.js'
+import { defineTool, json, text, ToolError, type Tool } from './registry.js'
 
 // Flows (#1057, spec 2026-10-01 §7): a Python script over ScadBuddy's host functions,
 // registered by name and run durably as a ProjectWorkflow. Routes:
@@ -450,5 +453,54 @@ export const flowTools: Tool[] = [
           }),
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'escalation_respond',
+    description:
+      "Answer a flow run's call that is outside the run's grant and waits for this session, because this session " +
+      'started the run (#2482). `deny` stops it; `pass_up` sends it on to the person unchanged; `narrow` (a ' +
+      "run's own queue_print or arrange only) replaces its request with a smaller one of the same call, fewer " +
+      'copies, plates or objects, which runs if the grant admits it and goes to the person as a proposal if not. ' +
+      'Nothing here approves a call: only the person does. An agent tool\'s call is never narrowed. Works only ' +
+      'in a turn of the session that started the run, while it waits there.',
+    input: z.object({
+      request_id: z.string().min(1).max(300).describe('The waiting call, as the escalation message names it'),
+      action: z.enum(ESCALATION_ACTIONS),
+      input: z.record(z.string(), z.unknown()).optional().describe('For `narrow`: the call\'s narrowed request'),
+      reason: z.string().min(1).max(1000).optional().describe('Why, for the record and the person'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflow-runs/{run_id}/escalations/{call_id}'],
+    summarize: ({ request_id, action }) => `${action.replace('_', ' ')} ${request_id}`,
+    handler: async ({ request_id, action, input, reason }, ctx) => {
+      // The caller is the session this turn runs in (ctx.session, set by the session
+      // manager or the session's workflow), never anything the call names.
+      if (ctx.session === undefined || !isUuid(ctx.session)) {
+        throw new ToolError('only a turn of the session that started the run answers for it')
+      }
+      const parsed = parseRequestId(request_id)
+      if (parsed?.store === 'flow') {
+        // A run's own call: the backend authorises it against the run's `started_by`
+        // and the session's owner now, from the author headers ctx.backend carries.
+        const path = { run_id: parsed.runId, call_id: parsed.callId }
+        return json(
+          await command(ctx, `${action} flow call ${request_id}`, (headers) =>
+            ctx.backend.POST('/api/v1/workflow-runs/{run_id}/escalations/{call_id}', {
+              params: { path },
+              body: { action, ...(input === undefined ? {} : { input }), ...(reason === undefined ? {} : { reason }) },
+              headers,
+            }),
+          ),
+        )
+      }
+      if (!ctx.sessions) throw new ToolError('escalations need the database: SCADBUDDY_DATABASE_URL is not set')
+      try {
+        return json(await ctx.sessions.escalations.respond({ principal: ctx.principal, session: ctx.session }, request_id, action, { reason }))
+      } catch (err) {
+        if (err instanceof EscalationError) throw new ToolError(err.message)
+        throw err
+      }
+    },
   }),
 ]

@@ -122,6 +122,13 @@ BED_TYPE_LABELS: dict[str, str] = {labels}
 
 #: ``printer_model`` -> the ``curr_bed_type`` values that model takes.
 BED_TYPES: dict[str, tuple[str, ...]] = {bed_types}
+
+#: ``printer_model`` -> (``extruder_clearance_radius``,
+#: ``extruder_clearance_height_to_rod``, ``extruder_clearance_height_to_lid``), mm:
+#: what a by-object print's objects must clear (#956). Bambu Studio refuses to slice a
+#: by-object plate whose objects sit closer than the radius, or where more than one is
+#: taller than the rod (the gantry) or any is taller than the lid.
+CLEARANCES: dict[str, tuple[float, float, float]] = {clearances}
 """
 
 
@@ -218,6 +225,34 @@ def collect(root: Path) -> dict[str, tuple[Any, ...]]:
     return table
 
 
+def collect_clearances(root: Path) -> dict[str, tuple[float, float, float]]:
+    """Each model's toolhead and gantry clearance, from its resolved machine profiles."""
+    files = _load_profiles(root)
+    keys = (
+        "extruder_clearance_radius",
+        "extruder_clearance_height_to_rod",
+        "extruder_clearance_height_to_lid",
+    )
+    table: dict[str, tuple[float, float, float]] = {}
+    for stem in sorted(files):
+        raw = json.loads(files[stem].read_text(encoding="utf-8"))
+        if raw.get("type") != "machine" or " template " in stem:
+            continue
+        resolved = _resolve(stem, files)
+        model = resolved.get("printer_model")
+        if not model or any(resolved.get(key) in (None, "") for key in keys):
+            continue
+        radius, rod, lid = (float(resolved[key]) for key in keys)
+        entry = (radius, rod, lid)
+        previous = table.setdefault(model, entry)
+        if previous != entry:
+            raise SystemExit(
+                f"{model}: nozzle variants disagree on clearances; the table's "
+                "one-entry-per-model shape no longer holds"
+            )
+    return table
+
+
 def collect_bed_types(root: Path) -> dict[str, tuple[str, ...]]:
     by_label = {label: value for value, label in BED_TYPE_LABELS.items()}
     table: dict[str, tuple[str, ...]] = {}
@@ -266,6 +301,7 @@ def main() -> None:
         aliases=_mapping(dict(sorted(EXTRA_ALIASES.items()))),
         labels=_mapping(BED_TYPE_LABELS),
         bed_types=_mapping({model: bed_types[model] for model in sorted(table)}),
+        clearances=_mapping(dict(sorted(collect_clearances(root).items()))),
     )
     OUTPUT.write_text(HEADER + body + footer, encoding="utf-8")
     # The rows are far past the 100-column limit as one line each; ruff owns the

@@ -43,6 +43,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, computed_field, model_validator
 
+from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.bambuddy.activity import row_of
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
 from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run
@@ -64,7 +66,8 @@ UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while preparing this print; s
 
 _COLUMNS = (
     "id, output_id, status, created_at, finished_at, result, error,"
-    " (status = 'failed' AND enqueue_attempted) AS may_have_queued"
+    " (status = 'failed' AND enqueue_attempted) AS may_have_queued,"
+    " workflow_id, workflow_run_id"
 )
 
 
@@ -197,9 +200,11 @@ class PrintRunStore:
         *,
         events: TransactionalEvents | None = None,
         repeat_window: timedelta = REPEAT_WINDOW,
+        activity: ActivityIndex | None = None,
     ) -> None:
         self._pool = pool
         self.events = events
+        self.activity = activity
         self.repeat_window = repeat_window
 
     async def find(self, key: str, *, has_request_id: bool) -> PrintRun | None:
@@ -294,7 +299,11 @@ class PrintRunStore:
 
     # The blocking bodies, run in a worker thread by the coroutines above.
 
-    def _announce(self, conn: Connection[DictRow], run: PrintRun, slug: str) -> None:
+    def _announce(self, conn: Connection[DictRow], run: PrintRun, slug: str, row: DictRow) -> None:
+        if self.activity is not None:
+            self.activity.upsert_in(
+                conn, lambda: row_of(run, slug, row["workflow_id"], row["workflow_run_id"])
+            )
         if self.events is not None:
             self.events.publish_in(
                 conn, PrintRunEvent(output_id=run.output_id, slug=slug, run_id=run.id)
@@ -373,7 +382,7 @@ class PrintRunStore:
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
-                self._announce(conn, run, slug)
+                self._announce(conn, run, slug, row)
                 return run
             existing = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs"
@@ -421,7 +430,7 @@ class PrintRunStore:
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
-                self._announce(conn, run, row["slug"] or "")
+                self._announce(conn, run, row["slug"] or "", row)
                 return run
             current = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
@@ -476,7 +485,7 @@ class PrintRunStore:
             ).fetchone()
             if row is not None:
                 run = PrintRun.model_validate(row)
-                self._announce(conn, run, slug)
+                self._announce(conn, run, slug, row)
                 return run
             current = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)

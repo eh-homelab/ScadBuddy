@@ -234,7 +234,8 @@ SILK_NOZZLE_TEMPERATURE = 235
 SILK_FIX = "silk-gloss"
 #: Nozzles the silk guide says are not recommended, in millimetres.
 SILK_UNRECOMMENDED_NOZZLES = (0.6, 0.8)
-#: Both spellings of the Cool Plate SuperTack the resolver's ``BED_TYPES`` offers.
+#: Both spellings of the Cool Plate SuperTack Bambuddy's ``SliceRequest`` takes: a
+#: remembered choice may be either (``hardware.BED_TYPE_ALIASES``).
 SUPERTACK = frozenset({"Supertack Plate", "Cool Plate (SuperTack)"})
 
 

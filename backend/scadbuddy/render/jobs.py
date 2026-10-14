@@ -80,6 +80,8 @@ MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
 #: The most plates a template may ask for with `echo(plates = N)`. Each plate is a
 #: render plus a solid render per colour of its own, so this bounds a job's cost.
 MAX_PLATES = 16
+#: Most objects a template may declare with `echo(objects = N)` (#956): each is a render.
+MAX_OBJECTS = 16
 
 
 def unreadable_colour_warnings(
@@ -176,6 +178,11 @@ def plate_defines(index: int) -> list[str]:
     return ["-D", f"$plate={index}"]
 
 
+def object_defines(index: int) -> list[str]:
+    """The `-D` that makes a template draw only its declared object ``index`` (#956)."""
+    return ["-D", f"$object={index}"]
+
+
 @dataclass(frozen=True)
 class PartSource:
     """Where a layout part's mesh is on disk, relative to the render's directory:
@@ -211,8 +218,12 @@ class PlateLayout:
                         "file": source.file,
                         "solid": source.solid,
                         **({"negative": True} if part.negative else {}),
+                        # Left out for the first object, so a layout of one reads as before.
+                        **({"object": number} if number != 1 else {}),
                     }
-                    for part, source in zip(plate.parts, sources, strict=True)
+                    for part, source, number in zip(
+                        plate.parts, sources, plate.objects, strict=True
+                    )
                 ],
             }
             for plate, sources in zip(self.plates, self.sources, strict=True)
@@ -263,7 +274,13 @@ class PlateLayout:
         sources: list[tuple[PartSource, ...]] = []
         for plate in document["plates"]:
             parts = [part(entry) for entry in plate["parts"]]
-            plates.append(PlateParts(tuple(p for p, _ in parts), tuple(plate["extruders"])))
+            plates.append(
+                PlateParts(
+                    tuple(p for p, _ in parts),
+                    tuple(plate["extruders"]),
+                    tuple(int(entry.get("object", 1)) for entry in plate["parts"]),
+                )
+            )
             sources.append(tuple(s for _, s in parts))
         return cls(
             plates,
@@ -299,6 +316,26 @@ def _empty_plate(index: int, count: int) -> str:
     )
 
 
+def _empty_object(index: int, count: int) -> str:
+    return (
+        f"object {index} of {count} rendered no geometry: the template asks for "
+        f"echo(objects = {count}) but draws nothing when $object = {index}"
+    )
+
+
+def _piece_label(
+    plate: int | None, plates: int, obj: int | None, objects: int, *, counts: bool = True
+) -> str:
+    """How an error names one render of a layout: its plate, its object, or both, with
+    each count ("plate 2 of 3") or, for a warning, without ("plate 2")."""
+    names = []
+    if plate is not None:
+        names.append(f"plate {plate} of {plates}" if counts else f"plate {plate}")
+    if obj is not None:
+        names.append(f"object {obj} of {objects}" if counts else f"object {obj}")
+    return ", ".join(names)
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -308,19 +345,24 @@ async def plate_layout(
     work_dir: Path,
     *,
     config: Config,
+    objects: int = 1,
 ) -> PlateLayout:
     """The plates of a render: one for an ordinary template, ``count`` for one that
-    asked for more with `echo(plates = N)` (spec §6.4).
+    asked for more with `echo(plates = N)` (spec §6.4), each holding the ``objects`` a
+    template declared with `echo(objects = N)` (#956).
 
     Plate *k* is its own render with ``$plate = k``, split, then the per-colour solids
-    of §6.3 with the same ``$plate``. Its parts are numbered against the extruder
-    order of the everything-at-once render (``preview_parts``), so a colour is the
-    same extruder on every plate. A colour only the everything render draws gets no
+    of §6.3 with the same ``$plate``. A template with declared objects is rendered once
+    per object as well, with ``$object = j`` (and the plate's ``$plate``), and each
+    object's parts are its own (`PlateParts.objects`). Parts are numbered against the
+    extruder order of the everything-at-once render (``preview_parts``), so a colour is
+    the same extruder on every plate. A colour only the everything render draws gets no
     extruder, and one only a plate draws is appended; both are warnings, because
-    either means the template's plates and its preview disagree.
+    either means the template's plates and its preview disagree. An object that draws
+    nothing on a plate is not on it; one drawn on no plate at all is an error.
     """
     box = bounding_box(preview_parts)
-    if count <= 1:
+    if count <= 1 and objects <= 1:
         parts, solid_warnings = await solid_parts(
             scad_path, schema, params, preview_parts, work_dir, config=config
         )
@@ -332,69 +374,130 @@ async def plate_layout(
         raise OpenSCADError(
             f"the template asks for {count} plates; ScadBuddy renders at most {MAX_PLATES}", []
         )
+    if objects > MAX_OBJECTS:
+        raise OpenSCADError(
+            f"the template asks for {objects} objects; ScadBuddy renders at most {MAX_OBJECTS}",
+            [],
+        )
 
+    plate_numbers: list[int | None] = list(range(1, count + 1)) if count > 1 else [None]
+    object_numbers: list[int | None] = list(range(1, objects + 1)) if objects > 1 else [None]
     colours = [part.colour for part in preview_parts]
     warnings: list[str] = []
-    drawn: list[tuple[list[ColourPart], list[int]]] = []
+    drawn: list[tuple[list[ColourPart], list[int], list[int]]] = []
     sources: list[tuple[PartSource, ...]] = []
-    for index in range(1, count + 1):
-        plate_dir = work_dir / f"plate-{index}"
-        plate_dir.mkdir(parents=True, exist_ok=True)
-        defines = plate_defines(index)
-        raw = plate_dir / RAW_RENDER_NAME
-        try:
-            output = await render_3mf(
-                scad_path, schema, params, raw, config=config, extra_defines=defines
-            )
-        except OpenSCADError as error:
-            # OpenSCAD will not export an empty top-level object: it exits 1
-            # before there is a 3MF to find empty (#1328).
-            empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
-            raise OpenSCADError(
-                _empty_plate(index, count) if empty else f"plate {index} of {count}: {error}",
-                error.log_tail,
-                error.returncode,
-                diagnostics=error.diagnostics,
-                diagnostics_dropped=error.diagnostics_dropped,
-                missing_files=error.missing_files,
-            ) from error
-        split = split_by_material(raw)
-        if not split:
-            # A file the plate could not open is often why it drew nothing (#451).
-            raise OpenSCADError(
-                _empty_plate(index, count),
-                output.log_tail,
-                diagnostics=output.diagnostics,
-                diagnostics_dropped=output.diagnostics_dropped,
-                missing_files=output.missing_files,
-            )
-        for part in split:
-            if part.colour not in colours:
-                colours.append(part.colour)
-                warnings.append(
-                    f"plate {index}: {part.colour} is not in the all-plates render; "
-                    f"it gets extruder {len(colours)}"
+    objects_drawn: set[int] = set()
+    for plate_number in plate_numbers:
+        plate_parts: list[ColourPart] = []
+        plate_objects: list[int] = []
+        plate_sources: list[PartSource] = []
+        for object_number in object_numbers:
+            piece_dir = work_dir
+            defines: list[str] = []
+            if plate_number is not None:
+                piece_dir = piece_dir / f"plate-{plate_number}"
+                defines += plate_defines(plate_number)
+            if object_number is not None:
+                piece_dir = piece_dir / f"object-{object_number}"
+                defines += object_defines(object_number)
+            piece_dir.mkdir(parents=True, exist_ok=True)
+            label = _piece_label(plate_number, count, object_number, objects)
+            # With objects, one may simply not be on this plate: not an error here.
+            may_be_empty = object_number is not None
+            raw = piece_dir / RAW_RENDER_NAME
+            try:
+                output = await render_3mf(
+                    scad_path, schema, params, raw, config=config, extra_defines=defines
                 )
-        split.sort(key=lambda part: colours.index(part.colour))
-        parts, solid_warnings = await solid_parts(
-            scad_path, schema, params, split, plate_dir, config=config, extra_defines=defines
+            except OpenSCADError as error:
+                # OpenSCAD will not export an empty top-level object: it exits 1
+                # before there is a 3MF to find empty (#1328).
+                empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
+                if empty and may_be_empty:
+                    continue
+                assert plate_number is not None or object_number is not None
+                raise OpenSCADError(
+                    _empty_plate(plate_number, count)
+                    if empty and plate_number is not None
+                    else f"{label}: {error}",
+                    error.log_tail,
+                    error.returncode,
+                    diagnostics=error.diagnostics,
+                    diagnostics_dropped=error.diagnostics_dropped,
+                    missing_files=error.missing_files,
+                ) from error
+            split = split_by_material(raw)
+            if not split:
+                if may_be_empty:
+                    continue
+                assert plate_number is not None
+                # A file the plate could not open is often why it drew nothing (#451).
+                raise OpenSCADError(
+                    _empty_plate(plate_number, count),
+                    output.log_tail,
+                    diagnostics=output.diagnostics,
+                    diagnostics_dropped=output.diagnostics_dropped,
+                    missing_files=output.missing_files,
+                )
+            for part in split:
+                if part.colour not in colours:
+                    colours.append(part.colour)
+                    short = _piece_label(plate_number, count, object_number, objects, counts=False)
+                    everything = "all-plates" if object_number is None else "everything-at-once"
+                    warnings.append(
+                        f"{short}: {part.colour} is not in the {everything} render; "
+                        f"it gets extruder {len(colours)}"
+                    )
+            split.sort(key=lambda part: colours.index(part.colour))
+            parts, solid_warnings = await solid_parts(
+                scad_path, schema, params, split, piece_dir, config=config, extra_defines=defines
+            )
+            # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
+            warnings += [warning for warning in solid_warnings if warning not in warnings]
+            plate_parts += parts
+            plate_objects += [object_number or 1] * len(parts)
+            plate_sources += _part_sources(work_dir, raw, split, parts)
+            if object_number is not None:
+                objects_drawn.add(object_number)
+        if not plate_parts:
+            assert plate_number is not None or objects > 1
+            raise OpenSCADError(
+                _empty_plate(plate_number, count)
+                if plate_number is not None
+                else "the render produced no geometry for any of its objects",
+                [],
+            )
+        drawn.append(
+            (plate_parts, [colours.index(part.colour) + 1 for part in plate_parts], plate_objects)
         )
-        # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
-        warnings += [warning for warning in solid_warnings if warning not in warnings]
-        drawn.append((parts, [colours.index(part.colour) + 1 for part in parts]))
-        sources.append(_part_sources(work_dir, raw, split, parts))
+        sources.append(tuple(plate_sources))
+    if objects > 1:
+        for number in range(1, objects + 1):
+            if number not in objects_drawn:
+                raise OpenSCADError(_empty_object(number, objects), [])
 
     # Dense extruders, as §7 promises: a colour no plate draws gives up its slot.
-    used = sorted({extruder for _, extruders in drawn for extruder in extruders})
+    used = sorted({extruder for _, extruders, _ in drawn for extruder in extruders})
     renumber = {old: new for new, old in enumerate(used, start=1)}
     for old, colour in enumerate(colours, start=1):
         if old not in renumber:
             warnings.append(f"{colour} is drawn only with every plate at once; it is on no plate")
     plates = [
-        PlateParts(tuple(parts), tuple(renumber[extruder] for extruder in extruders))
-        for parts, extruders in drawn
+        PlateParts(
+            tuple(parts),
+            tuple(renumber[extruder] for extruder in extruders),
+            _dense_objects(numbers),
+        )
+        for parts, extruders, numbers in drawn
     ]
     return PlateLayout(plates, [colours[old - 1] for old in used], warnings, box, sources)
+
+
+def _dense_objects(numbers: Sequence[int]) -> tuple[int, ...]:
+    """A plate's object numbers counted from 1 on that plate, in order: object 3 of the
+    template may be the first on plate 2."""
+    order = {number: index for index, number in enumerate(dict.fromkeys(numbers), start=1)}
+    return tuple(order[number] for number in numbers)
 
 
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
@@ -914,6 +1017,7 @@ async def _render_solids(
                 output.plates or 1,
                 work,
                 config=config,
+                objects=output.objects or 1,
             )
         except OpenSCADError as error:
             # A failed plate warns as a failed whole render does (#451).

@@ -2,26 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import json
+import time
+import weakref
+import xml.etree.ElementTree as ET
 import zipfile
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 import trimesh
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.bambuddy.library_objects import piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
-from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
+from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, laid_out_plates, write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
+from scadbuddy.render.jobs import PlateLayout, plates_thumbnails
 from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows import outputs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
     Layout,
@@ -461,3 +471,217 @@ async def test_no_copy_is_packed_where_a_neighbours_negative_part_reaches(tmp_pa
     apart_x = abs(first.x - second.x) >= 35 and first.rot == second.rot == 0
     apart_y = abs(first.y - second.y) >= min(box.size[1], box.size[0])
     assert apart_x or apart_y
+
+
+async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2573: an arrange of many library pieces was OOM-killed holding every piece's
+    meshes until the output was written. A piece is let go once its last copy is
+    placed: the first piece is gone while the second plate is laid out, and when the
+    covers are drawn."""
+    deps, _ = _deps(tmp_path)
+    entries, reads = [], []
+    for index, colour in enumerate(["#FF0000", "#0000FF"]):
+        out = tmp_path / f"piece-{index}.3mf"
+        mesh = trimesh.creation.box(extents=(10, 10, 4 + index))
+        write_bambu_3mf([ColourPart(1, "Body", colour, mesh)], out, thumbnails=None)
+        read = read_objects(out.read_bytes())
+        box = bounding_box(read[0].parts)
+        entries.append(
+            ManifestObject(
+                part=piece_key(f"{index}a" * 32, 0),
+                file=read[0].name,
+                slug="demo",
+                revision=None,
+                bbox=box,
+                footprint=(box.size[0], box.size[1]),
+                colours=[colour],
+                count=1,
+                library_file_id=90 + index,
+            )
+        )
+        reads.append(read[0])
+    await publish_library_pieces(deps.blobs, entries, reads)
+    first, second = (part_of(entry) for entry in entries)
+
+    loaded: dict[str, weakref.ref[PlateLayout]] = {}
+    alive_at_load: list[list[str]] = []
+    real_load = PlateLayout.load
+
+    def alive() -> list[str]:
+        """The layouts still held. A let-go one can outlive its ``del`` for a moment:
+        ``asyncio.to_thread``'s worker keeps its finished work item, whose future's
+        result is the layout, until it gets the CPU back, and under a loaded CI runner
+        the event loop resumes first. So wait, briefly, for it to go; one really held
+        stays alive past the wait and still fails."""
+        deadline = time.monotonic() + 5
+        while True:
+            gc.collect()
+            held = [key for key, ref in loaded.items() if ref() is not None]
+            if not held or time.monotonic() > deadline:
+                return held
+            time.sleep(0.01)
+
+    def load(path: Path) -> PlateLayout:
+        alive_at_load.append(alive())
+        layout = real_load(path)
+        loaded[path.parent.name] = weakref.ref(layout)
+        return layout
+
+    alive_at_covers: list[str] = []
+    real_covers = plates_thumbnails
+
+    async def covers(*args: Any, **kwargs: Any) -> Any:
+        alive_at_covers.extend(await asyncio.to_thread(alive))
+        return await real_covers(*args, **kwargs)
+
+    monkeypatch.setattr(PlateLayout, "load", staticmethod(load))
+    monkeypatch.setattr(outputs, "plates_thumbnails", covers)
+    req = OutputRequest(
+        job_id="j9",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(items=[Placed(piece_key=first.piece_key, x=0, y=0)]),
+                LayoutPlate(items=[Placed(piece_key=second.piece_key, x=0, y=0)]),
+            ]
+        ),
+        parts=[first, second],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([first.piece_key, second.piece_key]),
+        provenance={entry.part: entry for entry in entries},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+
+    assert len(written.result.plates or []) == 2
+    assert alive_at_load == [[], []]
+    assert first.piece_key not in alive_at_covers
+
+
+def _library_piece(read: list[Any], key: str, file_id: int, count: int) -> tuple[Any, Any]:
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key(key * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000"],
+        count=count,
+        library_file_id=file_id,
+    )
+    return entry, part_of(entry)
+
+
+async def _objects_of_output(
+    tmp_path: Path, read: list[Any], copies: int, key: str
+) -> list[set[str]]:
+    """Each object of the written plate, as the subtypes of its parts."""
+    deps, paths = _deps(tmp_path)
+    entry, library = _library_piece(read, key, 92, copies)
+    await publish_library_pieces(deps.blobs, [entry], read)
+    req = OutputRequest(
+        job_id="j9",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(
+                    items=[
+                        Placed(piece_key=library.piece_key, x=40.0 * n, y=0, rot=0.0)
+                        for n in range(copies)
+                    ]
+                )
+            ]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
+        [plate] = laid_out_plates(archive)
+        config = ET.fromstring(archive.read("Metadata/model_settings.config"))
+    subtypes = {
+        obj.get("id"): {part.get("subtype") or "" for part in obj.findall("part")}
+        for obj in config.iter("object")
+    }
+    return [subtypes[assembly] for assembly in plate.assembly_ids]
+
+
+async def test_each_copy_of_a_cut_piece_is_an_object_with_its_own_cut(tmp_path: Path) -> None:
+    """#2874 review: a packed copy with a negative part is its own object, and its cut
+    goes with it, not into its neighbour's."""
+    from tests.test_objects3mf import _cut_project
+
+    objects = await _objects_of_output(tmp_path, read_objects(_cut_project()), 2, "cd")
+
+    assert objects == [{"normal_part", "negative_part"}] * 2
+
+
+async def test_a_pieces_declared_objects_stay_apart_in_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2874 review: a piece whose template declares two objects keeps them two in a
+    packed plate, rather than joined into one per colour."""
+    left = trimesh.creation.box(extents=(10, 10, 4))
+    right = trimesh.creation.box(extents=(10, 10, 4))
+    right.apply_translation((20, 0, 0))
+    read = read_objects(
+        bambu_project(
+            items=[at(0, 0)],
+            parts={1: (left, "normal_part", 1), 2: (right, "normal_part", 2)},
+        )
+    )
+    loaded = PlateLayout.load
+
+    def declared(path: Path) -> PlateLayout:
+        layout = loaded(path)
+        first = layout.plates[0]
+        assert len(first.parts) == 2
+        layout.plates[0] = replace(first, objects=(1, 2))
+        return layout
+
+    monkeypatch.setattr(PlateLayout, "load", staticmethod(declared))
+
+    objects = await _objects_of_output(tmp_path, read, 1, "ce")
+
+    assert len(objects) == 2
+
+
+async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -> None:
+    """#2874 review: skipped, an empty plate would renumber every plate after it
+    against the layout, so it is refused loudly instead."""
+    from tests.test_objects3mf import _cut_project
+
+    deps, _ = _deps(tmp_path)
+    read = read_objects(_cut_project())
+    entry, library = _library_piece(read, "cf", 93, 1)
+    await publish_library_pieces(deps.blobs, [entry], read)
+    req = OutputRequest(
+        job_id="j10",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(items=[Placed(piece_key=library.piece_key, x=0, y=0, rot=0.0)]),
+                LayoutPlate(items=[]),
+            ]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    with pytest.raises(ApplicationError, match="plate 2 of the layout has nothing to print"):
+        await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)

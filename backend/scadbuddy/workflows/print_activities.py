@@ -26,7 +26,8 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
-from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.dispatch import SliceLostError, SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
@@ -59,6 +60,7 @@ from scadbuddy.rack.usage import RackUsage
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
+    SLICE_LOST,
     Checked,
     CheckInput,
     EnqueueInput,
@@ -246,7 +248,7 @@ class PrintActivities:
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:
         try:
             async with client_for(self._settings()) as client:
-                return await start_slice(
+                started = await start_slice(
                     client,
                     library_file_id=input.library_file_id,
                     plan=input.plan,
@@ -254,16 +256,43 @@ class PrintActivities:
                     # The dialog's background slice of the same, when there is one (#2169).
                     reuse=reusable_slice(client, self.d.uploads, printing=True),
                 )
+        except SliceLostError as error:
+            # Bambuddy may have taken it: the sweep looks for its job (#2715).
+            await self._record_lost_start(input.library_file_id)
+            raise raised_as(error, SLICE_LOST) from None
         except ApiError as error:
             raise raised_as(error, FAILED) from None
+        # Recorded before the run may queue it: the lost-start sweep removes what an
+        # unrecorded job of this copy sliced to (#2715), so a start it cannot record
+        # fails, and the run with it, rather than queue a file the sweep may remove.
+        await self.d.uploads.record_slice_start(input.library_file_id, started.job_id)
+        return started
+
+    async def _record_lost_start(self, library_file_id: int) -> None:
+        """A start that got no answer, for the sweep to look beside (#2715). Never fails
+        the run: unrecorded, its job's file is only left behind, as before."""
+        try:
+            await self.d.uploads.record_slice_start(library_file_id, None)
+        except Exception:
+            logger.warning(
+                "could not record a lost slice start; its job's file may be left behind",
+                extra={"library_file_id": library_file_id},
+                exc_info=True,
+            )
 
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
-        """Polls the slice job inside the activity, heartbeating (§5.3)."""
+        """Polls the slice job inside the activity, heartbeating (§5.3). A Bambuddy it
+        cannot reach is retried here, reading the same job; a job that is lost, or still
+        unreachable once these retries are spent, the workflow slices again (#2081)."""
         try:
             async with client_for(self._settings()) as client:
                 return await heartbeating(wait_slice(client, job_id))
+        except SliceLostError as error:
+            raise raised_as(error, SLICE_LOST) from None
         except ApiError as error:
+            if error.type == UNAVAILABLE_PROBLEM:
+                raise raised_as(error, SLICE_LOST, non_retryable=False) from None
             raise raised_as(error, FAILED) from None
 
     @activity.defn(name="print_start_enqueue")

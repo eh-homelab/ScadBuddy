@@ -138,6 +138,9 @@ export class SessionBlobs {
   /**
    * A fork's copy of the parent's images `names` lists: those the events it copies name
    * (forkPoint.ts `blobNames`, #2150), never every image the parent holds.
+   * `ai_session_tool_images` links are not copied, on purpose (#2658): they matter only
+   * until follow_session has named a call's images on its logged `tool.result`, and the
+   * events a fork copies already carry those names, so the blobs come from them.
    */
   async copy(from: string, to: string, names: readonly string[]): Promise<void> {
     if (names.length === 0) return

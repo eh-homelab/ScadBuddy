@@ -113,6 +113,8 @@ class StandInTools:
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
         self.turn_offered: list[dict[str, Any]] = []
         self.turn_packages: list[dict[str, Any]] = []
+        # What turn_tools says to tell the model (#2393, the built-ins it provides).
+        self.turn_note: str | None = None
         # memory_recall's block (agent temporal/memoryActivities.ts, #2320), and each
         # memory activity's (name, turn); memory_fails makes both fail.
         self.memory_context: str | None = None
@@ -205,6 +207,7 @@ class StandInTools:
             return {
                 "tools": [{**t, **pin} for t in self.turn_offered],
                 "packages": self.turn_packages,
+                **({"system_note": self.turn_note} if self.turn_note else {}),
             }
 
         @activity.defn(name="turn_tools_close")

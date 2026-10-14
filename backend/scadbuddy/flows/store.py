@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote
 
 import psycopg
 from psycopg import Connection
@@ -27,7 +27,6 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
 from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse, RuleUse
-from scadbuddy.flows.manifest import OVERRIDES_SETTING
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -100,6 +99,21 @@ class HopMovedError(Exception):
 
 #: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
 DEFAULT_APPROVAL_EXPIRY_S = 600
+
+
+def author_principal(owner_id: str) -> str:
+    """`owner_id` as the agent writes it in the author header (agent
+    `tools/authorship.ts` `principalHeader`): printable ASCII as it is, anything else
+    percent-encoded as UTF-8, at most 300 characters, a whole character at a time."""
+    out = ""
+    for c in owner_id:
+        encoded = c if 0x21 <= ord(c) <= 0x7E else quote(c, safe="", errors="replace")
+        if len(out) + len(encoded) > 300:
+            break
+        out += encoded
+    return out or "unknown"
+
+
 #: The agent's tiers, lowest first (agent `auth/principal.ts` `TIERS`).
 TIERS = ("read", "write", "outward")
 APPROVAL_EXPIRY_SETTING = "approval_expiry_seconds"
@@ -331,10 +345,10 @@ class FlowStore:
         return await asyncio.to_thread(self._get_proposal, request_id)
 
     async def parent_tiers(self, session: str, principal: str) -> list[str] | None:
-        """The tiers the starter session acts with now (#2482, spec §4.4): its owner's,
-        as the agent runs an escalation turn (`auth/principal.ts` `harnessPrincipal`,
-        a token's live tier). None when the session is gone or no longer the run
-        starter's (a handoff): it is no parent then."""
+        """The tiers the starter session acts with now (#2482, spec §4.4): the browser
+        user's all of them, a token's its live tier (the tiers the agent sends the
+        escalation turn with), anyone else's `read`. None when the session is gone,
+        archived, or no longer the run starter's (a handoff): it is no parent then."""
         return await asyncio.to_thread(self._parent_tiers, session, principal)
 
     async def approval_expiry_s(self) -> int:
@@ -405,10 +419,6 @@ class FlowStore:
 
     async def delete_grant(self, run_id: str) -> None:
         await asyncio.to_thread(self._delete_grant, run_id)
-
-    async def tool_overrides(self) -> Any:
-        """Settings' raised tool tiers (the agent's `ai_settings` row), or None."""
-        return await asyncio.to_thread(self._tool_overrides)
 
     # -- implementation -----------------------------------------------------------
 
@@ -638,17 +648,6 @@ class FlowStore:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
 
-    def _tool_overrides(self) -> Any:
-        with self._pool.connection() as conn:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM ai_settings WHERE key = %s", (OVERRIDES_SETTING,)
-                ).fetchone()
-            except psycopg.errors.UndefinedTable:
-                # No agent service has migrated this database: no overrides.
-                return None
-        return None if row is None else row["value"]
-
     def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
         with self._pool.connection() as conn, conn.transaction():
             if at_hop is not None:
@@ -813,10 +812,11 @@ class FlowStore:
         with self._pool.connection() as conn:
             try:
                 owner = conn.execute(
-                    "SELECT owner_kind, owner_id FROM ai_sessions WHERE id::text = %s",
+                    "SELECT owner_kind, owner_id FROM ai_sessions"
+                    " WHERE id::text = %s AND archived_at IS NULL",
                     (session,),
                 ).fetchone()
-                if owner is None or owner["owner_id"] != unquote(principal):
+                if owner is None or author_principal(str(owner["owner_id"])) != principal:
                     return None
                 if owner["owner_kind"] == "browser":
                     return list(TIERS)

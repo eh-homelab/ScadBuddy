@@ -326,13 +326,16 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
     }
 
     case 'session.started': {
-      const known = event.sessionId in state.sessions
+      const known = state.sessions[event.sessionId]
+      // #2371 — opening a chat replays its log from this event, which carries the title
+      // and status the session started with. What the panel already has for it (the
+      // list, a rename) is newer, so a replay keeps it.
       const summarised = upsertSummary(state, {
         sessionId: event.sessionId,
-        title: event.title ?? 'New chat',
+        title: known ? known.title : (event.title ?? 'New chat'),
         origin: event.origin,
         owner: event.owner,
-        status: 'running',
+        status: known ? known.status : 'running',
       })
       const budgeted =
         event.budgetUsd === undefined

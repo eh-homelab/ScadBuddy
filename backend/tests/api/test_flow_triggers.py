@@ -20,6 +20,7 @@ from scadbuddy.core.events import EventBus, JobEvent, VersionCommitted
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
 from scadbuddy.workflows.flow_triggers import schedule_id
+from tests.api.conftest import FakeAgentTools
 from tests.api.test_flows import AGENT, register, script, settings, until
 from tests.support.temporal import WorkflowReaper
 
@@ -468,6 +469,42 @@ def test_a_stale_schedule_never_fires_an_event_trigger(
     # The reconcile at the worker's start removes the Schedule of every non-schedule trigger.
     workflow_reaper.run(ensure_trigger_schedules(temporal, queue, store))
     assert schedule_id(trigger["id"]) not in workflow_reaper.run(_schedule_ids(temporal))
+
+
+@pytest.mark.usefixtures("triggers")
+def test_a_fire_waits_for_the_agents_tools_and_admits_nothing_meanwhile(
+    client: TestClient, workflow_reaper: WorkflowReaper, agent_tools: FakeAgentTools
+) -> None:
+    """#2704: a run starts with its tools' tiers as the agent says them now. With the
+    agent unreachable the fire is retried, never started on a guess."""
+    definition = register(client, QUICK)
+    trigger = create(client, definition["id"])
+    agent_tools.down = True
+    before = len(view(client, trigger["id"])["fires"])
+    temporal = workflow_reaper.client
+    assert isinstance(temporal, Client)
+    handle = temporal.get_schedule_handle(schedule_id(trigger["id"]))
+    workflow_reaper.run(handle.trigger(overlap=ScheduleOverlapPolicy.ALLOW_ALL))
+    deadline = time.monotonic() + 30
+    while len(view(client, trigger["id"])["fires"]) <= before:
+        assert time.monotonic() < deadline, "the fire was never claimed"
+        time.sleep(0.2)
+    time.sleep(3)
+    assert view(client, trigger["id"])["fires"][0]["outcome"] == "pending"
+    assert client.get("/api/v1/workflow-runs").json() == []
+    agent_tools.down = False
+    fired = decided(client, trigger["id"], before + 1, timeout=60)
+    assert fired["outcome"] == "started", fired
+
+
+def test_a_standing_grant_is_refused_while_the_agent_cannot_say_its_tools(
+    client: TestClient, agent_tools: FakeAgentTools
+) -> None:
+    definition = register(client, QUICK)
+    trigger = create(client, definition["id"])
+    agent_tools.down = True
+    attached = attach(client, trigger["id"], grant({"fn": "queue_print", "printers": [3]}))
+    assert attached.status_code == 503, attached.text
 
 
 @pytest.mark.usefixtures("triggers")
