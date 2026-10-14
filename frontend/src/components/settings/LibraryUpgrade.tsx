@@ -119,7 +119,8 @@ export function LibraryUpgrade() {
           Could not read the models, so rows show slugs: {models.error.message}
         </p>
       )}
-      <UnusedCheckouts installed={installed} onRemoved={libraries.reload} />
+      {/* A refresh, not a reload: the panel keeps its library, checks and ticks on screen. */}
+      <UnusedCheckouts installed={installed} onRemoved={() => libraries.refresh()} />
       {/* Keyed by library: another library's checks and ticks never carry over. */}
       {library && (
         <LibraryUsers
@@ -479,6 +480,8 @@ function UnusedCheckouts({ installed, onRemoved }: { installed: readonly Install
       // delete is safe to repeat. A "Try again" for an answer that never came would pass
       // that attempt's key instead (`command()`'s `key`).
       await api.removeLibraryCheckout(row.name, row.commit)
+      // The rows are re-listed in place: another row's refusal may no longer hold.
+      setErrors({})
       onRemoved()
     } catch (caught) {
       setErrors((current) => ({ ...current, [key]: message(caught) }))
