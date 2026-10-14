@@ -87,34 +87,42 @@ class ModelsHeadFollower:
         # the default executor until it ends, and the loop's close joins it.
         started = time.monotonic()
         walk = asyncio.ensure_future(asyncio.to_thread(self.revalidate, model_ids))
+        stalled = False
         try:
-            await asyncio.wait_for(asyncio.shield(walk), self.slow_after)
-        except asyncio.CancelledError:
-            # The walk outlives the cancelled listener; whatever it raises then is
-            # retrieved here, not reported as never retrieved at shutdown.
-            walk.add_done_callback(_settled)
-            raise
-        except TimeoutError:
-            # No limit on the walk itself: moving on before it ends would name a HEAD
-            # this replica has not revalidated for (#2617). A hung hard-mounted NFS is
-            # said instead, since every channel on the shared listener waits for it.
-            logger.warning(
-                "the models library refresh is still walking the mount; the event bus"
-                " and the listener's liveness check wait for it",
-                extra={"models": _count(model_ids), "seconds": self.slow_after},
-            )
             try:
-                await walk
+                await asyncio.wait_for(asyncio.shield(walk), self.slow_after)
             except asyncio.CancelledError:
+                # The walk outlives the cancelled listener; whatever it raises then is
+                # retrieved here, not reported as never retrieved at shutdown.
                 walk.add_done_callback(_settled)
                 raise
-        if self.catalogue is not None:
-            self.catalogue.forget(model_ids)
+            except TimeoutError:
+                stalled = True
+                # No limit on the walk itself: moving on before it ends would name a HEAD
+                # this replica has not revalidated for (#2617). A hung hard-mounted NFS is
+                # said instead, since every channel on the shared listener waits for it.
+                logger.warning(
+                    "the models library refresh is still walking the mount; the event bus"
+                    " and the listener's liveness check wait for it",
+                    extra={"models": _count(model_ids), "seconds": self.slow_after},
+                )
+                try:
+                    await walk
+                except asyncio.CancelledError:
+                    walk.add_done_callback(_settled)
+                    raise
+        finally:
+            # Even when the walk failed (#3375): `head` stays where it was, but what is
+            # cached about these templates may be stale, so it goes either way.
+            if self.catalogue is not None:
+                self.catalogue.forget(model_ids)
         took = round(time.monotonic() - started, 3)
         logger.log(
             logging.WARNING if took > self.slow_after else logging.DEBUG,
             "refreshed the models library",
-            extra={"models": _count(model_ids), "seconds": took},
+            # `stalled` tells this record from the "still walking" one already logged for
+            # the same refresh, so one stuck mount is not counted twice (#3375).
+            extra={"models": _count(model_ids), "seconds": took, "stalled": stalled},
         )
 
     def revalidate(self, model_ids: list[str] | None) -> None:

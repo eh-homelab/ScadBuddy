@@ -17,7 +17,9 @@ until something is sent on it.
 Each callback is awaited before the next notification is handed on, on every channel:
 a slow one (the models HEAD follower's whole-library NFS walk after a reconnect) holds
 up the event bus and the liveness check until it ends. The follower logs how long each
-of its refreshes took.
+of its refreshes took. That includes ``on_connect``: on a reconnect the follower's
+callback walks the whole library, and every channel registered after it -- the event
+bus's included -- catches up (``bus.resync``) only once that walk is done.
 
 Several owners may :meth:`~PgListener.run` it; the connection lives while at least
 one does. Channels are registered before the first run: a channel added to a live

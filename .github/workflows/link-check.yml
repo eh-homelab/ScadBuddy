@@ -28,7 +28,9 @@ jobs:
       #   npmjs.com and makerworld.com answer 403 to any client without a
       #   browser's cookies (bot protection), whatever the page. Nothing checks
       #   those links now, so a renamed package or a removed MakerWorld model
-      #   (docs/user-guide.md) goes unflagged: check them by hand when editing;
+      #   goes unflagged: check them by hand when editing a file that has one,
+      #   in docs/ (docs/user-guide.md and the AI integration spec today) or
+      #   elsewhere;
       #   github.com/eh-homelab/clusters is a private repository, a 404 to an
       #   unauthenticated request. Only that repository: the pattern ends at a
       #   path, query or fragment, so an eh-homelab/clusters-* one is checked;

@@ -469,6 +469,25 @@ describe('PresetPicker', () => {
     expect(screen.queryByTestId('preset-details')).not.toBeInTheDocument()
   })
 
+  it("loads a shipped preset's relative images from the template, never a saved one's (#1074)", async () => {
+    const [tiny, mum] = fixturePresets['name-keychain']!
+    setMockPresets('name-keychain', [
+      { ...tiny!, description: '![Front view](images/front.png)' },
+      { ...mum!, description: '![Mine](images/front.png)' },
+    ])
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Tiny')
+    expect(
+      within(screen.getByTestId('preset-details')).getByRole('img', { name: 'Front view' }),
+    ).toHaveAttribute('src', '/api/v1/models/name-keychain/images/images/front.png')
+    await user.selectOptions(select, 'Mum')
+    // A saved preset's text is no file of the template's: its image stays its alt text.
+    const details = screen.getByTestId('preset-details')
+    expect(within(details).queryByRole('img')).not.toBeInTheDocument()
+    expect(details).toHaveTextContent('Mine')
+  })
+
   it('saves a description and tags with a new preset', async () => {
     const create = vi.spyOn(api, 'createPreset')
     const { user } = render()

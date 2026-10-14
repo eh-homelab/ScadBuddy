@@ -175,6 +175,13 @@ describe('FlowPage', () => {
     expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
   })
 
+  it("shows the flow's triggers and makes one pinned to the version viewed (#2484)", async () => {
+    render('def-swap')
+    const section = await screen.findByRole('region', { name: 'Triggers' })
+    expect(await within(section).findByRole('listitem', { name: /Every hour/ })).toBeInTheDocument()
+    expect(within(section).getByRole('button', { name: 'New trigger…' })).toBeInTheDocument()
+  })
+
   it('starts a run with a key and goes to it', async () => {
     const { user } = render('def-swap')
     await user.click(await screen.findByRole('button', { name: 'Start run' }))

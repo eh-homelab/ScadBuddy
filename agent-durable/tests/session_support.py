@@ -110,6 +110,8 @@ class StandInTools:
         self._connect = connect
         self.ran: list[tuple[str, dict[str, Any]]] = []
         self.describe_refuses = False
+        #: The input hash describe_call gives a tool, when not the default ``"a" * 64``.
+        self.input_hashes: dict[str, str] = {}
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
         self.turn_offered: list[dict[str, Any]] = []
         self.turn_packages: list[dict[str, Any]] = []
@@ -196,7 +198,8 @@ class StandInTools:
         async def describe_call(args: dict[str, Any]) -> dict[str, str]:
             if self.describe_refuses:
                 raise ApplicationError("no such session", type="UnknownSession", non_retryable=True)
-            return {"summary": f"{args['tool']} call", "input_hash": "a" * 64}
+            digest = self.input_hashes.get(args["tool"], "a" * 64)
+            return {"summary": f"{args['tool']} call", "input_hash": digest}
 
         @activity.defn(name="turn_tools")
         async def turn_tools() -> dict[str, Any]:

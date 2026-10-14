@@ -62,6 +62,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
         transientRetries: null,
         servedBuiltins: [],
         backgroundTasks: false,
+        effort: null,
+        agentType: null,
       },
       slot: createTurnSlot(),
       secrets: [],

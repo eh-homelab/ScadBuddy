@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.metrics import Metrics, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -34,6 +35,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.fonts import (
+    GLYPH_CHECK_TIMEOUT,
+    font_coverage,
+    font_families,
+    missing_glyphs,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
@@ -102,6 +109,35 @@ def unreadable_colour_warnings(
             warnings.append(
                 f"colour parameter {parameter.name!r} is {value!r}, not a colour; "
                 "it gets no extruder"
+            )
+    return warnings
+
+
+def missing_glyph_warnings(
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    coverage: Callable[[str], tuple[str, list[tuple[int, int]]] | None],
+) -> list[str]:
+    """A warning for each font parameter whose family has no glyph for characters in
+    the model's text parameters (#2358): OpenSCAD's ``text()`` leaves those out without
+    a word, so an emoji renders as a gap. Every text parameter is checked against every
+    font parameter, as nothing says which text a font draws: a string that never
+    reaches ``text()`` (a label, a file name, a mode) can raise a warning too.
+    docs/user-guide.md says so."""
+    texts = "".join(
+        str(params.get(p.name, p.initial) or "") for p in schema.parameters if p.type == "string"
+    )
+    if not texts:
+        return []
+    warnings: list[str] = []
+    for parameter in schema.parameters:
+        if parameter.type != "font":
+            continue
+        font = str(params.get(parameter.name, parameter.initial) or "")
+        missing = missing_glyphs(font, texts, coverage(font) if font_families(font) else None)
+        if missing:
+            warnings.append(
+                f"font {font!r} has no glyph for {' '.join(missing)}; the text leaves them out"
             )
     return warnings
 
@@ -1124,6 +1160,13 @@ async def finish_piece_stage(
         )
     warnings += thumbnail_warnings
     warnings += unreadable_colour_warnings(schema, params)
+    fonts_env = env_for(config.data_dir)
+    warnings += await asyncio.to_thread(
+        missing_glyph_warnings,
+        schema,
+        params,
+        lambda font: font_coverage(font, fonts_env, GLYPH_CHECK_TIMEOUT),
+    )
 
     model_3mf = work / MODEL_NAME
     # A built-in's bare slug, as download_filename names the file: the id's

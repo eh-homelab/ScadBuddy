@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import socket
@@ -85,7 +86,7 @@ def test_the_plugins_subagents_are_read_as_they_declare_themselves() -> None:
 
 @pytest.mark.requires_postgres
 async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
-    agent_db: Conn, connect: Connect, tmp_path: Path
+    agent_db: Conn, connect: Connect, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     kek = Kek(id="k", key=b"\1" * 32)
     runner = ScadBuddyRunner(
@@ -109,20 +110,30 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
     assert extra["allowed_tools"] == ["mcp__scadbuddy_images__view_user_images", "mcp__scadbuddy"]
     # Settings names another URL (agent-durable outside the agent's pod): it replaces the
     # worker's own, read at each segment; a value the agent could not have stored does not.
-    for stored, expected in (
+    # A URL set but refused is warned of with why, never with the URL (#3054).
+    for stored, expected, problem in (
         (
             '{"url": "http://agent.svc:8081/internal/durable/subagent-mcp", "peers": []}',
             "http://agent.svc:8081/internal/durable/subagent-mcp",
+            None,
         ),
-        ('{"url": null, "peers": []}', "http://127.0.0.1:1/x"),
-        ('"nonsense"', "http://127.0.0.1:1/x"),
+        ('{"url": null, "peers": []}', "http://127.0.0.1:1/x", None),
+        ('"nonsense"', "http://127.0.0.1:1/x", None),
         # Not http(s) with a host: the worker's own (#2883).
-        ('{"url": "file:///etc/passwd", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "javascript:alert(1)", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "http://", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "http://[::1", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "agent.svc:8081/mcp", "peers": []}', "http://127.0.0.1:1/x"),
+        ('{"url": "file:///etc/passwd", "peers": []}', "http://127.0.0.1:1/x", "scheme 'file'"),
+        (
+            '{"url": "javascript:alert(1)", "peers": []}',
+            "http://127.0.0.1:1/x",
+            "scheme 'javascript'",
+        ),
+        ('{"url": "http://", "peers": []}', "http://127.0.0.1:1/x", "no host"),
+        ('{"url": "http://[::1", "peers": []}', "http://127.0.0.1:1/x", "unparseable"),
+        ('{"url": "agent.svc:8081/mcp", "peers": []}', "http://127.0.0.1:1/x", "no scheme"),
+        # urlsplit reads the host as the scheme: not named, as it is part of the URL.
+        ('{"url": "localhost:8081/mcp", "peers": []}', "http://127.0.0.1:1/x", "no scheme"),
+        ('{"url": "http:agent.svc/mcp", "peers": []}', "http://127.0.0.1:1/x", "no host"),
     ):
+        caplog.clear()
         await agent_db.execute(
             "INSERT INTO ai_settings (key, value) VALUES ('durable_subagents', %s::jsonb)"
             " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -132,6 +143,34 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
         await runner._subagent_tools(sid, again)
         [server] = again["agents"]["model-author"].mcpServers
         assert server["scadbuddy"]["url"] == expected
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        if problem is None:
+            assert warned == []
+        else:
+            [message] = warned
+            assert f"({problem})" in message
+            assert (
+                "etc/passwd" not in message
+                and "alert" not in message
+                and "agent.svc" not in message
+                and "localhost" not in message
+            )
+        # The same refused value on the next segment is not warned of again.
+        caplog.clear()
+        await runner._subagent_tools(sid, {})
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    async def warnings_for(stored: str) -> int:
+        caplog.clear()
+        await agent_db.execute(
+            "UPDATE ai_settings SET value = %s::jsonb WHERE key = 'durable_subagents'", (stored,)
+        )
+        await runner._subagent_tools(sid, {})
+        return len([r for r in caplog.records if r.levelno == logging.WARNING])
+
+    # Fixed and then broken the same way again: warned of again.
+    assert await warnings_for('{"url": "http://agent.svc:8081/mcp", "peers": []}') == 0
+    assert await warnings_for('{"url": "http:agent.svc/mcp", "peers": []}') == 1
     # Off, or no definitions: no subagents, whatever Settings names.
     for off_runner in (
         ScadBuddyRunner(connect, kek, cwd=str(tmp_path), agents_dir=str(AGENTS)),
@@ -284,4 +323,62 @@ async def test_the_bundled_claude_code_gives_the_server_to_the_subagent_only(
     finally:
         fake.close()
         stand_in.close()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_workflow_agents_chat_runs_as_its_subagent_type(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2393: a chat whose agent_type names a definition (a Workflow agent's, the agent's
+    workflowAgents.ts) runs its segment as that subagent: the bundled Claude Code's main
+    thread gets the definition's prompt, and its own effort."""
+    subagent_prompt = "You author ScadBuddy templates"
+    fake = FakeAnthropic(lambda body: {"text": "ok"}).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    plugin = tmp_path / "scadbuddy"
+    plugin.mkdir()
+    (plugin / "skills").symlink_to(REPO / "plugins" / "scadbuddy" / "skills")
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(plugin),
+            subagent_url="http://127.0.0.1:1/x",
+            agents_dir=str(AGENTS),
+            make_runner=ClaudeAgentSdkRunner,
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db)
+            await agent_db.execute(
+                "UPDATE ai_sessions SET durable_turn_id = %s, agent_model = %s,"
+                " agent_effort = %s, agent_type = %s WHERE id = %s",
+                (str(uuid.uuid4()), "claude-opus-5-5", "low", "model-author", sid),
+            )
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "make a box")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        main = [b for b in fake.messages() if b.get("tools")]
+        assert main
+        for body in main:
+            assert subagent_prompt in json.dumps(body.get("system"))
+            assert body.get("model") == "claude-opus-5-5"
+            assert body.get("output_config", {}).get("effort") == "low"
+    finally:
+        fake.close()
         await asyncio.sleep(0)

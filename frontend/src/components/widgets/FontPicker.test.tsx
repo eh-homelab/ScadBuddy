@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FontFamily, InstalledFamily } from '../../api/types'
+import { forgetGlyphAnswers } from '../../lib/useMissingGlyphs'
 import { setCatalogueOffline } from '../../mocks/handlers'
 import { FontPicker } from './FontPicker'
 
@@ -37,7 +38,10 @@ async function loaded() {
   await waitFor(() => expect(rows().length).toBeGreaterThan(0))
 }
 
-beforeEach(() => window.localStorage.clear())
+beforeEach(() => {
+  window.localStorage.clear()
+  forgetGlyphAnswers()
+})
 
 describe('FontPicker', () => {
   it('lists the catalogue with each row drawn in its own family', async () => {
@@ -204,5 +208,16 @@ describe('the widget it feeds', () => {
     await waitFor(() =>
       expect(screen.getByTestId('value')).toHaveTextContent('Pacifico:style=Regular'),
     )
+  })
+
+  // #2358 — the specimen draws a glyph the font lacks in the browser's fallback font, so
+  // an installed row that cannot print the sample says so.
+  it('marks an installed row whose font lacks a character of the sample', async () => {
+    setup({ sampleText: 'Zoë 😀' })
+    await loaded()
+    const noto = screen.getByRole('button', { name: /^Noto Sans/ })
+    await waitFor(() => expect(noto).toHaveTextContent('no 😀'))
+    // A row not installed cannot be asked: the server has no file for it.
+    expect(screen.getByRole('button', { name: /Pacifico/ })).not.toHaveTextContent('no 😀')
   })
 })

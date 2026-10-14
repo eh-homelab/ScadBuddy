@@ -120,6 +120,31 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(row).toEqual({ outcome: 'answered', answers: ['Blue', 'Approve'], answered_by_kind: 'browser' })
   })
 
+  // #3255: the answer and the session's move back to `running` are one commit. The parked
+  // turn resumes on that commit alone (it polls the row), so a status change made in a later
+  // transaction could land after the turn had finished and set `idle`: `running` was then
+  // never logged, and the panel went straight from waiting to idle. Read off the commits
+  // themselves, so the order of the turn and the answer call does not matter.
+  it('logs the move back to running in the same commit as the answer (#3255)', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const commits: ServerEvent[][] = []
+    const committed = m.events.committed.bind(m.events)
+    vi.spyOn(m.events, 'committed').mockImplementation((sessionId, logged, seqs) => {
+      commits.push([...logged])
+      committed(sessionId, logged, seqs)
+    })
+
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+
+    const withAnswer = commits.find((batch) => batch.some((e) => e.type === 'question.resolved'))
+    expect(withAnswer?.flatMap((e) => (e.type === 'session.status' ? [e.status] : []))).toEqual(['running'])
+    const statuses = (await events(m, session.id)).flatMap((e) => (e.type === 'session.status' ? [e.status] : []))
+    expect(statuses).toEqual(['idle', 'running', 'waiting_input', 'running', 'idle'])
+  })
+
   // #1075: the answer is in the AI audit log, tied to the tool call, as a
   // hash: an answer can be free text the user typed.
   // Which tool asked is recorded (ask_user is a subagent's way, but not only a subagent's).
@@ -495,13 +520,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(rows[0]?.detail).toMatch(/the test cancelled it$/)
   })
 
-  it('an answer committed before a failed status refresh is still audited', async () => {
+  // #3255: the answer and the session's status are one commit, so a status write that fails
+  // takes the answer with it: the question stays answerable, never answered with the
+  // session left saying it waits. Nothing is audited until an answer commits.
+  it('a failed status write rolls the answer back, and the answer can be given again (#3255)', async () => {
     const audit = new AuditLog({ sql: db.sql })
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
-    vi.spyOn(m.questions, 'refreshStatus').mockRejectedValueOnce(new Error('status write failed'))
+    const service = m.questions as unknown as { statusRefresh: () => Promise<ServerEvent[]> }
+    vi.spyOn(service, 'statusRefresh').mockRejectedValueOnce(new Error('status write failed'))
+
     await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`).toEqual([{ outcome: null }])
+    expect((await m.get(session.id, browser)).status).toBe('waiting_input')
+    expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'question'`).toEqual([])
+
+    await m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))
     await turn!.done
     expect(await db.sql`SELECT action, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([{ action: 'answered', outcome: 'ok' }])
   })

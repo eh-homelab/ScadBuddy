@@ -1,7 +1,8 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import { fakeRealtime } from '../lib/realtime.fake'
 import {
   flowRequests,
@@ -52,6 +53,18 @@ describe('WorkflowRunPage', () => {
       'false',
       '[1]',
     ])
+  })
+
+  it('says a run was started by a trigger, as whoever made it (#2484)', async () => {
+    const view = await api.getFlowRun('run-done')
+    const fired = new Date(Date.now() - 5 * 60_000).toISOString()
+    server.use(
+      http.get('/api/v1/workflow-runs/:id', () =>
+        HttpResponse.json({ ...view, trigger: { trigger_id: 't1', kind: 'schedule', fire_key: 'k', fired_at: fired } }),
+      ),
+    )
+    render('run-done')
+    expect(await screen.findByText(/through a schedule, fired/)).toBeInTheDocument()
   })
 
   it('shows no inputs for a run of a flow with none', async () => {
@@ -228,9 +241,17 @@ describe('WorkflowRunPage', () => {
   })
 
   it("names the step of the run's own call", async () => {
+    // #3493: the step comes from the agent's queue, a read apart from the run's, so the
+    // card can render first. Answered late here, as a slow runner does.
+    server.use(
+      http.get('/api/v1/ai/flow-runs/:id/queue', async () => {
+        await delay(50)
+        return undefined
+      }),
+    )
     render('run-escalated')
     const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
-    expect(card).toHaveTextContent('Step 1 (queue_print)')
+    await waitFor(() => expect(card).toHaveTextContent('Step 1 (queue_print)'))
   })
 
   it('keeps the approval of every outward call for the person', async () => {

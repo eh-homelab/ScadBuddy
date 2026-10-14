@@ -46,6 +46,17 @@ describe('TurnRunner', () => {
     expect(gateCalls.seen).toHaveLength(1)
   })
 
+  it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
+    const { runner, session, principal } = await turnRunnerForTest()
+    const plain = await runner.assemble(session, principal)
+    const agent = { ...session, agentModel: 'claude-haiku-test', agentEffort: 'low' as const, agentType: 'model-author' }
+    const turn = await runner.assemble(agent, principal)
+    expect(turn.run).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agent: { name: 'model-author' } })
+    expect(turn.run.agent?.definition.prompt).toContain('You author ScadBuddy templates')
+    expect(turn.fingerprintParts).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agentType: 'model-author' })
+    expect(turn.fingerprintParts).not.toEqual(plain.fingerprintParts)
+  })
+
   it('fingerprints an unchanged configuration the same on every assembly, and a moved plugin URL differently', async () => {
     const { runner, session, principal } = await turnRunnerForTest()
     const first = await runner.assemble(session, principal)
@@ -115,8 +126,11 @@ describe('TurnRunner', () => {
     const keys = new Set<string>()
     for (const resume of [false, true]) {
       const { runner, session, principal } = await turnRunnerForTest({ resume })
-      const turn = await runner.assemble(session, principal)
-      for (const key of Object.keys(turn.run)) keys.add(key)
+      // And a Workflow agent's chat, the only one given `effort` and `agent`.
+      for (const s of [session, { ...session, agentEffort: 'low' as const, agentType: 'model-author' }]) {
+        const turn = await runner.assemble(s, principal)
+        for (const key of Object.keys(turn.run)) keys.add(key)
+      }
     }
     // `maxRetries` is the one key set after assembly, per attempt (sessions/warmTurn.ts).
     keys.add('maxRetries')

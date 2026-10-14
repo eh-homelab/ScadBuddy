@@ -1,7 +1,15 @@
+import { useState } from 'react'
 import type { Param } from '../../api/types'
-import { normalizeHex } from '../../lib/format'
+import { colourHex, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
+
+/**
+ * A whole `#RRGGBB` as typed: taken at once, before the field loses focus. An 8-digit
+ * `#RRGGBBAA` therefore sends one render at its sixth digit; the value on blur is still
+ * the whole one, so that render is only an extra step on the way.
+ */
+const WHOLE_HEX = /^#?[0-9a-f]{6}$/i
 
 export function ColorWidget({
   param,
@@ -16,13 +24,33 @@ export function ColorWidget({
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
-  const hex = normalizeHex(value)
+  const colour = colourHex(value)
+  const hex = colour ?? value
+  // #2357 — what is being typed, until it is a whole colour or the field loses focus: a
+  // partial or wrong value is never padded into a colour ("red" was sent as "#RREEDD");
+  // a colour name becomes its hex.
+  const [draft, setDraft] = useState<string | null>(null)
+  // A value set from outside (a preset, a reset) replaces a half-typed draft, so a
+  // blur never commits the stale text over it.
+  const [shown, setShown] = useState(value)
+  if (shown !== value) {
+    setShown(value)
+    setDraft(null)
+  }
+  const error = draft === null ? rangeProblem(param, value) : null
+
+  function commit(text: string) {
+    setDraft(null)
+    // Typed without its `#`, a hex is still taken as one; the value sent always has it.
+    onChange(colourHex(text) ?? colourHex(`#${text.trim()}`) ?? text.trim())
+  }
 
   return (
     <Field
       id={id}
       label={param.caption ?? param.name}
       name={param.name}
+      error={error}
       readout={
         extruder === null ? (
           <span className="text-faint">not in this render</span>
@@ -35,18 +63,25 @@ export function ColorWidget({
         <input
           id={id}
           type="color"
-          value={hex.toLowerCase()}
+          // The picker takes only #rrggbb; while the text is no colour it shows black.
+          value={(colour ?? '#000000').toLowerCase()}
           aria-label={param.caption ?? param.name}
-          onChange={(event) => onChange(normalizeHex(event.target.value))}
+          onChange={(event) => commit(event.target.value)}
           className="size-8 shrink-0 cursor-pointer rounded-[4px] border border-line bg-surface-2 p-0.5"
         />
         <input
           type="text"
-          value={hex}
+          value={draft ?? hex}
           aria-label={`${param.caption ?? param.name} hex`}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
           spellCheck={false}
-          onChange={(event) => onChange(event.target.value.toUpperCase())}
-          onBlur={(event) => onChange(normalizeHex(event.target.value))}
+          onChange={(event) => {
+            const text = event.target.value.toUpperCase()
+            if (WHOLE_HEX.test(text.trim())) commit(text)
+            else setDraft(text)
+          }}
+          onBlur={(event) => commit(event.target.value)}
           className="sb-field sb-num uppercase"
         />
       </div>

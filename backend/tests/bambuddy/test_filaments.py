@@ -14,7 +14,9 @@ answers. What is tested here is that ScadBuddy sends it what it needs to answer 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, ClassVar, cast
+import contextvars
+from collections.abc import Callable
+from typing import ClassVar, Self, cast
 
 import httpx
 import pytest
@@ -881,8 +883,19 @@ class _WatchedRead(asyncio.Future[PrinterStatus | None]):
     def __init__(self) -> None:
         super().__init__()
         self.waited_on = asyncio.Event()
+        self.callbacks = 0
 
-    def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+    def add_done_callback(
+        self,
+        fn: Callable[[Self], object],
+        *,
+        context: contextvars.Context | None = None,
+    ) -> None:
+        # The premise (#2813): the `finally`'s `asyncio.wait` is the only caller that
+        # attaches a callback to the read, so the first one is the step waiting on it.
+        # Another caller would set this early and the test would pass for the wrong
+        # reason, so the count is checked too.
+        self.callbacks += 1
         self.waited_on.set()
         super().add_done_callback(fn, context=context)
 
@@ -920,6 +933,7 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     with pytest.raises(asyncio.CancelledError):
         await step
 
+    assert reading.callbacks == 1  # only the step's own wait attached one
     assert not reading.done()
     reading.set_result(None)
     assert await reading is None
@@ -966,3 +980,17 @@ def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -
         printer=printer(),
     )
     assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 1, 2: 3}
+
+
+@respx.mock
+async def test_a_shared_status_read_without_its_printer_is_refused(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2814: a contract, not an assert, so `python -O` keeps it. Refused before
+    anything is read: no request reaches Bambuddy (review #3007)."""
+    anything = respx.route(url__startswith=API).mock(return_value=httpx.Response(200, json=[]))
+    reading: asyncio.Future[PrinterStatus | None] = asyncio.get_running_loop().create_future()
+    with pytest.raises(ValueError, match="printer_id"):
+        await filament_options(bambuddy, cast(PrintSource, _ReadSource()), status=reading)
+    reading.cancel()
+    assert not anything.called

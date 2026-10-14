@@ -46,19 +46,78 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     await t.db.sql`
       INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
       VALUES (${session}, 'mcp', 'bearer', 'token:a', 'Agent A', 'bearer', 'token:a', 'idle', 10, 1)`
-    expect(await flows.startedBy(await run({ kind: 'browser' }))).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'token:a', session }))).toEqual({
+    expect(await flows.startedBy(await run({ kind: 'browser' }), 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'token:a', session }), 'wr1')).toEqual({
       kind: 'bearer',
       id: 'token:a',
       label: 'Agent A',
     })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'oidc:https%3A%2F%2Fidp#u1', session: null }))).toEqual({
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'oidc:https%3A%2F%2Fidp#u1', session: null }), 'wr1')).toEqual({
       kind: 'oidc',
       id: 'oidc:https://idp#u1',
       label: 'MCP OIDC oidc:https://idp#u1',
     })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'someone' }))).toBeUndefined()
-    expect(await flows.startedBy(randomUUID())).toBeUndefined()
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'someone' }), 'wr1')).toBeUndefined()
+    expect(await flows.startedBy(randomUUID(), 'wr1')).toBeUndefined()
+  })
+
+  // #2258: a closed run lends its starter to no later flow-<id> execution, nor does an open
+  // one to an execution a Reset replaced.
+  it('names no starter once the run has closed, or for a superseded execution', async () => {
+    const id = await run({ kind: 'browser' })
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'waiting' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    await t.db.sql`UPDATE workflow_runs SET superseded_run_ids = '{wr0}' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr0')).toBeUndefined()
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    for (const status of ['succeeded', 'failed', 'terminated']) {
+      await t.db.sql`UPDATE workflow_runs SET status = ${status} WHERE id = ${id}`
+      expect(await flows.startedBy(id, 'wr1'), status).toBeUndefined()
+      expect(await flows.startedBy(id, 'wr0'), status).toBeUndefined()
+    }
+  })
+
+  // A Reset that landed although its call failed leaves the row closed while its new
+  // execution runs (backend _reset_run); its retry commits. Until then that execution's
+  // calls fail as a lookup does, which the activity retries, not as an unknown flow.
+  it("leaves a closed run's unrecorded execution to retry, as a Reset not yet committed", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'succeeded' WHERE id = ${id}`
+    await expect(flows.startedBy(id, 'wr9')).rejects.toThrow(/has not recorded execution wr9 yet/)
+    // Once the Reset commits, the same execution is named.
+    await t.db.sql`UPDATE workflow_runs SET status = 'running', workflow_run_id = 'wr9', superseded_run_ids = '{wr1}' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr9')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+  })
+
+  // A Reset of a closed run holds the row while it starts the new execution, and opens
+  // the row after: the new execution's first call waits for that, not refused meanwhile.
+  it("waits for a Reset in flight to reopen a closed run, then names its starter", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'succeeded' WHERE id = ${id}`
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let locked!: () => void
+    const isLocked = new Promise<void>((resolve) => (locked = resolve))
+    const reset = t.db.sql.begin(async (tx) => {
+      await tx`SELECT 1 FROM workflow_runs WHERE id = ${id} FOR UPDATE`
+      locked()
+      await held
+      await tx`UPDATE workflow_runs SET status = 'running', superseded_run_ids = '{wr1}', workflow_run_id = 'wr2' WHERE id = ${id}`
+    })
+    await isLocked
+    let answered = false
+    const starter = flows.startedBy(id, 'wr2').finally(() => (answered = true))
+    // Seen waiting on a lock in Postgres itself, not inferred from a timer.
+    await expect
+      .poll(async () => (await t.db.sql`
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'`).length)
+      .toBe(1)
+    expect(answered).toBe(false)
+    release()
+    await reset
+    expect(await starter).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
   })
 
   it("approves only a call whose decision is an approval that approved, for the same input", async () => {

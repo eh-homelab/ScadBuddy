@@ -38,6 +38,8 @@ function assembly(): AssembledTurn {
       transientRetries: null,
       servedBuiltins: [],
       backgroundTasks: false,
+      effort: null,
+      agentType: null,
     },
     slot: createTurnSlot(),
     secrets: [],

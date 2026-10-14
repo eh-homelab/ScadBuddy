@@ -12,6 +12,7 @@ import {
 } from '../../lib/fonts'
 import { useAsync } from '../../lib/useAsync'
 import { useDebounced } from '../../lib/useDebounced'
+import { useMissingGlyphs } from '../../lib/useMissingGlyphs'
 import { Dialog } from '../ui/Dialog'
 import { Spinner } from '../ui/Spinner'
 
@@ -34,6 +35,17 @@ function useGoogleFontsStylesheet(families: string[], sample: string): void {
     document.head.append(link)
     return () => link.remove()
   }, [href])
+}
+
+/**
+ * #2358 — an installed family's missing glyphs for the sample. The specimen beside it
+ * cannot show them: the browser draws a glyph a font lacks in a fallback font, so every
+ * row looks complete. Only an installed family can be asked: the server reads its file.
+ */
+function RowLacks({ family, sample }: { family: string; sample: string }) {
+  const lacking = useMissingGlyphs(family, sample)
+  if (lacking.length === 0) return null
+  return <span className="text-warn">no {lacking.join(' ')}</span>
 }
 
 interface Props {
@@ -218,6 +230,7 @@ export function FontPicker({
                   {busy === row.family && <Spinner />}
                   {row.family}
                   {row.installed && <span className="text-ok">installed</span>}
+                  {row.installed && <RowLacks family={row.family} sample={sample} />}
                 </span>
               </button>
             </li>

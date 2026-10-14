@@ -309,6 +309,11 @@ def root_model(
     *,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """The package's root model: each plate's objects and their build items.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     items: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -362,6 +367,12 @@ def model_settings(
     covers: bool,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """``Metadata/model_settings.config``: each object's parts and extruders, and each
+    plate.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     plate_entries: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -605,7 +616,10 @@ class PlateEntry:
     index: int
     thumbnail: str | None
     #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
-    #: the objects on it joined with " + ", else ``None``.
+    #: the objects on it joined with " + ", else ``None``. A plate ScadBuddy wrote with
+    #: several objects carries the model's name (with " (plate N)" when the file has
+    #: several plates) as its ``plater_name``; a one-object plate has none, so it is
+    #: named by its object.
     name: str | None = None
 
 

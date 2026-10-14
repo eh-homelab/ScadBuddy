@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import QueueFilaments
-from scadbuddy.bambuddy.models import PresetRef, QueueItemCreate, SliceRequest
+from scadbuddy.bambuddy.models import PresetRef, ProcessValue, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.usage import PickedHotend
@@ -69,7 +69,7 @@ class SlicePlan(BaseModel):
     #: The template's ``print_settings`` (#770), written over the process preset.
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
-    process_overrides: dict[str, str] = Field(default_factory=dict)
+    process_overrides: dict[str, ProcessValue] = Field(default_factory=dict)
     #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
     #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
     #: any slot it thinks that plate leaves unused, and it cannot see colour painted

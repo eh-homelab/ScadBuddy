@@ -1,8 +1,8 @@
-import type { Resolver } from '../http/egress.js'
-import { webFetchEgressHook } from './webFetchEgress.js'
 import path from 'node:path'
 import {
+  type AgentDefinition,
   type CanUseTool,
+  type EffortLevel,
   type HookCallbackMatcher,
   type HookEvent,
   type McpHttpServerConfig,
@@ -14,6 +14,7 @@ import {
   type SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
+import type { Resolver } from '../http/egress.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
   type ApprovalGate,
@@ -23,6 +24,7 @@ import {
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
+import { webFetchEgressHook } from './webFetchEgress.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
 import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
 import { declaresRemoteServers } from '../plugins/packages/mcp.js'
@@ -105,6 +107,10 @@ export type HarnessRun = {
   prompt: string | AsyncIterable<SDKUserMessage>
   /** Claude model id or alias; the SDK's default when omitted. */
   model?: string
+  /** How much effort the model puts into its responses (a Workflow agent's chat); the SDK's default when omitted. */
+  effort?: EffortLevel
+  /** A subagent definition the turn's main thread runs as (a Workflow agent's chat, harness/agentDefinitions.ts). */
+  agent?: { name: string; definition: AgentDefinition }
   maxTurns?: number
   maxBudgetUsd?: number
   /**
@@ -424,6 +430,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
   if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
+  if (run.effort !== undefined) options.effort = run.effort
+  if (run.agent !== undefined) {
+    // Claude Code takes the main thread's agent from `agents`, not from a plugin (measured on 2.1.296).
+    options.agents = { ...options.agents, [run.agent.name]: run.agent.definition }
+    options.agent = run.agent.name
+  }
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
   if (run.sessionStore !== undefined) {
