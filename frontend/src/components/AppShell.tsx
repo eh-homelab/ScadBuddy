@@ -386,7 +386,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
 
 function PageLoading() {
   return (
-    <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
+    <p role="status" className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
       <Spinner /> Loading
     </p>
   )
