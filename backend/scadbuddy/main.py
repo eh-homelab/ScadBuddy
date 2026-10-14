@@ -67,6 +67,9 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
+from scadbuddy.flow_triggers.events import listen_for_triggers
+from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
@@ -101,6 +104,7 @@ from scadbuddy.workflows.client import (
     reconcile_lost_runs,
     sandboxed_runner,
 )
+from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
@@ -934,10 +938,12 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
 
     schedules = asyncio.create_task(set_up())
     ops = state.components.get(OPERATIONS)
+    trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+        *trigger_activities,
     ]
     try:
         while not stop.is_set():
@@ -945,7 +951,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow],
+                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
@@ -954,6 +960,26 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
+        await stop_triggers()
+
+
+def _flow_triggers(
+    state: AppState, client: Client, queue: str, stop: asyncio.Event
+) -> tuple[list[Callable[..., Any]], Callable[[], Coroutine[Any, Any, None]]]:
+    """Flow triggers (#2484) on the library worker: their fires run here, beside the data
+    volume; their Schedules are put right now and every `RECONCILE_INTERVAL`; their events
+    are heard by every replica. The fire activities, and what stops the rest."""
+    triggers = state.components.get(FLOW_TRIGGERS)
+    schedules = asyncio.create_task(
+        reconcile_trigger_schedules(client, queue, triggers.store, stop)
+    )
+    unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
+
+    async def stop_all() -> None:
+        schedules.cancel()
+        await unlisten()
+
+    return TriggerFires(triggers.store, lambda: triggers.flows, client, queue).all(), stop_all
 
 
 def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:

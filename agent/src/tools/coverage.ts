@@ -48,6 +48,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
   },
   {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/approve',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/decline',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
