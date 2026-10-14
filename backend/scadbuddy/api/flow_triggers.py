@@ -220,8 +220,8 @@ async def _check_grant(triggers: Triggers, spec: GrantSpec) -> None:
 
 async def _sync_schedule(triggers: Triggers, trigger: Trigger) -> None:
     """The trigger's Schedule as its row says. Temporal refusing the spec is the
-    request's fault (422); Temporal away is 503, and the worker's next start puts the
-    Schedule right."""
+    request's fault (422); Temporal away is 503, and the library worker's reconcile
+    (`reconcile_trigger_schedules`) puts the Schedule right within `RECONCILE_INTERVAL`."""
     try:
         await ensure_trigger_schedule(triggers.client, trigger, triggers.task_queue)
     except RPCError as err:
@@ -326,8 +326,9 @@ async def update_flow_trigger(
     trigger_id: str, body: TriggerUpdate, triggers: TriggersDep
 ) -> TriggerView:
     """Any change returns the trigger's standing grant to `requested` (Ruling 20): a person
-    approved it for what the trigger was. Runs already started keep their grants; its pause
-    is kept."""
+    approved it for what the trigger was. Runs already started keep their run grants, but
+    those spend only under the approval that seeded them, so their outward calls wait; its
+    pause is kept."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
     sent = body.model_fields_set

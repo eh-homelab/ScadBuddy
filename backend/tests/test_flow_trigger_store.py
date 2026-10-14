@@ -24,6 +24,7 @@ from scadbuddy.flows.grants import (
 )
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -105,6 +106,29 @@ async def test_concurrent_fires_keep_to_the_rate_cap(triggers: TriggerStore) -> 
     verdicts = await admit_all(triggers, trigger, 8, cap=3)
     assert verdicts.count(None) == 3
     assert verdicts.count("rate") == 5
+
+
+async def test_an_admitted_fire_whose_workflow_ended_stops_counting(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """A fire whose last attempt timed out stays `admitted` with no run: past
+    `FIRE_TIMEOUT` it no longer counts toward the rate cap. A started one still does."""
+    trigger = await make(triggers, overlap="allow_all")
+    assert await admit_all(triggers, trigger, 3, cap=3) == [None, None, None]
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_trigger_fires SET fired_at = now() - %s WHERE trigger_id = %s",
+            (FIRE_TIMEOUT + timedelta(minutes=1), trigger.id),
+        )
+        conn.execute(
+            "UPDATE flow_trigger_fires SET outcome = 'started'"
+            " WHERE trigger_id = %s AND fire_key = 'fire-0'",
+            (trigger.id,),
+        )
+    checked = state_hash(trigger, None)
+    assert await triggers.claim_fire(trigger.id, "late", "run-late", None) is not None
+    assert await triggers.admit(trigger.id, "late", 1, checked, True) == "rate"
+    assert await triggers.admit(trigger.id, "late", 2, checked, True) is None
 
 
 async def test_an_admitted_fire_is_admitted_again_on_a_retry(triggers: TriggerStore) -> None:

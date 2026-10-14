@@ -64,8 +64,8 @@ async def pause_for_flow(
     by: dict[str, Any],
 ) -> list[Trigger]:
     """Pause the triggers of a flow archived or deleted (§12.4), row then Schedule. A
-    Schedule that cannot be paused now is put right at the worker's next start; a fire
-    it makes meanwhile finds the row paused."""
+    Schedule that cannot be paused now is put right by the worker's next reconcile
+    (`reconcile_trigger_schedules`); a fire it makes meanwhile finds the row paused."""
     paused = await store.pause_flow(name, reason, by)
     if client is not None:
         for trigger in paused:
@@ -185,6 +185,9 @@ class TriggerFires:
 
 #: Between attempts to put the Schedules right while Temporal does not take them.
 SCHEDULES_RETRY = 5.0
+#: Between passes once they are right: a route that changed a row while Temporal was
+#: away (503) leaves its Schedule out of step until the next pass, not the next start.
+RECONCILE_INTERVAL = 300.0
 
 
 async def ensure_trigger_schedules(client: Client, task_queue: str, store: TriggerStore) -> None:
@@ -194,15 +197,17 @@ async def ensure_trigger_schedules(client: Client, task_queue: str, store: Trigg
         await ensure_trigger_schedule(client, trigger, task_queue)
 
 
-async def ensure_trigger_schedules_logged(
+async def reconcile_trigger_schedules(
     client: Client, task_queue: str, store: TriggerStore, stop: asyncio.Event
 ) -> None:
-    """`ensure_trigger_schedules`, retried until Temporal takes them or ``stop``."""
+    """`ensure_trigger_schedules` until ``stop``: every `RECONCILE_INTERVAL`, or every
+    `SCHEDULES_RETRY` while Temporal does not take them."""
     while not stop.is_set():
         try:
             await ensure_trigger_schedules(client, task_queue, store)
-            return
+            wait = RECONCILE_INTERVAL
         except Exception:
             logger.warning("could not set up the flow triggers' Schedules; retrying", exc_info=True)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), SCHEDULES_RETRY)
+            wait = SCHEDULES_RETRY
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), wait)

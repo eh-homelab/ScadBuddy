@@ -3,10 +3,12 @@
 The routes write who made, changed or paused a trigger from the request's author, never
 from its body; a fire reads everything it acts on from here. Revoking a standing grant
 revokes the run grants it seeded in the same transaction, so their next outward calls wait
-(§3.5); an edit returns it to `requested` (Ruling 20) and leaves runs already started
-alone. Approving one is bound to the trigger as the person saw it (`state_hash`), checked
-under the trigger's row lock, which every edit takes too. A fire is admitted under the
-same lock, so concurrent fires keep to the trigger's overlap and rate cap.
+(§3.5); an edit returns it to `requested` (Ruling 20), and the run grants it seeded
+spend only under the approval that seeded them, so runs already started wait from their
+next outward call. Approving one is bound to the trigger as the person saw it
+(`state_hash`), checked under the trigger's row lock, which every edit takes too. A fire
+is admitted under the same lock, so concurrent fires keep to the trigger's overlap and
+rate cap.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from scadbuddy.flow_triggers.models import (
 )
 from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus
 from scadbuddy.flows.models import TERMINAL
+from scadbuddy.workflows.flow_triggers import FIRE_TIMEOUT
 
 _TRIGGER = (
     "id, name, definition_id, kind, schedule, event, overlap, inputs, approval_timeout_s,"
@@ -53,6 +56,10 @@ _CURRENT_GRANT = (
 #: A fire whose run has no row yet is taken for open only this long: a start that never
 #: wrote its row must not hold every later fire back.
 STARTING_GRACE = timedelta(minutes=10)
+#: An `admitted` fire with no run this long after it fired is dead: its workflow has
+#: ended (`FIRE_TIMEOUT`), say after its last attempt timed out, with nothing settling
+#: it. It no longer counts toward the rate cap.
+ADMITTED_DEAD = FIRE_TIMEOUT
 _HOUR = timedelta(hours=1)
 #: What an edit may change: never who made it, nor its pause.
 _EDITABLE = frozenset(
@@ -114,7 +121,8 @@ class TriggerStore:
         self, trigger_id: str, fields: dict[str, Any], by: dict[str, Any], revoked_by: str
     ) -> Trigger | None:
         """Change `fields` and return the trigger's standing grant to `requested` (Ruling
-        20); the run grants it seeded already are left as they are."""
+        20). The run grants it seeded keep their rows, but spend only under the approval
+        that seeded them (`FlowStore.consume_grant`), so their outward calls wait."""
         return await self._call(self._update, trigger_id, fields, by, revoked_by)
 
     async def set_paused(
@@ -208,10 +216,11 @@ class TriggerStore:
         start its run (marked `admitted`; one admitted already stays so), else why not:
         `deleted`, `paused`, `overlap` (with `overlap: skip`, another admitted or started
         fire's run is open) or `rate` (`rate_cap` fires admitted or started in the last
-        hour), or `changed` when the trigger is no longer the `checked` one
-        (`state_hash` without its grant), or `not a schedule trigger` / `not an event
-        trigger` when a Schedule's fire (`scheduled`) or an event's reaches a trigger of the
-        other kind (a stale Schedule left by an edit while Temporal was away)."""
+        hour, less any admitted one `ADMITTED_DEAD` old with no run), or `changed` when
+        the trigger is no longer the `checked` one (`state_hash` without its grant), or
+        `not a schedule trigger` / `not an event trigger` when a Schedule's fire
+        (`scheduled`) or an event's reaches a trigger of the other kind (a stale Schedule
+        left by an edit while Temporal was away)."""
         return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked, scheduled)
 
     # -- implementation -------------------------------------------------------------
@@ -275,7 +284,8 @@ class TriggerStore:
             if row is None:
                 return None
             # Ruling 20: a person approves it again for what the trigger is now. Runs
-            # already started keep the grant they were given.
+            # already started keep their run grants, which no longer spend: they were
+            # seeded under the approval this ends.
             conn.execute(
                 "UPDATE flow_trigger_grants SET status = 'requested', approved_by = NULL,"
                 " approved_at = NULL, expires_at = NULL, approval_id = NULL WHERE trigger_id = %s"
@@ -596,7 +606,7 @@ class TriggerStore:
             if fire is not None and fire["outcome"] in ("admitted", "started"):
                 return None  # a retry of a fire admitted already, neither paused nor changed since
             others = conn.execute(
-                "SELECT f.fired_at, r.status, now() - f.fired_at AS age"
+                "SELECT f.outcome, r.status, now() - f.fired_at AS age"
                 " FROM flow_trigger_fires f LEFT JOIN workflow_runs r ON r.id = f.run_id"
                 " WHERE f.trigger_id = %s AND f.fire_key <> %s"
                 " AND f.outcome IN ('admitted', 'started')"
@@ -605,6 +615,14 @@ class TriggerStore:
                 " OR (r.status IS NOT NULL AND r.status <> ALL(%s)))",
                 (trigger_id, fire_key, sorted(TERMINAL)),
             ).fetchall()
+            # An admitted fire whose workflow ended without a run started nothing.
+            others = [
+                o
+                for o in others
+                if not (
+                    o["outcome"] == "admitted" and o["status"] is None and o["age"] >= ADMITTED_DEAD
+                )
+            ]
             if trigger.overlap == "skip" and any(
                 (o["status"] is None and o["age"] < STARTING_GRACE)
                 or (o["status"] is not None and o["status"] not in TERMINAL)
