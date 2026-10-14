@@ -48,7 +48,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
-import { rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
+import { reloaded, rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
 import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { RunsWaiting } from './RunsWaiting'
@@ -418,8 +418,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [openRequest, select, onOpenHandled])
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
-  // under way, rather than a blank new chat beside a turn that is still spending.
+  // under way, rather than a blank new chat beside a turn that is still spending. Only a
+  // reloaded tab (#3164): a new one opens on a new chat. Read as the chat first renders,
+  // before the shell records this panel as open.
   const restored = useRef(false)
+  const wasReloaded = useRef<boolean | null>(null)
+  if (wasReloaded.current === null) wasReloaded.current = reloaded()
   useEffect(() => {
     if (restored.current || state.order.length === 0) return
     restored.current = true
@@ -427,7 +431,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       rememberSession(state.activeId)
       return
     }
-    const id = sessionToRestore(rememberedSession(), state.order, state.sessions)
+    const id = wasReloaded.current ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
     if (id) select(id)
     // A remembered chat that is no longer listed, with nothing under way to show instead.
     else rememberSession(null)
