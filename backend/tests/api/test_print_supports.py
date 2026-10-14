@@ -12,6 +12,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.supports import SUPPORT_KEYS
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
@@ -272,3 +273,14 @@ def test_a_support_choice_it_cannot_send_is_refused(
         f"/api/v1/print/outputs/{output_id}/run", json={**body(), "supports": supports}
     )
     assert response.status_code == 422
+
+
+def test_the_support_keys_are_the_ones_the_dialog_strikes() -> None:
+    """``frontend/src/lib/supports.ts`` copies this list, and its own test pins the same
+    four in the same order: a key added here without it would go unstruck there."""
+    assert SUPPORT_KEYS == (
+        "enable_support",
+        "support_type",
+        "support_threshold_angle",
+        "support_on_build_plate_only",
+    )

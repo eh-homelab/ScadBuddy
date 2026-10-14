@@ -7,6 +7,7 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  SupportsChoice,
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
@@ -36,6 +37,8 @@ interface RunInput {
   options: PrintOptions
   /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
   printSequence: PrintSequence | null
+  /** #1899 — this print's supports; `null` (or absent) leaves them to the template and the process. */
+  supports?: SupportsChoice | null
   /** #717 — the filament profiles left on, by id. */
   filamentProfiles?: string[]
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
@@ -80,6 +83,7 @@ export function useRunPrint({
   projectId,
   options,
   printSequence,
+  supports = null,
   filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
@@ -88,6 +92,7 @@ export function useRunPrint({
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
   // By value: the caller builds a new array each render.
   const profilesKey = filamentProfiles.join(',')
+  const supportsKey = JSON.stringify(supports)
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -122,6 +127,7 @@ export function useRunPrint({
     printerId,
     plate,
     printSequence,
+    supportsKey,
     profilesKey,
     rackPosition,
     rackAlgorithm,
@@ -179,6 +185,7 @@ export function useRunPrint({
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
         ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...(supports === null ? {} : { supports }),
         ...(filamentProfiles.length === 0 ? {} : { filament_profiles: filamentProfiles }),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,

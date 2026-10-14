@@ -58,6 +58,8 @@ export type VersionFile = Schemas['VersionFile']
 export type VersionDiff = Schemas['VersionDiff']
 
 export type Job = Schemas['JobStatus']
+/** #1899 — a print's own support structures, over the template's `print_settings`. */
+export type SupportsChoice = Schemas['SupportsChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']

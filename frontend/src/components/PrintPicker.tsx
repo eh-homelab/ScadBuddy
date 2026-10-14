@@ -11,6 +11,7 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  SupportsChoice,
   RackAlgorithm,
 } from '../api/types'
 import {
@@ -66,6 +67,8 @@ import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
 import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
+import { SupportsStep } from './print/SupportsStep'
+import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicedSettings } from './print/SlicedSettings'
 import { slicedEstimate } from '../lib/slicedEstimate'
@@ -264,6 +267,8 @@ export function PrintPicker({
    * never remembered (until #1754 decides remembered choices by subject).
    */
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  // #1899 — this print's supports; `null` leaves them to the template and the process.
+  const [supports, setSupports] = useState<SupportsChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -425,6 +430,7 @@ export function PrintPicker({
     projectId,
     options,
     printSequence,
+    supports,
     filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
@@ -475,6 +481,7 @@ export function PrintPicker({
     if (carry.get()) return
     setOptions({})
     setPrintSequence(null)
+    setSupports(null)
   }, [currentKey, carry])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
@@ -712,6 +719,7 @@ export function PrintPicker({
     setOwnProjectId(null)
     setOptions({})
     setPrintSequence(null)
+    setSupports(null)
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -1111,13 +1119,21 @@ export function PrintPicker({
                             objects={check.current ? (check.verdict?.objects ?? null) : null}
                           />
 
-                          {given?.kind === 'output' && (
-                            <SlicerDefaults
-                              settings={printSettings}
-                              overridden={printSequence !== null ? ['print_sequence'] : []}
-                            />
-                          )}
-                        </>
+                      <SupportsStep
+                        value={supports}
+                        onChange={setSupports}
+                        templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                        fromFile={given?.kind !== 'output'}
+                      />
+
+                      {given?.kind === 'output' && (
+                        <SlicerDefaults
+                          settings={printSettings}
+                          overridden={[
+                            ...(printSequence !== null ? ['print_sequence'] : []),
+                            ...overriddenSupportKeys(supports),
+                          ]}
+                        />
                       )}
 
                       <PrintOptionsDisclosure
