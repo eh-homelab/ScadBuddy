@@ -65,6 +65,8 @@ class GrantCheck:
                 " rule_index, session_id) VALUES (%s, 'g1', %s, 'tool', %s, %s, 0, %s)",
                 (req["request_id"], RUN, req["tool"], self.use_hash, req["session_id"]),
             )
+        # HASH, never self.use_hash, on purpose: the audit row must take the hash the call
+        # was described with, so the verdict answers another and a test can tell them apart.
         return {"verdict": "inside", "grant_id": "g1", "rule_index": 0, "input_hash": HASH}
 
 
