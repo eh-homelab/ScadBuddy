@@ -735,7 +735,9 @@ async def _sequence_clearance(
     sequence = request.print_sequence or source.print_settings.get("print_sequence")
     if sequence != "by object":
         return None, []
-    clearance = clearance_for(PRINTER_MODEL)
+    # The resolved printer's, as the plate warnings are (#3024 review); a run accepted
+    # before the model was kept is judged as before.
+    clearance = clearance_for(prepared.printer_model or PRINTER_MODEL)
     try:
         # The source's own read, which the nozzle check made already (#2976).
         payload = await source.fetched_3mf(client)
