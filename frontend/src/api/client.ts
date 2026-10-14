@@ -82,6 +82,7 @@ import type {
   PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
   TimelapseFrames,
   PrintPage,
@@ -599,6 +600,51 @@ export async function command<T>(
 }
 
 /**
+ * A multipart upload as a command (#1054). XHR rather than `fetch`, which reports no
+ * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
+ * to 1. `form` builds the body afresh for each re-send.
+ */
+function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+  // A command (#1054): one key for this upload, kept on a re-send after an answer
+  // that never arrived, so the server adds the item once.
+  const key = newRequestId()
+  const send = () =>
+    new Promise<{ status: number; body: T | OperationAccepted }>((resolve, reject) => {
+      const body = form()
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}${path}`)
+      xhr.setRequestHeader('Accept', 'application/json')
+      xhr.setRequestHeader('Idempotency-Key', key)
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+      })
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as T | OperationAccepted })
+          return
+        }
+        reject(new ApiError(xhrProblem(xhr)))
+      }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
+      xhr.onerror = () =>
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
+      xhr.onabort = () =>
+        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+      xhr.send(body)
+    })
+  // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+  return reattach(send, undefined, { bounded: true }).then((first) => followOperation<T>(first))
+}
+
+/**
  * A command's first answer to its end: the route's own body, or a 202's operation
  * followed through `GET /operations/{id}` to its result, or to the problem the route
  * would have answered.
@@ -1042,48 +1088,18 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ): Promise<ModelSummary> => {
-    // A command (#1054): one key for this upload, kept on a re-send after an answer
-    // that never arrived, so the server adds the item once.
-    const key = newRequestId()
-    const send = () =>
-      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
+  ): Promise<ModelSummary> =>
+    uploadForm<ModelSummary>(
+      `/models/${seg(slug)}/media`,
+      () => {
         const body = new FormData()
         body.append('file', file)
         if (options.caption) body.append('caption', options.caption)
         if (options.poster) body.append('poster', options.poster)
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-        xhr.setRequestHeader('Accept', 'application/json')
-        xhr.setRequestHeader('Idempotency-Key', key)
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-        })
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
-            return
-          }
-          reject(new ApiError(xhrProblem(xhr)))
-        }
-        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-        // have landed, and `mayHaveRun` says so.
-        xhr.onerror = () =>
-          reject(
-            new ApiError({
-              type: UNANSWERED,
-              title: 'The upload failed',
-              status: 0,
-              detail: 'The upload failed',
-            }),
-          )
-        xhr.onabort = () =>
-          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-        xhr.send(body)
-      })
-    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
-    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
-  },
+        return body
+      },
+      onProgress,
+    ),
 
   patchMedia: (slug: string, id: string, caption: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
@@ -1317,6 +1333,41 @@ export const api = {
     command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
+    }),
+
+  /** #309 — adds a photo or video of the finished object to the print. */
+  addPrintAttachment: (
+    archiveId: number,
+    file: File,
+    caption: string,
+    onProgress?: (fraction: number) => void,
+  ): Promise<PrintAttachment> =>
+    uploadForm<PrintAttachment>(
+      `/prints/${archiveId}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (caption) body.append('caption', caption)
+        return body
+      },
+      onProgress,
+    ),
+
+  /** #309 — an empty caption takes it off. */
+  captionPrintAttachment: (archiveId: number, id: number, caption: string) =>
+    command<PrintAttachment>(`/prints/${archiveId}/attachments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    }),
+
+  deletePrintAttachment: (archiveId: number, id: number) =>
+    command<void>(`/prints/${archiveId}/attachments/${id}`, { method: 'DELETE' }),
+
+  /** #309 — copies the attachment into the template's gallery. */
+  promotePrintAttachment: (archiveId: number, id: number, slug: string) =>
+    command<ModelSummary>(`/prints/${archiveId}/attachments/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
     }),
 
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,

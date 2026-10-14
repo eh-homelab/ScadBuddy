@@ -258,6 +258,7 @@ export type PrintDetail = Schemas['PrintDetail']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
+export type PrintAttachment = Schemas['PrintAttachment']
 export type PrinterMedia = Schemas['PrinterMedia']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
