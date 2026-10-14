@@ -1033,9 +1033,11 @@ def test_with_no_loaded_spools_the_anchor_family_matches_the_most_slots() -> Non
 
 def test_on_a_slot_count_tie_the_anchor_family_has_the_best_single_match() -> None:
     """#3028 review: equal loaded and matched slots, so the exact PETG black beats the
-    near PLA black."""
+    near PLA black. Both shelf orders (#3497 review): `min` keeps the first family it
+    met on a full tie, so one order alone passes without the best-match level."""
     shelf = [
         _spool(1, "101010FF"),  # PLA near-black
         _spool(2, "1A1A1AFF", "PETG"),  # PETG black, an exact match
     ]
     assert _undeclared(shelf, [], "#1A1A1A") == {1: 2}
+    assert _undeclared(shelf[::-1], [], "#1A1A1A") == {1: 2}
