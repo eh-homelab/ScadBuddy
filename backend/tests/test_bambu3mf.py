@@ -1455,7 +1455,7 @@ def test_each_declared_object_is_its_own_build_item_on_its_plate(tmp_path: Path)
     assert len(settings.object_ids) == 2
     assert laid_out.assembly_ids == tuple(item.get("objectid") for item in items)
     assert laid_out.extruders == frozenset({1})
-    assert [entry.name for entry in plates_of(out)] == ["bins (object 1) + bins (object 2)"]
+    assert [entry.name for entry in plates_of(out)] == ["bins"]  # named as a plate (#2874 review)
     # A reader of any 3MF (Arrange's) sees the two objects too.
     assert [obj.name for obj in read_objects(payload)] == ["bins (object 1)", "bins (object 2)"]
 
@@ -1471,6 +1471,31 @@ def test_one_object_writes_the_file_it_always_did(tmp_path: Path) -> None:
         thumbnails=None,
     )
     assert implicit.read_bytes() == explicit.read_bytes()
+
+
+def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
+    """#2874 review: a packed plate of many copies is named after the model, not after
+    every object's name joined; one object leaves the name unset, as it always did."""
+    many, one = tmp_path / "many.3mf", tmp_path / "one.3mf"
+    parts = tuple(
+        ColourPart(n, f"Bin {n}", "#FF6AC1", trimesh.creation.box(extents=(4, 4, 4)))
+        for n in range(1, 21)
+    )
+    write_plates_3mf(
+        [PlateParts(parts, (1,) * 20, tuple(range(1, 21)))],
+        ["#FF6AC1"],
+        many,
+        thumbnails=None,
+        model_name="Bins",
+    )
+    write_plates_3mf([single_plate(_parts())], ["#FF6AC1", "#1F6FEB"], one, thumbnails=None)
+
+    assert [plate.name for plate in plates_of(many)] == ["Bins"]
+    with zipfile.ZipFile(one) as archive:
+        assert (
+            '<metadata key="plater_name" value=""/>'
+            in archive.read("Metadata/model_settings.config").decode()
+        )
 
 
 def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:
