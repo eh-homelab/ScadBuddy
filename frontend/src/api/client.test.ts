@@ -1601,6 +1601,28 @@ describe('render (#1053)', () => {
     })
     expect(follows).toBe(1)
   })
+
+  it('a follow in flight when the signal aborts, then unanswered, is sent once more to its answer (#3576)', async () => {
+    const controller = new AbortController()
+    let follows = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => stillAccepting()),
+      http.post(followUrl, () => {
+        follows += 1
+        if (follows === 1) {
+          // The abort lands while this follow is in flight, and its answer is lost.
+          controller.abort()
+          return HttpResponse.error()
+        }
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(follows).toBe(2)
+  })
 })
 
 describe('Retry-After on problems (#1000)', () => {

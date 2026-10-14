@@ -633,7 +633,10 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
     try {
       // A POST (#2782 review): a render's follow makes its supersede, a change the
       // cross-site gate must see.
-      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal)
+      // `finish`, as the POST's own re-send has: a follow in flight when the signal aborts
+      // may have made the supersede's release, so an unanswered one is sent once more to
+      // learn what it claimed, never dropped (#3576).
+      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal, { finish: true })
     } catch (caught) {
       if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
       answer = await send()

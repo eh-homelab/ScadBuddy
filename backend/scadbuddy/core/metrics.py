@@ -184,8 +184,8 @@ class Metrics:
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."
-            " A request answered 202 accepting is counted by the follow that gets its"
-            " answer; a follow sent again after a dropped answer counts it again (#2340).",
+            " A request answered 202 accepting and then refused is not counted: its follow"
+            " cannot tell a render's queue-full from an Arrange's (#2340, #3575).",
             ["kind"],
             registry=r,
         )

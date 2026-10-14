@@ -71,7 +71,6 @@ from scadbuddy.render.projection import (
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows import commands
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -128,9 +127,6 @@ CLOSING_WAIT = 5.0
 #: How long a release waits on its Update: `rpc_timeout` bounds each poll, not the
 #: Update, and the SDK polls again (review #1066 (8) 1).
 RELEASE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
-#: The least a follow that releases a superseded job waits on its Update: `FOLLOW_WAIT`
-#: less `RELEASE_BOUND`, never below this (a test's shortened `FOLLOW_WAIT`).
-SUPERSEDING_FOLLOW_MIN = timedelta(seconds=1)
 #: Every Temporal call a submit makes (both starts, the wait between them, the release)
 #: answers within this; past it one describe (`DESCRIBE_SECONDS`) says whether the
 #: request is still accepting or Temporal unavailable, and the two stay below Envoy's
@@ -350,16 +346,15 @@ class RenderService:
         submit could not make before it answered. Still not answered, it is
         `CommandStillAcceptingError`; an Update a closing run rejected, or one Temporal
         does not know, `CommandResendError`; a refusal, as `submit` raises it."""
-        # The release after the answer can take RELEASE_BOUND; a follow that makes one
-        # waits that much less on the Update, so the two stay below Envoy's 15 s (#3041).
-        wait = (
-            max(commands.FOLLOW_WAIT - timedelta(seconds=RELEASE_BOUND), SUPERSEDING_FOLLOW_MIN)
-            if supersedes
-            else None
-        )
+        # One bound for the Update and the release after it, as `_started` bounds a
+        # submit: the Update waits its whole `FOLLOW_WAIT`, and the release gets what is
+        # left of `SUBMIT_DEADLINE`, so the two stay below Envoy's 15 s (#3041) without the
+        # follow long-polling in short slices to keep the release's worst case (#3575).
+        loop = asyncio.get_running_loop()
+        ends = loop.time() + SUBMIT_DEADLINE
         try:
             answer = await follow_update(
-                self.client, workflow_id, update_id, result_type=RenderAnswer, wait=wait
+                self.client, workflow_id, update_id, result_type=RenderAnswer
             )
         except CommandStillAcceptingError:
             # Counted once, by the submit that answered 202; not once per follow.
@@ -371,18 +366,30 @@ class RenderService:
             raise
         if answer.closing:
             raise CommandResendError(workflow_id)
+        if answer.queue_full is not None:
+            # Not counted: with no job a follow cannot tell a render's from an Arrange's,
+            # which shares the `render-` prefix (#3575).
+            raise QueueFullError(answer.queue_full, await self.retry_after())
         if answer.job is not None and answer.job.kind != "render":
             # An Arrange runs on `render-<key>` too, but answers `JobStatus` and never
             # a 202 to follow: this route answers only what a render submit would
             # (review #2805).
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no render {workflow_id!r} to follow")
-        job, _ = await self._counted(answer, answer.job.kind if answer.job else "render")
+        job, _ = await self._counted(answer, "render")
         # Checked as the POST checks it (`_superseded`): the answered job's template, still
         # open, and neither that job nor its run (a submit that replaced its own render
         # answered with it). The follow URL's `supersedes` is the client's to send.
         previous = await self._superseded(supersedes, job.slug) if supersedes else None
         if previous is not None and previous.id != job.id and previous.workflow_id != workflow_id:
-            await self._supersede(previous, update_id)
+            try:
+                async with asyncio.timeout(max(ends - loop.time(), 0)):
+                    await self._supersede(previous, update_id)
+            except TimeoutError:
+                # The new render is answered either way, as `_supersede` says.
+                logger.warning(
+                    "could not release a render's claim before the follow's bound",
+                    extra={"job_id": previous.id},
+                )
         return job
 
     async def arrange(
@@ -443,15 +450,8 @@ class RenderService:
                 answer = await self._accepted(start, request_id, accept_within)
                 # Started first, so a refused submit supersedes nothing.
                 if answer.job is not None and previous is not None:
-                    try:
-                        await self._supersede(previous, request_id)
-                    except CommandStillAcceptingError as error:
-                        # Raised for the superseded job's execution: the 202 must name
-                        # this render's, whose follow answers it and makes the release
-                        # again, as the release is idempotent (review #2805).
-                        raise CommandStillAcceptingError(
-                            workflow_id_for_key(start.render_key)
-                        ) from error
+                    # Never raises: a release that fails is a warning (#3575).
+                    await self._supersede(previous, request_id)
         except TimeoutError as error:
             if not bound.expired():
                 raise
