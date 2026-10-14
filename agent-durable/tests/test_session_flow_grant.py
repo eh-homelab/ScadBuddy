@@ -181,6 +181,9 @@ async def test_a_grant_used_for_another_input_does_not_admit_a_plugin_tools_call
     [entry] = await base._parked(handle)
     assert entry["kind"] == "approval"
     assert harness.stand_in.ran == []
+    # Consulted and refused, not skipped: a plugin tool that never asked would park too.
+    [checked] = granted.checked
+    assert checked["tool"] == "notes__post"
     cur = await agent_db.execute(
         "SELECT count(*) FROM ai_input_responses WHERE session_id = %s", (sid,)
     )
