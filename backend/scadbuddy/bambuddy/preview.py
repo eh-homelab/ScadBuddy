@@ -17,10 +17,12 @@ and made a sliced file that is still there under the name it made it with.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 import zipfile
+from collections import OrderedDict
 from contextlib import aclosing
 from datetime import timedelta
 from typing import Literal
@@ -28,6 +30,7 @@ from typing import Literal
 from fastapi import status
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy import toolpath
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import ReuseSlice, slice_request
 from scadbuddy.bambuddy.models import SliceJob
@@ -47,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 #: A sliced file past this is not read for its filament changes.
 MAX_SLICED_BYTES = 128 * 1024 * 1024
+#: A plate's G-code, unzipped, past this is not read.
+MAX_GCODE_BYTES = 256 * 1024 * 1024
 #: Bambu's ``change_filament_gcode`` loads each filament with ``M620 S<n>A``; 255 is
 #: "no filament" (an unload).
 _LOAD = re.compile(rb"^M620 S(\d+)A", re.MULTILINE)
@@ -211,7 +216,6 @@ async def read_preview(
     if job.status != "completed" or job.result is None or sliced is None:
         return answer
     answer.print_time_seconds = job.result.print_time_seconds
-    answer.filament_used_g = job.result.filament_used_g
     requirements = await client.filament_requirements(sliced, plate_id=row.plate_id)
     answer.slots = [
         PreviewSlot(
@@ -222,12 +226,101 @@ async def read_preview(
         for need in requirements.filaments
         if need.used_in_plate
     ]
+    answer.filament_used_g = _total_grams(answer.slots, job.result.filament_used_g)
     answer.filament_changes = await _filament_changes(client, sliced, row.plate_id)
     return answer
 
 
+#: Toolpaths already read, newest last: a dialog's views ask for the same one again.
+_TOOLPATHS: OrderedDict[tuple[int, int, str | None, int], bytes] = OrderedDict()
+#: How many are kept: each is up to ~13 MB (``toolpath.MAX_SEGMENTS``).
+TOOLPATHS_KEPT = 4
+#: Toolpaths read at once.
+TOOLPATH_READS = 2
+_READING_TOOLPATHS = asyncio.Semaphore(TOOLPATH_READS)
+#: How long a request waits for a turn to read before a 503.
+TOOLPATH_WAIT_SECONDS = 20
+#: How long a read may spend downloading the sliced file before it gives its turn up.
+TOOLPATH_DOWNLOAD_SECONDS = 120
+#: A slice's toolpath never changes, but its job id is reused once Bambuddy restarts.
+TOOLPATH_HEADERS = {"Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff"}
+
+
+async def read_toolpath(
+    client: BambuddyClient, uploads: BambuddyUploadStore, job_id: int, subject: str
+) -> bytes:
+    """#2072: the toolpath of finished background slice ``job_id``, encoded as
+    :mod:`scadbuddy.bambuddy.toolpath` describes. 404 for no such slice, 409 while it
+    is not finished, 422 when its sliced file has no G-code that can be read."""
+    row = await uploads.preview(job_id, subject)
+    job = await _still_sliced(client, uploads, row) if row is not None else None
+    if row is None or job is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no background slice {job_id}")
+    sliced = job.result.library_file_id if job.result else None
+    if job.status != "completed" or job.result is None or sliced is None:
+        raise ApiError(status.HTTP_409_CONFLICT, f"background slice {job_id} has not finished")
+    key = (row.id or 0, sliced, job.result.name, row.plate_id)
+    if (cached := _TOOLPATHS.get(key)) is not None:
+        _TOOLPATHS.move_to_end(key)
+        return cached
+    # A bounded number of reads at once, as each holds up to a 256 MB G-code while it
+    # parses; a request that cannot get a turn soon is told to come back rather than
+    # queue behind them, and a read whose download stalls gives its turn up.
+    try:
+        async with asyncio.timeout(TOOLPATH_WAIT_SECONDS):
+            await _READING_TOOLPATHS.acquire()
+    except TimeoutError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "other toolpaths are being read; try again"
+        ) from None
+    try:
+        if (cached := _TOOLPATHS.get(key)) is not None:
+            return cached
+        try:
+            async with asyncio.timeout(TOOLPATH_DOWNLOAD_SECONDS):
+                gcode = await _plate_gcode(client, sliced, row.plate_id)
+        except TimeoutError:
+            raise ApiError(
+                status.HTTP_504_GATEWAY_TIMEOUT, "the sliced file took too long to download"
+            ) from None
+        if gcode is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the sliced file has no G-code for this plate that can be read",
+            )
+        encoded = (await asyncio.to_thread(toolpath.parse, gcode)).encode()
+        del gcode
+        _TOOLPATHS[key] = encoded
+        while len(_TOOLPATHS) > TOOLPATHS_KEPT:
+            _TOOLPATHS.popitem(last=False)
+        return encoded
+    finally:
+        _READING_TOOLPATHS.release()
+
+
+def _total_grams(slots: list[PreviewSlot], reported: float | None) -> float | None:
+    """The plate's filament: the sum of its slots' grams when every slot has them.
+    Bambuddy's ``filament_used_g`` is the first filament's alone (#2450: 5.2 g reported
+    for slots of 5.2, 5.6 and 0.3 g), so it is used only when the slots cannot say. The
+    slots' grams are the sliced plate's own (``filament-requirements`` for that plate),
+    never the whole file's, so their sum is this plate's need."""
+    if slots and all(slot.grams is not None for slot in slots):
+        return round(sum(slot.grams or 0.0 for slot in slots), 2)
+    return reported
+
+
 async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) -> int | None:
     """How many times the sliced plate changes filament, read from its G-code."""
+    gcode = await _plate_gcode(client, sliced, plate_id)
+    if gcode is None:
+        return None
+    loads = [int(match) for match in _LOAD.findall(gcode) if int(match) != 255]
+    return max(len(loads) - 1, 0)
+
+
+async def _plate_gcode(client: BambuddyClient, sliced: int, plate_id: int) -> bytes | None:
+    """The sliced plate's G-code (``Metadata/plate_N.gcode``); None past
+    :data:`MAX_SLICED_BYTES` or when the file has none for the plate."""
     data = bytearray()
     try:
         async with aclosing(client.download_library_file(sliced)) as chunks:
@@ -245,12 +338,16 @@ async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) 
             name = wanted if wanted in names else (names[0] if len(names) == 1 else None)
             if name is None:
                 return None
-            gcode = archive.read(name)
+            # Read no further than the bound, whatever the zip's header claims.
+            with archive.open(name) as member:
+                gcode = member.read(MAX_GCODE_BYTES + 1)
+            if len(gcode) > MAX_GCODE_BYTES:
+                logger.info("the sliced plate's G-code is past its bound")
+                return None
+            return gcode
     except (ApiError, zipfile.BadZipFile, KeyError) as error:
         logger.info("the sliced file could not be read", extra={"error": type(error).__name__})
         return None
-    loads = [int(match) for match in _LOAD.findall(gcode) if int(match) != 255]
-    return max(len(loads) - 1, 0)
 
 
 #: How long a background slice no run queued is kept: a dialog left open that long

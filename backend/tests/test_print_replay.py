@@ -46,6 +46,12 @@ completes.
 ``FOLLOW_PATCH`` (#1053) is the fourth: an output's run that succeeds starts its
 ``FollowPrint``. ``succeeded`` is the run from before it; ``succeeded_followed``,
 recorded by the patched one, follows.
+
+``SLICE_RETRY_PATCH`` (#2081) slices a plate again when its slice was lost. Every
+history above is from before it, and none lost a slice. Recorded by the patched one:
+``slice_lost_then_sliced`` (the sidecar dies under the first slice; the second is
+queued) and ``slice_lost_every_time`` (all ``SLICE_ATTEMPTS`` lost; the run is recorded
+failed), both with a one-second ``SLICE_BACKOFF``.
 """
 
 from __future__ import annotations
@@ -95,6 +101,8 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "cancelled_during_start_enqueue",
         "cancelled_during_fail_1061",
         "cancelled_during_fail",
+        "slice_lost_then_sliced",
+        "slice_lost_every_time",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:

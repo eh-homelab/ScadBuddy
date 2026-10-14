@@ -5,6 +5,7 @@ import type { HookCallback, HookInput, HookJSONOutput } from '@anthropic-ai/clau
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   actionLine,
+  capRecallQuery,
   createMemoryHooks,
   drainRetains,
   DEFAULT_MEMORY_HOOK_CONFIG,
@@ -13,6 +14,7 @@ import {
   type MemoryActivity,
   type MemoryHooksOptions,
   hindsightTarget,
+  retryQueryLength,
 } from '../src/memory/hindsight.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
@@ -172,6 +174,81 @@ describe('memory hooks against a fake Hindsight', () => {
     // At most recallMaxResults (5), numbered as upstream numbers them.
     expect(unwrapUntrusted(envelope)).toBe('1. The user prints in PETG.\n2. Boxes get 2 mm walls.\n3. x3\n4. x4\n5. x5')
     expect(logs).toEqual([])
+  })
+
+  // The Claude Code Hindsight plugin's recallMaxQueryChars: the start of the query, 800
+  // characters by default, 0 for no cut.
+  const recallHook = (overrides: Partial<MemoryHooksOptions> = {}) => hooks(overrides).hooks.UserPromptSubmit?.[0]?.hooks[0]
+  const sentQueries = () => fake.recalls().map((r) => (r.body as { query: string }).query)
+  const SCAD = 'difference(){cube([10,20,30]);translate([1,1,1])cube([8,18,30]);}\n'
+
+  it('sends the start of a long prompt, 800 characters by default, as the Claude Code plugin does', async () => {
+    expect(DEFAULT_MEMORY_HOOK_CONFIG.recallMaxQueryChars).toBe(800)
+    const long = SCAD.repeat(40)
+    await call(recallHook(), prompt(long))
+    const [query] = sentQueries()
+    expect(query).toBe(long.slice(0, 800))
+    expect(logs).toEqual([])
+  })
+
+  it('takes another cap, and 0 sends the whole query', async () => {
+    const long = SCAD.repeat(40)
+    await call(recallHook({ hookConfig: { recallMaxQueryChars: 50 } }), prompt(long))
+    await call(recallHook({ hookConfig: { recallMaxQueryChars: 0 } }), prompt(long))
+    expect(sentQueries()).toEqual([long.slice(0, 50), long])
+  })
+
+  it('counts characters, never cutting an emoji or other non-BMP character in half', () => {
+    const astral = '🧱'.repeat(10)
+    expect(capRecallQuery(astral, 3)).toBe('🧱🧱🧱')
+    expect(capRecallQuery(`ab${astral}`, 3)).toBe('ab🧱')
+    expect(capRecallQuery('模型模型', 2)).toBe('模型')
+    expect(capRecallQuery('Make a box', 800)).toBe('Make a box')
+    expect(capRecallQuery('Make a box', 0)).toBe('Make a box')
+  })
+
+  it('retries once, shortened by the ratio the bank reported, when the bank still finds it too long', async () => {
+    // Punctuation-dense SCAD runs about one token per two characters, so 800 of them can
+    // still pass the bank's token limit.
+    fake.memories = ['The user prints in PETG.']
+    let refused = 0
+    fake.respond = () =>
+      refused++ === 0
+        ? { status: 400, json: { detail: 'Query too long: 1000 tokens exceeds maximum of 500. Please shorten your query.' } }
+        : undefined
+    const out = await call(recallHook(), prompt(SCAD.repeat(40)))
+    // 800 × 500/1000, less a fifth for margin.
+    expect(sentQueries().map((q) => q.length)).toEqual([800, 320])
+    expect(sentQueries()[1]).toBe(SCAD.repeat(40).slice(0, 320))
+    expect(JSON.stringify(out)).toContain('The user prints in PETG.')
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatch(/refused a 800-character recall query as too long.*retrying once with 320 characters/)
+  })
+
+  it('retries at half the length when the refusal does not say the numbers, and only once', async () => {
+    fake.respond = () => ({ status: 400, json: { detail: 'Query too long. Please shorten your query.' } })
+    const out = await call(recallHook(), prompt(SCAD.repeat(40)))
+    expect(sentQueries().map((q) => q.length)).toEqual([800, 400])
+    expect(out).toEqual({})
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toMatch(/recall from bank scadbuddy failed .*HTTP 400.*no memories were injected/)
+  })
+
+  it('does not retry any other refusal', async () => {
+    fake.respond = () => ({ status: 400, json: { detail: 'budget: invalid' } })
+    await call(recallHook(), prompt('Make a box'))
+    fake.respond = () => ({ status: 500, text: 'Query too long' })
+    await call(recallHook(), prompt('Make a box'))
+    expect(fake.recalls()).toHaveLength(2)
+  })
+
+  it.each([
+    ['Query too long: 6192 tokens exceeds maximum of 500.', 1000, 64],
+    ['Query too long', 1000, 500],
+    ['Query too long: 10 tokens exceeds maximum of 500.', 1000, 500],
+    ['Query too long: 0 tokens exceeds maximum of 500.', 1000, 500],
+  ])('retryQueryLength(%j) of %i characters is %i', (reply, sent, expected) => {
+    expect(retryQueryLength(sent, reply)).toBe(expected)
   })
 
   it('recalls once per hooks (one user message): the same prompt again reuses it, any other prompt gets nothing (#1896)', async () => {

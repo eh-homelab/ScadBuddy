@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs'
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import {
   decide,
   makeCanUseTool,
   makePreToolUseHook,
+  RISK_TIERS,
   type RiskTier,
   type ToolDecision,
 } from '../src/harness/permissions.js'
@@ -115,5 +117,12 @@ describe('with an approval gate (#258)', () => {
     expect(await run('mcp__scadbuddy__send_to_printer')).toMatchObject({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' },
     })
+  })
+})
+
+describe('RISK_TIERS', () => {
+  it('is the vector agent-durable pins its copy to (#3144)', () => {
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/risk-tiers.json', import.meta.url), 'utf8')) as unknown
+    expect(fixture).toEqual([...RISK_TIERS])
   })
 })

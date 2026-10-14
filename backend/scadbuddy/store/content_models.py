@@ -3,12 +3,33 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 from pydantic import BaseModel
 
 BlobKind = Literal["piece", "snapshot", "asset", "font"]
+#: What a put stores: bytes, or a seekable file read from its start, which is hashed and
+#: uploaded a chunk at a time rather than held whole (#503).
+BlobData = bytes | BinaryIO
+_CHUNK = 1 << 20
+
+
+def blob_digest(data: BlobData) -> tuple[str, int]:
+    """``data``'s sha256 and size, a file read a chunk at a time and left at its start.
+    Blocking: call it from a thread."""
+    if isinstance(data, bytes):
+        return hashlib.sha256(data).hexdigest(), len(data)
+    data.seek(0)
+    digest, size = hashlib.sha256(), 0
+    while chunk := data.read(_CHUNK):
+        digest.update(chunk)
+        size += len(chunk)
+    data.seek(0)
+    return digest.hexdigest(), size
+
+
 #: Kinds whose life the sweep decides: pieces by `blob_refs` and grace, snapshots (a
 #: cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts are never swept.
 SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot")

@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -117,6 +117,8 @@ describe('ImportDialog (#1295)', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
+    // A failing assertion before the end still lets the held handler answer (#2559).
+    onTestFinished(() => release())
     server.use(
       http.post('/api/v1/models/import', async () => {
         posts += 1
@@ -138,6 +140,30 @@ describe('ImportDialog (#1295)', () => {
     await user.type(field, '{Enter}')
     await user.type(screen.getByLabelText('Name (optional)'), '{Enter}')
     release()
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a .scad file')
+    expect(posts).toBe(1)
+  })
+
+  it('sends one import for two submits in the same tick, before a re-render (#2558)', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/v1/models/import', () => {
+        posts += 1
+        return HttpResponse.json(
+          { title: 'Unprocessable', status: 422, detail: 'not a .scad file' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />)
+    await user.type(screen.getByLabelText('URL'), URL_)
+    const form = screen.getByLabelText('URL').closest('form')!
+    // One act: React does not re-render between the two, so both see `importing` false.
+    act(() => {
+      fireEvent.submit(form)
+      fireEvent.submit(form)
+    })
     expect(await screen.findByRole('alert')).toHaveTextContent('not a .scad file')
     expect(posts).toBe(1)
   })

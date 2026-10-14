@@ -633,8 +633,16 @@ are set ([headless-browser.md](ai/headless-browser.md)).
   lists each one with its tier and **Disable**. A tier can only be raised above the one
   ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
   built-in is never removed. Every setting here applies to classic and durable chats
-  alike. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
+  alike: a tool raised to outward asks for approval before it runs in a durable chat
+  too, as in a classic one. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never
   sees the endpoint's address or secret.
+- **Hindsight memory**. With a plugin named `hindsight` enabled, the assistant recalls
+  memories against each message you send. **Recall query limit (characters)** is how
+  much of the message it sends as the query: the first 800 characters by default, as
+  the Claude Code Hindsight plugin does (`recallMaxQueryChars`), or all of it at 0. The
+  bank has its own limit in tokens (`HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the
+  Hindsight server, 500 by default); a query it still finds too long is retried once,
+  shorter. A change applies from your next message, in classic and durable chats.

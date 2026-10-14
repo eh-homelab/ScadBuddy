@@ -200,6 +200,10 @@ class Config:
             ("SCADBUDDY_ASSET_MAX_TOTAL_BYTES", self.asset_max_total_bytes),
             ("SCADBUDDY_ASSET_MAX_COUNT", self.asset_max_count),
             ("SCADBUDDY_ASSET_SWEEP_INTERVAL", self.asset_sweep_interval),
+            # #2348: 0 is no limit for the store's caps; below it is no cap at all.
+            ("SCADBUDDY_STORE_MAX_TOTAL_BYTES", self.store_max_total_bytes),
+            ("SCADBUDDY_STORE_MAX_COUNT", self.store_max_count),
+            ("SCADBUDDY_WORKER_CACHE_MAX_BYTES", self.worker_cache_max_bytes),
         ):
             if value < 0:
                 raise ValueError(f"{name} must be at least 0, not {value}")

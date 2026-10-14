@@ -49,13 +49,13 @@ export const choicesView: ChoicesView = {
     '0.6': ['0.24mm Balanced Quality @BBL H2C 0.6 nozzle', '0.30mm Standard @BBL H2C 0.6 nozzle'],
     '0.8': ['0.32mm Balanced Quality @BBL H2C 0.8 nozzle', '0.40mm Standard @BBL H2C 0.8 nozzle'],
   },
-  bed_types: [
-    'Cool Plate',
-    'Engineering Plate',
-    'High Temp Plate',
-    'Textured PEI Plate',
-    'Supertack Plate',
-  ],
+  // #2366: the H2C's own plates, as `bed_types_for("H2C")` lists them.
+  bed_types: ['Engineering Plate', 'Textured PEI Plate', 'Supertack Plate'],
+  bed_type_labels: {
+    'Engineering Plate': 'Engineering Plate',
+    'Textured PEI Plate': 'Textured PEI Plate',
+    'Supertack Plate': 'Bambu Cool Plate SuperTack',
+  },
   last_bed_type: 'Textured PEI Plate',
   bed_type: 'Textured PEI Plate',
   filaments: filamentOptions,

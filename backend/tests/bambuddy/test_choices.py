@@ -6,6 +6,7 @@ from scadbuddy.bambuddy.choices import (
     nozzle_warning,
     plate_warning,
 )
+from scadbuddy.bambuddy.hardware import plate_unlisted_warning
 from scadbuddy.bambuddy.models import Archive, PrinterStatus
 from tests.bambuddy.conftest import recording
 
@@ -72,6 +73,19 @@ def test_a_different_plate_is_a_swap_reminder_and_the_same_one_is_not() -> None:
     assert "Swap to Cool Plate" in warning.message
     assert plate_warning("Textured PEI Plate", "Textured PEI Plate", "x") is None
     assert plate_warning("Cool Plate", None, "x") is None
+
+
+def test_a_plate_the_printers_model_does_not_take_warns() -> None:
+    """#2366: the H2C takes no Cool, High Temp or Smooth PEI plate."""
+    for chosen in ("Cool Plate", "High Temp Plate", "Smooth PEI Plate"):
+        warning = plate_unlisted_warning(chosen, "H2C", "3DP-31B-598")
+        assert warning is not None and warning.kind == "plate-not-listed", chosen
+        assert warning.message.startswith(f"The 3DP-31B-598 does not list {chosen}")
+    # Either spelling of the SuperTack is the plate it takes.
+    for chosen in ("Supertack Plate", "Cool Plate (SuperTack)", "Textured PEI Plate"):
+        assert plate_unlisted_warning(chosen, "H2C", "x") is None, chosen
+    # A model the profiles do not know is offered every plate, so nothing is claimed.
+    assert plate_unlisted_warning("Cool Plate", "Elegoo Neptune", "x") is None
 
 
 def test_a_size_not_in_the_rack_warns() -> None:

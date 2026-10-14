@@ -50,6 +50,11 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
+  A restart ends every turn the replica was running, and with it every question and
+  attention request those turns were waiting on: none is asked again. That includes an
+  attention request with `on_timeout: 'wait'`, which otherwise waits up to a day
+  (`WAIT_CEILING_S`, [`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts))
+  while holding the session's lease and its Claude Code process (#1220).
 
 ### 1.1 Routing the UI's origin to the agent
 
@@ -618,10 +623,21 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
+  characters (default 800, 0 for no cut, at most 100000), which Settings → Hindsight
+  memory writes through `PUT /api/v1/ai/settings/memory`
+  ([§11](#11-automatic-hindsight-memory));
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
   through `PUT /api/v1/ai/settings/session-mode`
-  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts));
+  `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
+  subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
+  the addresses or CIDR ranges besides loopback the agent answers on
+  `/internal/durable/subagent-mcp` (empty: loopback only, a worker in the agent's pod),
+  which Settings → Durable subagents writes through
+  `PUT /api/v1/ai/settings/durable-subagents`
+  ([`agent/src/routes/durableSubagents.ts`](../../agent/src/routes/durableSubagents.ts)). A
   durable session needs Temporal, the KEK and an `agent-durable` worker polling the
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
@@ -629,11 +645,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
   (a browser among them, as the `playwright` remote plugin, #2568), packages,
   `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
-  three differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  two differences: a durable subagent has ScadBuddy's own tools
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
-  `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
-  parked for approval, and says which it left out (#2393). The worker check counts only a
+  `allow_refused` package names, a durable turn does not offer the ones that work in the
+  background of a classic turn's Claude Code (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification`), and says which it left out. Every
+  other one is offered, each parked for approval (#2393, below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -704,7 +721,11 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  that reply. A fork runs in its parent's mode: a durable parent's conversation is read
+  from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
+  sealed under the child's own key (#2688); its replies are matched to the transcript by
+  their text, and a parent whose turn is running forks at its last finished reply.
+  Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
@@ -816,9 +837,36 @@ package's MCP servers run in the agent as turn tools, as a remote plugin's do. T
 named `plugin_<package>_<server>` and are outward. http ones go through the same
 forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
 local one runs only for a package approved with `allow_refused`, started in the
-package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
-their own activities, and so wait for a human. A durable turn offers those two and parks
-each call for approval. It does not offer the others, and says so in the session. The
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed
+package names, only `Bash` and `PowerShell` can run as the engine's own activities, and so
+wait for a human: the Temporal plugin refuses any other in `tool_activities`
+([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97)).
+A durable turn offers those two and parks each call for approval. The agent provides the
+others as the `builtin` turn tools (`agent/src/builtins/`, #2393), named
+`builtin__<Name>`, each outward and parked like any turn tool, and the turn's system
+prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `system_note`):
+
+- `Read`, `Write`, `Edit`, `Glob`, `Grep` and `NotebookEdit` act on the session's
+  workspace (`ai_session_files`), shown under `/workspace`, which the `workspace_*` tools
+  and the panel's Files see too;
+- `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
+  pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
+  upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
+  a one-shot Claude Code query with no tools, on the session's credential;
+- `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
+  search asked for, and returns its result as it is;
+- `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the
+  workspace file `_claude/tasks.json`, so it lasts the session, not one process;
+- `ReportFindings`, `EnterWorktree`, `ExitWorktree` and `SendMessage` answer as a
+  classic turn's do (there is no git repository and no agent team in either mode).
+
+The one-shot queries' cost is added to the session's `cost_usd`, which its budget reads,
+as a classic turn counts Claude Code's own calls. The inputs are Claude Code's own
+(`src/builtins/schemas.json`, checked against the bundled binary by
+`test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
+answers its wording, measured in a classic turn on Claude Code 2.1.296. `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification` work in the
+background of a classic turn's one Claude Code process and end with it; a durable turn is
+many processes, so they are not offered, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
@@ -905,7 +953,7 @@ model. In production the model called `recall` once and `retain` never across fo
 sessions. The code is [`agent/src/memory/hindsight.ts`](../../agent/src/memory/hindsight.ts),
 a port of `create_memory_hooks` in Hindsight's Claude Agent SDK integration
 ([`hooks.py` @ eb021da3](https://github.com/vectorize-io/hindsight/blob/eb021da3b2501911e4b57c82b3de1123572a200e/hindsight-integrations/claude-agent-sdk/hindsight_claude_agent_sdk/hooks.py)),
-registered as in-process SDK hooks by `harness/run.ts`. There is no setting: the API
+registered as in-process SDK hooks by `harness/run.ts`. The API
 base and bank come from the plugin's URL (`…/mcp/<bank>/` gives
 `/v1/default/banks/<bank>/…`), and requests carry the plugin's stored header to the
 address the plugin check pinned, with no redirects (`agent/src/http/pinned.ts`, shared
@@ -915,6 +963,20 @@ with the forwarder).
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
   3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
   logged.
+- **The recall query's length** (#2655). Only the start of the redacted query is sent:
+  `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
+  800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
+  setting of the same name (env `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`).
+  Settings → Assistant plugins → Hindsight memory writes it to `ai_settings`
+  `memory_recall_max_query_chars` through `PUT /api/v1/ai/settings/memory`
+  ([`agent/src/routes/memorySettings.ts`](../../agent/src/routes/memorySettings.ts)), and
+  both session modes read it at each turn. The bank's own limit is in tokens,
+  `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the Hindsight server (default 500, counted
+  with tiktoken), which refuses a longer query with HTTP 400 `Query too long: N tokens
+  exceeds maximum of M`. Since the two are set apart (and punctuation-dense text such as
+  pasted OpenSCAD runs about one token per two characters), such a refusal is retried
+  once with the query cut to its length × M/N, less a fifth, or to half when the reply
+  does not give both numbers, and logged. A second refusal is an ordinary recall failure.
 - **Retain** (`Stop`): the session's user and assistant text (tool results left out,
   secrets redacted) is upserted as one document, `conversation:<session_id>`, so every
   turn replaces the same document. It runs in the background and never fails or delays
@@ -943,7 +1005,7 @@ which the `DurableSession` workflow calls around each turn, behind the patch
   It upserts `conversation:<ScadBuddy session id>`.
 
 Each recall and retain gets the same audit row and `memory` event as in a classic
-turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+turn. Neither is retried (beyond the one shorter recall above), and neither ever fails the turn: a failure is recorded and
 the turn goes on with no memories. Only the recalled block enters the workflow's history,
 sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
 retain before it is marked done (up to the 15 s retain limit).

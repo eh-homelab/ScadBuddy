@@ -221,12 +221,14 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "presets.changed",
         "settings.changed",
         "analyzer.decision",
+        "activity.changed",
         # The agent service's own (#300, agent/src/sessions/busEvents.ts).
         "session.started",
         "session.owner",
         "session.waiting",
         "session.done",
         "session.message",
+        "ai_operation.changed",
         # Not a state change: the Postgres bus's marker for a listener gap.
         "bus.resync",
     } == EVENT_KINDS

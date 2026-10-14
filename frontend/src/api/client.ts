@@ -1,9 +1,13 @@
 import type {
+  InventoryView,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
   DecisionCreate,
+  FixApply,
+  FixPreview,
+  FixRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -22,6 +26,7 @@ import type {
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
+  MemorySettings,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -32,6 +37,7 @@ import type {
   SessionLimits,
   BlankTemplate,
   SessionModeSetting,
+  DurableSubagentsSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -39,8 +45,11 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryCopyResult,
   LibraryDeleteResult,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -73,8 +82,15 @@ import type {
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
+  ActivityDetail,
+  ActivityFacets,
+  ActivityPage,
   PrintProgress,
+  PrintersNow,
+  QueueItem,
+  ArchiveStats,
   PrintCheck,
   PreviewStarted,
   SlicePreview,
@@ -144,6 +160,7 @@ import type {
   AiCredentialList,
   AiCredentialSave,
 } from './aiCredential'
+import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -1304,6 +1321,12 @@ export const api = {
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
+  /**
+   * #2360 — a print's timelapse stills and Bambuddy's probe of it, read after the detail:
+   * Bambuddy makes them with ffmpeg, which can take tens of seconds.
+   */
+  getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
+
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
@@ -1398,6 +1421,10 @@ export const api = {
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
    * installed nozzles, quality tiers and processes per nozzle size, plates with the
@@ -1447,6 +1474,14 @@ export const api = {
   getLibraryPreviewSlice: (fileId: number, jobId: number) =>
     request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
 
+  /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
+  previewToolpathUrl: (outputId: string, jobId: number) =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+
+  /** #2072 — as `previewToolpathUrl`, for a library file's. */
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
    * on the person's own "yes".
@@ -1471,6 +1506,26 @@ export const api = {
    */
   createDecision: (body: DecisionCreate) =>
     request<AnalyzerDecision>('/analyzers/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — a fix's whole diff, where each line lands, whether it can be applied yet, and
+   * the fingerprint an apply confirms against. Changes nothing (`post_preview`).
+   */
+  previewFix: (body: FixRequest) =>
+    request<FixPreview>('/analyzers/fixes/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — record a previewed fix as accepted at its scope (`post_apply`). A 409
+   * `analyzer-fix-stale` means the diff, scope, print or base moved since the preview.
+   */
+  applyFix: (body: FixApply) =>
+    request<AnalyzerDecision>('/analyzers/fixes/apply', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1539,6 +1594,16 @@ export const api = {
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
 
+  /** #977 — every active printer's live state, whoever started its job. */
+  getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
+  getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
+    request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
+
+  /** #2351 — the farm's totals over every Bambuddy archive. */
+  getFarmStats: () => request<ArchiveStats>('/farm/stats'),
+
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
   listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
@@ -1551,6 +1616,24 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<PrintPage>(`/prints${suffix}`)
   },
+  /** The activity list, newest first, a page at a time; `cursor` is the last page's
+   * `next_cursor`. A `kind` or `status` of several comma-joined values is sent repeated. */
+  listActivity: (query: ActivityQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(apiParams(query))) {
+      if (key === 'kind' || key === 'status') {
+        for (const one of splitList(value)) search.append(key, one)
+      } else search.set(key, value)
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ActivityPage>(`/activity${suffix}`)
+  },
+  activityFacets: (since?: string) =>
+    request<ActivityFacets>(`/activity/facets${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  getActivity: (id: string, advanced: boolean) =>
+    request<ActivityDetail>(`/activity/${seg(id)}${advanced ? '?advanced=1' : ''}`),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
@@ -1575,6 +1658,27 @@ export const api = {
     command<LibraryRestoreResult>('/print/library/restore', {
       method: 'POST',
       body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2670 — files into another folder (`null`, the top level), each under its own id. */
+  moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryMoveResult>('/print/library/move', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a copy of each file in a folder (`null`, the top level), each a new file. */
+  copyLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryCopyResult>('/print/library/copy', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a new name for a file, its extension kept. */
+  renameLibraryFile: (fileId: number, filename: string) =>
+    command<LibraryRenameResult>('/print/library/rename', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
@@ -1834,6 +1938,15 @@ export const api = {
       body: JSON.stringify({ long_edge: longEdge }),
     }),
 
+  /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */
+  getMemorySettings: () => request<MemorySettings>('/ai/settings/memory'),
+
+  putMemorySettings: (recallMaxQueryChars: number) =>
+    request<MemorySettings>('/ai/settings/memory', {
+      method: 'PUT',
+      body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
+    }),
+
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
 
@@ -1876,6 +1989,15 @@ export const api = {
     request<SessionModeSetting>('/ai/settings/session-mode', {
       method: 'PUT',
       body: JSON.stringify({ mode }),
+    }),
+
+  /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
+  getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),
+
+  putDurableSubagents: (setting: DurableSubagentsSetting) =>
+    request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
+      method: 'PUT',
+      body: JSON.stringify(setting),
     }),
 
   /**

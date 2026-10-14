@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
-import type { SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
+import type { NozzlePlan, SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
 import { formatDuration, normalizeHex } from '../../lib/format'
 import { spoolLabel } from '../../lib/filaments'
 import { PlateScene } from './PlateScene'
@@ -12,6 +12,47 @@ function background(): string {
 /** jsdom and a browser with WebGL off draw no 3D; the pane still shows the rest. */
 function canDraw3d(): boolean {
   return typeof window !== 'undefined' && 'WebGLRenderingContext' in window
+}
+
+const SIDE = { L: 'left', R: 'right' } as const
+
+/**
+ * #2449 — where the slice departs from the plan it was made with: a planned slot the
+ * sliced plate does not use (so that colour is lost), and a filament the slicer put on
+ * the other nozzle. Nothing is said without a plan, or without slots read from the
+ * slice.
+ *
+ * A dropped slot is judged only against `plateSlots`, the sliced plate's own slots, and
+ * not at all when they are unknown (`null`): the slice is always of one plate, while the
+ * plan and the dialog's slots may be every plate's, so a colour only another plate uses
+ * would read as dropped. A slot the slice did use is on the sliced plate, so its side is
+ * always checked.
+ */
+function sliceDepartures(
+  plan: NozzlePlan | null,
+  plateSlots: readonly SlotNeed[] | null,
+  slice: SlicePreview | null,
+): string[] {
+  const read = slice?.slots ?? []
+  if (!plan || read.length === 0) return []
+  const sliced = new Map(read.map((entry) => [entry.slot_id, entry]))
+  const onPlate = plateSlots === null ? null : new Set(plateSlots.map((slot) => slot.slot_id))
+  const notes: string[] = []
+  for (const planned of plan.slots ?? []) {
+    const got = sliced.get(planned.slot_id)
+    if (!got) {
+      if (onPlate?.has(planned.slot_id)) {
+        notes.push(
+          `${planned.name} (slot ${planned.slot_id}) isn't used by the sliced plate, so it won't print: its parts may be too small to print.`,
+        )
+      }
+    } else if (got.side && got.side !== planned.side) {
+      notes.push(
+        `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned.`,
+      )
+    }
+  }
+  return notes
 }
 
 function grams(value: number | null | undefined): string | null {
@@ -33,6 +74,14 @@ type Props = {
   colors: Map<string, string>
   /** The background slice (#2169). */
   slice: SlicePreview | null
+  /** The nozzle plan the slice was made with (#2449). */
+  nozzlePlan?: NozzlePlan | null
+  /**
+   * The sliced plate's own slots, or null when they are not known (every plate's, or
+   * another plate's than the one shown): a planned slot is called dropped only against
+   * these (`slicedPlateSlots`).
+   */
+  plateSlots?: readonly SlotNeed[] | null
   stale: boolean
   slicing: boolean
   sliceError: string | null
@@ -54,6 +103,8 @@ export function PreviewPane({
   plan,
   colors,
   slice,
+  nozzlePlan = null,
+  plateSlots = null,
   stale,
   slicing,
   sliceError,
@@ -72,6 +123,7 @@ export function PreviewPane({
   }, [colors, slots, tried])
   const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry]))
   const [thumbFailed, setThumbFailed] = useState(false)
+  const departures = sliceDepartures(nozzlePlan, plateSlots, slice)
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">
@@ -191,6 +243,13 @@ export function PreviewPane({
           </dl>
         ) : (
           !slicing && !sliceError && <p className="mt-1 text-[12px] text-muted">Sliced once the choices are made.</p>
+        )}
+        {departures.length > 0 && (
+          <ul className={`mt-1 space-y-0.5 text-[12px] text-warn ${stale ? 'opacity-60' : ''}`} data-testid="slice-departures">
+            {departures.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
         )}
         {sliceError && (
           <p role="alert" className="mt-1 text-[12px] text-warn" data-testid="slice-error">

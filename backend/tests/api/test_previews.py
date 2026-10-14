@@ -35,6 +35,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.workflows import housekeeping
 from scadbuddy.workflows.housekeeping import prune_schedule_id_for
 from scadbuddy.workflows.previews import (
     PREVIEW_BACKFILL_WORKFLOW,
@@ -499,8 +500,10 @@ def _boot(settings: Settings, stub: StubRender) -> tuple[FastAPI, AppState]:
 
 
 def test_boot_renders_each_model_without_a_thumbnail_once(
-    settings: Settings, seed_dir: Path, paths: DataPaths
+    settings: Settings, seed_dir: Path, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Every boot here runs the backfill: no window of a run before it holds it off (#2352).
+    monkeypatch.setattr(housekeeping, "BOOT_TRIGGER_WINDOW", 0.0)
     _seed(seed_dir, "bare", thumbnail=False)
     _seed(seed_dir, "pictured", thumbnail=True)
     paths.model_dir("mine").mkdir(parents=True)
@@ -689,6 +692,23 @@ def test_the_listing_drops_nothing(
     assert previews.due() == []
 
 
+def test_the_listing_reads_every_record_in_one_query(
+    client: TestClient, state: AppState, stub: StubRender, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2353: the backfill's listing read each model's record in a query of its own, 98
+    a run. It reads them all at once, and decides the same."""
+    _create(client)
+    settle(client, state)
+    previews = scheduler(state)
+    previews.catalogue.thumbnail_path(SLUG).write_bytes(PNG_BYTES)
+
+    def one_by_one(slug: str) -> None:
+        raise AssertionError(f"read {slug}'s record on its own")
+
+    monkeypatch.setattr(previews.store, "record", one_by_one)
+    assert previews.due() == [SLUG]
+
+
 def test_due_skips_a_model_it_cannot_plan(
     client: TestClient, state: AppState, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -697,18 +717,21 @@ def test_due_skips_a_model_it_cannot_plan(
         paths.model_dir(slug).mkdir(parents=True)
         paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
 
-    def needs_refresh(slug: str) -> bool:
+    def needs_refresh(slug: str, record: object) -> bool:
         if slug == SLUG:
             raise OSError("unreadable")
         return True
 
-    monkeypatch.setattr(previews, "needs_refresh", needs_refresh)
+    monkeypatch.setattr(previews, "_needs_refresh", needs_refresh)
     due = previews.due()
     assert "gadget" in due
     assert SLUG not in due
 
 
-def test_previews_off_leaves_no_backfill_schedule(settings: Settings, paths: DataPaths) -> None:
+def test_previews_off_leaves_no_backfill_schedule(
+    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(housekeeping, "BOOT_TRIGGER_WINDOW", 0.0)
     queue = settings.temporal_task_queue_library
     app, booted = _boot(settings, StubRender(paths))
     with TestClient(app) as client:

@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
 import { SessionFiles } from './SessionFiles'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
@@ -405,6 +406,24 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     focusSession()
   }, [openRequest, select, onOpenHandled])
 
+  // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
+  // under way, rather than a blank new chat beside a turn that is still spending.
+  const restored = useRef(false)
+  useEffect(() => {
+    if (restored.current || state.order.length === 0) return
+    restored.current = true
+    if (state.activeId || state.awaitingStart || openRequest) {
+      rememberSession(state.activeId)
+      return
+    }
+    const id = sessionToRestore(rememberedSession(), state.order, state.sessions)
+    if (id) select(id)
+  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select])
+  // After the restore, so it does not forget the chat before reading it.
+  useEffect(() => {
+    if (restored.current) rememberSession(state.activeId)
+  }, [state.activeId])
+
   // Follow the stream. Instant when the user asked for reduced motion.
   const lastText = active?.items.at(-1)
   useEffect(() => {
@@ -650,7 +669,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]"
           data-testid="active-session-header"
         >
-          <span className="min-w-0 flex-1 truncate font-medium" title={active.title} data-testid="active-session-title">
+          {/* #2380 — a floor, so the badges and actions wrap under it rather than squeeze it to "q…". */}
+          <span
+            className="min-w-[min(12rem,100%)] flex-1 truncate font-medium"
+            title={active.title}
+            data-testid="active-session-title"
+          >
             {active.title}
           </span>
           <OriginBadge origin={active.origin} />
@@ -675,13 +699,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             variant="ghost"
             size="sm"
-            disabled={!hasReply || durable}
+            disabled={!hasReply}
             title={
-              durable
-                ? 'A durable session cannot be forked: its conversation is held by its workflow'
-                : hasReply
-                  ? 'Copy this chat into a new one and continue there; this one stays as it is'
-                  : 'No reply to fork yet: wait for the assistant to answer'
+              hasReply
+                ? 'Copy this chat into a new one and continue there; this one stays as it is'
+                : 'No reply to fork yet: wait for the assistant to answer'
             }
             data-agent-user-only=""
             onClick={() => fork(active.id)}
@@ -818,8 +840,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 sessionId={active.id}
                 askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
                 onForkHere={
-                  // A durable session refuses a fork (Ruling 7b), from any point.
-                  !durable && forkPoints.has(`${block.item.kind}:${block.item.id}`)
+                  forkPoints.has(`${block.item.kind}:${block.item.id}`)
                     ? () => fork(active.id, forkPoints.get(`${block.item.kind}:${block.item.id}`) ?? {})
                     : undefined
                 }
@@ -979,7 +1000,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         <p className="sr-only" role="status">
           {dictation.announcement}
         </p>
-        <div className="mt-1.5 flex items-center justify-end gap-2">
+        {/* #2443 — wraps, so "Read replies aloud" stays in the panel beside a long voice button. */}
+        <div className="mt-1.5 flex flex-wrap items-center justify-end gap-2" data-testid="composer-actions">
           <div className="mr-auto flex items-center gap-2">
             <SpeakRepliesToggle />
             {speech.speaking && (

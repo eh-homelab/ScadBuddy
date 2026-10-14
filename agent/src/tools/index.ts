@@ -1,3 +1,4 @@
+import { activityTools } from './activity.js'
 import { approvalTools } from './approvals.js'
 import { arrangeTools } from './arrange.js'
 import { authoringTools } from './authoring.js'
@@ -31,6 +32,7 @@ import { workspaceTools } from './workspace.js'
 // session tools (#300) are sessions.ts.
 
 export const ALL_TOOLS: readonly Tool[] = [
+  ...activityTools,
   ...catalogueTools,
   ...meshModelTools,
   ...customizerTools,

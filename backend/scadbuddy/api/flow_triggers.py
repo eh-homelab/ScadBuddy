@@ -27,6 +27,7 @@ from scadbuddy.api.flows import (
     GRANT_BROWSER_ONLY,
     GRANT_INVALID,
     GRANT_STATE,
+    agent_tool_tiers,
 )
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import ApiError
@@ -48,7 +49,6 @@ from scadbuddy.flow_triggers.store import (
 from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, validate_rules
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
-from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import Definition
 from scadbuddy.workflows.flow_triggers import (
     delete_trigger_schedule,
@@ -202,7 +202,7 @@ def _check_inputs(definition: Definition, inputs: dict[str, Any] | None) -> None
 
 
 async def _check_grant(triggers: Triggers, spec: GrantSpec) -> None:
-    tool_tiers = raise_tiers(tiers(), await triggers.flows.store.tool_overrides())
+    tool_tiers = await agent_tool_tiers(triggers.flows)
     problems = validate_rules(spec.rules, tool_tiers=tool_tiers)
     now = datetime.now(UTC)
     if spec.expires_at <= now:

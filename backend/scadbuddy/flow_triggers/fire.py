@@ -31,7 +31,6 @@ from scadbuddy.flows.component import Flows
 from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.launch import approval_timeout, execution_status, start_execution
-from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.typecheck import check_script
 from scadbuddy.workflows.flow_triggers import FIRE_ACTIVITY, FIRE_ATTEMPTS, ensure_trigger_schedule
 
@@ -153,6 +152,9 @@ class TriggerFires:
             # A retry after its start: only an admitted fire starts its run, and no
             # request can name a run id in the trigger namespace.
             return "started", None
+        # As the agent will enforce them now (#2704). Unanswered, the fire is retried,
+        # admitting nothing yet: there is no file or copy to start it with.
+        tool_tiers = await flows.agent_tools.tool_tiers()
         # Admitted again on a retry too: paused or changed since, it starts nothing.
         admitted = await self.store.admit(trigger_id, fire_key, cap, checked, scheduled)
         if admitted is not None:
@@ -176,7 +178,7 @@ class TriggerFires:
             started_by=started_by,
             inputs=inputs,
             approval_timeout_s=approval_timeout(flows, definition, trigger.approval_timeout_s),
-            tool_tiers=raise_tiers(tiers(), await flows.store.tool_overrides()),
+            tool_tiers=tool_tiers,
         )
         return "started", None
 

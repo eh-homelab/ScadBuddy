@@ -36,15 +36,16 @@ class RemoteAssets:
     async def mirror(
         self, store: AssetStore, meta: AssetMeta, *, slug: str | None, title: str | None
     ) -> None:
-        data = await asyncio.to_thread(store.blob_path(meta).read_bytes)
-        await self.content.put(
-            "asset",
-            data,
-            name=f"asset-{meta.id}.{meta.kind}",
-            scope=BlobScope(slug=slug, title=title),
-            key=asset_key(meta.id),
-            meta=meta.model_dump(),
-        )
+        # Sent from its file a chunk at a time, never read whole (#503).
+        with await asyncio.to_thread(store.blob_path(meta).open, "rb") as data:
+            await self.content.put(
+                "asset",
+                data,
+                name=f"asset-{meta.id}.{meta.kind}",
+                scope=BlobScope(slug=slug, title=title),
+                key=asset_key(meta.id),
+                meta=meta.model_dump(),
+            )
 
     async def clock(self) -> datetime:
         """Now, by the database's clock: a sweep's cutoff is compared with `touched_at`."""

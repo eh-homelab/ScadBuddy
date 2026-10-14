@@ -534,6 +534,12 @@ def flow_kinds(
                 responder=actor,
                 hops=hops_of(checked, "deny", actor),
             )
+            held = await store.get_decision(decision.request_id)
+            if held is not None and (held.outcome, held.responder) == ("denied", actor):
+                # A retried attempt after this very denial was recorded (and maybe sent):
+                # the entry may have left `parent` since; send it again, idempotently.
+                await send_approval(checked, held, approved=False, reason=reason)
+                return {**answer, "outcome": "denied"}
             try:
                 recorded = await store.record_decision(decision, at_hop="parent")
             except HopMovedError:

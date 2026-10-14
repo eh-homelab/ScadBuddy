@@ -15,8 +15,6 @@ print draws from that tray.
 
 from __future__ import annotations
 
-import re
-
 from scadbuddy.bambuddy.extruders import extruder_of, side_of
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
@@ -24,6 +22,7 @@ from scadbuddy.bambuddy.filaments import (
     SpoolOption,
     UnknownTray,
     colour_distance,
+    family,
     normalise_colour,
 )
 from scadbuddy.bambuddy.models import AmsTray, PrinterStatus
@@ -51,16 +50,6 @@ _WORDS: dict[str, tuple[int, int, int]] = {
     "pink": (240, 120, 180),
     "brown": (110, 70, 40),
 }
-
-
-_SPLIT = re.compile(r"[-\s_]+")
-
-
-def family(material: str | None) -> str:
-    """What can share a hotend (#2166): the material's first word (PLA, PETG, ABS,
-    TPU ...), so ``PLA Basic``, ``PLA-Matte`` and ``PLA-CF`` are one family."""
-    words = [word for word in _SPLIT.split((material or "").upper()) if word]
-    return words[0] if words else ""
 
 
 def tray_spool_id(ams_id: int, tray_id: int) -> int:

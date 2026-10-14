@@ -377,3 +377,12 @@ describe('FilamentPicker', () => {
     expect(screen.getByLabelText('Enough for this print')).toBe(screen.getByTestId('filter-enough'))
   })
 })
+
+describe('FilamentPicker · grams from the last slice (#2365)', () => {
+  it('marks grams as the last slice’s while a newer one is on its way', () => {
+    renderPage(
+      <FilamentPicker options={fixtures.filamentOptions} plan={[]} copies={1} onChange={vi.fn()} gramsStale />,
+    )
+    expect(within(slot(1)).getByText('4.8 g for 1 copy, from the last slice')).toBeInTheDocument()
+  })
+})

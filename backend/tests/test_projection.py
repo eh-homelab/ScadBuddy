@@ -611,3 +611,21 @@ def test_recent_render_seconds_leaves_out_cache_hits(
     for index in range(8, 16):
         _rendered(projection, f"hit-{index}", 0.05)
     assert projection.recent_render_seconds() == pytest.approx(30.0, abs=0.1)
+
+
+def test_a_pending_job_knows_its_place_in_the_queue(projection: JobProjection) -> None:
+    """#1638: what the preview says while a render waits for a worker."""
+    first = _accept(projection, "run-q1", width=61)
+    second = _accept(projection, "run-q2", width=62)
+    third = _accept(projection, "run-q3", width=63)
+
+    assert [projection.queue_position(projection.read(j.id)) for j in (first, second, third)] == [
+        1,
+        2,
+        3,
+    ]
+    # The first one starts: the others move up, and a started job has no place.
+    assert projection.mark_started(first.id) is not None
+    assert projection.queue_position(projection.read(first.id)) is None
+    assert projection.queue_position(projection.read(second.id)) == 1
+    assert projection.queue_position(projection.read(third.id)) == 2
