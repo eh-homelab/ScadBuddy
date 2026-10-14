@@ -1783,6 +1783,13 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ print_sequence: 'by object' }), {
       timeout: 5000,
     })
+
+    // And the run queues that slice (#2825): Print sends the sequence the last slice had.
+    const runs = watch('POST', '/run')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    const last = previews.bodies.at(-1) as { print_sequence?: string }
+    expect(runs.bodies[0]).toMatchObject({ print_sequence: last.print_sequence })
   })
 
   it('does not carry over to another source', async () => {
@@ -2583,6 +2590,35 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(reads.urls.at(-1)).toContain('plate_id=2')
     await waitFor(() => expect(screen.queryByTestId('filaments-unavailable')).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
+  // #2823: without a plan the checks have nothing to judge, so they wait idle, not busy.
+  it('sends no analysis and shows no busy checks while the filament read has failed', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json({ detail: 'Bambuddy is down.' }, { status: 503 }),
+      ),
+    )
+    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('print-checks')).toHaveAttribute('aria-busy', 'false'))
+    const before = analyses.bodies.length
+
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    const warning = await screen.findByTestId('filaments-unavailable')
+    expect(within(warning).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+
+    const checks = screen.getByTestId('print-checks')
+    await waitFor(() => expect(checks).toHaveAttribute('aria-busy', 'false'))
+    expect(checks.querySelector('.animate-spin')).toBeNull()
+    expect(analyses.bodies.slice(before)).toEqual([])
   })
 
   it("names a one-plate output's plate, with nothing to choose (#986)", async () => {

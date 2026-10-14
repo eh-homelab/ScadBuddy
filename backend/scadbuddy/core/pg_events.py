@@ -18,6 +18,14 @@ finds a smaller one appear behind it (a bare identity column would allow that, a
 numbers are handed out at insert and transactions commit in any order). Events are
 rare and each transaction is short, so serialising them costs nothing noticeable.
 
+**Lock order.** As the lock is held to commit, a transaction that publishes and then
+writes a row another publisher writes first can deadlock with it. That holds for any
+row, not only activity rows: a source row (``render_jobs``, ``operations``,
+``print_runs``) that one transaction writes after publishing while another writes it
+before publishing deadlocks the same way. A writer whose row another transaction may
+write after publishing takes the lock before that row: :func:`hold_event_log` (the
+activity index does, for every activity row).
+
 Two paths lead there:
 
 - :meth:`PgNotifyEventBus.publish_in` writes the event **inside the caller's
@@ -262,6 +270,17 @@ def notify_payload(event: Event, metrics: Metrics | None = None) -> str | None:
             metrics.events_dropped.labels("oversize").inc()
         return None
     return payload
+
+
+def hold_event_log(conn: Connection[Any]) -> None:
+    """Take `EVENT_LOG_LOCK` in ``conn``'s transaction now, ahead of a row write that
+    will publish. The lock is held to commit, so a transaction that publishes and then
+    writes a row (the render projection: its job event, then the job's activity row)
+    holds it while it waits for that row; one that wrote the row first and then
+    publishes waits for the lock while holding the row, and Postgres aborts one of the
+    two as a deadlock. Taking the lock before such a row keeps one order: the event log
+    first, then rows. Taking it again later in the transaction is free."""
+    conn.execute(_LOCK_SQL, (EVENT_LOG_LOCK,))
 
 
 def write_event(conn: Connection[Any], event: Event, payload: str) -> int:

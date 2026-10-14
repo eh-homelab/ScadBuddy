@@ -21,7 +21,11 @@ async function offscreen(page: Page): Promise<string[]> {
         if (el.closest('[aria-hidden="true"], [hidden]')) continue
         const box = el.getBoundingClientRect()
         if (box.width === 0 || box.height === 0) continue
-        if (getComputedStyle(el).visibility === 'hidden') continue
+        const style = getComputedStyle(el)
+        if (style.visibility === 'hidden') continue
+        // Visually hidden until focused (sr-only: the skip link, #2454): its 1px box sits at
+        // -1px, and no one sees it there.
+        if (style.clipPath === 'inset(50%)' || style.clip === 'rect(0px, 0px, 0px, 0px)') continue
         // Clipped on purpose by a scroller of its own (a scrolling tab row) is reachable.
         let clipped = false
         for (let up = el.parentElement; up && up !== document.body; up = up.parentElement) {
@@ -60,6 +64,9 @@ test.describe('customize page at 390 px (#362)', () => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
     expect(await pageWidth(page)).toBeLessThanOrEqual(390)
+    expect(await offscreen(page)).toEqual([])
+    // Focused, the skip link is shown, and on screen too.
+    await page.getByRole('link', { name: 'Skip to main content' }).focus()
     expect(await offscreen(page)).toEqual([])
   })
 

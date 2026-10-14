@@ -200,25 +200,29 @@ export function ParameterPanel({
         )}
 
         {current && (
-          <ul id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)} className="divide-y divide-line/60">
-            {current.params.map((param) => (
-              <li key={param.name} data-param={param.name}>
-                <ParamWidget
-                  param={param}
-                  value={values[param.name] ?? (param.initial as ParamValue)}
-                  slug={slug}
-                  version={version}
-                  fonts={fonts}
-                  sampleText={sampleText}
-                  extruder={extruderOf(param.name)}
-                  missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
-                  fontRefusal={missingFonts}
-                  onFontInstalled={onFontInstalled}
-                  onChange={(next) => onChange(param.name, next)}
-                />
-              </li>
-            ))}
-          </ul>
+          // #2455 — the panel wraps the list: as the <ul>'s own role it replaced the list
+          // semantics, and a screen reader lost "list, N items".
+          <div id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)}>
+            <ul className="divide-y divide-line/60">
+              {current.params.map((param) => (
+                <li key={param.name} data-param={param.name}>
+                  <ParamWidget
+                    param={param}
+                    value={values[param.name] ?? (param.initial as ParamValue)}
+                    slug={slug}
+                    version={version}
+                    fonts={fonts}
+                    sampleText={sampleText}
+                    extruder={extruderOf(param.name)}
+                    missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+                    fontRefusal={missingFonts}
+                    onFontInstalled={onFontInstalled}
+                    onChange={(next) => onChange(param.name, next)}
+                  />
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </div>
 
