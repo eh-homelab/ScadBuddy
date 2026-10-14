@@ -32,6 +32,7 @@ from typing import IO, Any, Literal, Self
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
@@ -653,7 +654,7 @@ class BambuddyClient:
         for row in rows:
             try:
                 parsed.append(ArchiveDetail.model_validate(row))
-            except ValueError:
+            except ValidationError:
                 unparsed += 1
         if unparsed:
             # One line per read, not per row (#3477 review): each such archive falls
