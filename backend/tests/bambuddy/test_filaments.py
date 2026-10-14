@@ -785,6 +785,17 @@ def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoic
     return built.suggested
 
 
+def _undeclared(shelf: list[Spool], loaded: list[SpoolAssignment], *colours: str) -> dict[int, int]:
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=loaded,
+        requirements=[SlotNeed(slot_id=n, colour=c) for n, c in enumerate(colours, start=1)],
+        printer=printer(),
+    )
+    return {choice.slot_id: choice.spool_id for choice in built.suggested}
+
+
 def test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu() -> None:
     """#2461: slot 2 fell through to an unloaded TPU 95A in an all-PLA print, because the
     loaded PLA Black was taken by slot 1 and an undeclared slot took any material."""
@@ -995,17 +1006,6 @@ async def test_a_shared_status_read_without_its_printer_is_refused(
         await filament_options(bambuddy, cast(PrintSource, _ReadSource()), status=reading)
     reading.cancel()
     assert not anything.called
-
-
-def _undeclared(shelf: list[Spool], loaded: list[SpoolAssignment], *colours: str) -> dict[int, int]:
-    built = build_options(
-        library_file_id=1,
-        spools=shelf,
-        assignments=loaded,
-        requirements=[SlotNeed(slot_id=n, colour=c) for n, c in enumerate(colours, start=1)],
-        printer=printer(),
-    )
-    return {choice.slot_id: choice.spool_id for choice in built.suggested}
 
 
 def test_the_anchor_family_is_first_the_one_matching_most_slots_with_a_loaded_spool() -> None:
