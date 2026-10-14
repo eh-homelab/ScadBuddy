@@ -100,10 +100,12 @@ async def support_overrides(
     else:
         try:
             read = await client.preset_values(process)
-        except ApiError as error:
+        except ApiError:
             # Not ``error.detail``: that repeats the operation ("read the values of
-            # process preset …"), which the sentence around it already says.
-            reason = f"Bambuddy failed the read (HTTP {error.status})"
+            # process preset …"), which the sentence around it already says. Nor
+            # ``error.status``: that is the status ScadBuddy maps the failure to, not
+            # necessarily one Bambuddy sent (#3183).
+            reason = "the read failed (Bambuddy unreachable or answering with an error)"
         else:
             if read.resolved:
                 values = read.values
@@ -112,14 +114,21 @@ async def support_overrides(
     if values is None:
         sent: dict[str, ProcessValue] = {k: v for k, v in wanted.items() if k in SCALAR_KEYS}
         withheld = [key for key in wanted if key not in SCALAR_KEYS]
-        if not withheld:
-            return sent, []
-        return sent, [
-            _not_applied(
+        said: list[str] = []
+        if withheld:
+            said.append(
                 f"Printing without {', '.join(withheld)}: the process preset's values could "
-                f"not be read, so it could not be written in the preset's shape: {reason}."
+                "not be read, so it could not be written in the preset's shape"
             )
-        ]
+        if sent:
+            # Said, though it is the usual shape: a preset that stores one as a list
+            # would take it unshaped (#3183).
+            said.append(
+                f"{', '.join(sent)} sent as single values, unchecked against the preset's shape"
+            )
+        if not said:
+            return sent, []
+        return sent, [_not_applied(f"{'; '.join(said)}: {reason}.")]
     overrides: dict[str, ProcessValue] = {}
     problems: list[str] = []
     for key, value in wanted.items():

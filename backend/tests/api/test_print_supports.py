@@ -124,6 +124,7 @@ def test_unreadable_preset_values_still_send_a_templates_supports(
     assert overrides(sliced) == {"enable_prime_tower": "1", "enable_support": "1"}
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
     assert "Printing without support_threshold_angle" in warning["message"]
+    assert "enable_support sent as single values, unchecked" in warning["message"]
     assert "sidecar_unavailable" in warning["message"]
 
 
@@ -141,7 +142,9 @@ def test_bambuddy_failing_the_read_still_sends_the_prints_choice(
 
     assert response.status_code == 200, response.text
     assert overrides(sliced) == {"enable_support": "1", "support_type": "tree(auto)"}
-    assert "supports-not-applied" not in [w["kind"] for w in response.json()["warnings"]]
+    # Said, since nothing checked them against the preset's shape (#3183).
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
+    assert "enable_support, support_type sent as single values, unchecked" in warning["message"]
 
 
 @respx.mock
@@ -160,7 +163,11 @@ def test_a_failed_read_names_a_short_cause(client: TestClient, model: str) -> No
 
     assert response.status_code == 200, response.text
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
-    assert warning["message"].endswith(": Bambuddy failed the read (HTTP 502).")
+    # Not "HTTP 502": the status is ScadBuddy's mapping, not necessarily Bambuddy's (#3183).
+    assert warning["message"].endswith(
+        ": the read failed (Bambuddy unreachable or answering with an error)."
+    )
+    assert "HTTP" not in warning["message"]
     assert "read the values of process preset" not in warning["message"]
 
 
