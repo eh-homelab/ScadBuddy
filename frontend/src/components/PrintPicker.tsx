@@ -265,7 +265,12 @@ export function PrintPicker({
   const [options, setOptions] = useState<PrintOptions>({})
   /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
   // Memoised: it is a dependency of the run and of the background analysis.
-  const sentOptions = useMemo(() => (queue ? { manual_start: true, ...options } : options), [queue, options])
+  // `??`, not a spread under it: an options object holding `manual_start: undefined`
+  // would otherwise drop the Queue's seed.
+  const sentOptions = useMemo(
+    () => (queue ? { ...options, manual_start: options.manual_start ?? true } : options),
+    [queue, options],
+  )
   /**
    * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
    * never remembered (until #1754 decides remembered choices by subject).

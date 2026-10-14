@@ -84,6 +84,27 @@ def test_output_writes_are_operations(client: TestClient, app: FastAPI, model: s
         assert _workflow_ids(app, kind), kind
 
 
+def test_a_renamed_output_writes_meta_json_as_a_save_does(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """#2786 review: a rename rewrites meta.json; renamed back, the file is byte for byte
+    the one the save wrote, so a renamed output's file never differs in format."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _job(client, model), "name": "Once"},
+        headers=press(),
+    )
+    assert created.status_code == 201, created.text
+    output_id = created.json()["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    meta = state.outputs.directory(output_id) / "meta.json"
+    saved = meta.read_bytes()
+    for name in ("Twice", "Once"):
+        renamed = client.patch(f"/api/v1/outputs/{output_id}", json={"name": name}, headers=press())
+        assert renamed.status_code == 200, renamed.text
+    assert meta.read_bytes() == saved
+
+
 def test_a_job_not_done_is_still_409_without_an_operation_record(
     client: TestClient, app: FastAPI, model: str
 ) -> None:

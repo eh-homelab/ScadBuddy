@@ -6,6 +6,17 @@ export function shortId(id: string): string {
   return id.slice(0, 8)
 }
 
+/**
+ * #2288 — an output's 3MF is saved under its name, which the user typed: what no file
+ * system takes (a path separator, `:`, `*`, `?`, quotes, `<>|`, control characters) is a
+ * `-`, so every browser saves it under the same name. Nothing left of the name, the id.
+ */
+export function outputFileName(output: { slug: string; name?: string | null; id: string }): string {
+  // eslint-disable-next-line no-control-regex
+  const safe = (output.name ?? '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-').trim()
+  return `${output.slug}-${/[^-.\s]/.test(safe) ? safe : output.id}.3mf`
+}
+
 export function formatBbox(bbox: BoundingBox, unit: DisplayUnit = 'mm'): string {
   const [x, y, z] = bbox.size
   return `${length(x, unit)} × ${length(y, unit)} × ${length(z, unit)} ${unit}`

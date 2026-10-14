@@ -19,7 +19,7 @@ import { editPath, editTargetFor, modelPath, type EditNavigationState } from '..
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { wasSent } from '../lib/sent'
-import { formatBbox, formatValue, shortId, timeAgo } from '../lib/format'
+import { formatBbox, formatValue, outputFileName, shortId, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
@@ -59,6 +59,9 @@ export function HistoryPage() {
   /**
    * #2288 — each output's newest print as the Prints page has it, so a row says how its
    * print went rather than only that it was queued. Best effort: unread, rows say less.
+   * Only the slug's newest 100 prints are read (`/prints` has no filter by output), so an
+   * output whose last print is older than those falls back to its queue id, as if it
+   * had not printed yet.
    */
   const printsState = useAsync(
     () => api.listPrints({ slug }, { limit: 100 }).catch(() => ({ items: [], next_cursor: null })),
@@ -659,7 +662,7 @@ function OutputRow({
           </Button>
           <BlobDownload
             url={api.downloadUrl(output.id)}
-            filename={`${output.slug}-${output.name ?? output.id}.3mf`}
+            filename={outputFileName(output)}
             className="text-[13px] text-accent underline"
           >
             Download 3MF
