@@ -634,6 +634,42 @@ def test_a_sliced_file_is_never_preview_sliced(client: TestClient) -> None:
 
 
 @respx.mock
+def test_a_preview_of_a_plate_with_no_slice_plan_fails_saying_so(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2691 review: a plate with nothing to slice is refused with a message, not an
+    assert python -O would strip into an AttributeError."""
+    from scadbuddy.bambuddy.print_run import plan_run as real
+
+    async def planless(*args: Any, **kwargs: Any) -> Any:
+        planned = await real(*args, **kwargs)
+        return planned.model_copy(
+            update={"plates": [p.model_copy(update={"plan": None}) for p in planned.plates]}
+        )
+
+    monkeypatch.setattr("scadbuddy.bambuddy.preview.plan_run", planless)
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    started = client.post("/api/v1/print/library/89/preview-slice", json=request, headers=press())
+
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "failed", op
+    assert "nothing to slice" in json.dumps(op["error"])
+    assert not sliced.called
+
+
+@respx.mock
 def test_a_second_print_of_the_same_choices_queues_scadbuddys_own_slice(
     client: TestClient,
 ) -> None:
@@ -673,6 +709,64 @@ def test_a_second_print_of_the_same_choices_queues_scadbuddys_own_slice(
         }
     ]
     assert not [w for w in first.json()["warnings"] if w["kind"] == "slice-reused"]
+
+
+@respx.mock
+def test_a_reprint_looks_up_every_plates_recorded_slice_at_once(client: TestClient) -> None:
+    """#2691 review: each plate's recorded slices are a GET each; a reprint of many
+    plates reads them together rather than one plate after another."""
+    configure(client)
+    one_color(67)
+    upload = flow_copy_routes()
+    library_file(67, plates="library-plates-multi.json")
+    run_routes()
+    # Each plate's slice its own job and its own file, so each records its own slice.
+    jobs = iter([9, 10])
+    sliced = respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"job_id": next(jobs), "status": "pending"}
+        )
+    )
+    for job_id, file_id in ((9, 77), (10, 78)):
+        respx.get(f"{API}/slice-jobs/{job_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": job_id,
+                    "status": "completed",
+                    "result": {"library_file_id": file_id, "filament_used_g": 12.0},
+                },
+            )
+        )
+    queue_route()
+    request = {
+        **body(),
+        "all_plates": True,
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    }
+    first = run_library(client, 67, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    in_flight, most = 0, 0
+
+    async def kept(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, most
+        in_flight += 1
+        most = max(most, in_flight)
+        await asyncio.sleep(0.2)
+        in_flight -= 1
+        file_id = int(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(
+            200, json={"id": file_id, "filename": "sliced.gcode.3mf", "file_type": "gcode.3mf"}
+        )
+
+    respx.get(url__regex=rf"{API}/library/files/7[78]$").mock(side_effect=kept)
+
+    second = run_library(client, 67, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2  # the first run's two plates; the second slices none
+    assert most == 2
 
 
 @respx.mock

@@ -1162,7 +1162,7 @@ export function PrintPicker({
                 spools={filaments?.spools ?? []}
                 plan={plan}
                 colors={previewColors}
-                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments) : previewSlice.result}
+                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, plate) : previewSlice.result}
                 nozzlePlan={previewSlice.plan}
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
                   plates: picker.plates.length,

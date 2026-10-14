@@ -226,3 +226,13 @@ def test_printer_models_compare_across_bambu_studio_and_bambuddy(
     studio: str, bambuddy: str, same: bool
 ) -> None:
     assert (model_key(studio) == model_key(bambuddy)) is same
+
+
+def test_only_the_model_names_known_to_differ_are_aliased() -> None:
+    """#2691 review: X1 Carbon is the one name Bambu Studio and Bambuddy are known to
+    spell differently. Any other difference (a "Combo" suffix, say) is not matched, so
+    the file is held for a manual start: the safe side until #2956 sources the names."""
+    from scadbuddy.bambuddy import filaments3mf
+
+    assert filaments3mf._MODEL_ALIASES == {"X1CARBON": "X1C"}
+    assert model_key("Bambu Lab P1S Combo") != model_key("P1S")

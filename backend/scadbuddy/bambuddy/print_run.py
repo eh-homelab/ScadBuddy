@@ -1253,7 +1253,7 @@ async def plan_run(
     # Each plate's slots are read on their own: a plate uses only some of the project's
     # filaments (#83). The one plan applies to every plate because a slot is a project
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
-    planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan, int | None]] = []
+    ready: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     per_plate = await gather_plate_options(
         client,
         library_file_id=library_file_id,
@@ -1293,13 +1293,18 @@ async def plan_run(
                 else {**source.print_settings, "print_sequence": request.print_sequence}
             ),
         )
-        # ScadBuddy's own slice of this copy with these presets, when it has one (#2671).
-        reused = await source.recorded_slice(
-            client, library_file_id, slice_request(plan, plate_id).preset_key
-        )
-        planned.append((plate_id, options, resolved, plan, reused))
+        ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    # ScadBuddy's own slice of this copy with these presets, when it has one (#2671):
+    # every plate's looked up together, each a few GETs (#2691 review).
+    reused = await asyncio.gather(
+        *(
+            source.recorded_slice(client, library_file_id, slice_request(plan, plate_id).preset_key)
+            for plate_id, _, _, plan in ready
+        )
+    )
+    planned = [(*plate, sliced) for plate, sliced in zip(ready, reused, strict=True)]
 
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name

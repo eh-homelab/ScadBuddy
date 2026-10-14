@@ -327,7 +327,12 @@ class PrintRunWorkflow:
         :data:`SLICE_BACKOFF`, up to :data:`SLICE_ATTEMPTS` in all (#2081). Starting it
         again is safe: nothing was queued, and the run queues each plate once, from the
         slice that finished. Any other failure ends the run as before."""
-        assert plate.plan is not None, "a plate with no sliced file has a plan"
+        if plate.plan is None:
+            # Only a plate with a sliced file has no plan, and it is never sliced; a
+            # non-retryable failure rather than an assert python -O strips (#2691 review).
+            raise ApplicationError(
+                f"plate {plate.plate_id} has no slice plan", type=REFUSED, non_retryable=True
+            )
         attempt = 1
         while True:
             try:
