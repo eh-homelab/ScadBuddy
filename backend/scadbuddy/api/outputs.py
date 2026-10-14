@@ -426,7 +426,12 @@ async def read_plain_files(
     for file_id in file_ids:
         try:
             read[file_id] = await read_library_objects(
-                client, file_id, blobs=state.store.blobs, cache=state.paths.cache, budget=budget
+                client,
+                file_id,
+                blobs=state.store.blobs,
+                cache=state.paths.cache,
+                budget=budget,
+                downloads=state.store.downloads,
             )
         except NotArrangeableError as error:
             refused.append(error)

@@ -190,6 +190,8 @@ def build_worker_deps(
             history=None,
             fonts=FontService(settings.data_dir),
             metrics=metrics,
+            # #2788: none unless set, and never one the API reads (README).
+            downloads_dir=config.download_cache_dir,
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.

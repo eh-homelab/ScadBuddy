@@ -95,6 +95,7 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
+from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -1153,6 +1154,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
+            # #2788: on the API's /data, so every replica shares it.
+            downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
