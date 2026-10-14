@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -28,9 +29,19 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
+from scadbuddy.render.geometry_cache import (
+    mesh_geometry,
+    recolour_piece,
+    reusable,
+)
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, now
 from scadbuddy.render.jobs import (
+    LAYOUT_NAME,
+    MODEL_NAME,
+    PREVIEW_NAME,
+    RAW_RENDER_NAME,
     Prepared,
+    _thread_to_end,
     finish_piece_stage,
     library_lease,
     prepare_source,
@@ -46,6 +57,7 @@ from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -86,6 +98,9 @@ class WorkerDeps:
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
     remote_assets: RemoteAssets | None = None
+    #: Where a piece's geometry is found for a later piece in other colours; None turns
+    #: that reuse off.
+    geometry: GeometryIndex | None = None
     #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
     revision: str = ""
     openscad_version: str = ""
@@ -201,6 +216,7 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
         returncode=output.returncode,
         duration_s=output.duration_s,
         plates=output.plates,
+        objects=output.objects,
         log_tail=list(output.log_tail),
         diagnostics=list(output.diagnostics),
         diagnostics_dropped=output.diagnostics_dropped,
@@ -299,6 +315,7 @@ def _process_output(main: RenderMainResult) -> ProcessOutput:
         diagnostics_dropped=main.diagnostics_dropped,
         notes=tuple(main.notes),
         plates=main.plates,
+        objects=main.objects,
     )
 
 
@@ -325,6 +342,7 @@ class RenderActivities:
         return [
             self.cached_piece,
             self.prepare,
+            self.reuse_geometry,
             self.render_main,
             self.render_solids,
             self.finish_piece,
@@ -440,7 +458,76 @@ class RenderActivities:
         problem = params_problem(schema, req.params)
         if problem is not None:
             raise _parameter_error(problem)
+        if req.revision is not None:
+            geometry = await asyncio.to_thread(
+                mesh_geometry,
+                req.slug,
+                req.file,
+                model_dir(prepared.scad, req.file),
+                prepared.libraries,
+                req.params,
+            )
+            if geometry is not None:
+                result.geometry_key, result.colours = geometry
         return result
+
+    @activity.defn(name="reuse_geometry")
+    async def reuse_geometry(
+        self, req: PieceRequest, prepared: PrepareResult
+    ) -> RenderMainResult | None:
+        """The piece as an earlier piece's geometry in its own colours, ready for
+        `finish_piece`; None when no finished piece shares its geometry key."""
+        d = self.deps
+        key = prepared.geometry_key
+        if d.geometry is None or key is None:
+            return None
+        row = await asyncio.to_thread(d.geometry.get, key)
+        if (
+            row is None
+            or row.piece_key == req.piece_key
+            or len(row.colours) != len(prepared.colours)
+        ):
+            return None
+        # Fetched first: on one volume `dir_for` would make the directory it looks for.
+        found = await _heartbeating(asyncio.create_task(d.blobs.fetch(row.piece_key)))
+        source = d.blobs.dir_for(row.piece_key)
+        if not found or not (source / PIECE_NAME).is_file():
+            await asyncio.to_thread(d.geometry.forget, key, row.piece_key)
+            return None
+        layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
+        if not reusable(layout, row.colours):
+            return None
+        baseline = await _heartbeating(asyncio.create_task(d.blobs.checkout_fresh(req.piece_key)))
+        work = d.blobs.dir_for(req.piece_key)
+        with _stage(d.metrics)("recolour"):
+            await _heartbeating(
+                asyncio.create_task(
+                    _thread_to_end(
+                        recolour_piece,
+                        source,
+                        work,
+                        layout,
+                        RAW_RENDER_NAME,
+                        classes=row.colours,
+                        colours=prepared.colours,
+                        skip=frozenset({PIECE_NAME, MODEL_NAME, LAYOUT_NAME, PREVIEW_NAME}),
+                        layout_name=LAYOUT_NAME,
+                        preview_name=PREVIEW_NAME,
+                    )
+                )
+            )
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
+            )
+        )
+        logger.info(
+            "piece recoloured from an earlier piece's geometry",
+            extra={"piece_key": req.piece_key, "source": row.piece_key},
+        )
+        return RenderMainResult.model_validate(row.main)
 
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
@@ -564,6 +651,22 @@ class RenderActivities:
                 )
             )
         )
+        if d.geometry is not None and prepared.geometry_key is not None:
+            # A cache's hint, after the piece is published: losing it costs a later
+            # recolour its shortcut, never this render. A recoloured piece comes with
+            # no key: its copied raw render keeps its source's colours.
+            try:
+                await asyncio.to_thread(
+                    d.geometry.put,
+                    prepared.geometry_key,
+                    req.piece_key,
+                    prepared.colours,
+                    main.model_dump(mode="json"),
+                )
+            except psycopg.Error:
+                logger.warning(
+                    "could not record the piece's geometry", extra={"piece_key": req.piece_key}
+                )
         return piece
 
     @activity.defn(name="render_preview_png")

@@ -204,6 +204,46 @@ it('tells every caller merged into one read that it failed', async () => {
   expect(first).toHaveBeenCalledOnce()
 })
 
+// A background read that lands after its component is gone must touch nothing: no
+// state, no caller's `accept` or `failed`. A test file's environment may be torn down by
+// then, and React's setState reads `window` (the unhandled "window is not defined" that
+// failed whole CI runs after every test had passed).
+it('does nothing with a background read that lands after unmount', async () => {
+  let fail: (cause: Error) => void = () => {}
+  let pass: (value: string) => void = () => {}
+  let reads = 0
+  const load = () => {
+    reads += 1
+    if (reads === 1) return Promise.resolve('first')
+    return new Promise<string>((resolve, reject) => {
+      if (reads === 2) fail = reject
+      else pass = resolve
+    })
+  }
+  // No state update either: React would warn (an act() or unmounted-update warning).
+  const errors = vi.spyOn(console, 'error')
+  const { result, unmount } = renderHook(() => useAsync(load, [], ['m']))
+  await waitFor(() => expect(result.current.data).toBe('first'))
+  const failed = vi.fn()
+  const accept = vi.fn(() => true)
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(reads).toBe(2))
+  unmount()
+  await act(async () => fail(new Error('the agent went away')))
+  expect(failed).not.toHaveBeenCalled()
+
+  const second = renderHook(() => useAsync(load, [], ['m']))
+  await waitFor(() => expect(reads).toBe(3))
+  await act(async () => pass('second'))
+  act(() => second.result.current.refresh(accept))
+  await waitFor(() => expect(reads).toBe(4))
+  second.unmount()
+  await act(async () => pass('late'))
+  expect(accept).not.toHaveBeenCalled()
+  expect(errors).not.toHaveBeenCalled()
+  errors.mockRestore()
+})
+
 describe('with the socket already open (#1039)', () => {
   beforeEach(() => {
     vi.spyOn(getRealtime(), 'willResync', 'get').mockReturnValue(true)

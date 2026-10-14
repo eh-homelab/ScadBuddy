@@ -10,23 +10,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from collections import Counter
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
+import httpx
 import psycopg
 from fastapi import APIRouter, Path, Query, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
+from starlette.types import Receive, Scope, Send
 from temporalio.common import WorkflowIDReusePolicy
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
     CatalogueDep,
     OutputIdPath,
     OutputsDep,
+    PathsDep,
     PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
@@ -40,6 +47,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    PROBLEM_SCHEMA,
     RETRY_FOLLOWS,
     STILL_ACCEPTING_PROBLEM,
     IdempotencyKey,
@@ -50,7 +58,7 @@ from scadbuddy.api.operations import (
     temporal_unavailable,
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
@@ -79,7 +87,13 @@ from scadbuddy.bambuddy.projects import (
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
+from scadbuddy.core.problems import (
+    DATABASE_ERRORS,
+    DATABASE_UNAVAILABLE_PROBLEM,
+    PROBLEM_MEDIA_TYPE,
+    ApiError,
+)
+from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
 from scadbuddy.library.settings_store import (
@@ -553,6 +567,115 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
     )
 
 
+#: How many live streams of one printer's camera are served at once (#2752 review):
+#: each holds a Bambuddy connection and an HTTP client for as long as it is watched.
+#: The count is this process's, so with several API replicas the cap is per replica.
+CAMERA_STREAMS_PER_PRINTER = 4
+CAMERA_STREAMS_BUSY_PROBLEM = "https://scadbuddy.dev/problems/camera-streams-busy"
+#: Open streams per printer id; one event loop, so a plain counter is enough.
+_camera_streams: Counter[int] = Counter()
+
+
+def _release_camera_stream(printer_id: int) -> None:
+    _camera_streams[printer_id] -= 1
+    if _camera_streams[printer_id] <= 0:
+        del _camera_streams[printer_id]
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """A stream that closes ``closing`` however the response ends (#2752 review).
+
+    A viewer gone before the first byte fails the response's start, so the body
+    generator never runs and Starlette skips ``background``: neither would release
+    the stream. Closing here does, whether the response finished, failed or was
+    cancelled; a stack the body already closed closes again as a no-op."""
+
+    def __init__(self, *args: Any, closing: AsyncExitStack, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._closing = closing
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._closing.aclose()
+
+
+@router.get(
+    "/printers/{printer_id}/camera/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {"content": {MJPEG_TYPE: {}}, "description": "The live camera, as MJPEG"},
+        429: {
+            "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+            "description": f"`{CAMERA_STREAMS_BUSY_PROBLEM}`, with `Retry-After`: this"
+            " printer's camera already has as many live viewers as it serves.",
+        },
+    },
+    summary="The printer's live camera",
+    description=(
+        "Bambuddy's MJPEG stream of the printer's camera (#981), for an `<img>`: open "
+        "until the viewer leaves, which closes Bambuddy's stream too. `fps` is capped "
+        "at 15, and a printer serves at most 4 streams at once (429 past that). Read "
+        "only: nothing here controls the printer or the camera."
+    ),
+)
+async def stream_printer_camera(
+    printer_id: int,
+    store: SettingsStoreDep,
+    fps: Annotated[int, Query(ge=1, le=15)] = 5,
+) -> StreamingResponse:
+    if _camera_streams[printer_id] >= CAMERA_STREAMS_PER_PRINTER:
+        raise ApiError(
+            429,
+            f"This printer's camera already has {CAMERA_STREAMS_PER_PRINTER} live viewers;"
+            " close one, or use the snapshot.",
+            title="Too Many Requests",
+            type_=CAMERA_STREAMS_BUSY_PROBLEM,
+            headers={"Retry-After": "5"},
+        )
+    stack = AsyncExitStack()
+    _camera_streams[printer_id] += 1
+    # Released with the stack, however the stream ends: the stack is closed once.
+    stack.callback(_release_camera_stream, printer_id)
+    try:
+        client = await stack.enter_async_context(client_for(store.load()))
+        media_type, chunks = await stack.enter_async_context(
+            client.camera_stream(printer_id, fps=fps)
+        )
+    except BaseException:
+        await stack.aclose()
+        raise
+
+    async def body() -> AsyncIterator[bytes]:
+        # The bytes are read outside `camera_stream`'s own try, so a stall or drop is a
+        # raw httpx error here. Handing it to the stack lets `camera_stream` fail its
+        # span and map it, as `api/prints.py` does (#1192).
+        try:
+            async for chunk in chunks:
+                yield chunk
+        except BaseException as error:
+            try:
+                await stack.__aexit__(type(error), error, error.__traceback__)
+            except (ApiError, httpx.HTTPError):
+                # A camera that stalls or drops mid-stream ends it; the viewer shows that.
+                logger.info("camera stream ended", extra={"printer_id": printer_id})
+                return
+            raise
+        await stack.aclose()
+
+    return _ClosingStreamingResponse(
+        body(),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Accel-Buffering": "no",
+        },
+        closing=stack,
+    )
+
+
 @router.post(
     "/outputs/{output_id}/run",
     status_code=status.HTTP_202_ACCEPTED,
@@ -573,6 +696,7 @@ async def post_run(
     response: Response,
     outputs: OutputsDep,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -608,6 +732,7 @@ async def post_run(
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
+        activity=activity,
     )
 
 
@@ -629,6 +754,7 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
+    activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
@@ -760,6 +886,7 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
+    await attribute_request(activity.index, f"print_run:{answer.run.id}")
     if answer.repeated:
         response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})
@@ -799,6 +926,7 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
+    catalogue: CatalogueDep,
 ) -> PrintCheck:
     """The run's own pre-upload refusals for the body the run would take (#755, #760), so
     the dialog can say before Print what the run would refuse. ``errors`` is exactly the
@@ -809,8 +937,15 @@ async def post_check(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    try:
+        # The template's defaults, by-object printing among them (#2976).
+        print_settings = await asyncio.to_thread(catalogue.print_settings, meta.slug)
+    except InvalidModelMetaError:
+        print_settings = {}  # the run refuses it; the check judges the request alone
     async with client_for(settings) as client:
-        return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
+        return await check_for_output(
+            client, outputs, uploads, meta, settings, body, rack=rack, print_settings=print_settings
+        )
 
 
 @router.post(
@@ -946,6 +1081,7 @@ async def get_choices(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
+    paths: PathsDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
@@ -954,7 +1090,14 @@ async def get_choices(
     settings = store.load()
     async with client_for(settings) as client:
         return await choices_for_output(
-            client, outputs, uploads, meta, settings, printer_id=printer_id, rack=rack
+            client,
+            outputs,
+            uploads,
+            meta,
+            settings,
+            printer_id=printer_id,
+            cache=paths.cache,
+            rack=rack,
         )
 
 

@@ -13,6 +13,12 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
+import { nestedQueries } from './builtins/nested.js'
+import { backgroundActivities, managerSender } from './background/activities.js'
+import { agentTimezone } from './background/schedule.js'
+import { BackgroundTasks } from './background/service.js'
+import { BackgroundTaskStore } from './background/store.js'
+import { temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -30,7 +36,7 @@ import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
-import { approvalHashKey } from './approvals/service.js'
+import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -42,7 +48,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { drainRetains } from './memory/hindsight.js'
+import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
@@ -75,6 +81,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
+import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -284,14 +291,33 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
+// A session's background tasks (CronCreate, ScheduleWakeup, TaskStop), in either mode:
+// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
+// payloads are task ids only, so its client has no codec.
+const backgroundTasks =
+  config.temporalAddress && database
+    ? new BackgroundTasks({
+        store: new BackgroundTaskStore(database.sql),
+        runner: temporalTaskRunner(
+          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
+          TASK_QUEUE,
+        ),
+      })
+    : undefined
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+// Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
+// and durable ones (memoryActivities), so a knob set here applies to both (#2420).
+// Undefined: the defaults.
+const memory: MemoryOptions | undefined = undefined
+
 const sessions =
   database && credentials
     ? new SessionManager({
+        memory,
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
@@ -327,6 +353,8 @@ const sessions =
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
+        // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
+        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -351,7 +379,7 @@ const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+  onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
 // Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
 const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
@@ -386,6 +414,15 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
+if (database && commandKinds.length > 0) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
+    })
+    .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
+}
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
@@ -452,7 +489,7 @@ const turnToolDeps = temporal
         ...(settings ? { settings } : {}),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
         // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
@@ -464,6 +501,29 @@ const turnToolDeps = temporal
               },
             }
           : {}),
+        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
+        ...(workspace && credentials
+          ? {
+              builtins: {
+                files: workspace,
+                audit,
+                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
+                nested: (context: { session: string; flow?: string }) =>
+                  nestedQueries({
+                    paths,
+                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
+                    ...(context.flow
+                      ? {}
+                      : {
+                          spent: async (cost: number) => {
+                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
+                          },
+                        }),
+                  }),
+              },
+            }
+          : {}),
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
@@ -471,6 +531,8 @@ const turnToolDeps = temporal
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
+      // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {
@@ -518,11 +580,15 @@ const temporalWorker =
                 credentialSecrets: durableCredentialSecrets,
                 audit,
                 settings,
+                memory,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
+          ...(backgroundTasks && sessions
+            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone() })
+            : {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -614,6 +680,8 @@ const app = createApp({
   ...(attachments ? { attachments } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
+  // The panel's background tasks (routes/backgroundTasks.ts).
+  ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,

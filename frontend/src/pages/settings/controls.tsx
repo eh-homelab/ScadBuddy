@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import type { Settings, SettingSource } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
+import { Chevron } from '../../components/ui/Chevron'
+import { useCollapsible } from './collapseState'
 import {
   BYTE_UNITS,
   LOG_LEVELS,
@@ -23,6 +25,9 @@ const BADGE: Record<SettingSource, string> = {
   cleared: 'border-warn/40 bg-warn/10 text-warn',
 }
 
+/** The label of the field a badge sits in (#2456): what its Reset button is named after. */
+const FieldLabel = createContext<string | null>(null)
+
 /** #322 — where a value came from, and the way back to the deployment's value. */
 export function SourceBadge({
   name,
@@ -35,6 +40,7 @@ export function SourceBadge({
   onReset: () => void
   resetting: boolean
 }) {
+  const fieldLabel = useContext(FieldLabel)
   const source = settings.sources?.[name]
   if (!source) return null
   const label =
@@ -73,7 +79,8 @@ export function SourceBadge({
           disabled={resetting}
           // #1035 — 24 px tall: a one-tap control that discards a stored setting.
           className="inline-flex min-h-6 items-center text-[11px] text-accent underline-offset-2 hover:underline disabled:opacity-50"
-          aria-label={`Reset ${name} to the deployment value`}
+          // #2456 — the visible text first (WCAG 2.5.3), then the field it resets by its label.
+          aria-label={`Reset to deployment value: ${fieldLabel ?? name}`}
           {...USER_ONLY}
         >
           Reset to deployment value
@@ -83,7 +90,11 @@ export function SourceBadge({
   )
 }
 
-/** A labelled field with its badge above and its help or error below. */
+/**
+ * A labelled field with its badge above and its help and error below. #2347 — the control
+ * (the element with `id`) is described by both, and marked invalid while there is an
+ * error; the help stays shown beside the error, since it is often what explains it.
+ */
 export function FieldRow({
   id,
   label,
@@ -99,21 +110,40 @@ export function FieldRow({
   error?: string
   children: ReactNode
 }) {
+  const row = useRef<HTMLDivElement>(null)
+  const helpId = `${id}-help`
+  const errorId = `${id}-error`
+  // The control is whatever the caller rendered with `id` (an input, a select, the bytes
+  // input), so its description is set on it here rather than through every caller.
+  useLayoutEffect(() => {
+    const control = row.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
+    if (!control) return
+    const own = new Set([helpId, errorId])
+    const others = (control.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((token) => token && !own.has(token))
+    const ids = [...others, ...(help ? [helpId] : []), ...(error ? [errorId] : [])]
+    if (ids.length > 0) control.setAttribute('aria-describedby', ids.join(' '))
+    else control.removeAttribute('aria-describedby')
+    if (error) control.setAttribute('aria-invalid', 'true')
+    else control.removeAttribute('aria-invalid')
+  })
   return (
-    <div>
+    <div ref={row}>
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <label htmlFor={id} className="block text-[13px]">
           {label}
         </label>
-        {badge}
+        <FieldLabel.Provider value={label}>{badge}</FieldLabel.Provider>
       </div>
       <div className="mt-1.5">{children}</div>
-      {error ? (
-        <p role="alert" className="mt-1.5 text-[12px] text-warn">
+      {error && (
+        <p id={errorId} role="alert" className="mt-1.5 text-[12px] text-warn">
           {error}
         </p>
-      ) : (
-        help && <p className="mt-1.5 text-[12px] text-muted">{help}</p>
+      )}
+      {help && (
+        <p id={helpId} className="mt-1.5 text-[12px] text-muted">
+          {help}
+        </p>
       )}
     </div>
   )
@@ -328,15 +358,29 @@ export function Section({
   children: ReactNode
 }) {
   const headingId = `${id}-heading`
+  // #2173 — folded from its heading, remembered per browser. Folding only hides the body:
+  // its fields keep their edits, and a dirty section keeps its badge and its Save bar.
+  const { open, toggle } = useCollapsible(id)
   return (
     <section
       id={id}
+      data-collapsible=""
       aria-labelledby={headingId}
       className="mt-4 scroll-mt-14 rounded-[6px] border border-line bg-surface first:mt-0"
     >
-      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
-        <h2 id={headingId} className="text-[13px] font-medium">
-          {title}
+      <div className={`flex items-center gap-2 px-4 py-1.5 ${open ? 'border-b border-line' : ''}`}>
+        {/* #2346 — focusable from script only: a section link moves focus here. */}
+        <h2 id={headingId} tabIndex={-1} className="text-[13px] font-medium outline-none">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={`${id}-body`}
+            onClick={toggle}
+            className="flex min-h-6 items-center gap-1.5 text-left"
+          >
+            <Chevron open={open} />
+            {title}
+          </button>
         </h2>
         {dirty && (
           <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] text-accent" data-testid={`${id}-unsaved`}>
@@ -344,11 +388,11 @@ export function Section({
           </span>
         )}
       </div>
-      <div className="space-y-4 p-4">
+      <div id={`${id}-body`} hidden={!open} className="space-y-4 p-4">
         {description && <p className="text-[13px] text-muted">{description}</p>}
         {children}
       </div>
-      {onSave && (
+      {onSave && (open || dirty) && (
         <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
           <Button
             variant="primary"

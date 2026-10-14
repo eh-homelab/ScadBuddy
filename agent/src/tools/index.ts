@@ -1,3 +1,4 @@
+import { activityTools } from './activity.js'
 import { approvalTools } from './approvals.js'
 import { arrangeTools } from './arrange.js'
 import { authoringTools } from './authoring.js'
@@ -7,6 +8,7 @@ import { customizerTools } from './customizer.js'
 import { farmTools } from './farm.js'
 import { fileTools } from './files.js'
 import { flowTools } from './flows.js'
+import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
@@ -30,6 +32,7 @@ import { workspaceTools } from './workspace.js'
 // session tools (#300) are sessions.ts.
 
 export const ALL_TOOLS: readonly Tool[] = [
+  ...activityTools,
   ...catalogueTools,
   ...meshModelTools,
   ...customizerTools,
@@ -53,6 +56,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...approvalTools,
   ...sessionTools,
   ...flowTools,
+  ...flowTriggerTools,
 ]
 
 const byName = new Map<string, Tool>()

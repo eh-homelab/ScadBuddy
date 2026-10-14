@@ -59,8 +59,19 @@ class SubjectForgottenError(Exception):
     """The subject's payloads cannot be decoded: its key was deleted (forgetSubject)."""
 
 
+# A session's background task (agent/src/background/service.ts), sealed under its session's key.
+_BACKGROUND_TASK = re.compile(
+    r"^bgtask-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$"
+)
+
+
 def subject_of(workflow_id: str | None) -> str | None:
-    return workflow_id if workflow_id is not None and _SUBJECT.match(workflow_id) else None
+    if workflow_id is None:
+        return None
+    if _SUBJECT.match(workflow_id):
+        return workflow_id
+    task = _BACKGROUND_TASK.match(workflow_id)
+    return f"session-{task.group(1)}" if task else None
 
 
 def payload_key_context(subject: str) -> str:

@@ -6,7 +6,7 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool } from '@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
-import { assertHostAllowed, assertHttpUrl, type Resolver, systemResolver } from '../http/egress.js'
+import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
 import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
@@ -49,8 +49,9 @@ import type { RiskTier } from './permissions.js'
 //   - Limits: at most MAX_REDIRECTS redirects; one deadline for the whole
 //     request (timeout_ms, default 30 s, at most 120 s); the body is read up
 //     to SAVE_MAX_BYTES (20 MiB) and returned inline up to INLINE_MAX_BYTES
-//     (1 MiB). A longer body is saved in the session's directory and read in
-//     pages with `http_response_read`.
+//     (1 MiB). A longer body is saved (`SavedBodies`: a session's in Postgres,
+//     sessions/httpBodies.ts, #2374; a flow's on its pod) and read in pages with
+//     `http_response_read`.
 //   - Redirects follow fetch's rules (303, and 301/302 after a POST, become a
 //     GET with no body); credentials (Authorization, Cookie) are dropped when
 //     a redirect leaves the origin, and a 307/308 that would re-send an
@@ -60,7 +61,7 @@ import type { RiskTier } from './permissions.js'
 //     wrapped in the `untrusted_data` envelope naming the URL's host.
 //   - `save_to_workspace: "<path>"` (#2329) stores the whole body as a file in
 //     the session's workspace (workspace/store.ts), under its caps, instead of
-//     on the pod's disk, so workspace_read reads it and an upload can send it.
+//     as a saved body, so workspace_read reads it and an upload can send it.
 //     A body cut at SAVE_MAX_BYTES is not stored.
 //   - Every request (every hop) is an `http` audit row: method, scheme, host,
 //     status, size and timing, and on the hop that answered, the id its body
@@ -196,8 +197,11 @@ export const DEFAULT_LIMITS: HttpLimits = {
 }
 
 export type HttpRequestContext = {
-  /** Where bodies too long to return inline are saved: the session's own directory. */
-  saveDir: string
+  /**
+   * Where bodies too long to return inline are saved: a session's in Postgres
+   * (sessions/httpBodies.ts, #2374), so any replica serves them; a flow's in a directory.
+   */
+  saved: SavedBodies
   /** The turn's secrets (credential, plugin tokens); no request may carry one. */
   secrets: () => readonly string[]
   /** The audit log; one `http` row per request. */
@@ -211,6 +215,10 @@ export type HttpRequestContext = {
   limits?: Partial<HttpLimits>
   /** Where `save_to_workspace` stores a body (#2329): the session's workspace. Refused without it. */
   workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
+  /** A redirect to another host is returned (`redirectTo`) instead of followed, as Claude Code's WebFetch does (#2393). */
+  sameHostRedirects?: boolean | undefined
+  /** Refuse a host that is, or resolves to, the pod's loopback: WebFetch fetches web pages, and loopback is the agent's own services (#2679). */
+  refuseLoopback?: boolean | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -235,7 +243,7 @@ export function requestProblem(args: HttpRequestArgs, secrets: readonly string[]
   return undefined
 }
 
-type Hop = {
+export type Hop = {
   status: number
   statusText: string
   headers: IncomingHttpHeaders
@@ -341,7 +349,7 @@ function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
-type Outcome =
+export type Outcome =
   | {
       ok: true
       url: URL
@@ -349,6 +357,8 @@ type Outcome =
       hop: Hop
       /** Set when a redirect was returned instead of followed. */
       note?: string
+      /** Where that redirect pointed, with `HttpRequestContext.sameHostRedirects`. */
+      redirectTo?: string
       /**
        * Writes the last hop's audit row, naming `saved` when its body was saved
        * under that id. Left to the caller so a row never names a body whose save
@@ -363,7 +373,7 @@ type Outcome =
  * the last one of a completed exchange, whose row the caller writes with `audit`
  * once it knows whether the body was saved (#1292, #2224).
  */
-async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
+export async function exchange(args: HttpRequestArgs, context: Omit<HttpRequestContext, 'saved'>, callSignal?: AbortSignal): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
   const deadline = AbortSignal.timeout(args.timeout_ms)
@@ -409,6 +419,10 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
     let addresses: string[]
     try {
       addresses = await assertHostAllowed(url.href, resolve, 'url', 'an allowed host')
+      const loopback = context.refuseLoopback ? addresses.find((a) => isLoopbackHost(embeddedIPv4(a) ?? a)) : undefined
+      if (loopback !== undefined || (context.refuseLoopback && isLoopbackHost(url.hostname))) {
+        throw new Error(`url host ${url.hostname} is, or resolves to, this pod's loopback, not a web page`)
+      }
     } catch (err) {
       const reason = (err as Error).message
       await audited('refused', { detail: reason })
@@ -446,6 +460,9 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
       return { ok: false, reason: (err as Error).message }
     }
     const crossOrigin = next.origin !== url.origin
+    if (context.sameHostRedirects && next.host !== url.host) {
+      return { ok: true, url, redirects, hop: result, audit: last, note: `not followed: a redirect to another host`, redirectTo: next.href }
+    }
     const toGet = result.status === 303 ? method !== 'HEAD' : (result.status === 301 || result.status === 302) && method === 'POST'
     if (!toGet && crossOrigin && !READ_METHODS.has(method)) {
       return {
@@ -471,15 +488,57 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
   }
 }
 
-/** The ids of saved bodies are UUIDs; a file's name is `<id>.body`, its metadata `<id>.json`. */
+/** What is recorded about a saved body; its id is a UUID. */
 export type SavedMeta = { content_type: string | null; size_bytes: number; complete: boolean; url: string }
 
-async function save(dir: string, id: string, bytes: Buffer, meta: SavedMeta): Promise<string> {
-  await mkdir(dir, { recursive: true })
-  await writeFile(path.join(dir, `${id}.body`), bytes, { mode: 0o600 })
-  await writeFile(path.join(dir, `${id}.json`), JSON.stringify(meta), { mode: 0o600 })
-  await prune(dir)
-  return id
+/** Where a turn's saved bodies are kept, the newest MAX_SAVED of them. Ids are checked UUIDs. */
+export interface SavedBodies {
+  save(id: string, bytes: Buffer, meta: SavedMeta): Promise<void>
+  meta(id: string): Promise<SavedMeta | undefined>
+  /** Up to `length` bytes from `offset`; fewer at the end. */
+  read(id: string, offset: number, length: number): Promise<Buffer>
+  whole(id: string): Promise<{ meta: SavedMeta; bytes: Buffer } | undefined>
+}
+
+/**
+ * Saved bodies as files in `dir`: `<id>.body`, and its metadata `<id>.json`. A flow
+ * turn's, on the pod that runs it (turnServers.ts); a session's are in Postgres.
+ */
+export function dirBodies(dir: string): SavedBodies {
+  return {
+    async save(id, bytes, meta) {
+      await mkdir(dir, { recursive: true })
+      await writeFile(path.join(dir, `${id}.body`), bytes, { mode: 0o600 })
+      await writeFile(path.join(dir, `${id}.json`), JSON.stringify(meta), { mode: 0o600 })
+      await prune(dir)
+    },
+    async meta(id) {
+      try {
+        return JSON.parse(await readFile(path.join(dir, `${id}.json`), 'utf8')) as SavedMeta
+      } catch {
+        return undefined
+      }
+    },
+    async read(id, offset, length) {
+      const file = await open(path.join(dir, `${id}.body`), 'r')
+      try {
+        const buffer = Buffer.alloc(length)
+        const { bytesRead } = await file.read(buffer, 0, length, offset)
+        return buffer.subarray(0, bytesRead)
+      } finally {
+        await file.close()
+      }
+    },
+    async whole(id) {
+      const meta = await this.meta(id)
+      if (!meta) return undefined
+      try {
+        return { meta, bytes: await readFile(path.join(dir, `${id}.body`)) }
+      } catch {
+        return undefined
+      }
+    },
+  }
 }
 
 /** Keeps the MAX_SAVED newest bodies. */
@@ -561,7 +620,8 @@ export async function runHttpRequest(
   let saved: string | undefined
   if (savesBody(hop, limits) && !(workspace && 'sha256' in workspace)) {
     try {
-      saved = await save(context.saveDir, randomUUID(), hop.bytes, {
+      saved = randomUUID()
+      await context.saved.save(saved, hop.bytes, {
         content_type: contentType ?? null,
         size_bytes: hop.bytes.length,
         complete: hop.complete,
@@ -636,60 +696,45 @@ async function saveToWorkspace(
 
 /**
  * A saved body whole, with what was recorded about it, for the UI to download
- * (#1292); undefined for anything that is not a saved response id, or one not in
- * `dir` (pruned, or saved on another replica).
+ * (#1292); undefined for anything that is not a saved response id, or one `saved`
+ * does not hold (pruned).
  */
-export async function savedBody(dir: string, id: string): Promise<{ meta: SavedMeta; bytes: Buffer } | undefined> {
+export async function savedBody(saved: SavedBodies, id: string): Promise<{ meta: SavedMeta; bytes: Buffer } | undefined> {
   if (!SAVED_ID.test(id)) return undefined
-  try {
-    const meta = JSON.parse(await readFile(path.join(dir, `${id}.json`), 'utf8')) as SavedMeta
-    return { meta, bytes: await readFile(path.join(dir, `${id}.body`)) }
-  } catch {
-    return undefined
-  }
+  return saved.whole(id)
 }
 
 /** The `http_response_read` handler: one page of a saved body. NOT yet marked untrusted. */
-export async function readSavedResponse(input: HttpReadArgs, context: Pick<HttpRequestContext, 'saveDir'>): Promise<CallToolResult> {
+export async function readSavedResponse(input: HttpReadArgs, context: Pick<HttpRequestContext, 'saved'>): Promise<CallToolResult> {
   const args = { id: input.id, offset: input.offset ?? 0, length: input.length ?? PAGE_DEFAULT_BYTES }
   // The schema already refuses anything else; checked again so no name can leave the directory.
   if (!SAVED_ID.test(args.id)) return text({ error: 'not a saved response id' }, true)
-  let meta: SavedMeta
-  try {
-    meta = JSON.parse(await readFile(path.join(context.saveDir, `${args.id}.json`), 'utf8')) as SavedMeta
-  } catch {
-    return text({ error: `no saved response ${args.id} in this session (only the ${MAX_SAVED} newest are kept)` }, true)
+  const meta = await context.saved.meta(args.id)
+  if (!meta) return text({ error: `no saved response ${args.id} in this session (only the ${MAX_SAVED} newest are kept)` }, true)
+  const want = Math.min(args.length, PAGE_MAX_BYTES)
+  // Read a few bytes more so a page can end on a whole UTF-8 sequence.
+  const chunk = await context.saved.read(args.id, args.offset, want + 4)
+  const bytesRead = chunk.length
+  const isText = textual(meta.content_type ?? undefined, chunk)
+  let start = 0
+  let end = Math.min(bytesRead, want)
+  if (isText) {
+    // Skip a split sequence at the start (the previous page ended before it).
+    while (start < end && args.offset + start > 0 && (chunk[start]! & 0xc0) === 0x80) start++
+    end = utf8Boundary(chunk, end)
+    if (end <= start) end = Math.min(bytesRead, want)
   }
-  const file = await open(path.join(context.saveDir, `${args.id}.body`), 'r')
-  try {
-    const want = Math.min(args.length, PAGE_MAX_BYTES)
-    // Read a few bytes more so a page can end on a whole UTF-8 sequence.
-    const buffer = Buffer.alloc(want + 4)
-    const { bytesRead } = await file.read(buffer, 0, want + 4, args.offset)
-    const chunk = buffer.subarray(0, bytesRead)
-    const isText = textual(meta.content_type ?? undefined, chunk)
-    let start = 0
-    let end = Math.min(bytesRead, want)
-    if (isText) {
-      // Skip a split sequence at the start (the previous page ended before it).
-      while (start < end && args.offset + start > 0 && (chunk[start]! & 0xc0) === 0x80) start++
-      end = utf8Boundary(chunk, end)
-      if (end <= start) end = Math.min(bytesRead, want)
-    }
-    const page = chunk.subarray(start, end)
-    const next = args.offset + end
-    return text({
-      id: args.id,
-      url: meta.url,
-      size_bytes: meta.size_bytes,
-      offset: args.offset + start,
-      next_offset: next < meta.size_bytes ? next : null,
-      encoding: isText ? 'utf8' : 'base64',
-      content: isText ? page.toString('utf8') : page.toString('base64'),
-    })
-  } finally {
-    await file.close()
-  }
+  const page = chunk.subarray(start, end)
+  const next = args.offset + end
+  return text({
+    id: args.id,
+    url: meta.url,
+    size_bytes: meta.size_bytes,
+    offset: args.offset + start,
+    next_offset: next < meta.size_bytes ? next : null,
+    encoding: isText ? 'utf8' : 'base64',
+    content: isText ? page.toString('utf8') : page.toString('base64'),
+  })
 }
 
 function signalOf(extra: unknown): AbortSignal | undefined {

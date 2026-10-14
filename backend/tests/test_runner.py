@@ -22,6 +22,7 @@ from scadbuddy.render.runner import (
     export_schema,
     format_scad_value,
     missing_file,
+    object_count,
     plate_count,
     quote_string,
     render_3mf,
@@ -660,3 +661,27 @@ async def test_a_run_that_echoes_no_plate_count_reports_none(tmp_path: Path) -> 
     config = Config(openscad=str(binary), data_dir=tmp_path / "data")
 
     assert (await run_openscad([], cwd=tmp_path, config=config)).plates is None
+
+
+# ── #956: a template states its object count with `echo(objects = N)` ────────
+
+
+def test_object_count_reads_only_the_objects_echo() -> None:
+    assert object_count("ECHO: objects = 3") == 3
+    assert object_count('ECHO: "objects = 2"') is None
+    assert object_count("ECHO: objects = 2, lid = true") is None
+    assert object_count("ECHO: plates = 2") is None
+
+
+async def test_a_run_reports_the_last_object_count_beside_its_plates(tmp_path: Path) -> None:
+    binary = tmp_path / "objects-openscad"
+    binary.write_text(
+        '#!/bin/sh\necho "ECHO: objects = 2"\necho "ECHO: plates = 2"\necho "ECHO: objects = 4"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert (output.plates, output.objects) == (2, 4)

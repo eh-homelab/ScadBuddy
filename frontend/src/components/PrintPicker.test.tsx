@@ -12,6 +12,7 @@ import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { startTracing } from '../lib/tracing'
+import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
@@ -145,18 +146,26 @@ async function showAdvanced() {
   await screen.findByRole('group', { name: /nozzles/i })
 }
 
-/** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
+/** The matching requests' URLs and bodies as they start, in order, and how many have
+ *  been answered (under `/print/` by default; `/analyzers/run` is not one): a test that
+ *  ends on a request waits for its answer, or the request is aborted at teardown and
+ *  the next test's fetch can miss MSW. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
-  const bodies: Record<string, unknown>[] = []
-  const urls: string[] = []
-  server.events.on('request:start', async ({ request }) => {
+  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
+  const matches = (request: Request) => {
     const path = new URL(request.url).pathname
-    if (request.method === method && path.startsWith(prefix) && path.endsWith(suffix)) {
-      urls.push(request.url)
-      if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
+    return request.method === method && path.startsWith(prefix) && path.endsWith(suffix)
+  }
+  server.events.on('request:start', async ({ request }) => {
+    if (matches(request)) {
+      seen.urls.push(request.url)
+      if (method !== 'GET') seen.bodies.push((await request.clone().json()) as Record<string, unknown>)
     }
   })
-  return { bodies, urls }
+  server.events.on('response:mocked', ({ request }) => {
+    if (matches(request)) seen.answered += 1
+  })
+  return seen
 }
 
 beforeEach(() => resetMockState())
@@ -520,6 +529,23 @@ describe('PrintPicker', () => {
     expect(save?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
   })
 
+  it('names the arranged output on the arrange span, and the one it came from apart (#2891)', async () => {
+    const tracing = installTestTracing()
+    try {
+      const { user } = renderPicker()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+      const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')
+      expect(span?.attributes['scadbuddy.source_output_id']).toBe(output.id)
+      expect(span?.attributes['scadbuddy.output_id']).toEqual(expect.any(String))
+      expect(span?.attributes['scadbuddy.output_id']).not.toBe(output.id)
+      expect(span?.attributes['scadbuddy.outcome']).toBeUndefined()
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
   it('keeps the spools and settings a re-arrange was made for', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
@@ -541,6 +567,9 @@ describe('PrintPicker', () => {
       expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
     )
     expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    // The new output is checked again first; Print is disabled until it is, and a click
+    // on it then does nothing (seen under load: the run was never sent).
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
@@ -821,12 +850,50 @@ describe('PrintPicker', () => {
           ),
         ),
       )
-      const { user } = renderPage(picker())
-      await loaded()
-      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
-      await user.click(screen.getByRole('button', { name: 'Re-render' }))
-      expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(picker())
+        await loaded()
+        await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+        // #2891: the span ends without an error, but says the re-render failed.
+        await waitFor(() =>
+          expect(
+            tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')?.attributes['scadbuddy.outcome'],
+          ).toBe('nothing_arranged'),
+        )
+      } finally {
+        tracing.uninstall()
+      }
       expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('starts the re-render in the arrange’s trace (#2891)', async () => {
+      const seen: { method: string; path: string; traceparent: string | null }[] = []
+      const listen = ({ request }: { request: Request }) => {
+        seen.push({
+          method: request.method,
+          path: new URL(request.url).pathname,
+          traceparent: request.headers.get('traceparent'),
+        })
+      }
+      server.events.on('request:start', listen)
+      const stop = startTracing()
+      try {
+        const { user } = renderPage(picker())
+        await loaded()
+        await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
+      } finally {
+        server.events.removeListener('request:start', listen)
+        await stop()
+      }
+      const backfill = seen.find((call) => call.method === 'POST' && call.path === `/api/v1/outputs/${nova.id}/backfill`)
+      const arrange = seen.find((call) => call.method === 'POST' && call.path === '/api/v1/outputs/arrange')
+      expect(backfill?.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+      expect(backfill?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
     })
 
     it('asks when Arrange itself says the output needs a re-render', async () => {
@@ -1603,6 +1670,57 @@ describe('PrintPicker · grams from the background slice (#2365)', () => {
   }, 20000)
 })
 
+describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
+  it("drops no slot for the plate just chosen while another plate's slice is still shown", async () => {
+    let release = () => {}
+    const plateTwo = new Promise<void>((resolve) => (release = resolve))
+    const planned = (slot_id: number, side: 'L' | 'R') => ({ slot_id, side, name: `Spool ${slot_id}`, by_hand: false })
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.post('/api/v1/print/outputs/:id/preview-slice', async ({ request }) => {
+        const body = (await request.clone().json()) as { plate_id?: number }
+        if (body.plate_id === 2) await plateTwo
+        return HttpResponse.json({
+          job_id: 7700 + (body.plate_id ?? 1),
+          plate_id: body.plate_id ?? 1,
+          nozzle_plan: {
+            left_flow: 'standard',
+            right_flow: 'standard',
+            size: '0.4',
+            summary: 'Two nozzles',
+            track_switch: false,
+            slots: [planned(1, 'L'), planned(2, 'R')],
+          },
+        })
+      }),
+      // Plate 1's slice used slot 1 alone: on plate 1, slot 2 is truly dropped.
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 600,
+          filament_used_g: 3,
+          slots: [{ slot_id: 1, grams: 3, side: 'L' }],
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const notes = await screen.findByTestId('slice-departures', {}, { timeout: 8000 })
+    expect(notes).toHaveTextContent("Spool 2 (slot 2) isn't used by the sliced plate")
+
+    // Plate 2 is chosen; its slice is still on its way, so plate 1's stays shown, stale.
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
+    release()
+  }, 20000)
+})
+
 describe('PrintPicker · Print sequence (#1862)', () => {
   const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
 
@@ -1665,6 +1783,13 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ print_sequence: 'by object' }), {
       timeout: 5000,
     })
+
+    // And the run queues that slice (#2825): Print sends the sequence the last slice had.
+    const runs = watch('POST', '/run')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    const last = previews.bodies.at(-1) as { print_sequence?: string }
+    expect(runs.bodies[0]).toMatchObject({ print_sequence: last.print_sequence })
   })
 
   it('does not carry over to another source', async () => {
@@ -2465,6 +2590,35 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(reads.urls.at(-1)).toContain('plate_id=2')
     await waitFor(() => expect(screen.queryByTestId('filaments-unavailable')).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
+  // #2823: without a plan the checks have nothing to judge, so they wait idle, not busy.
+  it('sends no analysis and shows no busy checks while the filament read has failed', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json({ detail: 'Bambuddy is down.' }, { status: 503 }),
+      ),
+    )
+    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('print-checks')).toHaveAttribute('aria-busy', 'false'))
+    const before = analyses.bodies.length
+
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    const warning = await screen.findByTestId('filaments-unavailable')
+    expect(within(warning).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+
+    const checks = screen.getByTestId('print-checks')
+    await waitFor(() => expect(checks).toHaveAttribute('aria-busy', 'false'))
+    expect(checks.querySelector('.animate-spin')).toBeNull()
+    expect(analyses.bodies.slice(before)).toEqual([])
   })
 
   it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
@@ -3365,6 +3519,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+    await waitFor(() => expect(runs.answered).toBe(1))
   })
 })
 
@@ -3433,5 +3588,100 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     await loaded()
     await showAdvanced()
     expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+  })
+})
+
+describe('PrintPicker · a sliced library file (#2671)', () => {
+  const SLICED = { kind: 'library', file: { id: 104, filename: 'bag-clip.gcode.3mf' } } as const
+
+  function renderSliced() {
+    return renderPage(<PrintPicker open source={SLICED} onClose={vi.fn()} onRan={vi.fn()} />)
+  }
+
+  it('shows what it was sliced for, read-only, in place of the slicer steps', async () => {
+    const previews = watch('POST', '/preview-slice')
+    renderSliced()
+    await loaded()
+    const settings = await screen.findByTestId('sliced-settings')
+    expect(settings).toHaveTextContent('Bambu Lab H2C')
+    expect(settings).toHaveTextContent('0.4 mm')
+    expect(settings).toHaveTextContent('0.20mm Standard @BBL H2C')
+    expect(settings).toHaveTextContent('Textured PEI Plate')
+    // Advanced still offers the print options, project and copies, but no slicer step.
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(await screen.findByLabelText('Copies')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: /nozzles/i })).toBeNull()
+    expect(screen.queryByRole('group', { name: /quality/i })).toBeNull()
+    expect(screen.queryByTestId('plate-preview-open')).toBeNull()
+    // Bambu Studio's own estimate stands in for a background slice, which it never gets.
+    expect(await screen.findByTestId('slice-time')).toHaveTextContent('45')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+    expect(previews.urls).toEqual([])
+  })
+
+  it('prints through the library run with the spools chosen', async () => {
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.urls).toHaveLength(1))
+    expect(runs.urls[0]).toContain('/print/library/104/run')
+    expect((runs.bodies[0]?.filament_plan as { slots: unknown[] }).slots.length).toBeGreaterThan(0)
+  })
+
+  it('offers only the plates it holds G-code for, and prints the first of them', async () => {
+    server.use(
+      http.get('/api/v1/print/library/104/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true, name: 'Lid' },
+        ]),
+      ),
+      http.get('/api/v1/print/library/104/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          sliced: {
+            printer_model: 'Bambu Lab H2C',
+            nozzle_diameters: ['0.4'],
+            plates: [{ index: 2, print_seconds: 600, weight_g: 3 }],
+          },
+        }),
+      ),
+    )
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    expect(await screen.findByTestId('single-plate')).toHaveTextContent('Lid')
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+})
+
+describe('PrintPicker · a sliced file that does not fit is warned of, never held (#2671)', () => {
+  it('shows a nozzle or model mismatch as a warning, with Print enabled', async () => {
+    server.use(
+      http.post('/api/v1/print/library/104/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            {
+              kind: 'sliced-nozzle-missing',
+              slot_id: null,
+              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Held for a manual start: swap it before you start the print.',
+            },
+            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C. Held for a manual start.' },
+          ],
+          rack: null,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker open source={{ kind: 'library', file: { id: 104, filename: 'clip.gcode.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    expect(await screen.findByText(/Sliced for a 0\.6 mm nozzle; 0\.4 mm is mounted/)).toBeInTheDocument()
+    expect(screen.getByText(/Sliced for a Bambu Lab X1 Carbon/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 })

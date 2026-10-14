@@ -12,6 +12,10 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
@@ -42,6 +46,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/grant/decline',
     reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/approve',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/decline',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
   },
   {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
@@ -215,6 +231,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
         'elsewhere until it names the project; get_remembered_choices lists them as `model_projects`.',
     }),
   ),
+  ...(
+    [
+      'POST /api/v1/prints/{archive_id}/attachments',
+      'PATCH /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'DELETE /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'POST /api/v1/prints/{archive_id}/attachments/{attachment_id}/promote',
+      'GET /api/v1/prints/{archive_id}/attachments/{attachment_id}/file',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A print's own photos and videos of the finished object (#309): taken with the person's camera " +
+      'and added on the print detail page, which the agent has no file of; get_print lists them under ' +
+      '`media.attachments`. Captioning, removing and promoting them land UI-first with the upload.',
+  })),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:
@@ -255,10 +286,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
   },
   {
-    operation: 'GET /api/v1/print/printers/now',
+    operation: 'GET /api/v1/print/printers/{printer_id}/camera/stream',
     reason:
-      "The Prints page's \"Now printing\" strip (#977). An agent already reads each printer's live state, " +
-      'job and progress through get_print_targets, and its camera through get_printer_camera.',
+      "The Prints page's live camera view (#981): an MJPEG stream that never ends, for an <img>. An agent " +
+      'reads the camera a frame at a time through get_printer_camera.',
   },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
@@ -294,6 +325,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     reason:
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
       'sessions_approve / sessions_deny, which take every approval id, durable ones included.',
+  },
+  {
+    route: 'GET /api/v1/ai/flow-runs/{id}/queue',
+    reason:
+      "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
+      'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
   {
     route: 'GET /api/v1/ai/settings/session-mode',

@@ -243,7 +243,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     }
     const blocked = cannotFetch(c)
     if (blocked) return blocked
-    return commandResponse(c, await deps.commands!.run(INSTALL_KIND, { source }, key(c)), 201)
+    return commandResponse(c, await deps.commands!.run(INSTALL_KIND, { source }, key(c), { principal: UI_ACTOR.id }), 201)
   })
 
   app.post(`${base}/:name/approve`, async (c) => {
@@ -294,7 +294,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const blocked = cannotFetch(c)
     if (blocked) return blocked
     const request = { name: c.req.param('name'), ...(ref === undefined ? {} : { ref }) }
-    return commandResponse(c, await deps.commands!.run(REPIN_KIND, request, key(c)), 200)
+    return commandResponse(c, await deps.commands!.run(REPIN_KIND, request, key(c), { principal: UI_ACTOR.id }), 200)
   })
 
   app.delete(`${base}/:name/pending`, async (c) => {

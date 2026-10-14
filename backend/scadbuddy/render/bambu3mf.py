@@ -30,6 +30,7 @@ from scadbuddy.render.plate import (
 )
 from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
+from scadbuddy.render.zipcopy import ENCRYPTED, copy_raw, raw_copy_checked
 
 #: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
 #: model's ``Application`` metadata starts with ``BambuStudio-``; otherwise
@@ -174,12 +175,19 @@ class PlateParts:
 
     parts: tuple[ColourPart, ...]
     extruders: tuple[int, ...]
+    #: The 1-based object each part belongs to (#956): a template's declared object, or
+    #: a packed copy. Empty means one object, every part in it.
+    objects: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.parts:
             raise ValueError("a plate needs at least one colour part")
         if len(self.parts) != len(self.extruders):
             raise ValueError("a plate needs one extruder per colour part")
+        if not self.objects:
+            object.__setattr__(self, "objects", (1,) * len(self.parts))
+        if len(self.objects) != len(self.parts):
+            raise ValueError("a plate needs one object number per colour part")
 
     @property
     def tower(self) -> bool:
@@ -236,33 +244,95 @@ def _object_ids(plates: Sequence[PlateParts]) -> list[range]:
     return ranges
 
 
+@dataclass(frozen=True)
+class _Assembly:
+    """One object of a plate as the writer emits it (#956): its id, its 1-based number
+    on the plate, and the ``object_N`` ids, parts and extruders of its colour parts."""
+
+    id: int
+    plate_index: int
+    number: int
+    count: int
+    part_ids: tuple[int, ...]
+    parts: tuple[ColourPart, ...]
+    extruders: tuple[int, ...]
+
+    def tag(self, tag: str) -> str:
+        """Its UUID tag: a plate's first object keeps the plate's, so a file of one
+        object per plate is byte-for-byte what it was before objects (#956)."""
+        numbered = _numbered(tag, self.plate_index)
+        return numbered if self.number == 1 else f"{numbered}-object-{self.number}"
+
+    def name(self, model_name: str, plates: int) -> str:
+        name = _assembly_name(model_name, self.plate_index, plates)
+        return name if self.count == 1 else f"{name} (object {self.number})"
+
+
+def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
+    """Each plate's objects, one assembly per distinct ``PlateParts.objects`` number,
+    in first-seen order. Assembly ids follow the part ids, counted across plates."""
+    next_id = sum(len(plate.parts) for plate in plates) + 1
+    result: list[list[_Assembly]] = []
+    for plate_index, (plate, ids) in enumerate(
+        zip(plates, _object_ids(plates), strict=True), start=1
+    ):
+        numbers = list(dict.fromkeys(plate.objects))
+        assemblies: list[_Assembly] = []
+        for position, number in enumerate(numbers, start=1):
+            members = [
+                (part_id, part, extruder)
+                for part_id, part, extruder, owner in zip(
+                    ids, plate.parts, plate.extruders, plate.objects, strict=True
+                )
+                if owner == number
+            ]
+            assemblies.append(
+                _Assembly(
+                    id=next_id,
+                    plate_index=plate_index,
+                    number=position,
+                    count=len(numbers),
+                    part_ids=tuple(m[0] for m in members),
+                    parts=tuple(m[1] for m in members),
+                    extruders=tuple(m[2] for m in members),
+                )
+            )
+            next_id += 1
+        result.append(assemblies)
+    return result
+
+
 def root_model(
-    plates: Sequence[PlateParts], model_name: str, offsets: Sequence[Sequence[float]]
+    plates: Sequence[PlateParts],
+    model_name: str,
+    offsets: Sequence[Sequence[float]],
+    *,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
-    total = sum(len(plate.parts) for plate in plates)
     objects: list[str] = []
     items: list[str] = []
-    for plate_index, (ids, offset) in enumerate(
-        zip(_object_ids(plates), offsets, strict=True), start=1
-    ):
-        assembly_id = total + plate_index
-        components = "".join(
-            f'\n    <component p:path="/3D/Objects/object_{index}.model" objectid="{index}"'
-            f' p:UUID="{_uuid(model_name, f"component-{index}")}" transform="{IDENTITY}"/>'
-            for index in ids
-        )
-        name = _assembly_name(model_name, plate_index, len(plates))
-        objects.append(
-            f'  <object id="{assembly_id}" name={quoteattr(name)} type="model"'
-            f' p:UUID="{_uuid(model_name, _numbered("assembly", plate_index))}">\n'
-            f"   <components>{components}\n   </components>\n"
-            "  </object>\n"
-        )
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for assemblies, offset in zip(each_plate, offsets, strict=True):
         translation = " ".join(_number(value) for value in offset)
-        items.append(
-            f'  <item objectid="{assembly_id}" transform="1 0 0 0 1 0 0 0 1 {translation}"'
-            f' printable="1" p:UUID="{_uuid(model_name, _numbered("item", plate_index))}"/>\n'
-        )
+        for assembly in assemblies:
+            components = "".join(
+                f'\n    <component p:path="/3D/Objects/object_{index}.model" objectid="{index}"'
+                f' p:UUID="{_uuid(model_name, f"component-{index}")}" transform="{IDENTITY}"/>'
+                for index in assembly.part_ids
+            )
+            name = assembly.name(model_name, len(plates))
+            objects.append(
+                f'  <object id="{assembly.id}" name={quoteattr(name)} type="model"'
+                f' p:UUID="{_uuid(model_name, assembly.tag("assembly"))}">\n'
+                f"   <components>{components}\n   </components>\n"
+                "  </object>\n"
+            )
+            # Every object of a plate is moved by the plate's one offset: the template
+            # drew them where they sit relative to each other.
+            items.append(
+                f'  <item objectid="{assembly.id}" transform="1 0 0 0 1 0 0 0 1 {translation}"'
+                f' printable="1" p:UUID="{_uuid(model_name, assembly.tag("item"))}"/>\n'
+            )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<model unit="millimeter" xml:lang="en-US" xmlns="{CORE_NS}" xmlns:p="{PRODUCTION_NS}">\n'
@@ -285,39 +355,55 @@ def _subtype(part: ColourPart) -> str:
     return "negative_part" if part.negative else "normal_part"
 
 
-def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
-    total = sum(len(plate.parts) for plate in plates)
+def model_settings(
+    plates: Sequence[PlateParts],
+    model_name: str,
+    *,
+    covers: bool,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
+) -> str:
     objects: list[str] = []
     plate_entries: list[str] = []
-    for plate_index, (plate, ids) in enumerate(
-        zip(plates, _object_ids(plates), strict=True), start=1
-    ):
-        assembly_id = total + plate_index
-        entries = "".join(
-            f'  <part id="{index}" subtype="{_subtype(part)}">\n'
-            f'   <metadata key="name" value={quoteattr(part.name)}/>\n'
-            f'   <metadata key="extruder" value="{extruder}"/>\n'
-            "  </part>\n"
-            for index, part, extruder in zip(ids, plate.parts, plate.extruders, strict=True)
-        )
-        name = _assembly_name(model_name, plate_index, len(plates))
-        objects.append(
-            f' <object id="{assembly_id}">\n'
-            f'  <metadata key="name" value={quoteattr(name)}/>\n'
-            f'  <metadata key="extruder" value="{plate.extruders[0]}"/>\n'
-            f"{entries}"
-            " </object>\n"
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for plate_index, assemblies in enumerate(each_plate, start=1):
+        instances: list[str] = []
+        for assembly in assemblies:
+            entries = "".join(
+                f'  <part id="{index}" subtype="{_subtype(part)}">\n'
+                f'   <metadata key="name" value={quoteattr(part.name)}/>\n'
+                f'   <metadata key="extruder" value="{extruder}"/>\n'
+                "  </part>\n"
+                for index, part, extruder in zip(
+                    assembly.part_ids, assembly.parts, assembly.extruders, strict=True
+                )
+            )
+            name = assembly.name(model_name, len(plates))
+            objects.append(
+                f' <object id="{assembly.id}">\n'
+                f'  <metadata key="name" value={quoteattr(name)}/>\n'
+                f'  <metadata key="extruder" value="{assembly.extruders[0]}"/>\n'
+                f"{entries}"
+                " </object>\n"
+            )
+            instances.append(
+                "  <model_instance>\n"
+                f'   <metadata key="object_id" value="{assembly.id}"/>\n'
+                '   <metadata key="instance_id" value="0"/>\n'
+                "  </model_instance>\n"
+            )
+        # A plate of several objects is named as a plate, not as every object's name
+        # joined (#2874 review: a 20-copy plate). One object leaves it to Bambu Studio,
+        # as the file always did.
+        plater_name = (
+            _assembly_name(model_name, plate_index, len(plates)) if len(assemblies) > 1 else ""
         )
         plate_entries.append(
             " <plate>\n"
             f'  <metadata key="plater_id" value="{plate_index}"/>\n'
-            '  <metadata key="plater_name" value=""/>\n'
+            f'  <metadata key="plater_name" value={quoteattr(plater_name)}/>\n'
             '  <metadata key="locked" value="false"/>\n'
             f"{_cover_metadata(plate_index) if covers else ''}"
-            "  <model_instance>\n"
-            f'   <metadata key="object_id" value="{assembly_id}"/>\n'
-            '   <metadata key="instance_id" value="0"/>\n'
-            "  </model_instance>\n"
+            f"{''.join(instances)}"
             " </plate>\n"
         )
     return (
@@ -667,19 +753,27 @@ def write_plates_3mf(
         for index, placement in enumerate(placements, start=1)
     ]
     ids = _object_ids(plates)
+    # Once, for both files that number the objects, so their ids cannot drift apart.
+    assemblies = _assemblies(plates)
     entries: list[tuple[str, bytes]] = [
         (name, payload.encode("utf-8"))
         for name, payload in (
             ("[Content_Types].xml", _content_types(covers=covers)),
             ("_rels/.rels", _package_rels(covers=covers)),
-            (ROOT_MODEL_NAME, root_model(plates, model_name, offsets)),
+            (
+                ROOT_MODEL_NAME,
+                root_model(plates, model_name, offsets, assemblies_by_plate=assemblies),
+            ),
             ("3D/_rels/3dmodel.model.rels", _model_rels(ids[-1].stop - 1)),
             *(
                 (f"3D/Objects/object_{index}.model", object_model(part, index))
                 for each, numbers in zip(plates, ids, strict=True)
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
-            (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
+            (
+                MODEL_SETTINGS_NAME,
+                model_settings(plates, model_name, covers=covers, assemblies_by_plate=assemblies),
+            ),
             (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
@@ -729,25 +823,135 @@ def _attribute(tag: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _vertex_bounds(archive: zipfile.ZipFile, names: Sequence[str]) -> np.ndarray:
-    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive.
+#: The longest coordinate :func:`object_model` writes (``_number``: six decimals) is far
+#: under this; a longer one is not that writer's, and is parsed instead. It bounds what
+#: one vertex costs as an array row, whatever the file holds (#2877).
+_MAX_WRITTEN_NUMBER = 32
+#: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
+#: two counted against each other, so a file written any other way is parsed instead.
+_WRITTEN_VERTEX = re.compile(
+    rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
+)
+_ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
+#: How far into a ``<triangle>`` tag its paint code is looked for: the writer puts it after
+#: three vertex indices, well inside this.
+_MAX_TRIANGLE_LEAD = 256
+#: A triangle's paint code, as the parse reads it (a ``<triangle>``'s attribute), and
+#: the attribute anywhere: the two counted against each other. Both runs are bounded, so
+#: a file of unterminated tags or quotes costs a pass, not a pass per tag (quadratic: 200
+#: KB took 14 s); a code they miss leaves the counts unequal, and the file to the parse.
+_PAINT_CODE = re.compile(
+    rb"<triangle\b[^>]{0,%d}?\s%s=\"([^\"]{0,%d})\""
+    % (_MAX_TRIANGLE_LEAD, PAINT_ATTRIBUTE.encode(), MAX_CODE_DIGITS + 1)
+)
+_ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
+#: The elements :func:`object_model` writes exactly one of; another count is the shape
+#: the parse refuses or reads otherwise (#2024), so it is left to the parse.
+_ONE_EACH = tuple(
+    re.compile(rb"<(?:[\w.-]+:)?%s\b" % tag)
+    for tag in (b"object", b"mesh", b"vertices", b"triangles")
+)
+#: Vertices turned into numbers at a time, so the copy never costs more than a batch.
+_VERTEX_BATCH = 65536
+
+
+def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
+    """The ``(2, 3)`` box and painted filaments of an object file :func:`object_model`
+    wrote, read off its bytes by pattern rather than parsed vertex by vertex (#2877):
+    a re-placed print only needs the box, and the parse of an 86 MB file held a worker
+    for 39 s. ``None`` when the file is not in that writer's shape (a vertex written
+    otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
+    entity, a processing instruction, no vertex at all, other than one object, mesh,
+    ``<vertices>`` and ``<triangles>``, a paint code off a triangle or past its cap),
+    which :func:`_plate_geometry` then parses as it always has.
+
+    Every value is bounded before it is copied: no entity is expanded (none is
+    accepted), coordinates are read a batch at a time into rows of at most
+    :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
+    # The writer's one processing instruction is its XML declaration; any other, like a
+    # comment, CDATA or an entity, is something the pattern does not read as XML does.
+    body = data[data.index(b"?>") + 2 :] if data.startswith(b"<?xml ") and b"?>" in data else data
+    if any(marker in body for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+        return None
+    if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
+        return None
+    low = np.full(3, np.inf)
+    high = np.full(3, -np.inf)
+    count = 0
+    batch: list[tuple[bytes, bytes, bytes]] = []
+
+    def reduce() -> None:
+        points = np.array(batch, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
+        np.minimum(low, points.min(axis=0), out=low)
+        np.maximum(high, points.max(axis=0), out=high)
+        batch.clear()
+
+    try:
+        for match in _WRITTEN_VERTEX.finditer(data):
+            batch.append((match[1], match[2], match[3]))
+            count += 1
+            if len(batch) == _VERTEX_BATCH:
+                reduce()
+        if batch:
+            reduce()
+    except ValueError:
+        return None
+    if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
+        return None
+    codes: set[bytes] = set()
+    found = 0
+    for match in _PAINT_CODE.finditer(data):
+        code = match.group(1)
+        if len(code) > MAX_CODE_DIGITS or not code.isascii():
+            return None
+        codes.add(code)
+        found += 1
+    if found != sum(1 for _ in _ANY_PAINT.finditer(data)):
+        return None
+    painted: set[int] = set()
+    for code in codes:
+        if code:
+            painted.update(states(code.decode("ascii")))
+    return np.array([low, high]), frozenset(painted)
+
+
+def _plate_geometry(
+    archive: zipfile.ZipFile, names: Sequence[str], entries: Mapping[str, bytes]
+) -> tuple[np.ndarray, frozenset[int]]:
+    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive
+    whose entries' bytes are ``entries``, and the filaments their painting uses
+    (#1965): what a plate's tower counts beside its parts' extruders (#2108), which
+    ``model_settings.config`` does not state.
 
     The component transforms this writer emits are the identity, so the vertex
     extents *are* the assembly's extents; the build item carries the whole
     placement. Reading them back rather than trusting a recorded plate size keeps
     :func:`replate_3mf` correct for files written before plates were per printer.
+    A file this writer wrote is read by pattern (:func:`_written_extents`, #2877);
+    any other is parsed.
     """
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
+    painted: set[int] = set()
     for name in names:
+        written = _written_extents(entries[name])
+        if written is not None:
+            box, codes = written
+            lows.append(box[0])
+            highs.append(box[1])
+            painted.update(codes)
+            continue
         for mesh in parse_model(archive, name).meshes.values():
             points = mesh.vertices
             if points.size:
                 lows.append(points.min(axis=0))
                 highs.append(points.max(axis=0))
+            for code in set(mesh.paint or ()):
+                if code:
+                    painted.update(states(code))
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
-    return np.array([np.min(lows, axis=0), np.max(highs, axis=0)])
+    return np.array([np.min(lows, axis=0), np.max(highs, axis=0)]), frozenset(painted)
 
 
 @dataclass(frozen=True)
@@ -757,6 +961,12 @@ class LaidOutPlate:
     index: int
     assembly_id: str
     object_files: tuple[str, ...]
+    #: Every build item's assembly on the plate (#956): one object per declared object,
+    #: all moved by the plate's one offset. ``assembly_id`` is the first.
+    assembly_ids: tuple[str, ...]
+    #: The extruders its parts print with, where ``model_settings.config`` states them;
+    #: ``None`` when it does not. A painting's filaments are not among them.
+    extruders: frozenset[int] | None = None
 
 
 def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
@@ -780,20 +990,37 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
     if not items:
         raise ValueError("the 3MF has no build item to place")
 
-    plates: list[tuple[int, str]] = []
+    plates: list[tuple[int, tuple[str, ...]]] = []
+    extruders: dict[str, set[int]] = {}
     if MODEL_SETTINGS_NAME in names:
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+        for obj in config.iter("object"):
+            stated = {
+                _metadata(part).get("extruder", "")
+                for part in obj.findall("part")
+                if part.get("subtype", "normal_part") == "normal_part"
+            }
+            extruders[obj.get("id", "")] = {int(e) for e in stated if e.isdigit()}
         for each in plate_settings(config):
-            if each.object_id is not None and each.object_id in items:
-                plates.append((each.index, each.object_id))
-    if len(plates) != len(items):
+            on_plate = tuple(object_id for object_id in each.object_ids if object_id in items)
+            if on_plate:
+                plates.append((each.index, on_plate))
+    if sum(len(ids) for _, ids in plates) != len(items):
         # Not a layout this writer produced plate by plate: one plate, placed by its
         # first build item, holding every object file.
         every = tuple(sorted(name for name in names if name.startswith("3D/Objects/")))
-        return [LaidOutPlate(1, items[0], every)]
+        return [LaidOutPlate(1, items[0], every, (items[0],))]
     return [
-        LaidOutPlate(index, object_id, components.get(object_id, ()))
-        for index, object_id in sorted(plates)
+        LaidOutPlate(
+            index,
+            ids[0],
+            tuple(path for object_id in ids for path in components.get(object_id, ())),
+            ids,
+            frozenset().union(*(extruders[i] for i in ids))
+            if all(i in extruders for i in ids)
+            else None,
+        )
+        for index, ids in sorted(plates)
     ]
 
 
@@ -837,8 +1064,9 @@ def replate_3mf(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
         laid_out = laid_out_plates(archive)
-        bounds = {
-            each.assembly_id: _vertex_bounds(archive, each.object_files)
+        contents = dict(entries)
+        geometry = {
+            each.assembly_id: _plate_geometry(archive, each.object_files, contents)
             for each in laid_out
             if each.object_files
         }
@@ -851,19 +1079,30 @@ def replate_3mf(
     transforms: dict[str, str] = {}
     rotation = IDENTITY.rsplit(" ", 3)[0]
     for each in laid_out:
-        if each.assembly_id not in bounds:
+        if each.assembly_id not in geometry:
             continue
+        bounds, painted = geometry[each.assembly_id]
         try:
-            placement = place_on_plate(
-                bounds[each.assembly_id], plate, tower=len(each.object_files) > 1
-            )
+            # A tower only for more than one filament, a painting's counted as
+            # `PlateParts.tower` counts them (#2108). One object goes by its parts, as
+            # it always has; several objects in one colour need none (#956).
+            if len(each.assembly_ids) > 1 and each.extruders is not None:
+                tower = len(each.extruders | painted) > 1
+            else:
+                # One object; or several whose model_settings name no extruders, so the
+                # filaments are unknown and a tower is reserved whenever there is more
+                # than one part: room to spare rather than a plate that will not slice.
+                tower = len(each.object_files) > 1
+            placement = place_on_plate(bounds, plate, tower=tower)
         except PlateFitError as error:
             if count == 1:
                 raise
             raise PlateFitError(f"plate {each.index}: {error}") from error
         placements.append(placement)
         offset = _plate_offset(placement, each.index, count, plate)
-        transforms[each.assembly_id] = rotation + " " + " ".join(_number(v) for v in offset)
+        moved = rotation + " " + " ".join(_number(v) for v in offset)
+        for assembly_id in each.assembly_ids:
+            transforms[assembly_id] = moved
 
     def _replaced(match: re.Match[str]) -> str:
         tag = match.group(0)
@@ -874,10 +1113,10 @@ def replate_3mf(
             raise ValueError("the 3MF's build item carries no transform to re-place")
         return re.sub(r'\btransform="[^"]*"', f'transform="{transform}"', tag, count=1)
 
-    rewritten: list[tuple[str, bytes]] = []
+    changed: dict[str, bytes] = {}
     for name, data in entries:
         if name == ROOT_MODEL_NAME:
-            data = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
+            changed[name] = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
         elif name == PROJECT_SETTINGS_NAME:
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
@@ -893,9 +1132,8 @@ def replate_3mf(
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
             _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
-            data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
-        rewritten.append((name, data))
-    return _zipped(rewritten)
+            changed[name] = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+    return _rezipped(payload, changed)
 
 
 @dataclass(frozen=True)
@@ -1309,11 +1547,31 @@ def _entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def _zipped(entries: Sequence[tuple[str, bytes]]) -> bytes:
+def _rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
+    """``payload`` with each entry in ``changed`` replaced, written in the writer's policy
+    (:func:`_entry`), so a replated file is byte-identical to one written for this plate
+    directly, covers included.
+
+    An entry left unchanged and already in that policy is copied as its compressed
+    bytes (:func:`~scadbuddy.render.zipcopy.copy_raw`, #2942) rather than inflated and
+    deflated again: those are the mesh objects, nearly all of a large file."""
+    source = io.BytesIO(payload)
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in entries:
-            # Same policy as the writer, so a replated file is byte-identical to
-            # one written for this plate directly — covers included.
-            out.writestr(_entry(name), data)
+    raw_copy = raw_copy_checked()
+    with (
+        zipfile.ZipFile(source) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            name = info.filename
+            entry = _entry(name)
+            if (
+                raw_copy
+                and name not in changed
+                and info.compress_type == entry.compress_type
+                and not info.flag_bits & ENCRYPTED
+            ):
+                copy_raw(source, info, out, date_time=ZIP_TIMESTAMP)
+                continue
+            out.writestr(entry, changed[name] if name in changed else archive.read(info))
     return buffer.getvalue()

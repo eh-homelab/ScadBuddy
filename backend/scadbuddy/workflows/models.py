@@ -83,10 +83,17 @@ class PrepareResult(BaseModel):
     schema_cache: str
     #: The pins `library_path` holds (#169), for the result to record.
     libraries: list[ModelLibrary] = Field(default_factory=list)
+    #: The piece's geometry key (`render/geometry_cache.py`): None when its geometry is
+    #: never shared (not a mesh model's compiled scene, or no revision).
+    geometry_key: str | None = None
+    #: The colour of each of its colour classes, in class order.
+    colours: list[str] = Field(default_factory=list)
 
 
 class RenderMainResult(BaseModel):
     plates: int | None = None
+    #: The template's `echo(objects = N)` (#956); defaulted, so older histories read.
+    objects: int | None = None
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0

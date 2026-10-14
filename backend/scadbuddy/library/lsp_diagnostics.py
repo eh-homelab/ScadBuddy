@@ -34,7 +34,7 @@ import anyio
 from pydantic import BaseModel, Field
 
 from scadbuddy.editor import nonet
-from scadbuddy.library.lsp import KILL_WAIT, frame, read_message, reap_later
+from scadbuddy.library.lsp import KILL_WAIT, frame, kill, read_message, reap_later
 
 #: How long the whole exchange may take. openscad-lsp answers in milliseconds; this
 #: only bounds a server that has wedged.
@@ -168,7 +168,7 @@ async def lsp_diagnostics(
         # unreaped (#750 review).
         with anyio.CancelScope(shield=True):
             if process.returncode is None:
-                process.kill()
+                kill(process)
             with anyio.move_on_after(KILL_WAIT) as waiting:
                 await process.wait()
             if waiting.cancelled_caught:

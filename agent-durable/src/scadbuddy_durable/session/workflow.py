@@ -234,6 +234,12 @@ def refusal(tool: str, request_id: str, outcome: str, reason: str | None) -> str
     return f"{what} was not approved, so it was not run."
 
 
+def _joined(append: str | None, note: str | None) -> str | None:
+    """The turn's system append, with what this turn's listing said to tell the model."""
+    parts = [p for p in (append, note) if p]
+    return "\n\n".join(parts) if parts else None
+
+
 @workflow.defn(name=WORKFLOW)
 class DurableSession:
     @workflow.init
@@ -252,6 +258,7 @@ class DurableSession:
         self._turn_tiers: dict[str, str] = {}
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
         self._packages: list[TurnPackage] = []
+        self._system_note: str | None = None
         # The replica this session's pinned turn tools run on (#2581), from the last listing.
         self._host_queue: str | None = start.host_queue
         self._turn: TurnStart | None = start.turn
@@ -351,9 +358,11 @@ class DurableSession:
                 e.name: e.tier for e in offered.tools if e.name in self._turn_tools and e.tier
             }
             self._packages = list(offered.packages)
+            self._system_note = offered.system_note
             # The built-ins the allowed packages name, as a classic turn offers them; each
             # call is outward there, so here it runs as its own activity after a human
-            # approved it (the agent offers only Bash and PowerShell, which can).
+            # approved it (the agent lists only Bash and PowerShell here, which can; it
+            # provides the others as its own `builtin` turn tools, #2393).
             named = sorted(
                 {t for p in offered.packages for t in p.builtin_tools} - {"Skill", "Agent"}
             )
@@ -400,7 +409,7 @@ class DurableSession:
             text = f"{err}: {err.cause}" if err.cause else str(err)
             if self._interrupted is not None:
                 outcome = "interrupted"
-            elif BUDGET_EXHAUSTED in text or "max_budget_usd" in text:
+            elif BUDGET_EXHAUSTED in text:
                 outcome = "budget_exhausted"
             else:
                 outcome, message = "failed", text[:MESSAGE_MAX]
@@ -989,10 +998,11 @@ class DurableSession:
         return SegmentContext(
             images=list(self._turn.images) if self._turn else [],
             # The turn's own append; a turn sent without one keeps the session's first (#2525).
-            system_append=(
+            system_append=_joined(
                 self._turn.system_append
                 if self._turn is not None and self._turn.system_append is not None
-                else self._start.system_append
+                else self._start.system_append,
+                self._system_note,
             ),
             disabled_tools=list(self._settings.disabled_tools),
             packages=list(self._packages),

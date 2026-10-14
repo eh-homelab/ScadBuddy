@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { Job, PrintDetail, PrinterMedia } from '../api/types'
@@ -6,30 +6,25 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
+import { PrintAttachments } from '../components/prints/PrintAttachments'
+import { PrintFiles } from '../components/prints/PrintFiles'
 import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
 import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
-import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
+import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { fineLength, useDisplayUnit } from '../lib/units'
 
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 
-type PrintFile = PrintDetail['files'][number]
 type Run = PrintDetail['outcome']['runs'][number]
 
 
-const FILE_LABELS: Record<PrintFile['kind'], string> = {
-  output_3mf: 'ScadBuddy 3MF',
-  preview_glb: 'Preview mesh',
-  sliced: 'Sliced file',
-  source: 'Source 3MF',
-  library_file: 'Library file',
-}
 
 function formatWhen(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -40,6 +35,11 @@ function formatWhen(iso: string | null | undefined): string | null {
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/** A video attachment's type, from the extension its bytes gave it (#309). */
+function videoType(filename: string): string {
+  return filename.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4'
 }
 
 /** The print's photos, timelapse, plate image and attachments, in that order. */
@@ -86,23 +86,10 @@ function gallerySlides(print: PrintDetail): Slide[] {
       src: attachment.url,
       alt: attachment.caption ?? `Attachment ${index + 1}`,
       caption: attachment.caption ?? undefined,
+      contentType: attachment.kind === 'video' ? videoType(attachment.filename) : undefined,
     })
   })
   return slides
-}
-
-/** Fetched as a blob and saved through `lib/embed`, so it works inside Bambuddy's iframe. */
-async function download(url: string, name: string): Promise<void> {
-  await downloadBlob(async () => {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.blob()
-  }, name)
-}
-
-function paramsFileName(print: PrintDetail): string {
-  const own = print.files.find((file) => file.kind === 'output_3mf')
-  return own ? `${own.name.replace(/\.3mf$/i, '')}-params.json` : `print-${print.archive_id}-params.json`
 }
 
 export function PrintDetailPage() {
@@ -203,8 +190,26 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           {!deleted && <GallerySection print={print} />}
           <RenderSection print={print} />
           {!deleted && <TimelapseSection print={print} onPulled={reload} />}
+          {!deleted && (
+            <Section title="Photos and videos">
+              <PrintAttachments print={print} onChanged={reload} />
+            </Section>
+          )}
           <OutcomeSection print={print} />
-          {print.provenance && <ProvenanceSection provenance={print.provenance} />}
+          {print.provenance ? (
+            <ProvenanceSection provenance={print.provenance} />
+          ) : (
+            <Section title="Provenance">
+              {/* #1860 — say why there is none, rather than leave the section out. */}
+              <p className="text-[13px] text-muted">
+                {print.library_file_id !== null
+                  ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
+                  : 'The ScadBuddy output this print came from is not known.'}
+              </p>
+            </Section>
+          )}
+          {print.slicing && <SlicingSection slicing={print.slicing} />}
+          {print.record && <RecordSection record={print.record} />}
           <FilesSection print={print} />
         </div>
       </div>
@@ -450,6 +455,37 @@ function duration(seconds: number | null | undefined): string | null {
   return seconds === null || seconds === undefined ? null : formatDuration(seconds)
 }
 
+/** A measured amount, rounded for reading: Bambuddy's floats can end `…000001`. */
+function amount(value: number | null | undefined, unit: string): string | null {
+  if (value === null || value === undefined) return null
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} ${unit}`
+}
+
+/** A percentage, rounded as {@link amount} rounds. */
+function percent(value: number): string {
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+}
+
+/** A link Bambuddy keeps, opened outside the frame; only an http(s) one is a link. */
+function LinkFact({ label, url }: { label: string; url: string | null | undefined }) {
+  if (!url) return null
+  const web = /^https?:\/\//i.test(url)
+  return (
+    <Fact
+      label={label}
+      value={
+        web ? (
+          <button type="button" className="break-all text-left text-accent underline" onClick={() => openExternal(url)}>
+            {url}
+          </button>
+        ) : (
+          url
+        )
+      }
+    />
+  )
+}
+
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   if (value === null || value === undefined || value === '') return null
   return (
@@ -487,12 +523,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
             value={
               <span className="flex gap-1">
                 {colours.map((colour) => (
-                  <span
-                    key={colour}
-                    title={colour}
-                    className="inline-block h-3.5 w-3.5 rounded-full border border-line"
-                    style={{ background: colour }}
-                  />
+                  <Swatch key={colour} colour={colour} />
                 ))}
               </span>
             }
@@ -509,6 +540,114 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
             ))}
           </ul>
         </>
+      )}
+    </Section>
+  )
+}
+
+/** A colour as Bambuddy reports one: `#RGB`, `#RRGGBB` or with alpha, nothing else. */
+const HEX_COLOUR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+
+/**
+ * One filament colour. Only a hex colour is painted: the value is Bambuddy's, and a CSS
+ * `background` would otherwise load whatever `url(...)` it named.
+ */
+function Swatch({ colour }: { colour: string }) {
+  const paint = HEX_COLOUR.test(colour.trim()) ? colour.trim() : undefined
+  return (
+    <span
+      title={colour}
+      className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-line"
+      style={paint ? { background: paint } : undefined}
+    />
+  )
+}
+
+/** #1860 — what the sliced file says: the printer, bed, layers, nozzle and each slot. */
+function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing']> }) {
+  const unit = useDisplayUnit()
+  const metres = slicing.filament_used_mm !== null ? `${(slicing.filament_used_mm / 1000).toFixed(2)} m` : null
+  return (
+    <Section title="Slicing">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Sliced for" value={slicing.sliced_for_model} />
+        <Fact label="Bed" value={slicing.bed_type} />
+        <Fact
+          label="Layer height"
+          value={slicing.layer_height_mm !== null ? `${fineLength(slicing.layer_height_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Layers" value={slicing.total_layers} />
+        <Fact
+          label="Nozzle"
+          value={slicing.nozzle_diameter_mm !== null ? `${fineLength(slicing.nozzle_diameter_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Nozzle temp" value={slicing.nozzle_temperature_c !== null ? `${slicing.nozzle_temperature_c} °C` : null} />
+        <Fact label="Bed temp" value={slicing.bed_temperature_c !== null ? `${slicing.bed_temperature_c} °C` : null} />
+        <Fact label="Objects" value={slicing.objects.length > 0 ? slicing.objects.join(', ') : null} />
+        <Fact label="Filament length" value={metres} />
+      </dl>
+      {slicing.filament_slots.length > 0 && (
+        <>
+          <h3 className="mt-3 text-[12px] font-medium text-muted">Filament by slot</h3>
+          <ul aria-label="Filament by slot" className="mt-1 space-y-1">
+            {slicing.filament_slots.map((slot) => (
+              <li key={slot.slot_id} className="sb-num flex items-center gap-2 text-[13px] text-ink">
+                {slot.color && <Swatch colour={slot.color} />}
+                <span>Slot {slot.slot_id}</span>
+                {slot.filament_type && <span className="text-muted">{slot.filament_type}</span>}
+                {slot.used_grams !== null && <span>{amount(slot.used_grams, 'g')}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </Section>
+  )
+}
+
+/** #1860 — Bambuddy's bookkeeping, and every field of its archive not shown elsewhere. */
+function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> }) {
+  const other = Object.entries(record.other)
+  return (
+    <Section title="In Bambuddy">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Project" value={record.project_name} />
+        <Fact label="Designer" value={record.designer} />
+        <Fact label="Dispatched" value={formatWhen(record.created_at)} />
+        <Fact label="Last run" value={formatWhen(record.last_run_at)} />
+        <Fact
+          label="Runs"
+          value={`${record.successful_run_count} succeeded, ${record.failed_run_count} failed`}
+        />
+        <Fact label="Copies" value={record.quantity > 1 ? record.quantity : null} />
+        <Fact
+          label="Time accuracy"
+          value={record.time_accuracy_percent !== null ? percent(record.time_accuracy_percent) : null}
+        />
+        <Fact label="Filament read" value={amount(record.filament_actual_grams, 'g')} />
+        <Fact label="Energy" value={amount(record.energy_kwh, 'kWh')} />
+        <Fact
+          label="Energy cost"
+          value={record.energy_cost !== null ? `${record.energy_cost.toFixed(2)} (in Bambuddy's currency)` : null}
+        />
+        <Fact label="Favourite" value={record.is_favorite ? 'Yes' : null} />
+        <Fact label="Tags" value={record.tags} />
+        <Fact label="Notes" value={record.notes} />
+        <LinkFact label="MakerWorld" url={record.makerworld_url} />
+        <LinkFact label="Link" url={record.external_url} />
+      </dl>
+      {other.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[12px] text-muted">All other fields ({other.length})</summary>
+          <dl aria-label="All other fields" className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+            {other.map(([name, value]) => (
+              <Fragment key={name}>
+                <dt className="sb-num text-[12px] text-faint">{name}</dt>
+                <dd className="sb-num text-[13px] break-all text-ink">{value === null ? '—' : String(value)}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </details>
       )}
     </Section>
   )
@@ -582,76 +721,9 @@ function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail
 }
 
 function FilesSection({ print }: { print: PrintDetail }) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function save(file: PrintFile) {
-    setBusy(file.url)
-    setError(null)
-    try {
-      await download(file.url, file.name)
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : `Could not download ${file.name}.`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function saveParams() {
-    setError(null)
-    if (!print.provenance) return
-    const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
-    try {
-      await downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : 'Could not save the parameters.')
-    }
-  }
-
   return (
     <Section title="Files">
-      <ul className="space-y-1.5">
-        {print.files.map((file) => (
-          <li key={file.url} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-[13px] text-ink">{FILE_LABELS[file.kind]}</span>
-            <span className="sb-num min-w-0 truncate text-[12px] text-faint">{file.name}</span>
-            {file.size !== null && (
-              <span className="sb-num text-[12px] text-faint">{formatBytes(file.size)}</span>
-            )}
-            <Button
-              size="sm"
-              className="ml-auto"
-              aria-label={`Download ${file.name}`}
-              onClick={() => void save(file)}
-              disabled={busy !== null}
-            >
-              {busy === file.url && <Spinner />}
-              Download
-            </Button>
-          </li>
-        ))}
-        {print.provenance && (
-          <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-[13px] text-ink">Parameters</span>
-            <span className="sb-num min-w-0 truncate text-[12px] text-faint">
-              {paramsFileName(print)}
-            </span>
-            <Button
-              size="sm"
-              className="ml-auto"
-              aria-label="Download parameters as JSON"
-              onClick={() => void saveParams()}
-            >
-              Download
-            </Button>
-          </li>
-        )}
-      </ul>
-      {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
-          {error}
-        </p>
-      )}
+      <PrintFiles print={print} />
     </Section>
   )
 }

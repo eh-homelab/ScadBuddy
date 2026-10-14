@@ -2,19 +2,23 @@
 
 The same dialog as an output's (``printing.py``): its choices, filament step and run,
 over :class:`~scadbuddy.bambuddy.print_source.LibrarySource`, which prints a copy laid
-out for the printer as an output's is (#1752) and never changes the file itself; the
-images are proxied so the API key never reaches the browser.
+out for the printer as an output's is (#1752) and never changes the file itself; a
+sliced file is queued as it is (#2671). The images are proxied so the API key never
+reaches the browser.
 """
 
 from __future__ import annotations
 
+import asyncio
 from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
@@ -27,10 +31,13 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
+from scadbuddy.api.media import receive_upload
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    Claimed,
     IdempotencyKey,
     operation_answer,
+    recorded,
     run_operation,
 )
 from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
@@ -78,7 +85,16 @@ from scadbuddy.library.library_file_operations import (
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
+from scadbuddy.library.library_write_operations import (
+    LibraryEntryUpdated,
+    LibraryFileUpdate,
+    LibraryFolder,
+    LibraryFolderCreate,
+    LibraryFolderDeleteResult,
+    LibraryFolderUpdate,
+)
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
@@ -92,6 +108,7 @@ router = APIRouter(prefix="/print/library", tags=["print"])
 LIBRARY_FILES_SUBJECT = "library-files"
 
 FileIdPath = Annotated[int, Path(ge=1)]
+FolderIdPath = Annotated[int, Path(ge=1)]
 
 
 @router.get("", response_model=LibraryListing, summary="Bambuddy's library, one folder at a time")
@@ -256,6 +273,197 @@ async def post_library_rename(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, LibraryRenameResult)
+
+
+@router.patch(
+    "/folders/{folder_id}",
+    response_model=LibraryFolder,
+    summary="Rename or move a library folder",
+    responses=OPERATION_RESPONSES,
+)
+async def patch_library_folder(
+    folder_id: FolderIdPath,
+    body: LibraryFolderUpdate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolder | JSONResponse:
+    """A partial update through Bambuddy: ``name``, ``parent_id`` (``0`` is the top
+    level), or both (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_update"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"folder_id": folder_id, "update": body.model_dump(mode="json", exclude_none=True)},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolder)
+
+
+@router.post(
+    "/folders/{folder_id}/delete",
+    response_model=LibraryFolderDeleteResult,
+    summary="Delete a library folder and everything in it",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_folder_delete(
+    folder_id: FolderIdPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolderDeleteResult | JSONResponse:
+    """Deletes the folder's files as ``/delete`` does, then its folders, deepest first
+    (#2686). A file a print waiting in Bambuddy's queue names is a 409 before anything
+    is deleted, as are files of the folder in Bambuddy's trash; a key without
+    ``library:delete_all`` (which sees only its own user's trash) is a 403. A folder
+    holding a file Bambuddy skipped, and its ancestors, are kept."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_delete"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"folder_id": folder_id},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolderDeleteResult)
+
+
+@router.post(
+    "/folders",
+    response_model=LibraryFolder,
+    summary="Make a library folder",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_folder(
+    body: LibraryFolderCreate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolder | JSONResponse:
+    """A new folder through Bambuddy, at the top level without ``parent_id`` (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_create"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolder)
+
+
+class LibraryFileUploadForm(BaseModel):
+    """The multipart body of ``POST /print/library/files`` (schema only)."""
+
+    file: bytes = Field(description="The file; its filename is the library name")
+    folder_id: int | None = Field(default=None, description="The folder; absent is the top level")
+
+
+@router.post(
+    "/files",
+    response_model=LibraryEntryUpdated,
+    summary="Upload a file into a library folder",
+    responses=OPERATION_RESPONSES,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/LibraryFileUploadForm"}
+                }
+            },
+        }
+    },
+)
+async def post_library_file(
+    request: Request,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryEntryUpdated | JSONResponse:
+    """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
+    in ``folder_id`` or the top level; its filename is the library name. The body may be
+    as large as the library download cap (#2686)."""
+    received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
+    try:
+        path = received.files.get("file")
+        if path is None or received.sizes["file"] == 0:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "send the file as the `file` part"
+            )
+        filename = received.filenames["file"]
+        if not filename or "/" in filename or "\x00" in filename or len(filename) > 255:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the file needs a name of at most 255 characters, without `/`",
+            )
+        try:
+            raw = received.fields.get("folder_id", bytearray()).decode("ascii").strip()
+            folder_id = int(raw) if raw else None
+        except ValueError:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "`folder_id` is a folder's number"
+            ) from None
+        if folder_id is not None and folder_id < 1:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "`folder_id` is a folder's number"
+            )
+        digest = received.hashes["file"].hexdigest()
+        body = {"claim": digest, "filename": filename, "folder_id": folder_id}
+        kind = ops.kinds["library_file_upload"]
+        claims = ClaimStore(paths.claims)
+        held: list[Held] = []
+        if (
+            await recorded(
+                ops,
+                kind=kind,
+                subject=LIBRARY_FILES_SUBJECT,
+                request=body,
+                idempotency_key=idempotency_key,
+            )
+            is None
+        ):
+            held.append(await asyncio.to_thread(claims.hold_file, path, digest))
+        result = await run_operation(
+            ops,
+            response,
+            kind=kind,
+            subject=LIBRARY_FILES_SUBJECT,
+            request=body,
+            idempotency_key=idempotency_key,
+            claimed=Claimed(claims, held),
+        )
+        return operation_answer(result, LibraryEntryUpdated)
+    finally:
+        received.discard()
+
+
+@router.patch(
+    "/{file_id}",
+    response_model=LibraryEntryUpdated,
+    summary="Rename or move a library file",
+    responses=OPERATION_RESPONSES,
+)
+async def patch_library_file(
+    file_id: FileIdPath,
+    body: LibraryFileUpdate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryEntryUpdated | JSONResponse:
+    """A partial update through Bambuddy: ``filename``, ``folder_id`` (``0`` is the top
+    level), or both (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_update"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"file_id": file_id, "update": body.model_dump(mode="json", exclude_none=True)},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryEntryUpdated)
 
 
 @router.get(
@@ -444,7 +652,13 @@ async def get_library_choices(
             filaments=partial(library_filaments, client, paths.cache, budget=budget),
         )
         return await choices_for(
-            client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
+            client,
+            source,
+            settings,
+            remembered=remembered,
+            printer_id=printer_id,
+            cache=paths.cache,
+            rack=rack,
         )
 
 
@@ -508,16 +722,19 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
-    A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
-    202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
-    ``output_id``, which older clients read. The file's filament slots go with the run,
-    read from the file as ``/choices`` read them (#2550)."""
+    A sliced file is queued as it is, with no slice (#2671), and never refused: one
+    sliced for another printer model or a nozzle the printer lacks queues with a
+    warning that says so. A file deleted in Bambuddy is its 404, before the 202. The
+    run's ``subject`` is ``library:<file id>``, and so is its ``output_id``, which older
+    clients read. The file's filament slots go with the run, read from the file as
+    ``/choices`` read them (#2550)."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
         filaments = await _run_filaments(store, paths, budget, file_id)
@@ -530,6 +747,7 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
+        activity=activity,
         prepare=prepare,
     )
 

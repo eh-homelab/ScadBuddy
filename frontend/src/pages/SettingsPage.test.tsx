@@ -26,7 +26,7 @@ async function enter(user: UserEvent, field: HTMLElement, text: string) {
  * ran into their 5 s under load (#1485); so buttons are looked for in their section.
  */
 function region(name: string): HTMLElement {
-  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
   if (!section) throw new Error(`no section headed ${name}`)
   return section
 }
@@ -260,8 +260,9 @@ describe('SettingsPage', () => {
     await user.type(screen.getByLabelText('Keep finished Bambuddy operations for (days)'), '2')
     await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     expect(await screen.findByText(msg)).toBeInTheDocument()
-    // Beside the field, in place of its help.
-    expect(screen.queryByText(/at least as long as Temporal's namespace retention/)).not.toBeInTheDocument()
+    // Beside the field, and its help with it, which explains the refusal (#2347).
+    expect(screen.getByText(/at least as long as Temporal's namespace retention/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Keep finished Bambuddy operations for (days)')).toHaveAttribute('aria-invalid', 'true')
   })
 
   it('refuses a print run retention under a day, which would forget a retried print (#1061)', async () => {

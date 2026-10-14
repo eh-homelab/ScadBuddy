@@ -367,11 +367,21 @@ it off when approving the grant), an outside call goes there first.
 - **Delivery.** The agent's `EscalationService` (`agent/src/flows/escalations.ts`)
   sends the starter session a turn, authored `system:escalation`, listing every entry of
   that session's runs at hop `parent` that was not yet delivered: run, step, tool, the
-  scrubbed summary, the proposal, and for a child's call the child's reasoning (§4.5).
-  It sends only to an idle session. A session in a turn gets the batch when the turn
-  ends. A classic session gets it through `SessionManager.send`, a durable one through
-  `DurableTurns.send`. The turn runs at the owner's default tiers, as a browser turn
-  does (#2320).
+  scrubbed summary, why it is outside the grant, and for a child's call the child's
+  reasoning (§4.5). There is no proposal to send: at hop `parent` nothing has narrowed
+  the call yet, since the starter session is the only parent that narrows (§4.1). A run's
+  own call has no scrubbed summary in its projection; its step and function stand in.
+  It sends only to an idle session. A session in a turn gets the batch on a later
+  tick of the agent's 30 s sweep, once the turn has ended. It goes through
+  `SessionManager.send` (classic or durable), as the session's owner: the turn is the
+  owner's, and its text opens with ScadBuddy's own instruction, the calls' details
+  after it in the untrusted-data envelope (#2482; no separate `system:escalation`
+  author). The turn runs with the tiers the owner holds now: the browser user's all of
+  them, a token's its live tier (as the backend's `parent_tiers` reads it), anyone else
+  `read`, which cannot call `escalation_respond` (`write`), so such a session is
+  skipped. A child's entry records its delivery in `ai_pending_input.delivered_at`, a
+  run's own call in `ai_escalation_deliveries`, each claimed before the turn is sent and
+  released if it did not start.
 - **The answer** is one tool, `escalation_respond(request_id, action, input?, reason?)`,
   `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. It dispatches on the
   id's prefix as the pending-input route does: `durable:` to the agent's
@@ -389,12 +399,14 @@ it off when approving the grant), an outside call goes there first.
   be its owner.
 - **Cost.** Each delivery is a turn of the starter session, paid from its budget
   (`budget_root_id`, #823). A session out of budget, archived, deleted, or whose owner
-  changed by handoff is skipped: its entries go to the person at once.
+  changed by handoff is skipped: a child's entries go to the person at once; a run's own
+  call waits out its hop (its run's timer is the only writer of `waiting_on`).
 - **A child that is the starter session.** A script may `ask_session` the very session
   that started the run. Its outside calls would escalate to itself in the middle of its
   own turn, and it receives escalations only when idle, so they would wait out the whole
   parent hop. So the parent hop is skipped when the child is the starter session: its
-  outside calls go straight to the person.
+  outside calls go to the person on the delivery's next tick, and it is never sent them
+  (#2482).
 - **The escalation turn's text is untrusted.** The summary, the proposal, the outside
   reason and above all the child's reasoning are model or tool output. The turn wraps
   them in the untrusted-data envelope every tool result uses
@@ -415,6 +427,12 @@ its child sessions' parked calls from flow turns, and a requested grant.
   browser-started run, the badge. The badge counts every run-queue entry at hop
   `person` (10-01 §6.6's "Flow entries stay out of the assistant's reads" is replaced:
   they are now in the aggregate read, grouped by run).
+  - As built (#2482): the panel's `SessionFlowRuns` reads each open run's queue and lists
+    its entries under the run, each with where it waits and why, linking to the run's
+    page, where they are decided. Each aggregate-read entry of a run carries
+    `run: {id, hop, reason}`, and the badge skips one at hop `parent`. The run's own
+    calls are added to the aggregate read only by its HTTP route, the browser user's:
+    the `pending_input_list` tool and every other principal's read never list them.
 - **One read.** `GET /api/v1/ai/flow-runs/{run_id}/queue`, in the agent service, is the
   union of:
   - the run's own entries, from `workflow_runs.waiting_on` (which `ProjectWorkflow`
@@ -431,10 +449,15 @@ its child sessions' parked calls from flow turns, and a requested grant.
   it the call's raw input (10-01 §6.6):
   - the run, its flow's name and the commit it runs (§6), with a link to the script at
     that commit;
-  - the step (`steps[].seq`, `fn`), and for a child the step that drives it;
+  - the step (`steps[].seq`, `fn`), and for a child the step that drives it (the run's
+    latest running step whose `session_id` is the child's);
   - for a child's call, **the child's reasoning**: the text the child's model wrote in
     that turn before the call (`assistant.text.delta` events since the turn's start),
-    the last 2 KiB, shown as untrusted text, as every tool result is;
+    the last 2048 characters (`REASONING_MAX`), shown as untrusted text, as every tool
+    result is. It is read from
+    `ai_session_events` when the queue is read (`flows/queue.ts` `childReasoning`): the
+    deltas after the turn's `user.turn` and before the call's `tool.call`, so nothing
+    in a workflow records it;
   - the hop it came through, and the parent's action if it narrowed it ("narrowed by the
     starting session from 6 copies to 2");
   - why it is outside the grant (`flow_grant_check`'s `reason`: "printer 5 is not in the
@@ -763,9 +786,217 @@ Amends §6.1 and Ruling 16, and 10-01 §7.3–7.4 ("the script is the run's inpu
 
 ## 11. Out of scope
 
-- Grants for scheduled or event-started runs: #2484 builds on these grants.
+- Grants for scheduled or event-started runs: §12 (#2484) builds on these grants.
 - Editing an approved grant in place, or widening one without a new approval.
 - A parent chain longer than one session (§4.4).
 - The flow editor (#2487) and the Flows tab (#2350) beyond showing the grant, its uses,
   the queue and the history this document defines.
 - Pushing `data/flows` off the box (the same seam as `ModelHistory`'s, not built).
+
+## 12. Amendment: schedules and event triggers (#2484)
+
+Amends 10-01 §7.3 (a run is started only by a request) and §3.2 here (who approves a
+grant). A **trigger** starts runs of a flow with no person present: on a Temporal
+Schedule, or on an event. Each fire starts a normal run, through the same start the
+route makes, and records which trigger and which fire started it.
+
+### 12.1 What a trigger is
+
+`flow_triggers`, one row per trigger, is the only record a fire reads:
+
+- **The flow, pinned to a version** (`definition_id`), never "latest" (Ruling 18).
+  Moving a trigger to another version is an edit (§12.4).
+- **Inputs**, checked against that version's inputs schema when the trigger is made or
+  edited, and again, with the defaults filled in, at each fire, as a start checks them.
+- **An approval timeout** for its runs, as `RunCreate.approval_timeout`. Omitted, the
+  flow's applies, then the global setting.
+- **When it fires**, one of:
+  - `schedule`: a Temporal Schedule (`ScheduleSpec`): `cron` (up to 4 expressions) or
+    `interval_s` (at least 60) with an optional `offset_s`; `time_zone` (an IANA name,
+    `ScheduleSpec.time_zone_name`, default `UTC`); `catchup_window_s`
+    (`SchedulePolicy.catchup_window`, 10 s to 7 days, default 300 s);
+  - `event`: one of the event kinds of §12.3, optionally for one template `slug` only.
+- **`overlap`**: `skip` (the default) or `allow_all`: whether a fire starts a run while
+  the trigger's previous run is still open (Ruling 21).
+- **`paused`**, with when, by whom and why (`flow archived`, `flow deleted`, or a pause
+  by a person or the creator).
+- **`created_by`** and **`updated_by`**: `_started_by()` of the request that made or last
+  edited it, written by the route from the author header (`core/authorship.py`), never
+  from the body. No route takes an author, a starter or a grant status in its body
+  (`extra="forbid"`).
+
+The Schedule is `flow-trigger-<trigger id>` on the `library` queue, whose worker holds
+the data volume with `data/flows`. Its action starts `FlowTriggerFire` with the
+**trigger id only**. Everything a fire acts on is read from the row when it fires, so
+nothing carried in a Schedule's action, or in an event, can say who a run is or what it
+may do. The row is the truth. A Schedule out of step with it (Temporal was down when a
+trigger was edited) is put right when the library worker starts and every five minutes
+after (`reconcile_trigger_schedules`), and a fire whose row says paused, or which no longer
+exists, starts nothing. The Schedule's own `SchedulePolicy.overlap` (`SKIP` or
+`ALLOW_ALL`) applies to the fire workflow, and the fire checks the trigger's previous
+run as well (Ruling 21).
+
+### 12.2 A fire
+
+`FlowTriggerFire(trigger_id, event?)` runs one activity, `flow_trigger_fire`, on
+`library`. In order:
+
+1. Records the fire in `flow_trigger_fires` under `(trigger_id, fire_key)`: an event's
+   fire workflow id, one per trigger and event (§12.3), or a Schedule's fire workflow id
+   with its run id, since two fires asked for in one second share a workflow id. A
+   retried activity, or the same event heard by every replica, finds the row and starts
+   nothing more.
+2. Reads the trigger. Gone or paused: the fire is `skipped`.
+3. If the flow is archived or deleted (#2485), the trigger is paused (row and Schedule),
+   and the fire is `skipped`.
+4. Type-checks the pinned version and resolves the inputs, as a start does. A problem
+   makes the fire `failed`, with the reason, and starts nothing.
+5. **Admits** the fire in one transaction under the trigger's row lock
+   (`TriggerStore.admit`), counting every other fire already `admitted` or `started`,
+   so concurrent fires (a burst of events, a Schedule's catch-up) cannot all pass:
+   - with `overlap: skip`, another admitted fire's run still open (or, with no row yet,
+     admitted in the last 10 minutes) makes it `skipped` (`overlap`);
+   - an event trigger with `MAX_EVENT_FIRES_PER_HOUR` (60) fires admitted in the last
+     hour makes it `skipped` (`rate`), so a flow that causes its own event cannot loop;
+   - a trigger changed since step 4 read it makes it `skipped` (`changed`): nothing
+     starts on settings that were not the ones checked.
+   - a Schedule's fire reaching a trigger that is no longer a schedule (a Schedule left
+     by an edit while Temporal was away), or an event's reaching a schedule trigger, is
+     `skipped`; each worker start removes the Schedule of every non-schedule trigger.
+   Admitted, it is marked `admitted`, which a retried activity takes up where it stopped;
+   an edit between admission and the start starts nothing (`changed`), and a fire whose
+   every attempt failed is settled `failed`, so it holds neither the overlap nor the cap.
+6. Starts the run with the same `start_execution` the route uses, with the id
+   `uuid5(TRIGGER_NAMESPACE, "<trigger id>:<fire key>")`. Its namespace is its own, so
+   no request's `Idempotency-Key` can reach it.
+
+### 12.3 Events
+
+Built on the event bus (`core/events.py`), never by polling. Every replica hears each
+event. Each starts `FlowTriggerFire` for each matching trigger, with the workflow id
+`flow-trigger-<trigger id>-<sha256 of the event key>` and
+`WorkflowIDReusePolicy.REJECT_DUPLICATE`, so one fire runs. §12.2 step 1 holds it to one
+beyond Temporal's retention.
+
+| Trigger event | Bus event | Event key |
+|---|---|---|
+| `render.finished` | `job.done` | `job:<job id>` |
+| `model.changed` | `version.committed` | `commit:<slug>:<commit>` |
+
+- **Print finished or failed is not in this first set** (Ruling 22, #2665).
+  `print.settled` is published per process by `ProgressObserver`'s in-memory comparison,
+  carries no outcome, and two replicas reading one print can each publish it. A print
+  trigger first needs the settle recorded once, with its outcome.
+- An event the bus lost while its LISTEN connection was down (`bus.resync`) fires
+  nothing: a trigger fires at most once per event.
+- The event's facts (kind, slug, job or commit) are recorded on the fire and shown with
+  the run. They are not passed to the script (#2666).
+
+### 12.4 Authority
+
+A triggered run has no person present, so:
+
+- **It runs as the trigger's creator** (`created_by` from the row). Its `started_by` is
+  `{"kind": "browser"}` or `{"kind": "agent", "principal": <creator>}`, **without** the
+  session the trigger was made in. So it has the creator's tiers as they are when each
+  call runs (§5, `flowCaller`, `currentTiers`), and no starter session, so no parent hop
+  (Ruling 23).
+- **It carries a grant only if a person approved a standing grant** for that trigger
+  (`flow_trigger_grants`):
+  - Its shape is a `GrantSpec`. From the browser it is approved as sent. From an agent
+    it is `requested` and authorises nothing until a person, in the browser, approves it
+    (as sent or edited) or declines it (`_browser_only`, 403 `flow-grant-browser-only`).
+    No agent tool approves or declines one.
+  - **It expires at most 30 days after approval** (Ruling 19). The dialog's default is 7
+    days.
+  - At each fire while it is in force, the run gets its own run grant: `approved`, with
+    `approved_by` `trigger-grant:<standing grant id>` and `standing_grant_id` naming it,
+    the same rules, `ask_starter_session` false, expiring at the earlier of the
+    standing grant's expiry and 7 days after the fire (§3.1's maximum). It is seeded
+    only while the trigger is still what the fire checked (§12.2).
+  - **Its limits are spent across every run it seeds, never once per run.**
+    `FlowStore.consume_grant` locks the standing grant's row (before the run grant's,
+    the order a revocation takes) and checks each rule against the standing grant's
+    counters (`flow_trigger_grants.used`), which it spends with the run grant's own. So
+    N fires never multiply its prints, grams or calls by N. A standing grant not in force
+    (revoked, expired, back to `requested`) matches nothing, whatever its run grants say.
+  - **Each approval is its own.** Every approval gives the standing grant a fresh
+    `approval_id`; a run grant records the one that seeded it (`standing_approval_id`)
+    and spends only while the standing grant is still under that approval. The counters
+    are kept per approval id and only ever grow, so a re-approval (after an edit, perhaps
+    with other rules) neither lets older runs reach the new rules nor gives anyone fresh
+    counters for the old ones.
+  - **The bindings fail closed.** An approved attach without `seen`, and an admission or
+    a seed without the hash the fire decided on, are refused, never waved through.
+    Everything else in §3 applies to the run grant unchanged.
+  - **An approval is bound to what the person saw.** A trigger's view carries `seen`, a
+    hash of the trigger (its version, inputs, kind, schedule or event, overlap, approval
+    timeout and `created_by`) and its live standing grant (its id, status, spec and
+    requester). Approving sends it back, and so does the browser's attach, which is an
+    approval; it is compared under the trigger's row lock, which every edit takes, and a
+    change since is 409 `flow-trigger-changed`. Without one it is 422.
+  - **It is revocable** by the browser or the trigger's creator (by author header, which
+    only takes authority away, §4.2). Once it is revoked or expired, later fires get no
+    grant. Revoking it also revokes, in the same transaction, every run grant it seeded,
+    so their next outward calls wait (§3.5). So does deleting the trigger.
+  - **Any edit of the trigger returns its standing grant to `requested`** (Ruling 20):
+    its version, inputs, timing, overlap or approval timeout. A person approved it for
+    what the trigger was then, and approves it again for what it is now. Runs already
+    started keep the run grants they were given.
+  - A trigger has at most one live (requested, or approved and not revoked) standing
+    grant. Attaching another while one is live is 409. One revoked, declined or expired
+    may be replaced.
+- **Without one**, its outward calls wait in the run's queue for the person, as any
+  run's do.
+- **Who may change a trigger.** Anyone may make one; the agent tool is `outward`, so an
+  agent's wait for a person. Editing, resuming, pausing, deleting, attaching a standing
+  grant and revoking it are open to the browser and, by author header, to the agent
+  principal named in `created_by`. Another principal gets 403
+  `flow-trigger-creator-only`. Approving and declining a standing grant are the
+  browser's alone.
+- **Archiving or deleting a flow pauses its triggers** (`paused_reason` `flow archived`
+  or `flow deleted`). A trigger of an archived or deleted flow cannot be resumed (409).
+  Unarchiving does not resume them; a person does.
+
+### 12.5 Routes and tools
+
+| Route | Who | Agent tool, tier |
+|---|---|---|
+| `GET /flow-triggers?name=`, `GET /flow-triggers/{id}` | any | `list_flow_triggers`, `get_flow_trigger`: `read` |
+| `POST /flow-triggers` | any | `create_flow_trigger`: `outward` |
+| `PATCH /flow-triggers/{id}` | browser, creator | `update_flow_trigger`: `outward` |
+| `POST /flow-triggers/{id}/pause` | browser, creator | `pause_flow_trigger`: `write` |
+| `POST /flow-triggers/{id}/resume` | browser, creator | `resume_flow_trigger`: `outward` |
+| `DELETE /flow-triggers/{id}` | browser, creator | `delete_flow_trigger`: `write` |
+| `POST /flow-triggers/{id}/grant` | browser (approved), creator (requested) | `attach_flow_trigger_grant`: `outward` |
+| `POST /flow-triggers/{id}/grant/approve`, `.../decline` | browser | none (`NOT_A_TOOL`) |
+| `POST /flow-triggers/{id}/grant/revoke` | browser, creator | `revoke_flow_trigger_grant`: `write` |
+
+A trigger's view carries its next fire times (`ScheduleDescription.info.next_action_times`)
+and its last fires, each with its run's status. A run's view carries `trigger`: the
+trigger, its kind, and the fire's time and event. In the UI, the person-only controls
+(approving and declining a standing grant, and every control that makes, resumes or
+edits a trigger) carry `USER_ONLY`; #2653 tracks the server-side half.
+
+### 12.6 Rulings
+
+18. **(user) A trigger pins a version, never "latest".** Any agent may register a new
+    version of a flow, so "latest" would let it change what runs under a standing grant
+    a person approved, with no person present.
+19. **(user) A standing grant expires at most 30 days after approval**, beyond a run
+    grant's 7 days, so a weekly schedule is re-approved monthly rather than weekly. Each
+    fire's run grant still expires within 7 days of the fire, and every limit is spent
+    across all the runs the standing grant seeds.
+20. **(user) Any edit of a trigger returns its standing grant to `requested`**, and the
+    person's approval names the state it saw. Runs already started keep their run
+    grants, but those spend only under the approval that seeded them, so their outward
+    calls wait; pausing and resuming change nothing.
+21. **Overlap is `skip` or `allow_all`.** A fire ends once its run has started, so
+    Temporal's own policy sees only the fire, and the fire checks the previous run
+    itself. Temporal's `BUFFER_*`, `CANCEL_OTHER` and `TERMINATE_OTHER` would need the
+    fire to wait for its run (polling) or own it (a run is not a child workflow), so they
+    are left out.
+22. **The first event set is `render.finished` and `model.changed`.** Print finished and
+    failed wait for a settle recorded once with its outcome (#2665).
+23. **A triggered run has no starter session** (§12.4), so no parent hop: the session
+    that made a trigger is not there when it fires.

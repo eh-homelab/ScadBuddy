@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { dirBodies, HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { turnToolActivity } from '../src/temporal/turnTools.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -284,6 +284,22 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(result).toMatchObject({ id: 'a'.repeat(64), workspace_file: { path: 'downloads/logo.svg', size_bytes: svg.length, sha256: info.sha256 } })
     })
 
+    it('upload_library_file sends a workspace file with its folder, named by filename', async () => {
+      const bytes = Buffer.from('3mf-bytes')
+      const info = await files.write(ws, 'out/cube.3mf', bytes)
+      const { c, seen } = upload(() => Response.json({ id: 11, filename: 'part.3mf', folder_id: 3 }, { status: 201 }))
+      const result = firstText(
+        // outward: runTool would park it for approval, which is the gate's own test
+        await tool('upload_library_file').execute({ folder_id: 3, filename: 'part.3mf', workspace_path: 'out/cube.3mf', workspace_sha256: info.sha256 }, c),
+      ) as Record<string, unknown>
+      expect(seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/print/library/files' })
+      expect(seen[0]!.form!.get('folder_id')).toBe('3')
+      const file = seen[0]!.form!.get('file') as File
+      expect(file.name).toBe('part.3mf')
+      expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true)
+      expect(result).toMatchObject({ id: 11 })
+    })
+
     it('refuses a changed file, a path without its sha256, and both or neither of the two', async () => {
       const info = await files.write(ws, 'p.png', PNG)
       const { c, seen } = upload()
@@ -406,6 +422,10 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(humanSize(1)).toBe('1 byte')
       expect(humanSize(5 * 1024 * 1024)).toBe('5.0 MB (5,242,880 bytes)')
       expect(humanSize(3 * 1024 ** 3)).toBe('3.0 GB (3,221,225,472 bytes)')
+      // Rounded before the unit is picked (#2530): never "1024.0 KB" or "1024.0 MB".
+      expect(humanSize(1_048_575)).toBe('1.0 MB (1,048,575 bytes)')
+      expect(humanSize(1024 ** 3 - 1)).toBe('1.0 GB (1,073,741,823 bytes)')
+      expect(humanSize(1023 * 1024)).toBe('1023.0 KB (1,047,552 bytes)')
       expect(await withWorkspaceSize(files, ws, call)).toEqual({ ...call, workspace_size: size })
       // A file that is gone or no longer at that sha256, or a bad path, is said to be; an input with no upload is left alone.
       const stale = await withWorkspaceSize(files, ws, { ...call, workspace_sha256: 'f'.repeat(64) })
@@ -432,6 +452,31 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       })
       expect(JSON.parse(classic.inputSummary)).toEqual({ ...call, workspace_size: size })
       expect(classic.inputHash).toBe(m.approvals.hash('import_model', call))
+
+      // Classic, through the turn's real gate (#2531): SessionManager hands ApprovalService
+      // the session's workspace, so the parked row shows the size read there, never the
+      // model's, and the hash is still over the call's own input.
+      const stop = new AbortController()
+      const gated = { ...call, workspace_size: '1 byte' }
+      const parked = m.approvals
+        .gate({ sessionId, turnId: '22222222-2222-4222-8222-222222222222', requestedBy: browser, secrets: () => [], signal: stop.signal })({
+          toolName: 'import_model',
+          input: gated,
+          toolUseId: 'toolu_gated',
+          tier: 'outward',
+          signal: stop.signal,
+        })
+        .catch(() => undefined)
+      let row: Awaited<ReturnType<typeof m.approvals.list>>[number] | undefined
+      for (let i = 0; i < 250 && !row; i++) {
+        row = (await m.approvals.list(browser, { sessionId, pending: true })).find((a) => a.toolUseId === 'toolu_gated')
+        if (!row) await new Promise((r) => setTimeout(r, 20))
+      }
+      stop.abort()
+      await parked
+      expect(row).toBeDefined()
+      expect(JSON.parse(row!.inputSummary)).toEqual({ ...call, workspace_size: size })
+      expect(row!.inputHash).toBe(m.approvals.hash('import_model', gated))
 
       // /mcp: a prepare outside any session reads the caller's own workspace.
       const principal = { id: 'token:up', kind: 'bearer' as const, tiers: tiersUpTo('outward') }
@@ -532,7 +577,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
           settings: { get: async <T,>() => true as T },
         }),
       }
@@ -559,7 +604,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
     }
 
     const context = (dir: string) => ({
-      saveDir: dir,
+      saved: dirBodies(dir),
       secrets: () => [],
       actor: browser,
       workspace: { files, ref: ws },

@@ -21,21 +21,31 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
+from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.activity.index import (
+    ACTIVITY_PRUNE_MARGIN,
+    ACTIVITY_REPAIR_WINDOW_DEFAULT,
+    ACTIVITY_TTL_DEFAULT,
+)
 from scadbuddy.api import (
     health,
     libraries,
+    library_print,
     media,
     mesh_models,
     metrics,
     models,
     outputs,
+    print_attachments,
     telemetry,
 )
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
+    ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
+    LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
     MESH_UPLOAD_PATH,
     BodySizeGate,
@@ -59,6 +69,9 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
+from scadbuddy.flow_triggers.events import listen_for_triggers
+from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
@@ -83,6 +96,7 @@ from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSourc
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
@@ -93,8 +107,10 @@ from scadbuddy.workflows.client import (
     reconcile_lost_runs,
     sandboxed_runner,
 )
+from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
@@ -340,6 +356,12 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         raise
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
+        # A swept piece is no geometry's source any more (`store/geometry.py`).
+        try:
+            await asyncio.to_thread(GeometryIndex(state.refs.pool).forget_pieces, removed)
+        except Exception:
+            logger.exception("could not forget swept pieces' geometry")
+            raise
 
 
 async def _backfill_store_logged(
@@ -486,6 +508,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
 
+    @activity.defn(name=ACTIVITY_SWEEP)
+    async def sweep_activity() -> None:
+        await _heartbeating(_sweep_activity_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -497,7 +523,42 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_flow_runs,
         sweep_preview_slices,
         maintain_models_git,
+        sweep_activity,
     ]
+
+
+async def _sweep_activity_logged(state: AppState) -> None:
+    """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune. Repair
+    first, so a placeholder it can fill is filled before its time is up; prune runs
+    whatever repair did. The window stays an hour inside the TTL, or a pruned row could
+    be restored from its source on the next run: prune reads the row's own finished_at,
+    the moment it was written, and repair the source's, a little earlier."""
+    failed = False
+    try:
+        settings = await asyncio.to_thread(state.settings_store.load)
+    except Exception:
+        # The stored TTL is unknown, and the default may be shorter than the operator's:
+        # pruning with it would delete rows they chose to keep. Skip the run, which fails.
+        logger.warning("could not load the activity settings; skipping the sweep", exc_info=True)
+        raise
+    ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
+    window = min(
+        settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT,
+        ttl - ACTIVITY_PRUNE_MARGIN,
+    )
+    index = state.components.get(ACTIVITY).index
+    try:
+        await index.repair(window)
+    except Exception:
+        logger.exception("could not repair activity")
+        failed = True
+    try:
+        await index.prune(ttl, window)
+    except Exception:
+        logger.exception("could not prune activity")
+        failed = True
+    if failed:
+        raise RuntimeError("the activity sweep failed")
 
 
 async def _prune_jobs_logged(state: AppState) -> None:
@@ -886,10 +947,12 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
 
     schedules = asyncio.create_task(set_up())
     ops = state.components.get(OPERATIONS)
+    trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+        *trigger_activities,
     ]
     try:
         while not stop.is_set():
@@ -897,7 +960,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow],
+                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
@@ -906,6 +969,26 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
+        await stop_triggers()
+
+
+def _flow_triggers(
+    state: AppState, client: Client, queue: str, stop: asyncio.Event
+) -> tuple[list[Callable[..., Any]], Callable[[], Coroutine[Any, Any, None]]]:
+    """Flow triggers (#2484) on the library worker: their fires run here, beside the data
+    volume; their Schedules are put right now and every `RECONCILE_INTERVAL`; their events
+    are heard by every replica. The fire activities, and what stops the rest."""
+    triggers = state.components.get(FLOW_TRIGGERS)
+    schedules = asyncio.create_task(
+        reconcile_trigger_schedules(client, queue, triggers.store, stop)
+    )
+    unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
+
+    async def stop_all() -> None:
+        schedules.cancel()
+        await unlisten()
+
+    return TriggerFires(triggers.store, lambda: triggers.flows, client, queue).all(), stop_all
 
 
 def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:
@@ -1224,9 +1307,23 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             RouteLimit(
                 "POST",
+                ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "a print's photo or video",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
                 MESH_UPLOAD_PATH,
                 MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
                 "a mesh upload",
+                "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
+            ),
+            RouteLimit(
+                "POST",
+                LIBRARY_UPLOAD_PATH,
+                MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
+                "a library upload",
                 "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
@@ -1256,6 +1353,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         models.PastedSource,
         media.MediaUpload,
         mesh_models.MeshUpload,
+        library_print.LibraryFileUploadForm,
+        print_attachments.AttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

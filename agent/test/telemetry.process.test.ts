@@ -30,7 +30,7 @@ const { createBackendClient } = await import('./api/backend.js')
 // What main.ts imports: the SDK-free half (telemetry/runtime.ts).
 const { shutdownTelemetry, traceListener } = await import('./telemetry/runtime.js')
 const { PluginForwarder } = await import('./plugins/forwarder.js')
-const { runHttpRequest, withDefaults } = await import('./harness/httpRequest.js')
+const { dirBodies, runHttpRequest, withDefaults } = await import('./harness/httpRequest.js')
 
 const target = process.argv[2]
 // HttpInstrumentation wraps Server.prototype.emit with shimmer, which marks the wrapper.
@@ -79,7 +79,7 @@ const work = await trace.getTracer('child').startActiveSpan('work', async (span)
   // The http_request tool as a turn runs it (harness/httpRequest.ts).
   const saveDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-process-')), 'http')
   const requested = await runHttpRequest(withDefaults({ url: target + '/http-request', method: 'GET' }), {
-    saveDir,
+    saved: dirBodies(saveDir),
     secrets: () => [],
     actor: { kind: 'browser', id: 'user', label: 'User' },
   })

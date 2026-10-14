@@ -146,6 +146,52 @@ async def test_a_failed_insert_leaves_its_commit_which_keeps_its_position(
     assert got is not None and (got.version, got.script, got.created_by) == (2, TWO, AGENT)
 
 
+async def test_an_orphan_of_a_flow_back_in_the_tree_is_indexed_as_not_deleted(
+    definitions: FlowDefinitions, store: FlowStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2646: a restore after a delete commits `<name>/` back but its insert fails; the
+    reconciler that indexes it also clears the delete, as the insert would have."""
+    await definitions.start()
+    one = await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
+    await definitions.delete("swap", BROWSER)
+    insert = store.insert_version
+
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise GitError("the database went away")
+
+    monkeypatch.setattr(store, "insert_version", failing)
+    with pytest.raises(GitError):
+        await definitions.restore("swap", str(one.commit), BROWSER)
+    monkeypatch.setattr(store, "insert_version", insert)
+    assert definitions.states.state("swap").deleted_at is not None
+
+    await definitions.register("other", ONE, BROWSER, approval_timeout_s=None)
+    assert [v for n, v, _ in rows(store) if n == "swap"] == [1, 2]
+    assert definitions.states.state("swap").deleted_at is None
+
+
+async def test_an_orphan_of_a_flow_deleted_after_it_stays_deleted(
+    definitions: FlowDefinitions, store: FlowStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphan predates the delete: the flow is not in the tree, so it stays deleted."""
+    await definitions.start()
+    await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
+    insert = store.insert_version
+
+    def failing(*args: Any, **kwargs: Any) -> Any:
+        raise GitError("the database went away")
+
+    monkeypatch.setattr(store, "insert_version", failing)
+    with pytest.raises(GitError):
+        await definitions.register("swap", TWO, BROWSER, approval_timeout_s=None)
+    monkeypatch.setattr(store, "insert_version", insert)
+    await definitions.delete("swap", BROWSER)
+
+    await definitions.register("other", ONE, BROWSER, approval_timeout_s=None)
+    assert [v for n, v, _ in rows(store) if n == "swap"] == [1, 2]
+    assert definitions.states.state("swap").deleted_at is not None
+
+
 def legacy(
     store: FlowStore,
     name: str,

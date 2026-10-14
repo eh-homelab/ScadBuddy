@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
+import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
 
 /** How often the printers are read while the page is visible. */
 export const NOW_POLL_MS = 15_000
@@ -26,20 +28,26 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
 export function NowPrinting() {
   const [printers, setPrinters] = useState<PrinterNow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** #981 — the printer whose camera is open, by id, so its status stays current. */
+  const [watching, setWatching] = useState<number | null>(null)
 
   useEffect(() => {
     let live = true
+    // A timer read and a visibility read can overlap; only the newest one may land.
+    let sent = 0
     const read = () => {
       if (document.hidden) return
+      const mine = ++sent
+      const current = () => live && mine === sent
       api
         .getPrintersNow()
         .then((now) => {
-          if (!live) return
+          if (!current()) return
           setPrinters(now.printers ?? [])
           setError(null)
         })
         .catch((cause: unknown) => {
-          if (live) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
+          if (current()) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
         })
     }
     read()
@@ -51,6 +59,14 @@ export function NowPrinting() {
       document.removeEventListener('visibilitychange', read)
     }
   }, [])
+
+  // #2752 review: a printer that drops out closes its camera for good; it does not
+  // reopen on its own when the printer comes back.
+  useEffect(() => {
+    if (watching !== null && printers !== null && !printers.some((printer) => printer.printer_id === watching)) {
+      setWatching(null)
+    }
+  }, [printers, watching])
 
   if (printers === null && error === null) return null
   if (printers !== null && printers.length === 0) return null
@@ -67,19 +83,20 @@ export function NowPrinting() {
       {printers && (
         <ul className="grid gap-2 sm:grid-cols-2" aria-label="Printers">
           {printers.map((printer) => (
-            <PrinterCard key={printer.printer_id} printer={printer} />
+            <PrinterCard key={printer.printer_id} printer={printer} onCamera={() => setWatching(printer.printer_id)} />
           ))}
         </ul>
       )}
+      <CameraDialog
+        printer={printers?.find((printer) => printer.printer_id === watching) ?? null}
+        onClose={() => setWatching(null)}
+      />
     </section>
   )
 }
 
-function PrinterCard({ printer }: { printer: PrinterNow }) {
+function PrinterCard({ printer, onCamera }: { printer: PrinterNow; onCamera: () => void }) {
   const activity = ACTIVITY[printer.activity]
-  const working = printer.activity === 'printing' || printer.activity === 'paused'
-  const hms = printer.hms ?? []
-  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
   return (
     <li
       className="min-w-0 rounded-[6px] border border-line bg-surface px-3 py-2 text-[12.5px]"
@@ -91,6 +108,23 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           {activity.label}
         </span>
       </div>
+      <JobStatus printer={printer} />
+      {printer.activity !== 'offline' && !printer.error && (
+        <Button variant="ghost" size="sm" onClick={onCamera} className="mt-1.5" aria-label={`Camera of ${printer.name}`}>
+          Camera
+        </Button>
+      )}
+    </li>
+  )
+}
+
+/** What the printer is doing: the job, its progress, HMS errors and where it is recorded. */
+function JobStatus({ printer }: { printer: PrinterNow }) {
+  const working = printer.activity === 'printing' || printer.activity === 'paused'
+  const hms = printer.hms ?? []
+  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
+  return (
+    <>
       {printer.error && <p className="mt-1 text-[12px] text-muted">{printer.error}</p>}
       {working && (
         <>
@@ -129,8 +163,8 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           aria-label={`${printer.name} errors`}
           data-testid={`printer-now-hms-${printer.printer_id}`}
         >
-          {hms.map((error) => (
-            <li key={error.code}>
+          {hms.map((error, index) => (
+            <li key={`${index}-${error.code}`}>
               {error.description ?? 'No description from Bambuddy'}{' '}
               <span className="sb-num text-faint">HMS {error.code}</span>
             </li>
@@ -143,15 +177,108 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
             View this print
           </Link>
         ) : printer.bambuddy_url ? (
-          <a
-            href={bambuddyLink(printer.bambuddy_url)}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1.5 inline-block text-[12px] text-accent hover:underline"
-          >
-            Open in Bambuddy (archive {printer.archive_id})
-          </a>
+          // Bambuddy has no page per archive, so the link names the page it opens and the
+          // archive to look for there sits beside it (#2930).
+          <p className="mt-1.5 text-[12px] text-muted">
+            <a
+              href={bambuddyLink(printer.bambuddy_url)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline"
+            >
+              Bambuddy's archives
+            </a>{' '}
+            · archive {printer.archive_id}
+          </p>
         ) : null)}
-    </li>
+    </>
+  )
+}
+
+/**
+ * #981 — the printer's live camera, with what it is printing beside it. The stream is
+ * Bambuddy's MJPEG through ScadBuddy, open only while this dialog is: closing it drops
+ * the image, which ends the request and so Bambuddy's stream. A stream that is refused
+ * or fails falls back to a snapshot with Refresh. One that stalls mid-stream is ended
+ * cleanly by the backend, which browsers do not report as an error, so it keeps its
+ * last frame; Close and reopen to try again. Read only.
+ */
+function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClose: () => void }) {
+  return (
+    <Dialog
+      open={printer !== null}
+      title={printer ? `${printer.name} camera` : 'Camera'}
+      onClose={onClose}
+      size="wide"
+      footer={
+        <Button variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      }
+    >
+      {/* Keyed per printer, so another printer's camera starts live, never in the last
+          one's snapshot mode (which would fetch a snapshot first). */}
+      {printer && <CameraView key={printer.printer_id} printer={printer} />}
+    </Dialog>
+  )
+}
+
+function CameraView({ printer }: { printer: PrinterNow }) {
+  const [live, setLive] = useState(true)
+  const [at, setAt] = useState(() => Date.now())
+  const leaving = useRef(false)
+  /**
+   * Ends a live `<img>`'s request as it leaves (#3207): Chromium can keep a
+   * `multipart/x-mixed-replace` image's request open for a while after the element is
+   * removed, which would keep Bambuddy's stream subscribed after the dialog closed.
+   * Emptying `src` aborts it, and can fire `error`, which is then not a fallback.
+   */
+  const dropStreamOnUnmount = useCallback((img: HTMLImageElement | null) => {
+    leaving.current = false
+    return () => {
+      leaving.current = true
+      if (img) img.src = ''
+    }
+  }, [])
+  return (
+    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
+      <div className="min-w-0">
+        {live ? (
+          <img
+            ref={dropStreamOnUnmount}
+            src={api.printerCameraStreamUrl(printer.printer_id)}
+            alt={`Live camera of ${printer.name}`}
+            className="w-full rounded-[6px] border border-line bg-surface-2"
+            onError={() => {
+              if (leaving.current) return
+              // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
+              setAt(Date.now())
+              setLive(false)
+            }}
+          />
+        ) : (
+          <>
+            <img
+              src={api.printerCameraUrl(printer.printer_id, at)}
+              alt={`Camera snapshot of ${printer.name}`}
+              className="w-full rounded-[6px] border border-line bg-surface-2"
+            />
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted" role="status">
+              The live stream stopped; this is a snapshot.
+              <Button variant="ghost" size="sm" onClick={() => setAt(Date.now())}>
+                Refresh
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setLive(true)}>
+                Try live again
+              </Button>
+            </p>
+          </>
+        )}
+      </div>
+      <div className="min-w-0 text-[12.5px]" data-testid="printer-camera-status">
+        <p className="font-medium text-ink">{ACTIVITY[printer.activity].label}</p>
+        <JobStatus printer={printer} />
+      </div>
+    </div>
   )
 }

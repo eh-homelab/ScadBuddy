@@ -300,15 +300,19 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     for its file parameters (``asset_operations.py``), font installs
     (``font_operations.py``), preset writes (``preset_operations.py``) and deleting
     and restoring Bambuddy library files (``library_file_operations.py``), and
-    copying, moving and renaming them (``library_file_moves.py``). Imported
+    copying, moving and renaming them (``library_file_moves.py``), and uploading,
+    renaming and moving library files and making, renaming, moving and deleting folders
+    (``library_write_operations.py``). Imported
     here, as they import this module. Their runs are the routes' former bodies, which
     take the whole ``AppState`` and read services the ``Core`` does not name, so any
     other core is refused here rather than failing inside an operation (review #1126 1.2)."""
     from scadbuddy.api.deps import AppState
     from scadbuddy.library.asset_operations import asset_kinds
+    from scadbuddy.library.attachment_operations import attachment_kinds
     from scadbuddy.library.font_operations import font_kinds
     from scadbuddy.library.library_file_moves import library_file_move_kinds
     from scadbuddy.library.library_file_operations import library_file_kinds
+    from scadbuddy.library.library_write_operations import library_write_kinds
     from scadbuddy.library.media_operations import media_kinds
     from scadbuddy.library.model_operations import model_kinds
     from scadbuddy.library.output_operations import output_kinds
@@ -329,6 +333,8 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         *preset_kinds(core),
         *library_file_kinds(core),
         *library_file_move_kinds(core),
+        *library_write_kinds(core),
+        *attachment_kinds(core, components),
     ]
 
 

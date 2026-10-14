@@ -149,6 +149,12 @@ interface Props {
    * if nothing were wrong.
    */
   rejected?: boolean
+  /**
+   * #2444 — why nothing renders now: a value on the form is out of range (or no colour).
+   * The last render stays, marked as not of these values; with none, this is said instead
+   * of "Change a parameter to render.", which reads as if nothing were wrong.
+   */
+  blocked?: string
   /** #937 — where OpenSCAD's warnings point the reader to fix them: the source editor. */
   sourceLink?: ReactNode
 }
@@ -163,6 +169,7 @@ export function Preview({
   controls,
   covered,
   rejected = false,
+  blocked,
   sourceLink,
 }: Props) {
   // #1638 — the job this render waits on, once read: whether a worker has it yet,
@@ -437,7 +444,20 @@ export function Preview({
         />
       )}
 
-      {!shown && !failed && !rendering && !rejected && (
+      {blocked && (
+        <p
+          data-testid="preview-blocked"
+          className={
+            shown
+              ? 'pointer-events-none absolute inset-x-0 bottom-14 mx-auto w-fit max-w-[90%] rounded-[6px] border border-warn/40 bg-surface/90 px-3 py-1.5 text-center text-[12px] text-warn backdrop-blur-sm'
+              : 'absolute inset-0 flex items-center justify-center px-6 text-center text-[13px] text-warn'
+          }
+          style={clear}
+        >
+          {shown ? `Showing the last render. ${blocked} Fix it to render again.` : `${blocked} Fix it to render.`}
+        </p>
+      )}
+      {!shown && !failed && !rendering && !rejected && !blocked && (
         <p
           className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
           style={clear}

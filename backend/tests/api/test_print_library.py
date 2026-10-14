@@ -19,7 +19,12 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy import clearance, print_run
+from scadbuddy.bambuddy.filaments3mf import SlicedProfile
+from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
+from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
@@ -28,7 +33,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
-from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
@@ -37,6 +42,7 @@ from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.test_clearance import two_objects_3mf
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -142,7 +148,8 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
     assert plain["files"] and {row["file_type"] for row in plain["files"]} == {"3mf"}
     assert all(row["printable"] for row in plain["files"])
     sliced = [row for row in every["files"] if row["file_type"] == "gcode.3mf"]
-    assert sliced and not any(row["printable"] for row in sliced)
+    # #2671: a sliced file prints as it is, and says it is sliced (so it is never arranged).
+    assert sliced and all(row["printable"] and row["sliced"] for row in sliced)
     assert plain["hidden"] == len(every["files"]) - len(plain["files"])
     # The folder tree arrives flattened, each with its depth.
     assert {"Supplies": 0, "Storage": 1}.items() <= {
@@ -374,6 +381,65 @@ def test_a_deleted_files_choices_are_its_404_whatever_else_fails(client: TestCli
     assert response.json()["type"].endswith("/bambuddy-not-found")
 
 
+def sliced_3mf(
+    *,
+    printer_model: str = "Bambu Lab H2C",
+    nozzle: str = "0.4",
+    plates: tuple[int, ...] = (1,),
+) -> bytes:
+    """A sliced file as Bambu Studio exports one (#2671): G-code for ``plates``, and
+    ``slice_info.config`` saying what each was sliced for and which filament it uses."""
+    info = "".join(
+        f"""<plate>
+          <metadata key="index" value="{index}"/>
+          <metadata key="nozzle_diameters" value="{nozzle}"/>
+          <metadata key="prediction" value="{1800 * index}"/>
+          <metadata key="weight" value="{4.5 * index}"/>
+          <filament id="1" type="PLA" color="#0047BB" used_m="1.2" used_g="{4.5 * index}"/>
+        </plate>"""
+        for index in plates
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr(
+            "Metadata/project_settings.config",
+            json.dumps(
+                {
+                    "printer_model": printer_model,
+                    "printer_settings_id": f"{printer_model} {nozzle} nozzle",
+                    "print_settings_id": "0.20mm Standard @BBL H2C",
+                    "curr_bed_type": "Textured PEI Plate",
+                    "nozzle_diameter": [nozzle, nozzle],
+                    "filament_colour": ["#0047BB"],
+                    "filament_type": ["PLA"],
+                }
+            ),
+        )
+        archive.writestr("Metadata/slice_info.config", f"<config>{info}</config>")
+        for index in plates:
+            archive.writestr(f"Metadata/plate_{index}.gcode", "; sliced\n")
+    return buffer.getvalue()
+
+
+def sliced_file(file_id: int = 104, content: bytes | None = None) -> respx.Route:
+    """A sliced library file with a hash, so its slots and profile are read from it."""
+    return library_file(
+        file_id,
+        file_type="gcode.3mf",
+        content=sliced_3mf() if content is None else content,
+        file_hash=hashlib.sha256(f"sliced-{file_id}".encode()).hexdigest(),
+    )
+
+
+SLICED_RUN = {
+    "printer_id": 1,
+    "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+}
+
+
 @respx.mock
 def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
     """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
@@ -393,22 +459,437 @@ def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: Te
 
 
 @respx.mock
-def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) -> None:
+def test_a_sliced_file_is_queued_as_it_is_with_nothing_sliced_or_uploaded(
+    client: TestClient,
+) -> None:
+    """#2671: the file itself is queued, with the spools chosen for its slots and the
+    options remembered for it (a manual start among them); nothing is uploaded or
+    sliced, and the user's file is only read."""
     configure(client)
-    library_file(104, file_type="gcode.3mf")
+    upload = flow_copy_routes()
+    sliced_file(104)
+    run_routes()
+    sliced = slice_routes()
+    queued = queue_route()
+    assert (
+        client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "model", "key": "library:104", "options": {"manual_start": True}},
+        ).status_code
+        == 200
+    )
+
+    response = run_library(client, 104, json=SLICED_RUN)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["library_file_id"] == 104
+    assert response.json()["sliced_library_file_id"] == 104
+    assert response.json()["slice_job_id"] is None
+    assert not sliced.called and not upload.called
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["library_file_id"] == 104
+    assert sent["plate_id"] == 1
+    assert sent["manual_start"] is True
+    assert sent["filament_overrides"][0]["slot_id"] == 1
+    assert not [
+        call
+        for call in respx.calls
+        if "/library/files/104" in call.request.url.path and call.request.method != "GET"
+    ]
+
+
+@respx.mock
+def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -> None:
+    """#2671: the dialog shows the baked-in slicer choices read-only, and its slots are
+    the ones the file was sliced with."""
+    configure(client)
+    sliced_file(104, sliced_3mf(plates=(1, 3)))
+    run_routes()
+
+    choices = client.get("/api/v1/print/library/104/choices")
+
+    assert choices.status_code == 200, choices.text
+    profile = choices.json()["sliced"]
+    assert profile["printer_model"] == "Bambu Lab H2C"
+    assert profile["nozzle_diameters"] == ["0.4"]
+    assert profile["process"] == "0.20mm Standard @BBL H2C"
+    assert profile["bed_type"] == "Textured PEI Plate"
+    assert [(p["index"], p["print_seconds"], p["weight_g"]) for p in profile["plates"]] == [
+        (1, 1800, 4.5),
+        (3, 5400, 13.5),
+    ]
+    assert [slot["slot_id"] for slot in choices.json()["filaments"]["slots"]] == [1]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("content", "plate_id", "kind", "warning", "queued_plate", "held"),
+    [
+        pytest.param(
+            sliced_3mf(printer_model="Bambu Lab X1 Carbon"),
+            1,
+            "sliced-other-model",
+            "Sliced for a Bambu Lab X1 Carbon; 3DP-31B-598 is a H2C. Held for a manual start.",
+            1,
+            True,
+            id="another-model",
+        ),
+        pytest.param(
+            sliced_3mf(nozzle="0.6"),
+            1,
+            "sliced-nozzle-missing",
+            "Sliced for a 0.6 mm nozzle; 0.2, 0.4 mm is mounted on 3DP-31B-598."
+            " Held for a manual start: swap it before you start the print.",
+            1,
+            True,
+            id="another-nozzle",
+        ),
+        pytest.param(
+            sliced_3mf(plates=(1,)),
+            2,
+            "sliced-plate-missing",
+            "This file holds no plate 2, so plate 1 is queued instead.",
+            1,
+            False,
+            id="no-such-plate",
+        ),
+    ],
+)
+def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
+    client: TestClient,
+    content: bytes,
+    plate_id: int,
+    kind: str,
+    warning: str,
+    queued_plate: int,
+    held: bool,
+) -> None:
+    """#2671: a sliced file is never refused. A mismatch is a warning in the check and
+    on the run, so the user sets it right before starting the print. #2954: one sliced
+    for another model or nozzle is held for a manual start even though the options
+    remembered for it say to start at once, so it cannot start before anyone reads the
+    warning."""
+    configure(client)
+    sliced_file(104, content)
+    run_routes()
+    queued = queue_route()
+    assert (
+        client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "model", "key": "library:104", "options": {"manual_start": False}},
+        ).status_code
+        == 200
+    )
+
+    check = client.post(
+        "/api/v1/print/library/104/check", json={**SLICED_RUN, "plate_id": plate_id}
+    )
+    run = run_library(client, 104, json={**SLICED_RUN, "plate_id": plate_id})
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert {"kind": kind, "slot_id": None, "message": warning} in check.json()["warnings"]
+    assert run.status_code == 200, run.text
+    assert any(w["kind"] == kind and w["message"] == warning for w in run.json()["warnings"])
+    assert queued.call_count == 1
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["plate_id"] == queued_plate
+    assert sent["manual_start"] is held
+
+
+@respx.mock
+def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
+    """#2671: an H2C file for the 0.4 the printer has, on a plate it holds: nothing to
+    warn of, though the printer is not one ScadBuddy chooses presets for by name."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+
+    check = client.post("/api/v1/print/library/104/check", json=SLICED_RUN)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert check.json()["warnings"] == []
+
+
+@respx.mock
+def test_a_sliced_file_is_never_preview_sliced(client: TestClient) -> None:
+    configure(client)
+    sliced_file(104)
     run_routes()
     sliced = slice_routes()
 
-    run = client.post("/api/v1/print/library/104/run", json=body())
-    choices = client.get("/api/v1/print/library/104/choices")
-    filaments = client.get("/api/v1/print/library/104/filaments")
+    started = client.post(
+        "/api/v1/print/library/104/preview-slice", json=SLICED_RUN, headers=press()
+    )
 
-    for response in (run, choices, filaments):
-        assert response.status_code == 422, response.text
-        assert response.json()["detail"] == (
-            "file-104.gcode.3mf is sliced already. Print it from Bambuddy."
-        )
+    # #2700: the route answers 202 once the operation is recorded; the refusal is the
+    # operation's failure, so it is followed until it settles.
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "failed", op
+    assert "sliced already" in json.dumps(op["error"])
     assert not sliced.called
+
+
+@respx.mock
+def test_the_dialogs_background_slice_looks_up_no_earlier_slice(client: TestClient) -> None:
+    """#2691 review: the background slice planned the run, which looked up the recorded
+    slices (GETs) and then sliced anyway, as it slices to show the toolpath."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    copy_kept(upload)
+    kept = slice_kept()
+    before = kept.call_count
+
+    started = client.post("/api/v1/print/library/89/preview-slice", json=request, headers=press())
+
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    assert sliced.call_count == 2
+    assert kept.call_count == before
+
+
+@respx.mock
+def test_a_preview_of_a_plate_with_no_slice_plan_fails_saying_so(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2691 review: a plate with nothing to slice is refused with a message, not an
+    assert python -O would strip into an AttributeError."""
+    from scadbuddy.bambuddy.print_run import plan_run as real
+
+    async def planless(*args: Any, **kwargs: Any) -> Any:
+        planned = await real(*args, **kwargs)
+        return planned.model_copy(
+            update={"plates": [p.model_copy(update={"plan": None}) for p in planned.plates]}
+        )
+
+    monkeypatch.setattr("scadbuddy.bambuddy.preview.plan_run", planless)
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    started = client.post("/api/v1/print/library/89/preview-slice", json=request, headers=press())
+
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "failed", op
+    assert "nothing to slice" in json.dumps(op["error"])
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_second_print_of_the_same_choices_queues_scadbuddys_own_slice(
+    client: TestClient,
+) -> None:
+    """#2671: ScadBuddy recorded the slice of its copy with these presets, and Bambuddy
+    still has it, so printing the same again queues that slice rather than slicing."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queued = queue_route()
+    slice_kept()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 1
+    assert second.json()["sliced_library_file_id"] == 77
+    assert second.json()["slice_job_id"] is None
+    assert [json.loads(call.request.content)["library_file_id"] for call in queued.calls] == [
+        77,
+        77,
+    ]
+    # #2955: said, so no slice job does not read as a slice skipped by mistake.
+    reused = [w for w in second.json()["warnings"] if w["kind"] == "slice-reused"]
+    assert reused == [
+        {
+            "kind": "slice-reused",
+            "slot_id": None,
+            "message": "Plate 1 queues ScadBuddy's earlier slice of the same choices;"
+            " nothing was sliced again.",
+        }
+    ]
+    assert not [w for w in first.json()["warnings"] if w["kind"] == "slice-reused"]
+
+
+@respx.mock
+def test_a_recorded_slice_whose_id_now_holds_another_file_is_sliced_again(
+    client: TestClient,
+) -> None:
+    """#2691 review (Blocking): Bambuddy hands a deleted file's id to the next file, so a
+    slice matched by id alone could queue another model's G-code. A reuse needs the
+    file at the id to have the hash the run recorded; another file there is sliced
+    again."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queued = queue_route()
+    slice_kept(file_hash="a" * 64)
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    copy_kept(upload)
+    # The slice was deleted, and its id went to another file: still a gcode.3mf.
+    slice_kept(file_hash="b" * 64)
+
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2
+    assert second.json()["slice_job_id"] is not None
+    assert not [w for w in second.json()["warnings"] if w["kind"] == "slice-reused"]
+    assert queued.call_count == 2
+
+
+@respx.mock
+def test_a_slice_whose_hash_cannot_be_read_still_queues_and_is_never_reused(
+    client: TestClient,
+) -> None:
+    """#2691 review: the hash is read once the plate is queued, so a failed read must
+    not fail the run; the slice is then only never reused."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queue_route()
+    respx.get(f"{API}/library/files/77").mock(return_value=httpx.Response(500))
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    assert first.status_code == 200, first.text
+    copy_kept(upload)
+    slice_kept()
+
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2
+
+
+@respx.mock
+def test_a_reprint_looks_up_every_plates_recorded_slice_at_once(client: TestClient) -> None:
+    """#2691 review: each plate's recorded slices are a GET each; a reprint of many
+    plates reads them together rather than one plate after another."""
+    configure(client)
+    one_color(67)
+    upload = flow_copy_routes()
+    library_file(67, plates="library-plates-multi.json")
+    run_routes()
+    # Each plate's slice its own job and its own file, so each records its own slice.
+    jobs = iter([9, 10])
+    sliced = respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"job_id": next(jobs), "status": "pending"}
+        )
+    )
+    for job_id, file_id in ((9, 77), (10, 78)):
+        respx.get(f"{API}/slice-jobs/{job_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": job_id,
+                    "status": "completed",
+                    "result": {"library_file_id": file_id, "filament_used_g": 12.0},
+                },
+            )
+        )
+    queue_route()
+    request = {
+        **body(),
+        "all_plates": True,
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    }
+    in_flight, most = 0, 0
+
+    async def kept(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, most
+        in_flight += 1
+        most = max(most, in_flight)
+        await asyncio.sleep(0.2)
+        in_flight -= 1
+        file_id = int(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(
+            200,
+            json={
+                "id": file_id,
+                "filename": "sliced.gcode.3mf",
+                "file_type": "gcode.3mf",
+                "file_hash": f"{file_id:064x}",
+            },
+        )
+
+    # Read by the first run for each slice's hash (#2691 review), then by the reprint.
+    respx.get(url__regex=rf"{API}/library/files/7[78]$").mock(side_effect=kept)
+    first = run_library(client, 67, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    most = 0
+
+    second = run_library(client, 67, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2  # the first run's two plates; the second slices none
+    assert most == 2
+
+
+@respx.mock
+def test_a_recorded_slice_bambuddy_no_longer_has_is_sliced_again(client: TestClient) -> None:
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queue_route()
+    respx.get(f"{API}/library/files/77").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2
 
 
 @respx.mock
@@ -563,6 +1044,31 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
     assert check.status_code == 200, check.text
     assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
     assert not sliced.called
+
+
+@respx.mock
+def test_a_library_run_is_attributed_to_who_started_it(
+    client: TestClient, gate: Gate, activity_index: ActivityIndex
+) -> None:
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    gated_slice_routes(gate)
+    queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    response = client.post(
+        "/api/v1/print/library/89/run",
+        json=request,
+        headers={"X-ScadBuddy-Agent-Author": "token:t9"},
+    )
+
+    assert response.status_code == 202, response.text
+    got = asyncio.run(activity_index.get(f"print_run:{response.json()['id']}"))
+    gate.open()
+    assert got is not None and got.principal == "token:t9"
 
 
 @respx.mock
@@ -773,6 +1279,7 @@ def test_a_library_print_s_progress_is_its_newest_run_s_and_is_followed(
             200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
         )
     )
+    slice_kept()
     queue_route(item_id=52)
     second = run_library(client, 89, json={**body(), **plan, "request_id": "second"})
     assert second.status_code == 200, second.text
@@ -880,6 +1387,18 @@ def flow_copy_routes(listed: list[dict[str, Any]] | None = None) -> respx.Route:
     )
 
 
+def copy_kept(upload: respx.Route) -> None:
+    """The copy the first run uploaded, still in the inbox, so a second run takes it."""
+    payload = _uploaded_3mf(upload)
+    row = {"id": 141, "filename": uploaded_name(upload), "file_type": "3mf"}
+    flow_copy_routes([{**row, "file_size": len(payload)}])
+    respx.get(f"{API}/library/files/141").mock(
+        return_value=httpx.Response(
+            200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
+        )
+    )
+
+
 def uploaded_name(route: respx.Route) -> str:
     content: bytes = route.calls.last.request.content
     return content.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
@@ -933,8 +1452,8 @@ def test_a_library_file_bambuddy_slices_is_sliced_for_the_high_flow_chosen(
 
 @respx.mock
 def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) -> None:
-    """The same bytes under the same name in the inbox are sliced again, not uploaded
-    again, so printing a file twice leaves one copy."""
+    """The same bytes under the same name in the inbox are not uploaded again, so
+    printing a file twice leaves one copy; its slice is queued again too (#2671)."""
     configure(client)
     one_color(89)
     first = flow_copy_routes()
@@ -953,11 +1472,13 @@ def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) ->
         )
     )
 
+    slice_kept()
+
     # Two copies, so it is a second run rather than the first one's answer repeated.
     response = run_library(client, 89, json={**high_flow_run(), "copies": 2})
 
     assert response.status_code == 200, response.text
-    assert sliced.call_count == 2
+    assert sliced.call_count == 1
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert first.call_count == 1
 
@@ -1392,3 +1913,127 @@ def test_a_library_print_runs_when_bambuddy_cannot_read_its_filaments(
         "/api/v1/library/files/67/filament-requirements",
         "/api/v1/library/files/141/filament-requirements",
     }, asked
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("sequence", "warned"), [("by object", True), ("by layer", False), (None, False)]
+)
+def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
+    client: TestClient, tmp_path: Path, sequence: str | None, warned: bool
+) -> None:
+    """#956: two objects 15 mm apart on an H2C, whose toolhead needs 49 mm. Printing by
+    object, the check warns and refuses nothing; by layer it has nothing to say."""
+    configure(client)
+    download = library_file(89, content=two_objects_3mf(tmp_path / "bins.3mf", apart=15))
+    run_routes()
+    sliced = slice_routes()
+    request = {**body(), **({"print_sequence": sequence} if sequence else {})}
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+
+    assert check.status_code == 200, check.text
+    kinds = [warning["kind"] for warning in check.json()["warnings"]]
+    assert check.json()["errors"] == []
+    assert ("sequence-clearance" in kinds) is warned
+    assert check.json()["objects"] == (2 if warned else None)
+    assert not sliced.called
+    # #2976: by object or not, the file is downloaded as often: once for its slots, once
+    # for the nozzle check, whose read the objects come from.
+    assert download.call_count == 2
+
+
+@respx.mock
+def test_the_by_object_pairs_are_compared_off_the_event_loop(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3251: the pairwise comparison is quadratic in a file's objects, and ran on the
+    API's event loop, where a large one blocked every request until it finished."""
+    configure(client)
+    library_file(89, content=two_objects_3mf(tmp_path / "bins.3mf", apart=15))
+    run_routes()
+    slice_routes()
+    real = clearance.clearance_warnings
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(clearance, "clearance_warnings", recorded)
+    monkeypatch.setattr(print_run, "clearance_warnings", recorded, raising=False)
+
+    check = client.post(
+        "/api/v1/print/library/89/check", json={**body(), "print_sequence": "by object"}
+    )
+
+    assert check.status_code == 200, check.text
+    assert "sequence-clearance" in [w["kind"] for w in check.json()["warnings"]]
+    assert on_loop == [False]
+
+
+@respx.mock
+def test_a_by_object_check_of_every_plate_names_each_plate_and_counts_none(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#2976: checking every plate at once, each plate's clash is named, and no one
+    plate's object count stands for all of them."""
+    configure(client)
+    library_file(
+        89,
+        content=two_objects_3mf(tmp_path / "bins.3mf", apart=15, plates=2),
+        plates="library-plates-multi.json",
+    )
+    run_routes()
+    slice_routes()
+
+    check = client.post(
+        "/api/v1/print/library/89/check",
+        json={**body(), "print_sequence": "by object", "all_plates": True},
+    )
+
+    assert check.status_code == 200, check.text
+    clashes = [w["message"] for w in check.json()["warnings"] if w["kind"] == "sequence-clearance"]
+    assert any("Plate 1" in message for message in clashes), clashes
+    assert any("Plate 2" in message for message in clashes), clashes
+    assert check.json()["objects"] is None
+
+
+def _status(*sizes: str) -> PrinterStatus:
+    return PrinterStatus(
+        id=1, name="P", connected=True, nozzles=[NozzleInfo(nozzle_diameter=s) for s in sizes]
+    )
+
+
+def test_a_sliced_file_records_its_own_nozzle_else_the_printers() -> None:
+    """#2691 review: with no diameter in the file, the run recorded the dialog's nozzle,
+    which is hidden for a sliced file and says nothing of it."""
+    request = PrintRunRequest.model_validate(
+        SLICED_RUN | {"choices": {"nozzles": [{"size": "0.2"}]}}
+    )
+    stated = SlicedProfile(nozzle_diameters=["0.6"])
+
+    def size(profile: SlicedProfile | None, status: PrinterStatus | None) -> str:
+        prepared = PreparedPlates(plate_ids=[1], printer_id=1, printer_status=status)
+        return print_run.sliced_nozzle_size(profile, prepared, request)
+
+    assert size(stated, _status("0.4")) == "0.6"
+    assert size(SlicedProfile(), _status("0.4")) == "0.4"
+    assert size(None, None) == "0.2"
+
+
+def test_a_printer_reporting_no_nozzle_leaves_a_sliced_files_nozzle_unchecked() -> None:
+    """#2691 review: a printer that reports no nozzles said nothing, which reads as fine."""
+    profile = SlicedProfile(printer_model="Bambu Lab H2C", nozzle_diameters=["0.6"])
+    printer = Printer(id=1, name="P", model="H2C")
+
+    [warning] = print_run.sliced_warnings(profile, printer, _status(), [1])
+
+    assert warning.kind == "sliced-nozzle-missing"
+    assert "could not be checked" in warning.message
+    assert print_run.sliced_warnings(profile, printer, _status("0.6"), [1]) == []
+    assert print_run.sliced_warnings(SlicedProfile(), printer, _status(), [1]) == []

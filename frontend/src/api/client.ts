@@ -4,6 +4,7 @@ import type {
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  BackgroundTask,
   DecisionCreate,
   FixApply,
   FixPreview,
@@ -81,9 +82,13 @@ import type {
   PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
   TimelapseFrames,
   PrintPage,
+  ActivityDetail,
+  ActivityFacets,
+  ActivityPage,
   PrintProgress,
   PrintersNow,
   QueueItem,
@@ -94,6 +99,8 @@ import type {
   TrayAssigned,
   PrintRun,
   FlowDecided,
+  FlowProposal,
+  FlowRunQueue,
   FlowDefinition,
   FlowGrantSpec,
   FlowGrantView,
@@ -153,6 +160,7 @@ import type {
   AiCredentialList,
   AiCredentialSave,
 } from './aiCredential'
+import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -592,6 +600,51 @@ export async function command<T>(
 }
 
 /**
+ * A multipart upload as a command (#1054). XHR rather than `fetch`, which reports no
+ * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
+ * to 1. `form` builds the body afresh for each re-send.
+ */
+function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+  // A command (#1054): one key for this upload, kept on a re-send after an answer
+  // that never arrived, so the server adds the item once.
+  const key = newRequestId()
+  const send = () =>
+    new Promise<{ status: number; body: T | OperationAccepted }>((resolve, reject) => {
+      const body = form()
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}${path}`)
+      xhr.setRequestHeader('Accept', 'application/json')
+      xhr.setRequestHeader('Idempotency-Key', key)
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+      })
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as T | OperationAccepted })
+          return
+        }
+        reject(new ApiError(xhrProblem(xhr)))
+      }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
+      xhr.onerror = () =>
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
+      xhr.onabort = () =>
+        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+      xhr.send(body)
+    })
+  // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+  return reattach(send, undefined, { bounded: true }).then((first) => followOperation<T>(first))
+}
+
+/**
  * A command's first answer to its end: the route's own body, or a 202's operation
  * followed through `GET /operations/{id}` to its result, or to the problem the route
  * would have answered.
@@ -707,11 +760,24 @@ export const api = {
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
-      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(reason ? { reason } : {}),
+        // #2482: approve a parent's proposal, exactly the one shown (its hash).
+        ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+      }),
     }),
+
+  /** #2482 — a run's one queue, from the agent: its own calls, its child sessions' and its grant request. */
+  getFlowRunQueue: (id: string) => request<FlowRunQueue>(`/ai/flow-runs/${seg(id)}/queue`),
+
+  /** #2482 — a parent's proposal beside the call it narrows (the person's only). */
+  getFlowProposal: (id: string, callId: string) =>
+    request<FlowProposal>(`/workflow-runs/${seg(id)}/proposals/${seg(callId)}`),
 
   // #2350 — the Flows tab: every registered flow version, one with its script, and a
   // run started from it. #2487: its editor's Save, check, completion, diff and restore.
@@ -1022,48 +1088,18 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ): Promise<ModelSummary> => {
-    // A command (#1054): one key for this upload, kept on a re-send after an answer
-    // that never arrived, so the server adds the item once.
-    const key = newRequestId()
-    const send = () =>
-      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
+  ): Promise<ModelSummary> =>
+    uploadForm<ModelSummary>(
+      `/models/${seg(slug)}/media`,
+      () => {
         const body = new FormData()
         body.append('file', file)
         if (options.caption) body.append('caption', options.caption)
         if (options.poster) body.append('poster', options.poster)
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-        xhr.setRequestHeader('Accept', 'application/json')
-        xhr.setRequestHeader('Idempotency-Key', key)
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-        })
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
-            return
-          }
-          reject(new ApiError(xhrProblem(xhr)))
-        }
-        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-        // have landed, and `mayHaveRun` says so.
-        xhr.onerror = () =>
-          reject(
-            new ApiError({
-              type: UNANSWERED,
-              title: 'The upload failed',
-              status: 0,
-              detail: 'The upload failed',
-            }),
-          )
-        xhr.onabort = () =>
-          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-        xhr.send(body)
-      })
-    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
-    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
-  },
+        return body
+      },
+      onProgress,
+    ),
 
   patchMedia: (slug: string, id: string, caption: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
@@ -1299,6 +1335,41 @@ export const api = {
       body: JSON.stringify({ filename }),
     }),
 
+  /** #309 — adds a photo or video of the finished object to the print. */
+  addPrintAttachment: (
+    archiveId: number,
+    file: File,
+    caption: string,
+    onProgress?: (fraction: number) => void,
+  ): Promise<PrintAttachment> =>
+    uploadForm<PrintAttachment>(
+      `/prints/${archiveId}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (caption) body.append('caption', caption)
+        return body
+      },
+      onProgress,
+    ),
+
+  /** #309 — an empty caption takes it off. */
+  captionPrintAttachment: (archiveId: number, id: number, caption: string) =>
+    command<PrintAttachment>(`/prints/${archiveId}/attachments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    }),
+
+  deletePrintAttachment: (archiveId: number, id: number) =>
+    command<void>(`/prints/${archiveId}/attachments/${id}`, { method: 'DELETE' }),
+
+  /** #309 — copies the attachment into the template's gallery. */
+  promotePrintAttachment: (archiveId: number, id: number, slug: string) =>
+    command<ModelSummary>(`/prints/${archiveId}/attachments/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
+    }),
+
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
@@ -1436,6 +1507,14 @@ export const api = {
   getLibraryPreviewSlice: (fileId: number, jobId: number) =>
     request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
 
+  /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
+  previewToolpathUrl: (outputId: string, jobId: number) =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+
+  /** #2072 — as `previewToolpathUrl`, for a library file's. */
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+
   /**
    * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
    * on the person's own "yes".
@@ -1548,6 +1627,12 @@ export const api = {
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
 
+  /** #981 — the printer's live camera, Bambuddy's MJPEG for an `<img>`: closing the
+   * image (unmounting it) ends the stream. */
+  printerCameraStreamUrl: (printerId: number) => `${API_BASE}/print/printers/${printerId}/camera/stream`,
+  /** #796 — one camera frame; `at` makes each refresh a new request. */
+  printerCameraUrl: (printerId: number, at: number) => `${API_BASE}/print/printers/${printerId}/camera?at=${at}`,
+
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
 
@@ -1570,6 +1655,24 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<PrintPage>(`/prints${suffix}`)
   },
+  /** The activity list, newest first, a page at a time; `cursor` is the last page's
+   * `next_cursor`. A `kind` or `status` of several comma-joined values is sent repeated. */
+  listActivity: (query: ActivityQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(apiParams(query))) {
+      if (key === 'kind' || key === 'status') {
+        for (const one of splitList(value)) search.append(key, one)
+      } else search.set(key, value)
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ActivityPage>(`/activity${suffix}`)
+  },
+  activityFacets: (since?: string) =>
+    request<ActivityFacets>(`/activity/facets${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  getActivity: (id: string, advanced: boolean) =>
+    request<ActivityDetail>(`/activity/${seg(id)}${advanced ? '?advanced=1' : ''}`),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
@@ -1745,6 +1848,10 @@ export const api = {
   /** #169 — library checkouts on the volume, with the models whose live pins read each. */
   listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
 
+  /** #2770 — removes one checkout from the volume; a 409 while any live pin or running render reads it. */
+  removeLibraryCheckout: (name: string, commit: string) =>
+    command<void>(`/libraries/${seg(name)}?commit=${encodeURIComponent(commit)}`, { method: 'DELETE' }),
+
   /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
   listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
 
@@ -1917,6 +2024,13 @@ export const api = {
   /** #2329 — deletes one file from a session's workspace. */
   deleteAiSessionFile: (id: string, path: string) =>
     request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
+
+  /** A session's background tasks (CronCreate, ScheduleWakeup): the active ones first, then the last ended. */
+  listAiBackgroundTasks: (id: string) => request<{ tasks: BackgroundTask[] }>(`/ai/sessions/${seg(id)}/background-tasks`),
+
+  /** Cancels one; the session's owner only. */
+  cancelAiBackgroundTask: (id: string, taskId: string) =>
+    request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
 
   /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
   getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),

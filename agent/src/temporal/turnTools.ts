@@ -1,7 +1,7 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { AuditLog } from '../audit/log.js'
@@ -12,11 +12,14 @@ import { harnessToolName } from '../plugins/registry.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
+import type { FlowBlobStore } from './flowBlobs.js'
 import { type FlowRuns, flowOf } from './flowRuns.js'
 import { endClient, type KeptClient, type KeptConnection, neverSent, type SessionClients, sessionGone, transportBroken } from './sessionClients.js'
 import {
   type ApprovalRecords,
   durableSession,
+  flowResult,
+  GRANT_REVOKED,
   NOT_APPROVED,
   type ResultBlobs,
   resultText,
@@ -129,6 +132,8 @@ export type TurnServers = {
   secrets: readonly string[]
   /** The plugin packages the turn's Claude Code loads; only for a listing (`TurnContext.listing`). */
   packages?: TurnPackage[]
+  /** Said to the model in the turn's system prompt (the built-ins offered as turn tools, #2393). */
+  notes?: string[]
   release(): void | Promise<void>
 }
 
@@ -162,6 +167,8 @@ export type TurnToolsDeps = {
   listTimeoutMs?: number | undefined
   /** Where a call's result images are kept for `view_tool_images` (toolActivities.ts `resultText`). */
   blobs?: ResultBlobs | undefined
+  /** Where a flow's call keeps the images it returned, as its ScadBuddy tools' do (#2578, flowBlobs.ts). */
+  flowBlobs?: FlowBlobStore | undefined
   /** This replica's kept MCP clients, per durable session and plugin (#2581); without it every call opens its own. */
   clients?: SessionClients<ListedTools> | undefined
 }
@@ -193,10 +200,15 @@ export type TurnPackage = {
   builtin_tools: string[]
 }
 
-export type TurnToolsResult = { tools: TurnToolEntry[]; packages: TurnPackage[] }
+export type TurnToolsResult = {
+  tools: TurnToolEntry[]
+  packages: TurnPackage[]
+  /** Appended to the turn's system prompt (TurnServers.notes); absent when there is nothing to say. */
+  system_note?: string
+}
 
 /** A client on an in-process MCP server (an SDK server's `instance`), made fresh for each use. */
-export async function connectInProcess(create: () => McpServer): Promise<Client> {
+export async function connectInProcess(create: () => { connect(transport: Transport): Promise<void> }): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await create().connect(serverSide)
   const client = new Client({ name: 'scadbuddy-durable-turn', version: '1' })
@@ -406,6 +418,8 @@ type TurnCaller = {
   requestId: string
   tiers: readonly Tier[] | undefined
   approved(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
+  /** Whether a call approved by a grant now revoked or expired would otherwise have run (#2871). */
+  lapsed(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
 }
 
 async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string): Promise<TurnCaller> {
@@ -427,6 +441,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       // A token starter's run acts with what its token holds now, as toolActivities' flowCaller.
       tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
       approved: (requestId, binding) => flows.approved(requestId, binding?.inputHash),
+      lapsed: async (requestId, binding) => (await flows.lapsed?.(requestId, binding?.inputHash)) ?? false,
     }
   }
   const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
@@ -437,6 +452,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
     requestId: durableRequestId(session, runId, toolUseId),
     tiers: await turnTiers(owner, sent, deps),
     approved: async (requestId, binding) => (await deps.approvals?.approved(requestId, binding)) ?? false,
+    lapsed: async (requestId, binding) => (await deps.approvals?.lapsed?.(requestId, binding)) ?? false,
   }
 }
 
@@ -495,7 +511,8 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         // Said once, after the listing, so a retried attempt does not say it again.
         const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : [])), ...tooLong]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
-        return { tools, packages: set.packages ?? [] }
+        const notes = set.notes ?? []
+        return { tools, packages: set.packages ?? [], ...(notes.length ? { system_note: notes.join('\n\n') } : {}) }
       })
     },
     [TURN_TOOLS_CLOSE_ACTIVITY]: async (): Promise<void> => {
@@ -572,6 +589,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const binding = deps.audit ? { inputHash: deps.audit.hash(name, fields) } : undefined
       if (tier === 'outward') {
         if (!(await caller.approved(requestId, binding))) {
+          // As runAsActivity: a call its grant approved, revoked or expired since, says so.
+          if (await caller.lapsed(requestId, binding)) {
+            await refuse(`${name}: the run's grant was revoked or expired before this call ran`, GRANT_REVOKED)
+          }
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
         }
       }
@@ -593,18 +614,23 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       } finally {
         clearInterval(heartbeat)
       }
-      // The images go to the session's blobs, never into the payload; their names and
-      // the text go through the same scrub.
-      const text = scrub(
-        (reset ? `[${reset}]\n\n` : '') +
-        await resultText(
-          (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
-          deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
-        ),
-      )
+      // The images go to the session's blobs, or a flow's to its run's (#2578), never into
+      // the payload; their names and the text go through the same scrub.
+      const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
+      const flow = caller.context.flow
+      // An errored call keeps no image: nothing would point at it, yet a flow's would count
+      // toward its run's FLOW_IMAGES_MAX.
+      const answer =
+        flow !== undefined && !result.isError
+          ? await flowResult(content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+          : await resultText(
+              content,
+              flow === undefined && deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
+            )
+      const text = scrub((reset ? `[${reset}]\n\n` : '') + (typeof answer === 'string' ? answer : answer.text))
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
-      return text
+      return typeof answer === 'string' ? text : { text, images: answer.images }
     })
   }
 }

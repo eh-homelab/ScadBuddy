@@ -55,10 +55,11 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 import psycopg
 from claude_agent_sdk import AgentDefinition, ResultError, create_sdk_mcp_server, tool
@@ -69,6 +70,11 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+
+# Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
+# as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
+# HeldText stops holding anything, with no error.
+from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
@@ -84,6 +90,18 @@ from scadbuddy_durable.session.package_hash import PackageContentError, hash_tre
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 logger = logging.getLogger(__name__)
+
+
+def _http_url(value: object) -> TypeGuard[str]:
+    """Whether ``value`` is an absolute http(s) URL with a host."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
 
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
@@ -132,8 +150,15 @@ _FINAL = re.compile(
     re.IGNORECASE,
 )
 # Claude Code's own words when a segment reaches its max_budget_usd (the result's
-# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)").
-_BUDGET_REACHED = re.compile(r"Reached maximum budget|error_max_budget_usd")
+# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
+# words with the amount that follows, and only at the start: the SDK raises them as
+# "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
+# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
+# error's text is the session's content, and one that quotes the subtype or the words,
+# even the whole phrase, is not the cap (#2675).
+_BUDGET_REACHED = re.compile(
+    r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
+)
 # sessions/images.ts and routes/imageSettings.ts: what one message's images may be.
 IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 * 3 // 4  # 5 MB of base64, the Messages API's limit
@@ -241,6 +266,7 @@ def declares_remote_servers(root: str) -> bool:
                 maps.append(read(entry, True))
             else:
                 maps.append(entry)
+    # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
     except OSError, ValueError:
         return True
     for m in maps:
@@ -453,6 +479,32 @@ def with_refusals(injected: dict[str, Any], refusals: dict[str, str]) -> dict[st
     return out
 
 
+class HeldText:
+    """A segment's live output with its ``text`` events held back until the next other
+    event, or until the attempt ends: then they go out in order (``flush``), unless the
+    attempt was refused and they are dropped (``drop``, #2945). A refused attempt's
+    text is the refusal notice, with nothing after it."""
+
+    def __init__(self, publish: Callable[[dict[str, Any]], None]) -> None:
+        self._publish = publish
+        self._held: list[dict[str, Any]] = []
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "text":
+            self._held.append(event)
+            return
+        self.flush()
+        self._publish(event)
+
+    def flush(self) -> None:
+        held, self._held = self._held, []
+        for event in held:
+            self._publish(event)
+
+    def drop(self) -> None:
+        self._held = []
+
+
 class ScadBuddyRunner:
     def __init__(
         self,
@@ -520,7 +572,9 @@ class ScadBuddyRunner:
             return
         stored = setting[0] if setting else None
         url = stored.get("url") if isinstance(stored, dict) else None
-        if not isinstance(url, str) or not url:
+        if not _http_url(url):
+            # The agent's route stores only an http(s) URL; a row written any other way
+            # does not reach the subagents' definitions (#2883).
             url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
@@ -541,6 +595,7 @@ class ScadBuddyRunner:
             path = os.path.join(self._package_root, package.dir)
             try:
                 matches = hash_tree(path) == package.content_hash
+            # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
             except OSError, PackageContentError:
                 matches = False
             if not matches:
@@ -596,9 +651,16 @@ class ScadBuddyRunner:
                 extra_options=extra,
                 **({"model": settings.model} if settings.model else {}),
             )
+            # A credential Claude Code refuses answers as the assistant ("You've hit your
+            # session limit") before its ResultError, and the plugin publishes that text
+            # (#2945): held until the attempt is known not to be refused, while another
+            # credential could still take the segment over.
+            publish = _EMIT.get()
+            held = HeldText(publish) if publish is not None and i + 1 < len(credentials) else None
+            token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
-                if out.is_error and out.error and _BUDGET_REACHED.search(out.error):
+                if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
                     # The plugin answers a segment that reached its cap with the error's
                     # text only: no subtype, and no cost. Claude Code stops only once the
                     # cost reached the cap, so at least what was left was spent; charged
@@ -618,6 +680,11 @@ class ScadBuddyRunner:
                     len(error_text(err).encode()),
                 )
                 if credentials_fault(err) and i + 1 < len(credentials):
+                    if held is not None:
+                        # Mostly the refusal notice. A fault mid-segment also drops real
+                        # text since the last tool call, which the rerun on the next
+                        # credential writes again: dropped, never flushed.
+                        held.drop()
                     cost = _cost(err)
                     if cost > 0:
                         left -= cost
@@ -645,6 +712,11 @@ class ScadBuddyRunner:
                     error=bounded(str(err)),
                     cost_usd=_cost(err),
                 )
+            finally:
+                if token is not None:
+                    _EMIT.reset(token)
+                if held is not None:
+                    held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:

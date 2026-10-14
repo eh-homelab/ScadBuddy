@@ -28,12 +28,13 @@ test.describe('library', () => {
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })
 
-  test('Advanced lists a sliced file without Print, and is remembered', async ({ page }) => {
+  test('Advanced lists a sliced file with Print, and is remembered', async ({ page }) => {
     await page.goto('/library')
     await page.getByRole('switch', { name: 'Advanced' }).click()
     const sliced = page.getByTestId('library-file-104')
-    await expect(sliced).toContainText('Print it from Bambuddy')
-    await expect(sliced.getByRole('button', { name: 'Print' })).toHaveCount(0)
+    // #2671 — a sliced file prints as it is.
+    await expect(sliced.getByRole('button', { name: /^Print / })).toBeVisible()
+    await expect(sliced).not.toContainText('Print it from Bambuddy')
 
     await page.reload()
     await expect(page.getByTestId('library-file-104')).toBeVisible()
@@ -134,5 +135,30 @@ test.describe('library', () => {
     await expect(toast.getByTestId('library-skipped')).toContainText('alex-headphone-hook.3mf')
     await expect(page.getByTestId('library-file-121')).toBeVisible()
     await expect(page.getByTestId('library-file-122')).toHaveCount(0)
+  })
+
+  // #2368 — on a phone the tree folds behind a picker, so the files come first.
+  test('puts the files first at phone width, with the folders behind a picker', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/library')
+    const picker = page.getByRole('button', { name: /^Folder: Top level/ })
+    const tree = page.getByRole('tree', { name: 'Library folders' })
+    await expect(page.getByTestId('library-file-89')).toBeInViewport()
+    await expect(picker).toHaveAttribute('aria-expanded', 'false')
+    await expect(tree).toBeHidden()
+
+    await picker.click()
+    await expect(tree).toBeVisible()
+    await tree.getByRole('treeitem', { name: 'Spec' }).click()
+    await expect(page).toHaveURL(/\/library\/Spec$/)
+    await expect(tree).toBeHidden()
+    await expect(page.getByRole('button', { name: /^Folder: Spec/ })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('shows the tree beside the files on a wide screen, with no picker', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/library')
+    await expect(page.getByRole('tree', { name: 'Library folders' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Folder: / })).toBeHidden()
   })
 })

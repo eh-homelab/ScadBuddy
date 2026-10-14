@@ -274,6 +274,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             // Every output that can be arranged is, the ones that never needed a re-render too.
             if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
               setFailures(`${why} Nothing was arranged.`)
+              // Ends without an output, and is not an ordinary arrange (#2892).
+              span.setAttribute('scadbuddy.outcome', 'nothing_arranged')
               return
             }
             // Said wherever this lands, History too: the arrange went ahead without them (#1007).

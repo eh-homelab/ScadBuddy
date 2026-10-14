@@ -6,12 +6,14 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
+import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -67,7 +69,7 @@ function notes(calls: string[]): () => McpServer {
 // read.note is read; post is tiered as httpTierOf tiers http_request: no method or a
 // GET is read, anything else outward. So only its input says whether a call is outward.
 const tierOf = (name: string, input: unknown): RiskTier => {
-  if (name.endsWith('__read_note')) return 'read'
+  if (name.endsWith('__read_note') || name.endsWith('__shot')) return 'read'
   if (name.endsWith('__post')) return ((input as { method?: string } | undefined)?.method ?? 'GET') === 'GET' ? 'read' : 'outward'
   return 'outward'
 }
@@ -85,6 +87,7 @@ function harness(
     mayPark?: boolean
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
+    flowBlobs?: TurnToolsDeps['flowBlobs']
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -129,6 +132,7 @@ function harness(
     },
     report: async (_session, problems) => void reported.push(...problems),
     blobs: { put: async (session, images, toolUseId) => void stored.push(...images.map((i) => `${session}/${i.name}/${toolUseId}`)) },
+    ...(options.flowBlobs ? { flowBlobs: options.flowBlobs } : {}),
   }
   return {
     contexts,
@@ -240,11 +244,39 @@ describe('turn tools in a durable session', () => {
     expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward' })
   })
 
+  it("labels and parks a remote plugin's tools by their Settings tier, an unlisted one outward (#2838)", async () => {
+    const forwarded: PluginsForRun = {
+      plugins: [
+        {
+          name: 'notes',
+          url: 'http://127.0.0.1:9/forward/notes',
+          toolTiers: { search: 'read', save: 'write' },
+          disabledTools: [],
+        },
+      ],
+      problems: [],
+      secrets: [],
+      release: () => {},
+    }
+    const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
+      session: SESSION,
+      owner: BROWSER,
+      signal: new AbortController().signal,
+      listing: true,
+    })
+    const notes = servers.find((s) => s.name === 'notes')!
+    const tier = (tool: string) => notes.fixedTier?.(`mcp__notes__${tool}`)
+    expect([tier('search'), tier('save'), tier('delete')]).toEqual(['read', 'write', 'outward'])
+    expect(['search', 'save', 'delete'].map((t) => notes.mayPark?.(`mcp__notes__${t}`))).toEqual([false, false, true])
+    expect(notes.tierOf('mcp__notes__delete', {})).toBe('outward')
+  })
+
   it("lists the real http_request as may_park, and tiers a POST outward and refuses it unapproved (review of #2324)", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      servers: turnServers({ httpRequest: { saveRoot } }),
+      // Its saved bodies are in Postgres; this test saves none.
+      servers: turnServers({ httpRequest: { saveRoot, sql: {} as never } }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
@@ -355,6 +387,64 @@ describe('turn tools in a durable session', () => {
 
   describe("from a flow's tool(name, args) (#2320 phase 8)", () => {
     const flowEnv = (activityType: string, activityId = 'tool-flow_01') => env(activityType, activityId, `flow-${FLOW}`)
+
+    it("keeps a call's images under the run, as its own tools' are, and answers pointers (#2578)", async () => {
+      const kept: string[] = []
+      const flowBlobs = {
+        put: async (subject: string, images: readonly { name: string }[]) => {
+          kept.push(...images.map((i) => `${subject}/${i.name}`))
+          return images.map((i) => i.name)
+        },
+        get: async () => undefined,
+      }
+      const h = harness({ flowBlobs })
+      const raw: unknown = await flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {})
+      const out = raw as {
+        text: string
+        images: { name: string; mediaType: string }[]
+      }
+      expect(h.stored).toEqual([])
+      expect(kept).toHaveLength(1)
+      const [name] = out.images.map((i) => i.name)
+      expect(kept[0]).toBe(`flow-${FLOW}/${name}`)
+      expect(out.images[0]!.mediaType).toBe('image/png')
+      expect(out.text).toContain(`[image ${name}]`)
+      expect(out.text).not.toContain('view_tool_images')
+      expect(JSON.stringify(out)).not.toContain('iVBORw0KGgo')
+    })
+
+    it("says an image the run did not keep, with no pointer, when its run keeps no more (#2578)", async () => {
+      const flowBlobs = { put: async () => [], get: async () => undefined }
+      const h = harness({ flowBlobs })
+      const out = await flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {})
+      expect(out).toBe(FLOW_IMAGES_FULL)
+    })
+
+    it('keeps no image from an errored call: nothing would point at it', async () => {
+      const kept: string[] = []
+      const flowBlobs = {
+        put: async (subject: string, images: readonly { name: string }[]) => {
+          kept.push(...images.map((i) => `${subject}/${i.name}`))
+          return images.map((i) => i.name)
+        },
+        get: async () => undefined,
+      }
+      const failing = () => () => {
+        const server = new McpServer({ name: 'notes', version: '1' })
+        server.registerTool('shot', { description: 'a picture that fails', inputSchema: {} }, async () => ({
+          isError: true,
+          content: [
+            { type: 'text', text: 'it broke' },
+            { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+          ],
+        }))
+        return server
+      }
+      const h = harness({ flowBlobs, server: failing })
+      const err = await failure(flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {}))
+      expect(err.message).toContain('it broke')
+      expect(kept).toEqual([])
+    })
 
     it("tiers and runs a read call as the run's starter, with no session and no browser", async () => {
       const h = harness({ pinned: true })

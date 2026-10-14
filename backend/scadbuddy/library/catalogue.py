@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import psycopg
+from opentelemetry.trace import Span
 from pydantic import (
     BaseModel,
     Field,
@@ -43,6 +44,7 @@ from scadbuddy.core.paths import (
     model_path,
     revalidate_dirs,
 )
+from scadbuddy.core.tracing import span
 from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
@@ -665,6 +667,11 @@ class Catalogue:
         for model_id in model_ids:
             self._ui_versions.pop(model_id, None)
 
+    def caches_ui_version(self, slug: str) -> bool:
+        """Whether the template's `ui_version` is cached, and so not read again until
+        HEAD moves or :meth:`forget` drops it."""
+        return slug in self._ui_versions
+
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
         -- a revision restored straight through the history."""
@@ -1093,8 +1100,14 @@ class Catalogue:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one.
         ``slugs``, a window of :meth:`slugs`, builds only those records (#843)."""
+        with span("catalogue.list_models") as current:
+            return self._list_models(slugs, current)
+
+    def _list_models(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
         if slugs is None:
-            slugs = self.slugs()
+            with span("catalogue.slugs"):
+                slugs = self.slugs()
+        current.set_attribute("scadbuddy.models", len(slugs))
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()

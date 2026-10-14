@@ -72,8 +72,8 @@ def _clear_spans() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _forget_catalogues() -> Iterator[None]:
-    """The dialog keeps Bambuddy's preset catalogue in process (#2361); each test mocks
-    its own, so none outlives the test that read it."""
+    """The dialog keeps what it parsed of Bambuddy's preset catalogue in process
+    (#2361, #2978); each test mocks its own, so none outlives the test that read it."""
     forget_catalogues()
     yield
     forget_catalogues()

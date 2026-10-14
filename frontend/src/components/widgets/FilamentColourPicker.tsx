@@ -1,9 +1,9 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
-import { amsUnitLabel } from '../../lib/filaments'
+import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
-import { Swatch } from '../print/Swatch'
+import { ClearSwatch, Swatch } from '../print/Swatch'
 
 type State =
   | { kind: 'closed' }
@@ -35,20 +35,35 @@ export function FilamentColourPicker({
   const [state, setState] = useState<State>({ kind: 'closed' })
   const listId = useId()
   const open = state.kind !== 'closed'
+  // Each open is a new read; closing, reopening or unmounting makes an older one stale,
+  // so a late answer can neither reopen the list nor overwrite a newer one.
+  const reading = useRef(0)
+  useEffect(
+    () => () => {
+      reading.current += 1
+    },
+    [],
+  )
 
   const toggle = () => {
+    const read = ++reading.current
     if (open) {
       setState({ kind: 'closed' })
       return
     }
     setState({ kind: 'loading' })
     api.getSpoolInventory().then(
-      (view) => setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) }),
-      (cause: unknown) =>
+      (view) => {
+        if (read !== reading.current) return
+        setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) })
+      },
+      (cause: unknown) => {
+        if (read !== reading.current) return
         setState({
           kind: 'failed',
           message: cause instanceof ApiError ? cause.detail : "Bambuddy's filaments could not be read.",
-        }),
+        })
+      },
     )
   }
 
@@ -80,9 +95,8 @@ export function FilamentColourPicker({
                 const colour = spoolColour(spool)
                 const name = spoolName(spool)
                 const chosen = colour !== null && colour.hex === value
-                const where = spool.loaded
-                  ? `${amsUnitLabel(spool.loaded.ams_id)} · slot ${spool.loaded.tray_id + 1}`
-                  : null
+                // The printer too: on a farm, two spools can both be in AMS-A slot 1.
+                const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
                 return (
                   <li key={spool.id}>
                     <button
@@ -96,7 +110,7 @@ export function FilamentColourPicker({
                       }}
                       className="flex w-full items-center gap-2 rounded-[4px] px-1.5 py-1 text-left hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 aria-pressed:bg-accent/10"
                     >
-                      <Swatch colour={colour?.hex ?? null} size="sm" />
+                      {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
                       <span className="min-w-0 flex-1 truncate text-ink">{name}</span>
                       <span className="sb-num shrink-0 text-muted">
                         {colour === null

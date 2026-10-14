@@ -356,8 +356,18 @@ flow — either would otherwise apply unseen from Simple mode.
 
 The **Library** page lists everything already in Bambuddy's library, by folder. By
 default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
-browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
-shown without **Print**, since a sliced file is printed from Bambuddy directly.
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files.
+
+**Print** on a sliced file (#2671) queues the file itself, with no slice: the dialog
+offers the plates it holds G-code for, the spools for its slots, the printer and the
+print options (a held manual start among them), and shows what it was sliced for —
+printer, nozzle, process and plate type — read-only, with Bambu Studio's own time and
+filament estimate. A sliced file is never refused: a printer of another model, a nozzle
+diameter the printer has nowhere ("Sliced for a 0.6 mm nozzle; 0.4 mm is mounted"), or a
+plate the file does not hold (its first plate is queued instead) is a warning in Checks,
+so you can set it right before starting the print. A sliced file cannot be arranged.
+Printing a ScadBuddy copy again with the same presets queues the slice ScadBuddy already
+made of it, while Bambuddy still has that file, instead of slicing it again.
 
 **Print** on a file opens the same print picker an output uses, and the print goes
 exactly as an output's does (#1752): a copy of the file is laid out for the nozzle side
@@ -633,7 +643,8 @@ are set ([headless-browser.md](ai/headless-browser.md)).
   lists each one with its tier and **Disable**. A tier can only be raised above the one
   ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
   built-in is never removed. Every setting here applies to classic and durable chats
-  alike. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
+  alike: a tool raised to outward asks for approval before it runs in a durable chat
+  too, as in a classic one. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

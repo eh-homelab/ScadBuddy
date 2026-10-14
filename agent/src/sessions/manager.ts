@@ -1,3 +1,6 @@
+import { nestedQueries } from '../builtins/nested.js'
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import {
@@ -43,7 +46,7 @@ import {
   HindsightClient,
   type MemoryActivity,
   type MemoryHooks,
-  type MemoryHooksOptions,
+  type MemoryOptions,
   hindsightTarget,
   turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
@@ -75,6 +78,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -88,6 +92,7 @@ import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
+import { FlowQueue } from '../flows/queue.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -346,6 +351,18 @@ export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Pr
   tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
 }
 
+/**
+ * An attention request's `stop` or `wait` timer ended the turn (#815), not a
+ * user's Stop: the session's `interrupted` error says why (#1206).
+ */
+class AttentionStop extends Error {}
+
+/** The `interrupted` error's message: why, when an attention request's timer ended the turn. */
+function interruptedMessage(signal: AbortSignal): string {
+  const reason: unknown = signal.reason
+  return reason instanceof AttentionStop ? `the turn ended: ${reason.message}` : 'the turn was interrupted'
+}
+
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
   return reason instanceof Error ? reason.message : 'the turn was interrupted'
@@ -420,47 +437,47 @@ export async function recordMemoryActivity(
   a: MemoryActivity,
   secrets: readonly string[],
 ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      deps.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+  const id = session.id
+  const summary = {
+    bank: a.bank,
+    ...(a.documentId ? { document_id: a.documentId } : {}),
+    ...(a.count === undefined ? {} : { results: a.count }),
+    ...(a.tool ? { tool: a.tool } : {}),
+  }
+  const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+  await Promise.all([
+    deps.audit?.record({
+      kind: 'memory',
+      action: a.action,
+      surface: 'harness',
+      actor: session.owner,
+      sessionId: id,
+      turnId,
+      ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+      inputSummary: JSON.stringify(summary),
+      outcome: a.outcome === 'ok' ? 'ok' : 'error',
+      ...detail,
+      startedAt: a.startedAt,
+      finishedAt: a.finishedAt,
+    }),
+    deps.events.append(id, [
+      scrubForLog(
+        event({
+          type: 'memory',
+          sessionId: id,
+          turnId,
+          action: a.action,
+          bank: a.bank,
+          outcome: a.outcome,
+          ...(a.count === undefined ? {} : { count: a.count }),
+          ...detail,
+          ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+          ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+        }),
+        secrets,
+      ),
+    ]),
+  ])
 }
 
 export class SessionError extends Error {
@@ -520,11 +537,22 @@ export type SessionRecord = {
  * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
  * query's `total_cost_usd` does not hold that part.
  */
-type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
+type ClaimedSession = SessionRecord & {
+  unpricedCostUsd: number
+  /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
+  claimedAt: string
+}
 
-const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
+/**
+ * The claim's `updated_at` as `claimedAt`: ISO 8601 in UTC at Postgres's microseconds,
+ * whatever the connection's `DateStyle` and `TimeZone` (a plain `::text` follows them).
+ */
+export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
+
+const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  claimedAt: row.claimed_at,
 })
 
 export type TurnOutcome =
@@ -670,7 +698,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+  memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
@@ -688,7 +716,15 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: SessionFiles
+  /**
+   * A session's background tasks (src/background/): a classic turn whose allowed packages
+   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
+   * end with the turn. Without it those are Claude Code's.
+   */
+  background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -923,6 +959,8 @@ export class SessionManager {
   readonly projection: PendingProjection
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
+  /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
+  readonly queue: FlowQueue
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -978,13 +1016,22 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
-    this.escalations = new Escalations({ sql: deps.sql, durable: () => this.durable })
+    this.queue = new FlowQueue(deps.sql)
+    this.escalations = new Escalations({
+      sql: deps.sql,
+      durable: () => this.durable,
+      // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
+      send: async (id, owner, text, tiers) => {
+        await this.send(id, owner, text, { tiers })
+      },
+    })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -1034,7 +1081,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1247,13 +1294,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1291,13 +1338,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1495,6 +1542,8 @@ export class SessionManager {
       parent: otelContext.active(),
       // Each tool's tier for its span (TierResolver takes an optional input).
       tierOf: (name) => eventTierOf(name) ?? 'outward',
+      // What finish() subtracts for the audit row, so the span's cost is this turn's (#2376).
+      before: { costUsd: session.ownCostUsd, turns: session.turns },
     })
     // The turn's span ends whatever happens below, even if a cleanup step or
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
@@ -1504,6 +1553,8 @@ export class SessionManager {
       let lost = false
       /** Redacted from everything this turn writes to the durable event log. */
       let secrets: string[] = []
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer).
+      let nestedUsd = 0
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
         ? new TurnAuditor(this.deps.audit, {
@@ -1706,7 +1757,8 @@ export class SessionManager {
         const http =
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
-                saveDir: path.join(cwd, 'http'),
+                // In Postgres, so any replica serves it, after a deploy too (#2374).
+                saved: new PgHttpBodies(this.deps.sql, id),
                 // save_to_workspace (#2329): the body becomes one of the session's files.
                 workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,
@@ -1719,6 +1771,13 @@ export class SessionManager {
                 ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
               })
             : undefined
+        // The built-ins the packages name that the session serves instead of Claude Code: the
+        // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
+        const served = allowedPluginPaths.length
+          ? (packages?.builtinTools ?? []).filter(
+              (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
+            )
+          : []
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1743,9 +1802,9 @@ export class SessionManager {
               secrets: () => secrets,
               signal: controller.signal,
               // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-              stopTurn: (why) => controller.abort(new Error(why)),
+              stopTurn: (why) => controller.abort(new AttentionStop(why)),
               // The claim set updated_at = now(): the turn's start by the database's clock.
-              turnStartedAt: new Date(session.updatedAt),
+              turnStartedAt: session.claimedAt,
             })
           : undefined
         const run: Omit<HarnessRun, 'credential'> = {
@@ -1761,11 +1820,11 @@ export class SessionManager {
           ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: systemAppend(),
+          systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || http
+          ...(this.deps.mcpServers || http || served.length
             ? {
                 mcpServers: {
                   ...(this.deps.mcpServers
@@ -1784,11 +1843,47 @@ export class SessionManager {
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
+                  ...(served.length
+                    ? {
+                        [BUILTIN_SERVER]: classicBuiltinServer(served, {
+                          ...(this.deps.background
+                            ? {
+                                background: {
+                                  tasks: this.deps.background.tasks,
+                                  sessionId: id,
+                                  owner: session.owner,
+                                  tz: this.deps.background.tz,
+                                  now: () => new Date(),
+                                },
+                              }
+                            : {}),
+                          web: {
+                            // The answer's model call, on the turn's first credential; its cost is the turn's.
+                            nested: (this.deps.nestedQueries ?? nestedQueries)({
+                              paths: this.deps.paths,
+                              credential: async () => candidates[0]!.credential,
+                              spent: async (cost) => {
+                                nestedUsd += cost
+                              },
+                            }),
+                            secrets: () => secrets,
+                            audit: this.deps.audit,
+                            actor: session.owner,
+                            sessionId: id,
+                            turnId,
+                            signal: controller.signal,
+                            ...(this.deps.httpRequest?.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                          },
+                        }),
+                      }
+                    : {}),
                 },
               }
             : {}),
           ...(pluginPaths.length ? { pluginPaths } : {}),
-          ...(allowedPluginPaths.length ? { allowedPluginPaths, builtinTools: packages?.builtinTools ?? [] } : {}),
+          ...(allowedPluginPaths.length
+            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
+            : {}),
           ...(ownPlugin !== undefined ? { ownPlugin } : {}),
           ...(remotePlugins.length ? { remotePlugins } : {}),
           ...(memory ? { memoryHooks: memory.hooks } : {}),
@@ -1860,13 +1955,15 @@ export class SessionManager {
         session,
         turnId,
         stopped,
+        stopped === undefined ? undefined : interruptedMessage(controller.signal),
         result,
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
         // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result.
-        stopped !== undefined || !result ? unpriced.usd() : 0,
+        // one that did has every request priced in its result. WebFetch's own
+        // model calls are in no result, so they are added the same way.
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nestedUsd,
       )
       return outcome
     } catch (err) {
@@ -1939,12 +2036,17 @@ export class SessionManager {
     session: ClaimedSession,
     turnId: string,
     stopped: string | undefined,
+    /** The `interrupted` error's message when `stopped`: an attention timer's says so (#1206). */
+    interrupted: string | undefined,
     result: SDKResultMessage | undefined,
     /** The failed model request `result` reports, when it reports one (fallback.ts `onRefused`). */
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
-    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
@@ -1998,10 +2100,11 @@ export class SessionManager {
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = fromTotal(result.total_cost_usd)
+      // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
+      costUsd = fromTotal(result.total_cost_usd) + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -2037,7 +2140,7 @@ export class SessionManager {
         costUsd = session.ownCostUsd + cutUsd
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       }
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else {
       status = 'failed'

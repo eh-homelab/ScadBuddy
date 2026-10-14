@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http } from 'msw'
+import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -10,11 +10,15 @@ import {
   setFlowRunImages,
   setFlowRunOffline,
   setFlowRunStarting,
+  childEntries,
+  setFlowRunChildren,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { WorkflowRunPage } from './WorkflowRunPage'
+import { ATTENTION_POLL_MS } from '../agent/attention'
+import { STALE_ENTRY_MESSAGE } from '../lib/flows'
 
 // #1057 — one flow run (plan 2026-10-09 Task F1): its steps, and its answers and
 // approvals, sent through `command()` with an Idempotency-Key.
@@ -67,6 +71,31 @@ describe('WorkflowRunPage', () => {
     expect(screen.queryByLabelText('Your answer')).not.toBeInTheDocument()
   })
 
+  it('sends no blank answer, and shows the answer in flight (#2379)', async () => {
+    const { user } = render('run-ask')
+    const box = await screen.findByLabelText('Your answer')
+    const answer = screen.getByRole('button', { name: 'Answer' })
+    expect(answer).toBeDisabled()
+    await user.type(box, '   ')
+    expect(answer).toBeDisabled()
+    await user.type(box, '{Enter}')
+    let release!: () => void
+    const landed = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('*/api/v1/workflow-runs/run-ask/answer', async () => {
+        await landed
+        return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+      }),
+    )
+    await user.clear(box)
+    await user.type(box, 'yes')
+    await user.click(answer)
+    expect(await screen.findByRole('button', { name: 'Sending…' })).toBeDisabled()
+    expect(flowRequests()).toEqual([])
+    release()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull())
+  })
+
   it('approves an outward call', async () => {
     const { user } = render('run-print')
     await user.click(await screen.findByRole('button', { name: 'Approve' }))
@@ -76,6 +105,138 @@ describe('WorkflowRunPage', () => {
       key: expect.stringMatching(KEY),
       body: { call_id: 'call-1', approved: true },
     })
+  })
+
+  // #2482 — a call outside the run's grant: where it waits, why, and its way up.
+  it('says a call waits at the starting session first, why it is outside the grant, and that you may decide now', async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('With the session that started the run until')
+    expect(card).toHaveTextContent('Outside the grant: print limit reached')
+    expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it("shows a parent's proposal beside the call it narrows, and approves exactly what was shown", async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const proposal = await within(card).findByRole('table', { name: 'Proposed change' })
+    expect(within(proposal).getAllByRole('row').map((r) => r.textContent)).toEqual([
+      'FieldAs calledAs proposed',
+      'request.objects[0].count32',
+      'request.objects[1]{"output_id":"b"}(removed)',
+    ])
+    expect(card).toHaveTextContent('Narrowed by the starting session')
+    // A person's to see and to approve: the assistant can neither read nor click it.
+    expect(proposal.closest('[data-agent-user-only]')).not.toBeNull()
+    const approve = within(card).getByRole('button', { name: 'Approve as proposed' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(approve)
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
+  })
+
+  it('sends the reason typed with an approval as proposed, as Approve and Deny do', async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    await within(card).findByRole('table', { name: 'Proposed change' })
+    await user.type(within(card).getByLabelText('Reason (optional)'), 'smaller is fine')
+    await user.click(within(card).getByRole('button', { name: 'Approve as proposed' }))
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({
+      call_id: 'call-narrowed',
+      approved: true,
+      reason: 'smaller is fine',
+      proposal: true,
+      proposal_hash: 'f'.repeat(64),
+    })
+  })
+
+  it("names each step's hop by where it was, whoever acted, its underscores spaced", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const steps = within(within(card).getByRole('list', { name: 'Its way here' })).getAllByRole('listitem')
+    expect(steps.map((s) => s.textContent)).toEqual([
+      expect.stringMatching(/^parked by .* \(at the starting session\)$/),
+      expect.stringMatching(/^narrow by .* \(at the starting session\)$/),
+      expect.stringMatching(/^pass up by .* \(at the person\)$/),
+    ])
+  })
+
+  // #2482 — the run's one queue: a child session's call is in it too (spec 2026-10-11 §4.5).
+  it("shows a child session's call with its step, where it waits, why, and the session's own words", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('print box on printer 5')
+    expect(card).toHaveTextContent('From a session the run talks to, at step 3 (ask_session)')
+    expect(card).toHaveTextContent('Outside the grant: printer 5 is not in the grant')
+    expect(within(card).getByRole('list', { name: 'Its way here' })).toHaveTextContent('pass up by the starting session')
+    const words = within(card).getByRole('figure', { name: 'What the session wrote before the call' })
+    expect(words).toHaveTextContent("These are the model's words, not ScadBuddy's")
+    expect(words).toHaveTextContent('Printer 5 is idle, so I will print the box there.')
+  })
+
+  it("decides a child session's call through the agent, and keeps that decision for the person", async () => {
+    const sent: { id: string; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
+        sent.push({ id: String(params['id']), body: await request.json() })
+        return HttpResponse.json({ id: params['id'], kind: 'approval', outcome: 'denied' })
+      }),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    const deny = within(card).getByRole('button', { name: 'Deny' })
+    expect(deny.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(deny)
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]).toEqual({ id: 'durable:sess-child:wr-child:toolu_1', body: { kind: 'approval', decision: 'deny' } })
+  })
+
+  it("says a child's call already decided is out of date, not the agent's raw refusal", async () => {
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', () =>
+        HttpResponse.json({ detail: 'durable:sess-child is no longer waiting', reason: 'it was already approved' }, { status: 409 }),
+      ),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    await user.click(within(card).getByRole('button', { name: 'Deny' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(STALE_ENTRY_MESSAGE)
+  })
+
+  it("re-reads the queue while a child's call shows, which no run topic announces", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render('run-escalated')
+      await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+      setFlowRunChildren('run-escalated', [])
+      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Waiting for approval: print_output' })).toBeNull())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("offers no decision on a child's call past its timer", async () => {
+    const [entry] = childEntries('run-escalated')
+    setFlowRunChildren('run-escalated', [{ ...entry!, expiring: true }])
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('Its time is up: ScadBuddy is closing it.')
+    expect(within(card).queryByRole('button', { name: 'Approve' })).toBeNull()
+    expect(within(card).queryByRole('button', { name: 'Deny' })).toBeNull()
+  })
+
+  it("names the step of the run's own call", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('Step 1 (queue_print)')
+  })
+
+  it('keeps the approval of every outward call for the person', async () => {
+    render('run-print')
+    const approve = await screen.findByRole('button', { name: 'Approve' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
   })
 
   it('denies with a reason', async () => {

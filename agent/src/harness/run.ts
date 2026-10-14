@@ -149,6 +149,12 @@ export type HarnessRun = {
    */
   builtinTools?: string[]
   /**
+   * Built-ins a nested one-shot query gets on its own, without a package
+   * (builtins/nested.ts: a durable turn's WebSearch runs Claude Code's). Tiered by
+   * `tierOf` like any other tool, so one it does not allow is refused.
+   */
+  nestedTools?: string[]
+  /**
    * ScadBuddy's own plugin (ownPlugin.ts `OWN_PLUGIN_DIR`, #896), vetted like
    * `pluginPaths`. Loading it gives the run the Skill and Agent tools, at
    * `read`, so its skills and subagents can be used; a run without it has no
@@ -444,6 +450,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
+      ...(run.nestedTools ?? []),
     ]),
   ]
   if (builtins.length) options.tools = builtins

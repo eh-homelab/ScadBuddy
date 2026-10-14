@@ -7,6 +7,8 @@ import type { OperationProblem } from '../temporal/names.js'
 
 export type OperationKind = {
   name: string
+  /** The activity kind's label (`agent.<name>`); the name, spaced, without one. */
+  label?: string
   /** What the command acts on, for the record and `ScadbuddySubject`. */
   subject(request: Record<string, unknown>): string
   /** The route's refusals; its result is handed to `run`. */

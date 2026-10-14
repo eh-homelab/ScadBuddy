@@ -140,24 +140,27 @@ export const outputTools: Tool[] = [
     handler: async ({ plate, ...rest }, ctx) => {
       const source = sourceOf(rest)
       if (source.kind === 'library') {
+        // A library file's preview is always one plate, 1 by default: one name per mesh.
         const id = source.id
+        const libraryPlate = plate ?? 1
         return binary(
           ctx.backend.GET('/api/v1/print/library/{file_id}/preview.glb', {
-            params: { path: { file_id: id }, query: { plate } },
+            params: { path: { file_id: id }, query: { plate: libraryPlate } },
             parseAs: 'stream',
           }),
           `get preview of library file ${id}`,
           ctx,
           {
-            path: `/api/v1/print/library/${id}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
-            name: `library-${id}.glb`,
+            path: `/api/v1/print/library/${id}/preview.glb?plate=${libraryPlate}`,
+            name: `library-${id}-plate-${libraryPlate}.glb`,
             fallbackType: 'model/gltf-binary',
           },
-          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb`, bytes, mimeType),
+          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb?plate=${libraryPlate}`, bytes, mimeType),
         )
       }
-      const output_id = source.id
       const query = plate === undefined ? '' : `?plate=${plate}`
+      const plateName = plate === undefined ? '' : `-plate-${plate}`
+      const output_id = source.id
       return binary(
         ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', {
           params: { path: { output_id }, query: { plate } },
@@ -167,7 +170,7 @@ export const outputTools: Tool[] = [
         ctx,
         {
           path: `/api/v1/outputs/${output_id}/preview.glb${query}`,
-          name: plate === undefined ? `${output_id}.glb` : `${output_id}-plate-${plate}.glb`,
+          name: `${output_id}${plateName}.glb`,
           fallbackType: 'model/gltf-binary',
         },
         (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb${query}`, bytes, mimeType),

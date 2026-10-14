@@ -65,6 +65,14 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'rack-unsafe-material': 'text-warn',
   'rack-left-to-bambuddy': 'text-muted',
   'rack-manual-partial': 'text-muted',
+  // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
+  'sequence-clearance': 'text-warn',
+  // #2671 — a sliced file queued as it is: what to set right before starting it.
+  'sliced-other-model': 'text-warn',
+  'sliced-nozzle-missing': 'text-warn',
+  'sliced-plate-missing': 'text-warn',
+  // #2955 — ScadBuddy's own earlier slice queued: said, so a missing slice job reads as intended.
+  'slice-reused': 'text-muted',
 }
 
 /**

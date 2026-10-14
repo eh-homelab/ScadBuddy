@@ -210,6 +210,33 @@ def test_last_commits_answers_the_whole_catalogue_in_one_walk(
     assert newest["keychain"] != newest["plate"]
 
 
+def test_last_commits_walks_the_history_once_per_head(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2289: every listing walked the whole history, ~11 s over NFS. Until HEAD moves,
+    the walk is kept; a commit (here or on another replica) moves it."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    walks = 0
+    walk = history._walk_last_commits
+
+    def counted() -> dict[str, str] | None:
+        nonlocal walks
+        walks += 1
+        return walk()
+
+    monkeypatch.setattr(history, "_walk_last_commits", counted)
+    first = history.last_commits()
+    first["keychain"] = "changed by the caller"
+    assert history.last_commits()["keychain"] != "changed by the caller"
+    assert walks == 1
+
+    write_model(models, "plate", "sphere(5);\n")
+    added = history.commit("Add plate", "plate")
+    assert history.last_commits()["plate"] == added
+    assert walks == 2
+
+
 def test_last_commits_keys_a_built_in_by_its_own_id(models: Path, history: ModelHistory) -> None:
     """Not by its first path component, which would fold every built-in into one."""
     write_model(models, "_builtin/keychain", "cube(10);\n")

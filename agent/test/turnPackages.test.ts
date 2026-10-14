@@ -1,3 +1,4 @@
+import type { BackgroundTasks } from '../src/background/service.js'
 import { mkdir, mkdtemp, readdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,7 +10,8 @@ import { declaresRemoteServers, forwardPackageServers, type PackageServers, with
 import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
-import { turnServers } from '../src/temporal/turnServers.js'
+import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
+import type { SessionFiles } from '../src/workspace/store.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
 
@@ -197,6 +199,62 @@ describe('plugin packages in a durable turn', () => {
     expect(unshared.problems.join('\n')).toContain('SCADBUDDY_PAYLOAD_DIR is not set')
   })
 
+  it("offers an allowed package's other built-ins as the builtin turn tools, and tells the model (#2393)", async () => {
+    const pkg = { ...(await fakePackage(undefined)), allowed: true, builtinTools: ['Bash', 'Monitor', 'Read', 'Skill', 'Task', 'WebFetch'] }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} })
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const builtins = { files: {} as SessionFiles, nested: () => nested }
+    const servers = turnServers({ packages: { load, root, localRoot: root, forward: none }, builtins })
+    const signal = new AbortController().signal
+    const listing = await servers({ session: 's', owner: OWNER, signal, listing: true })
+    // The engine runs Bash, Skill and Agent (Task); the agent serves Read and WebFetch.
+    expect(listing.packages?.[0]?.builtin_tools).toEqual(['Bash', 'Skill', 'Task'])
+    expect(listing.servers.map((s) => s.name)).toEqual(['builtin'])
+    expect(listing.servers[0]!.tierOf('mcp__builtin__Read', {})).toBe('outward')
+    const client = await listing.servers[0]!.connect()
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['Read', 'WebFetch'])
+    await client.close()
+    expect(listing.notes).toEqual([builtinNote(['Read', 'WebFetch'])])
+    expect(listing.notes?.[0]).toContain('Read (mcp__durable__builtin__Read)')
+    // Only what nothing provides is left out, and said.
+    expect(listing.problems).toEqual([expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you')])
+    await listing.release()
+    // A flow has no session workspace: no built-ins there.
+    const flow = await servers({ session: 'flow-x', flow: 'x', owner: OWNER, signal })
+    expect(flow.servers).toEqual([])
+    await flow.release()
+  })
+
+  it('offers CronCreate and the rest only where the session keeps background tasks', async () => {
+    const pkg = { ...(await fakePackage(undefined)), allowed: true, builtinTools: ['CronCreate', 'ScheduleWakeup', 'TaskStop'] }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} })
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const signal = new AbortController().signal
+    const kept = turnServers({
+      packages: { load, root, localRoot: root, forward: none },
+      builtins: { files: {} as SessionFiles, nested: () => nested, background: { tasks: {} as BackgroundTasks, tz: 'UTC' } },
+    })
+    const listing = await kept({ session: 's', owner: OWNER, signal, listing: true })
+    const client = await listing.servers[0]!.connect()
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['CronCreate', 'ScheduleWakeup', 'TaskStop'])
+    await client.close()
+    expect(listing.notes?.[0]).toContain('The session keeps the jobs and wakeups')
+    expect(listing.problems).toEqual([])
+    await listing.release()
+    // Without them (no Temporal), they are left out, and said.
+    const without = await turnServers({ packages: { load, root, localRoot: root, forward: none }, builtins: { files: {} as SessionFiles, nested: () => nested } })({
+      session: 's',
+      owner: OWNER,
+      signal,
+      listing: true,
+    })
+    expect(without.servers).toEqual([])
+    expect(without.problems).toEqual([expect.stringContaining('names CronCreate, ScheduleWakeup, TaskStop')])
+    await without.release()
+  })
+
   it("offers no server of a package that failed to share, on the listing (#2563)", async () => {
     const pkg = { ...(await fakePackage({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })), allowed: true }
     const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
@@ -214,6 +272,33 @@ describe('plugin packages in a durable turn', () => {
       expect(names(failed)).toEqual([])
       expect(failed.problems.join('\n')).toContain('plugin package notes was not loaded')
     }
+  })
+
+  it("never forwards a failed package's http server, nor puts its URL or token in secrets (#2620)", async () => {
+    const pkg = { ...(await fakePackage({ mcpServers: { api: { type: 'http', url: 'https://notes.example/mcp' } } })), allowed: true }
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+    const URL = 'http://127.0.0.1:9/forward/notes-token-0123456789'
+    const handed: string[][] = []
+    const forward = async (loaded: readonly LoadedPackage[]): Promise<PackageServers> => {
+      handed.push(loaded.map((p) => p.name))
+      const plugins = loaded.map((p) => ({ name: `plugin_${p.name}_api`, url: URL, toolTiers: {}, disabledTools: [] }))
+      // As forwardPackageServers does: the header values and the forwarder URLs are its secrets.
+      return { plugins, problems: [], secrets: plugins.flatMap((p) => [p.url, 'notes-token-0123456789']), release: () => {} }
+    }
+    const signal = new AbortController().signal
+    const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    // Shared, its http server is forwarded, and its URL and token are secrets.
+    const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+    expect(handed).toEqual([['notes']])
+    expect(listed.servers.map((x) => x.name)).toContain('plugin_notes_api')
+    expect(listed.secrets).toEqual(expect.arrayContaining([URL, 'notes-token-0123456789']))
+    // Failed to share: never handed to the forwarder, so no server, URL or token.
+    handed.length = 0
+    const failed = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+    expect(handed).toEqual([[]])
+    expect(failed.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
+    expect(failed.secrets).not.toContain(URL)
+    expect(failed.secrets).not.toContain('notes-token-0123456789')
   })
 
   it('reads a null command as none, as the segment runner does (#2563)', async () => {

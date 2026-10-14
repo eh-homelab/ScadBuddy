@@ -6,6 +6,7 @@ import type {
   FlowHostInterface,
   FlowScriptProblem,
   FlowPending,
+  FlowQueueEntry,
   FlowResetPoints,
   FlowResetPreview,
   FlowRun,
@@ -161,6 +162,44 @@ function defaults(): FlowRun[] {
       result: 'result: 7',
       created_at: at(1),
     }),
+    // #2482: a run started from a session, one call at its starter session and one
+    // narrowed by it, waiting at the person as a proposal.
+    run('run-escalated', {
+      status: 'waiting',
+      steps: [
+        { ...step(1, 'queue_print', 'running', false), call_id: 'call-parent' },
+        { ...step(2, 'arrange', 'running', false), call_id: 'call-narrowed' },
+      ],
+      waiting_on: [
+        {
+          call_id: 'call-parent',
+          kind: 'approval',
+          fn: 'queue_print',
+          since: at(1),
+          hop: 'parent',
+          hop_until: at(11),
+          reason: 'print limit reached',
+          proposed: false,
+          hops: [{ hop: 'parent', action: 'parked', actor: 'flow', at: at(1), reason: 'print limit reached' }],
+        },
+        {
+          call_id: 'call-narrowed',
+          kind: 'approval',
+          fn: 'arrange',
+          since: at(2),
+          hop: 'person',
+          reason: 'no rule admits it',
+          proposed: true,
+          hops: [
+            { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'no rule admits it' },
+            { hop: 'parent', action: 'narrow', actor: 'session:sess-escalated', at: at(3), reason: 'no rule admits it' },
+            { hop: 'person', action: 'pass_up', actor: 'system', at: at(3) },
+          ],
+        },
+      ],
+      started_by: { kind: 'agent', principal: 'p', session: 'sess-escalated' },
+      created_at: at(4),
+    }),
     // #2483: a run of a flow with inputs, recorded with its defaults filled in.
     run('run-coasters', {
       definition_id: 'def-coasters',
@@ -260,6 +299,45 @@ const offline = new Set<string>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
+/** #2482: each run's child sessions' calls, as the agent's queue read lists them. */
+const children = new Map<string, Extract<FlowQueueEntry, { source: 'child' }>[]>()
+function defaultChildren(): void {
+  children.set('run-escalated', [
+    {
+      source: 'child',
+      id: 'durable:sess-child:wr-child:toolu_1',
+      kind: 'approval',
+      session_id: 'sess-child',
+      tool: 'print_output',
+      summary: 'print box on printer 5',
+      input_hash: 'a'.repeat(64),
+      hop: 'person',
+      hop_until: null,
+      reason: 'printer 5 is not in the grant',
+      hops: [
+        { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'printer 5 is not in the grant' },
+        { hop: 'parent', action: 'pass_up', actor: 'session:sess-escalated', at: at(3) },
+      ],
+      created_at: at(2),
+      expires_at: at(60),
+      expiring: false,
+      step: { seq: 3, fn: 'ask_session' },
+      reasoning: 'Printer 5 is idle, so I will print the box there.',
+    },
+  ])
+}
+defaultChildren()
+
+/** Tests: a run's child sessions' calls as the mock lists them now (#2482). */
+export function childEntries(id: string): Extract<FlowQueueEntry, { source: 'child' }>[] {
+  return children.get(id) ?? []
+}
+
+/** Tests: a run's child sessions' calls in its queue (#2482). */
+export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { source: 'child' }>[]): void {
+  children.set(id, next)
+}
+
 /** #2477: each run's images, as the view lists them. */
 const images = new Map<string, FlowRunView['images']>()
 /** One grey pixel, what every image route answers. */
@@ -274,6 +352,8 @@ export function reset(): void {
   offline.clear()
   starting.clear()
   images.clear()
+  children.clear()
+  defaultChildren()
   states.clear()
   requests = []
 }
@@ -838,4 +918,50 @@ export const handlers = [
   ),
   http.post('/api/v1/workflow-runs/:id/answer', respond(() => 'answered')),
   http.post('/api/v1/workflow-runs/:id/decide', respond((body) => (body['approved'] ? 'approved' : 'denied'))),
+  // #2482: the agent's read of a run's one queue (agent src/flows/queue.ts).
+  http.get('/api/v1/ai/flow-runs/:id/queue', ({ params }) => {
+    const found = runs.find((r) => r.id === params['id'])
+    if (!found) return HttpResponse.json({ detail: `no flow run ${String(params['id'])}` }, { status: 404 })
+    const own: FlowQueueEntry[] = found.waiting_on.map((w) => {
+      const s = found.steps.find((x) => x.call_id === w.call_id)
+      return {
+        source: 'flow',
+        id: `flow:${found.id}:${found.workflow_run_id}:${w.call_id}`,
+        kind: w.kind,
+        call_id: w.call_id,
+        fn: w.fn,
+        prompt: w.prompt ?? null,
+        since: w.since ?? null,
+        hop: w.hop ?? null,
+        hop_until: w.hop_until ?? null,
+        reason: w.reason ?? null,
+        proposed: w.proposed ?? false,
+        hops: w.hops ?? [],
+        step: s ? { seq: s.seq, fn: s.fn } : null,
+      }
+    })
+    const session = 'session' in found.started_by ? found.started_by.session : undefined
+    return HttpResponse.json({
+      run_id: found.id,
+      name: found.name,
+      status: found.status,
+      starter_session: typeof session === 'string' ? session : null,
+      entries: [...own, ...(children.get(found.id) ?? [])],
+    })
+  }),
+  // #2482: a parent's proposal beside the call it narrows, for the person only.
+  http.get('/api/v1/workflow-runs/:id/proposals/:callId', ({ params }) => {
+    const found = runs.find((r) => r.id === params['id'])
+    const entry = found?.waiting_on.find((w) => w.call_id === params['callId'] && w.proposed)
+    if (!entry) return HttpResponse.json({ detail: 'No such proposal.' }, { status: 404 })
+    return HttpResponse.json({
+      call_id: entry.call_id,
+      fn: entry.fn,
+      tool: null,
+      original: { request: { objects: [{ output_id: 'a', count: 3 }, { output_id: 'b' }], goal: 'fewest_plates' } },
+      proposed: { request: { objects: [{ output_id: 'a', count: 2 }], goal: 'fewest_plates' } },
+      proposal_hash: 'f'.repeat(64),
+      proposed_by: 'session:sess-escalated',
+    })
+  }),
 ]

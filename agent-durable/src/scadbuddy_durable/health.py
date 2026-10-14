@@ -24,6 +24,7 @@ async def serve_health(
                 f"{head}Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
             )
             await writer.drain()
+        # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
         except TimeoutError, ConnectionError:
             pass
         finally:

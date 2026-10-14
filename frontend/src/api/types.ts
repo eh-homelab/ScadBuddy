@@ -135,6 +135,8 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
+/** #2482 — a parent's narrowing beside the call it narrows. */
+export type FlowProposal = Schemas['ProposalView']
 export type FlowStep = Schemas['FlowStep']
 export type FlowDecided = Schemas['Decided']
 /** #2350 — a registered flow version, with and without its script. */
@@ -199,6 +201,8 @@ export type PlannedSlot = Schemas['PlannedSlot']
 export type UnknownTray = Schemas['UnknownTray']
 export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
+/** #2671 — what a sliced library file was sliced for, read from the file itself. */
+export type SlicedProfile = Schemas['SlicedProfile']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
@@ -224,6 +228,10 @@ export type LibraryRenameResult = Schemas['LibraryRenameResult']
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
 
+/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
+export type InventoryView = Schemas['InventoryView']
+export type InventorySpool = Schemas['InventorySpool']
+
 /**
  * #89 — run tracking.
  *
@@ -231,9 +239,6 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * than string literals of their own: the backend's vocabulary is the contract, and a
  * hand-kept copy would drift the moment it gains a state.
  */
-/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
-export type InventoryView = Schemas['InventoryView']
-export type InventorySpool = Schemas['InventorySpool']
 export type PrintProgress = Schemas['PrintProgress']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']
@@ -244,10 +249,16 @@ export type PrinterNow = Schemas['PrinterNow']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
+/** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
+export type Activity = Schemas['ActivityItem']
+export type ActivityPage = Schemas['ActivityPage']
+export type ActivityFacets = Schemas['ActivityFacets']
+export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
+export type PrintAttachment = Schemas['PrintAttachment']
 export type PrinterMedia = Schemas['PrinterMedia']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
@@ -457,6 +468,26 @@ export interface WorkspaceFile {
   updated_at: string
 }
 
+/**
+ * A session's background task (the agent's `routes/backgroundTasks.ts`): what its
+ * CronCreate or ScheduleWakeup left running, which sends `prompt` to the session when due.
+ */
+export interface BackgroundTask {
+  id: string
+  kind: 'cron' | 'wakeup' | 'monitor' | 'workflow'
+  description: string
+  /** The schedule as words: "Every 5 minutes", "once, 1200 s after it was set". */
+  schedule: string
+  prompt: string
+  state: 'active' | 'done' | 'cancelled' | 'failed'
+  next_at: string | null
+  fired: number
+  last_fired_at: string | null
+  expires_at: string | null
+  detail: string | null
+  created_at: string
+}
+
 export interface WorkspaceFileList {
   files: WorkspaceFile[]
   usage: { files: number; bytes: number }
@@ -498,6 +529,70 @@ export interface AiSessionView {
   archived_at?: string | null
   /** #1284 — a live handoff offer: to whom, until when. */
   offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
+}
+
+/** #2482 — a run's step, as a queue entry names it. */
+export interface FlowQueueStep {
+  seq: number
+  fn: string
+}
+
+/** #2482 — one hop action on an entry (`hops`), as the run page lists it. */
+export interface FlowQueueHop {
+  hop: string
+  action: string
+  actor: string
+  at: string
+  reason?: string | null
+}
+
+interface FlowQueueCommon {
+  id: string
+  hop: 'parent' | 'person' | null
+  hop_until: string | null
+  reason: string | null
+  hops: FlowQueueHop[]
+  step: FlowQueueStep | null
+}
+
+/**
+ * #2482 — one entry of a flow run's one queue (agent `flows/queue.ts` QueueEntry,
+ * `GET /api/v1/ai/flow-runs/:id/queue`): the run's own call, a child session's call
+ * (answered by `POST /api/v1/ai/pending-input/{id}`), or its requested grant. A child's
+ * `reasoning` is its model's text before the call: untrusted.
+ */
+export type FlowQueueEntry =
+  | (FlowQueueCommon & {
+      source: 'flow'
+      kind: 'approval' | 'answer'
+      call_id: string
+      fn: string
+      prompt: string | null
+      since: string | null
+      proposed: boolean
+    })
+  | (FlowQueueCommon & {
+      source: 'child'
+      kind: 'approval' | 'answer'
+      session_id: string
+      tool: string
+      summary: string
+      input_hash: string | null
+      created_at: string
+      expires_at: string
+      /** Past its timer, not yet resolved by its worker: no one can decide it now. */
+      expiring: boolean
+      reasoning: string
+    })
+  | { source: 'grant'; id: string; status: 'requested'; created_at: string }
+
+/** #2482 — a flow run's one queue (agent `flows/queue.ts` RunQueue). */
+export interface FlowRunQueue {
+  run_id: string
+  name: string
+  status: string
+  starter_session: string | null
+  entries: FlowQueueEntry[]
 }
 
 /**

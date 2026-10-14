@@ -47,6 +47,7 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     ReadOutOfMemoryError,
     SpoolFullError,
+    is_sliced,
     printable,
 )
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
@@ -154,9 +155,12 @@ async def _keep_filaments(
     cache: Path, file: LibraryFile, payload: BinaryIO, budget: ReadBudget | None
 ) -> LocalFilaments | None:
     """``payload``'s filament slots, cached for ``file`` when it has a hash; ``None``
-    when they cannot be read here. Leaves ``payload`` at its start."""
+    when they cannot be read here. Leaves ``payload`` at its start. A sliced file's are
+    read with what it was sliced for (#2671)."""
     try:
-        local = await asyncio.to_thread(read_filaments, payload, budget)
+        local = await asyncio.to_thread(
+            partial(read_filaments, sliced=is_sliced(file.file_type)), payload, budget
+        )
     except UnreadableFilamentsError as error:
         logger.info(
             "could not read the library file's filament slots; Bambuddy is asked instead",
@@ -179,7 +183,8 @@ async def library_filaments(
     from the cache when its preview, or an earlier read, fetched the same bytes, else
     from a download of it. ``None`` for a file ScadBuddy cannot read them from (not a
     3MF, unreadable, too large for the volume), which Bambuddy is then asked about."""
-    if (file.file_type or "").lower() != "3mf":
+    file_type = (file.file_type or "").lower()
+    if file_type not in ("3mf", SLICED_TYPE):
         return None
     path = _filaments_at(cache, file)
     if path is not None:
@@ -192,7 +197,7 @@ async def library_filaments(
             await asyncio.to_thread(_hit, path)
             return cached
     source = LibrarySource(
-        file_id=file.id, colours=[], plates=[], filename=file.filename, file_type="3mf"
+        file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=file_type
     )
     try:
         async with spooled_3mf(client, source, cache, budget or ReadBudget()) as payload:
@@ -222,9 +227,9 @@ def _store(path: Path, data: bytes, keep: int) -> None:
     """Write ``path`` aside and rename it in, then drop all but the ``keep`` most recently
     used files (a hit touches its file: :func:`_hit`)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    partial.write_bytes(data)
-    partial.replace(path)
+    aside = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    aside.write_bytes(data)
+    aside.replace(path)
     used: list[tuple[int, Path]] = []
     for entry in path.parent.iterdir():
         if entry.name.startswith("."):

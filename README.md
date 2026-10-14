@@ -328,6 +328,12 @@ fresh install can be configured; that gives up DNS-rebinding protection until on
 of the two is set. The agent reads the same variable for its own origin check
 (below).
 
+## Mounting the library (bambuddy-fs)
+
+`tools/go/bambuddy-fs` mounts Bambuddy's print library, through ScadBuddy's API, as a
+FUSE filesystem, as a binary built from the workspace or as a container image. See
+[its README](tools/go/bambuddy-fs/README.md).
+
 ## Deploying
 
 ScadBuddy runs on the homelab cluster from
@@ -399,11 +405,15 @@ Both call `deploy.reusable.yml`, which:
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
    dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
-   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`, to
-   the same revision. That line is optional: an overlay that does not mention
+   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`,
+   optionally followed by exactly `&timeout=<n>s|m|h`, to the same revision,
+   keeping that suffix as it is. The suffix raises kustomize's 27s default git
+   timeout, which a checkout of this repo (with its LFS test fixtures) now
+   outlasts. That line is optional: an overlay that does not mention
    `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
    notice; one that mentions it in any other form (a short SHA, a branch, a
-   comment, other casing or spacing) or twice stops the deploy;
+   comment, other casing or spacing, any other query parameter) or twice stops
+   the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -1059,8 +1069,11 @@ see the subagents bullet for what the second needs.
   subagents no ScadBuddy tools. The path is not under `/api/v1/ai/`, so the
   ingress never routes to it. The agent answers it on loopback only, unless
   Settings → Durable subagents (`/api/v1/ai/settings/durable-subagents`) lists
-  more addresses or CIDR ranges: a worker in its own pods needs its pod range
-  there, and a NetworkPolicy that admits only those pods to the agent's port.
+  more addresses or CIDR ranges (none broader than a /8, or an IPv6 /32): a
+  worker in its own pods needs its pod range there. A NetworkPolicy that admits
+  only those pods to the agent's port is then **required**, not optional: a pod
+  range also holds the ingress's pods, and without the policy the guard is only
+  the token and the ingress's `X-Forwarded-For`.
   Each call still needs a token minted under the KEK for one session, turn and
   owner, and is a request with no `X-Forwarded-For`. The same setting's URL,
   when set, replaces `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL` (not `off`) from the
@@ -1224,6 +1237,10 @@ and the metric panels are unaffected. CI's `lint` job checks the dashboard
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
+- `test-fixtures/` — real 3MFs in Git LFS (~290 MB) for the tests marked
+  `requires_fixtures`, which skip without them. With git-lfs installed a plain
+  clone downloads them all; clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` and
+  `git lfs pull --include "test-fixtures/**"` only when you need them.
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
 - `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.

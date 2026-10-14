@@ -246,6 +246,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_flow: () => [],
   // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
   revoke_flow_grant: () => [],
+  // A flow's triggers (#2484) are the flow's: its page lists them, with who made each.
+  create_flow_trigger: () => [],
+  update_flow_trigger: () => [],
+  pause_flow_trigger: () => [],
+  resume_flow_trigger: () => [],
+  delete_flow_trigger: () => [],
+  attach_flow_trigger_grant: () => [],
+  revoke_flow_trigger_grant: () => [],
   // A starting session's answer to its run's call (#2482) is recorded on the call's hops.
   escalation_respond: () => [],
   // Models.
@@ -377,6 +385,17 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
     ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
+  // #2686: an upload makes a file, an update changes one. A folder delete records the files it
+  // deleted (as delete_library_files does); the folders themselves are no recorded resource.
+  upload_library_file: (_input, result) => {
+    const id = bambuddyId(field(result, 'id'))
+    return id ? [{ type: 'bambuddy_file', id, action: 'created' }] : []
+  },
+  update_library_file: (input, result) => {
+    const id = bambuddyId(field(result, 'id')) ?? bambuddyId(input.file_id)
+    return id ? [{ type: 'bambuddy_file', id, action: 'modified' }] : []
+  },
+  delete_library_folder: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   // #2670: a move or rename changes the file under its id; a copy creates a new one.
   move_library_file: (_input, result) => libraryFiles(field(result, 'moved'), 'modified'),
   copy_library_file: (_input, result) => libraryFiles(field(result, 'copied'), 'created'),
@@ -467,6 +486,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_deny',
   'browser_pair',
   'confirm_action',
+  // #2686: a library folder is no recorded resource kind.
+  'create_library_folder',
+  'update_library_folder',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

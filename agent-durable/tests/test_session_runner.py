@@ -15,7 +15,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import ProcessError, ResultError
@@ -41,16 +41,17 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+from temporalio.claude_agent_sdk._events import emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
-from scadbuddy_durable.credentials import credential_aad
+from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
-from scadbuddy_durable.session.models import ImageRef
+from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
 from scadbuddy_durable.session.runner import (
     IMAGE_TOO_LARGE,
     IMAGES_SERVER,
@@ -58,8 +59,10 @@ from scadbuddy_durable.session.runner import (
     PLUGIN_REJECTION,
     VIEW_IMAGES_TOOL,
     VIEW_TOOL_IMAGES_TOOL,
+    HeldText,
     Image,
     ScadBuddyRunner,
+    TurnSettings,
     image_problem,
     image_size,
     tool_images_loader,
@@ -121,14 +124,14 @@ async def _client(env: WorkflowEnvironment, connect: Connect) -> Client:
 
 @contextlib.asynccontextmanager
 async def running(
-    env: WorkflowEnvironment, connect: Connect, runner: Any
+    env: WorkflowEnvironment, connect: Connect, runner: Any, stand_in: StandInTools | None = None
 ) -> AsyncIterator[tuple[Client, str]]:
     tools.use_manifest(MANIFEST)
     client = await _client(env, connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
     async with (
         build_worker(client, connect, runner, task_queue=queue),
-        tools_worker(client, StandInTools(connect)),
+        tools_worker(client, stand_in or StandInTools(connect)),
     ):
         yield client, queue
 
@@ -606,6 +609,35 @@ async def test_each_turn_runs_with_the_append_it_was_sent_with(
     assert appends == ["no browser", "a headless browser"]
 
 
+async def test_the_built_ins_the_agent_provides_are_named_in_the_append(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2393: what the turn's listing says to tell the model (the package built-ins it
+    gets as turn tools) follows the turn's append, or stands alone without one."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    recording = Recording()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=recording)
+    stand_in = StandInTools(connect)
+    stand_in.turn_note = "Read is builtin__Read."
+    async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue, system_append="Be careful.")
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    appends = [m["extra_options"]["system_prompt"].get("append") for m in recording.made]
+    assert appends == ["Be careful.\n\nRead is builtin__Read.", "Read is builtin__Read."]
+
+
 async def _setting(conn: Conn, key: str, value: str) -> None:
     await conn.execute(
         "INSERT INTO ai_settings (key, value) VALUES (%s, %s::jsonb)"
@@ -645,9 +677,10 @@ class Refusing:
     """make_runner for the runner: a segment on a credential in ``refused`` raises
     ``error``; any other answers. Records each runner's token."""
 
-    def __init__(self, refused: set[str], error: BaseException) -> None:
+    def __init__(self, refused: set[str], error: BaseException, said: str | None = None) -> None:
         self.refused = refused
         self.error = error
+        self.said = said
         self.tokens: list[str] = []
         self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
 
@@ -655,10 +688,13 @@ class Refusing:
         token = kwargs["env"]["ANTHROPIC_AUTH_TOKEN"]
         self.tokens.append(token)
         if token in self.refused:
-            error = self.error
+            error, said = self.error, self.said
 
             class Raises:
                 async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                    if said is not None:
+                        # As Claude Code answers a refused request: the notice, then the error.
+                        emit({"type": "text", "text": said})
                     raise error
 
             return Raises()
@@ -699,6 +735,50 @@ async def test_a_refused_credential_falls_back_to_the_next(
         finally:
             await handle.terminate()
     assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_refused_credentials_notice_never_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2945: the refused attempt's "session limit" text is dropped; the turn's answer,
+    on the next credential, is what the session log holds."""
+    await _two_credentials(agent_db)
+    notice = "You've hit your session limit · resets 6pm (UTC)"
+    refusing = Refusing(
+        {TOKEN}, _result_error("API Error: 429 rate limited", status=429), said=notice
+    )
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_first_credentials_answer_still_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2945: a non-last credential's text is held, and flushed when it answers."""
+    await _two_credentials(agent_db)
+    refusing = Refusing(set(), _result_error("API Error: 429 rate limited", status=429))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN]
 
 
 async def test_a_failure_of_the_request_does_not_try_another_credential(
@@ -871,3 +951,114 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
         f"{PLUGIN_REJECTION}\n\n" + refusal("print_output", entry["id"], "denied", None)
     )
     assert is_error is True
+
+
+class _Answers:
+    """make_runner whose segment answers ``out``, whatever it is asked."""
+
+    def __init__(self, out: SegmentOutput) -> None:
+        self.out = out
+        self.budgets: list[float] = []
+
+    def __call__(self, **kwargs: Any) -> Any:
+        self.budgets.append(kwargs["max_budget_usd"])
+        out = self.out
+
+        class Answers:
+            async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                return out
+
+        return Answers()
+
+
+def _credential() -> Credential:
+    return Credential(id="c1", priority=0, kind="gateway", base_url="http://x", secret=TOKEN)
+
+
+async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
+    # `_on_credentials` reads neither the connector nor the SegmentInput: the runner it
+    # builds is `_Answers`, which answers `out` whatever it is given. Both are None here.
+    answers = _Answers(out)
+    runner = ScadBuddyRunner(cast(Any, None), KEK, cwd="/tmp", make_runner=answers)
+    settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
+    got = await runner._on_credentials(
+        "s", "wf", cast(Any, None), 1, [_credential()], left, {}, settings
+    )
+    assert answers.budgets == [left]
+    return got
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Reached maximum budget ($1.00)",
+        "Claude Code returned an error result: Reached maximum budget ($1.00) (exit code: 1)",
+    ],
+)
+@pytest.mark.parametrize(("cost", "charged"), [(0.25, 1.0), (0.0, 1.0), (1.5, 1.5)])
+async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
+    error: str, cost: float, charged: float
+) -> None:
+    """#2675: Claude Code stops once the cost reached the cap, so the segment is charged
+    `max(cost_usd, left)`: what was left when its own report is lower, its report when
+    higher. Either way the turn ends as the budget's."""
+    out = SegmentOutput(session_id="s", is_error=True, error=error, cost_usd=cost)
+    got = await _segment(out, left=1.0)
+    assert got.error == BUDGET_EXHAUSTED
+    assert got.cost_usd == pytest.approx(charged)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the tool said error_max_budget_usd somewhere in its output",
+        "Quoting: Reached maximum budget is what it says",
+        "the user pasted: Reached maximum budget ($5.00) from an old log",
+        "Claude Code returned an error result: tool said Reached maximum budget ($2.00)",
+    ],
+)
+async def test_an_error_that_only_quotes_the_budget_text_is_not_the_cap(text: str) -> None:
+    """#2675: the error text is session content. Only Claude Code's own message,
+    "Reached maximum budget ($N)", is the cap; a result that quotes the subtype or the
+    words is the error it is, charged what it reported."""
+    out = SegmentOutput(session_id="s", is_error=True, error=text, cost_usd=0.1)
+    got = await _segment(out, left=1.0)
+    assert got.error == text
+    assert got.cost_usd == pytest.approx(0.1)
+
+
+async def test_an_error_that_names_max_budget_usd_fails_the_turn(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3094: only the runner's own BUDGET_EXHAUSTED ends a turn as the budget's. A
+    segment's error that merely names `max_budget_usd` (session content, or a plugin
+    complaining about its options) is the failure it is."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    text = "the plugin refused ClaudeAgentSdkRunner(max_budget_usd=...)"
+    answers = _Answers(SegmentOutput(session_id="s", is_error=True, error=text))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=answers)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db, budget=1.0)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "failed"
+        finally:
+            await handle.terminate()
+    [error] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert error["code"] == "turn_failed"
+
+
+def test_held_text_goes_out_in_order_before_the_next_other_event() -> None:
+    """#2945: text is only held, never reordered; a drop loses only what is held."""
+    out: list[dict[str, Any]] = []
+    held = HeldText(out.append)
+    held({"type": "text", "text": "a"})
+    held({"type": "tool_call", "id": "1"})
+    held({"type": "text", "text": "b"})
+    assert out == [{"type": "text", "text": "a"}, {"type": "tool_call", "id": "1"}]
+    held.drop()
+    held.flush()
+    held({"type": "text", "text": "c"})
+    held.flush()
+    assert [e.get("text", e["type"]) for e in out] == ["a", "tool_call", "c"]

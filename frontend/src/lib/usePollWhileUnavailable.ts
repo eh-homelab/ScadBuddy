@@ -17,3 +17,20 @@ export function usePollWhileUnavailable(read: () => void, ms: number): void {
     return () => clearInterval(timer)
   }, [ms])
 }
+
+/**
+ * Calls `read` every `ms` while `active`: for data that changes with no topic to say so,
+ * such as a child session's call decided in its own session (#2482: the agent's
+ * pending input, which the shell's badge polls too).
+ */
+export function usePollWhile(active: boolean, read: () => void, ms: number): void {
+  const latest = useRef(read)
+  useEffect(() => {
+    latest.current = read
+  })
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => latest.current(), ms)
+    return () => clearInterval(timer)
+  }, [active, ms])
+}

@@ -1,0 +1,187 @@
+---
+name: Build Go CLI Images
+
+# Publishes every tools/go/* CLI module as a container image,
+# ghcr.io/eh-homelab/scadbuddy-<module> (#2686, spec 2026-10-13 §7.1). Copied
+# from WonderForgeLabs/forge's build-go-image.yml: `discover` finds the
+# modules, `build-and-push` builds and pushes each in its own matrix job. Every
+# `tools/go/*/main.go` is a CLI and every CLI must ship a Dockerfile; `discover`
+# fails if one is missing rather than skipping it. A library module
+# (scadbuddy-client, no main.go) is never discovered.
+#
+# Unlike forge: hosted runners only (the repo is public; CLAUDE.md, "CI and
+# caching rules"), the repo root as build context (the Dockerfiles need go.work
+# and the root vendor/), and buildx for amd64 and arm64.
+#
+# THE PACKAGE MUST BE PUBLIC, for the reason build-image.yml gives: the
+# cluster pulls ghcr.io through an anonymous proxy.
+#
+# Nothing here runs on a pull request: a PR has no GHCR write token. ci.yml's
+# `go` job builds each image and runs `--help` on every PR that touches Go.
+
+on:
+  push:
+    branches: [main]
+    # GitHub does not evaluate path filters for tag pushes, so every `v*` tag
+    # builds.
+    tags: ["v*"]
+    paths:
+      - "tools/go/**"
+      - "go.work"
+      - "go.work.sum"
+      - "vendor/**"
+      - ".github/workflows/build-go-image.yml"
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA or ref to build from (default: the dispatched ref)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+
+      - name: Discover Go CLI modules
+        id: build-matrix
+        run: |
+          set -euo pipefail
+          mapfile -t mods < <(find tools/go -mindepth 2 -maxdepth 2 -name main.go -printf '%h\n' | sort -u)
+
+          if [ ${#mods[@]} -eq 0 ]; then
+            echo "::error::No Go CLI modules (main.go) discovered under tools/go/"
+            exit 1
+          fi
+
+          missing=()
+          for m in "${mods[@]}"; do
+            if [ ! -f "${m}/Dockerfile" ]; then
+              missing+=("${m}")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing Dockerfile for Go CLI module(s) — every tools/go CLI must publish an image: ${missing[*]}"
+            exit 1
+          fi
+
+          matrix=$(printf '%s\n' "${mods[@]}" | jq -R . | jq -s -c .)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "==> Discovered Go CLI modules: ${mods[*]}"
+
+  build-and-push:
+    name: "build-and-push (${{ matrix.module }})"
+    needs: [discover]
+    runs-on: ubuntu-latest
+    # arm64 runs its apt layer under QEMU.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    concurrency:
+      # Unique per (module, run), so a dispatched build is never cancelled by a
+      # later one; a cancelled push leaves a half-written manifest list.
+      # `latest` is last-writer-wins across concurrent runs; `sha-<short>` is
+      # unique per commit.
+      group: build-go-image-${{ matrix.module }}-${{ github.run_id }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive the image name and tags
+        id: tags
+        env:
+          MODULE: ${{ matrix.module }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          name=$(basename "$MODULE")
+          image="ghcr.io/eh-homelab/scadbuddy-${name}"
+          sha=$(git rev-parse HEAD)
+          # `sha-<short>`, 7 characters, as build-image.yml tags the app image.
+          tags="${image}:sha-${sha:0:7}"
+          # `latest` is main's head only: a dispatched build of another ref or an
+          # older commit, or a tag push, must not move it.
+          if [[ "$EVENT" == push && "$REF" == refs/heads/main ]]; then
+            tags+=$'\n'"${image}:latest"
+          fi
+          if [[ "$REF" == refs/tags/v* ]]; then
+            tags+=$'\n'"${image}:${REF#refs/tags/v}"
+          fi
+          {
+            echo "name=${name}"
+            echo "image=${image}"
+            echo "sha=${sha}"
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$tags"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.module }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
+          provenance: false
+          # `type=gha` only because this is a hosted runner (it fails the build
+          # on the self-hosted pools). mode=min and a scope per module: the
+          # repo's Actions cache is full (CLAUDE.md, "CI and caching rules").
+          cache-from: type=gha,scope=go-${{ steps.tags.outputs.name }}
+          cache-to: type=gha,scope=go-${{ steps.tags.outputs.name }},mode=min
+
+      - name: Report the published digest
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`${IMAGE}\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
