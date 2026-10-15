@@ -5,7 +5,7 @@ import { useAssistantOpener } from '../agent/chat/opener'
 import { api, ApiError } from '../api/client'
 import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
-import { useFillable } from '../agent/fillable'
+import { useFillable } from '../agent/useFillable'
 import { Hint } from '../components/Hint'
 import { PageLoading, PageProblem } from '../components/PageState'
 import {

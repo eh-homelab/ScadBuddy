@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react'
 import { useCommandState } from 'cmdk'
-import { useFillable } from '../../agent/fillable'
+import { useFillable } from '../../agent/useFillable'
 import { ApiError, api } from '../../api/client'
 import type { FontFamily, InstalledFamily, Param } from '../../api/types'
 import { cssFontFamily, formatFontValue, parseFontValue, preferredStyle } from '../../lib/fonts'

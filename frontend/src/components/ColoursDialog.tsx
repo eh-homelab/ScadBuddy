@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError, api, type ColourBreakdown } from '../api/client'
 import { inkOn, normalizeHex } from '../lib/format'
-import { useFillable } from '../agent/fillable'
+import { useFillable } from '../agent/useFillable'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'

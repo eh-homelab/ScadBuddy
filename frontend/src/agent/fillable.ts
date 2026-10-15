@@ -1,5 +1,3 @@
-import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react'
-
 /**
  * A control that is not a native field, which the bridge's `fill` can still set (#3672):
  * a Radix select is a button and a listbox in a portal, with no value to write to. What
@@ -14,26 +12,17 @@ export interface Fillable {
 
 const fillables = new WeakMap<Element, Fillable>()
 
-export function fillableOf(element: Element): Fillable | undefined {
-  return fillables.get(element)
+/**
+ * Without React: the bridge's tests load this module (through `global.ts` and
+ * `snapshot.ts`) in the agent package, which has no React. The hook is `useFillable.ts`.
+ */
+export function registerFillable(element: Element, fillable: Fillable): () => void {
+  fillables.set(element, fillable)
+  return () => {
+    fillables.delete(element)
+  }
 }
 
-/** Registers `ref`'s element for `fill` while it is mounted; the latest props are read on each call. */
-export function useFillable(ref: RefObject<Element | null>, fillable: Fillable): void {
-  const latest = useRef(fillable)
-  useLayoutEffect(() => {
-    latest.current = fillable
-  })
-  useEffect(() => {
-    const element = ref.current
-    if (!element) return
-    fillables.set(element, {
-      options: () => latest.current.options(),
-      value: () => latest.current.value(),
-      set: (value) => latest.current.set(value),
-    })
-    return () => {
-      fillables.delete(element)
-    }
-  }, [ref])
+export function fillableOf(element: Element): Fillable | undefined {
+  return fillables.get(element)
 }
