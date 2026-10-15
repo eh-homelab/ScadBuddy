@@ -28,6 +28,10 @@ export const SWEEP_GRACE_MS = 5 * 60_000
 const DESCRIBE_DEADLINE_MS = 10_000
 const WORKFLOW_TASK_QUEUE = 1
 
+/** What a package's http server's sessions are recorded under, apart from the registry's names (#3599). */
+const PACKAGE_PREFIX = 'pkg:'
+export const packageLedgerId = (server: string): string => `${PACKAGE_PREFIX}${server}`
+
 export class PluginSessions implements SessionLedger {
   private readonly sql: Sql
   private readonly replica: string
@@ -67,8 +71,8 @@ type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
  * Sends each row's session its DELETE, as the plugin is now (the registry's URL and header, the
  * address the egress check passes), and forgets it. A session of a plugin that is gone, disabled
  * or refused by the egress check is forgotten without a DELETE (one log line names each such
- * plugin); that includes a package's http server, which is not in the registry (the packages are
- * not resolved here). A failed DELETE keeps its row for the next sweep unless it is `old` or
+ * plugin); so is a package's http server's (`packageLedgerId`), which is never looked up in the
+ * registry (the packages are not resolved here). A failed DELETE keeps its row for the next sweep unless it is `old` or
  * `forgetFailed`.
  */
 async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed: boolean): Promise<void> {
@@ -76,12 +80,18 @@ async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed:
   const log = deps.log ?? (() => {})
   const loaded = await loadEnabledPlugins(deps.plugins, deps.kek, deps.resolve)
   const byName = new Map(loaded.plugins.map((checked) => [checked.plugin.name, checked]))
-  for (const name of new Set(rows.filter((r) => !byName.has(r.plugin_id)).map((r) => r.plugin_id))) {
-    log(`plugin session sweep: ${name} is not an enabled plugin that passes the egress check (or is a package's server); its sessions are dropped without a DELETE`)
+  // A package's server is never looked up in the registry, whatever its name.
+  const registered = (id: string) => (id.startsWith(PACKAGE_PREFIX) ? undefined : byName.get(id))
+  for (const id of new Set(rows.filter((r) => !registered(r.plugin_id)).map((r) => r.plugin_id))) {
+    log(
+      id.startsWith(PACKAGE_PREFIX)
+        ? `plugin session sweep: ${id.slice(PACKAGE_PREFIX.length)} is a package's server; its sessions are dropped without a DELETE`
+        : `plugin session sweep: ${id} is not an enabled plugin that passes the egress check; its sessions are dropped without a DELETE`,
+    )
   }
   await Promise.all(
     rows.map(async (row) => {
-      const checked = byName.get(row.plugin_id)
+      const checked = registered(row.plugin_id)
       const ended = checked ? await deleteUpstreamSession(checked.plugin, checked.address, row.upstream_session_id, log) : true
       if (!ended && !row.old && !forgetFailed) return
       await sql`

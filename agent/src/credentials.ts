@@ -653,11 +653,15 @@ export class SettingsStore {
     const startedAt = new Date()
     let failure: unknown
     try {
-      await this.sql`
-        INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
-      // A key a warm Claude Code was spawned by tells every cache (spec 2026-10-13 §5.3, sessions/warmEvict.ts).
-      if (evictsWarmOnWrite(key)) await notifyWarmEvict(this.sql, '*')
+      await this.sql.begin(async (tx) => {
+        await tx`
+          INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+        // A key a warm Claude Code was spawned by tells every cache (spec 2026-10-13 §5.3, sessions/warmEvict.ts).
+        if (evictsWarmOnWrite(key)) await notifyWarmEvict(tx, '*')
+        // The warm cache's size and idle time are re-read, as setMany tells them (#3598).
+        if (isRuntimeKey(key)) await notifyRuntimeSettings(tx)
+      })
     } catch (err) {
       failure = err
     }
