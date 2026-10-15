@@ -1,6 +1,9 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
-import { Chevron } from '../../components/ui/Chevron'
+import { ChevronRightIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { cn } from '@/lib/utils'
 import { CollapseContext, foldsAround, readCollapsed, useCollapsible, useReveal, writeCollapsed } from './collapseState'
 
 /** The Settings page's folded sections and sub-sections, remembered per browser. */
@@ -60,30 +63,32 @@ export function SubSection({ id, title, children }: { id: string; title: string;
   }, [id, setEmpty])
   const headingId = `${id}-heading`
   return (
-    <div
-      id={id}
-      data-collapsible=""
-      role="group"
-      aria-labelledby={headingId}
-      hidden={context?.empty.has(id)}
-      className="scroll-mt-14 rounded-[6px] border border-line"
-    >
-      <h3 id={headingId} className="text-[13px] font-medium">
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={`${id}-body`}
-          onClick={toggle}
-          className="flex min-h-6 w-full items-center gap-1.5 px-3 py-2 text-left"
-        >
-          <Chevron open={open} />
-          {title}
-        </button>
-      </h3>
-      <div id={`${id}-body`} ref={body} hidden={!open} className="space-y-4 border-t border-line p-3">
-        {children}
+    <Collapsible open={open} onOpenChange={(next) => next !== open && toggle()} asChild>
+      <div
+        id={id}
+        data-collapsible=""
+        role="group"
+        aria-labelledby={headingId}
+        hidden={context?.empty.has(id)}
+        className="scroll-mt-14 rounded-lg ring-1 ring-foreground/10"
+      >
+        <h3 id={headingId} className="text-sm font-medium">
+          <CollapsibleTrigger
+            aria-controls={`${id}-body`}
+            className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left hover:bg-ui-muted/50"
+          >
+            <ChevronRightIcon
+              aria-hidden="true"
+              className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
+            />
+            {title}
+          </CollapsibleTrigger>
+        </h3>
+        <CollapsibleContent forceMount hidden={!open} id={`${id}-body`} ref={body} className="space-y-4 border-t p-3">
+          {children}
+        </CollapsibleContent>
       </div>
-    </div>
+    </Collapsible>
   )
 }
 
@@ -95,22 +100,23 @@ export function SectionContents({ label, items }: { label: string; items: readon
   const shown = items.filter((item) => !context?.empty.has(item.id))
   return (
     <nav aria-label={label}>
-      <ul className="flex flex-wrap gap-x-3 gap-y-1 text-[12px]">
+      <ul className="flex flex-wrap gap-1">
         {shown.map((item) => (
           <li key={item.id}>
-            <a
-              href={`#${item.id}`}
-              onClick={(event) => {
-                event.preventDefault()
-                // Unfolded in this render, and scrolled to once it is, by the section nav,
-                // which follows the address (#2345).
-                reveal(item.id)
-                navigate({ hash: `#${item.id}` })
-              }}
-              className="text-accent underline"
-            >
-              {item.title}
-            </a>
+            <Button asChild variant="link" size="xs" className="h-6 px-1">
+              <a
+                href={`#${item.id}`}
+                onClick={(event) => {
+                  event.preventDefault()
+                  // Unfolded in this render, and scrolled to once it is, by the section nav,
+                  // which follows the address (#2345).
+                  reveal(item.id)
+                  navigate({ hash: `#${item.id}` })
+                }}
+              >
+                {item.title}
+              </a>
+            </Button>
           </li>
         ))}
       </ul>

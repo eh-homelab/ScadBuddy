@@ -1,9 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 const MiB = 1024 * 1024
 
@@ -55,13 +53,12 @@ export function WorkspaceSettingsSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant workspace</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <div className="flex flex-wrap gap-4">
-          <label className="flex flex-col gap-1 text-[13px]">
-            Largest file (MiB)
-            <input
+    <SettingCard title="Assistant workspace">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <div className="flex flex-wrap gap-4">
+            <LabeledInput
+              label="Largest file (MiB)"
               type="number"
               inputMode="numeric"
               min={current.min / MiB}
@@ -70,13 +67,11 @@ export function WorkspaceSettingsSetting() {
               required
               value={fileText}
               onChange={(event) => setFile(event.target.value)}
-              className="sb-field sb-num w-32"
+              className="w-36"
               aria-describedby="workspace-settings-help"
             />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            Per chat, in all (MiB)
-            <input
+            <LabeledInput
+              label="Per chat, in all (MiB)"
               type="number"
               inputMode="numeric"
               min={current.min / MiB}
@@ -85,34 +80,19 @@ export function WorkspaceSettingsSetting() {
               required
               value={totalText}
               onChange={(event) => setTotal(event.target.value)}
-              className="sb-field sb-num w-32"
+              className="w-36"
               aria-describedby="workspace-settings-help"
             />
-          </label>
-        </div>
-        <p id="workspace-settings-help" className="text-[12px] text-muted">
-          The files the assistant keeps for a chat (its downloads, its own files and what you upload under Files) are
-          stored in the AI database. 25 MiB a file and 200 MiB a chat are the defaults; a file may be up to{' '}
-          {current.file_max / MiB} MiB and a chat&apos;s files up to {current.workspace_max / MiB} MiB. Applies to files
-          written from now on.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+          </div>
+          <p id="workspace-settings-help" className="text-xs text-muted-foreground">
+            The files the assistant keeps for a chat (its downloads, its own files and what you upload under Files) are
+            stored in the AI database. 25 MiB a file and 200 MiB a chat are the defaults; a file may be up to{' '}
+            {current.file_max / MiB} MiB and a chat&apos;s files up to {current.workspace_max / MiB} MiB. Applies to files
+            written from now on.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter saving={saving} disabled={!changed} saved={saved && !changed ? 'Saved.' : null} error={error} />
       </form>
-    </section>
+    </SettingCard>
   )
 }

@@ -44,6 +44,9 @@ afterEach(() => {
   resetIntersections()
   // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
   window.sessionStorage.clear()
+  // A Radix select or dialog still open when its test ends can leave the body
+  // `pointer-events: none`, and the next test could click nothing (#3671).
+  document.body.style.pointerEvents = ''
 })
 afterAll(() => server.close())
 
@@ -79,3 +82,12 @@ if (!globalThis.IntersectionObserver) {
   globalThis.IntersectionObserver =
     FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }
+
+// Radix's Select captures the pointer and scrolls its chosen item into view, and cmdk
+// scrolls its active item: jsdom has neither (#3671).
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.setPointerCapture = () => {}
+  Element.prototype.releasePointerCapture = () => {}
+}
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}

@@ -17,8 +17,34 @@ import {
 } from '../../api/aiPlugins'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
+import { ChevronRightIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge as UiBadge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { cn } from '@/lib/utils'
+import { LoadingLines, SettingBody, SettingCard } from './form'
 import { Spinner } from '../ui/Spinner'
 import { PackageFiles } from './PackageFiles'
 
@@ -52,7 +78,7 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
   const safe = safeHttpUrl(href)
   if (!safe) return <span className="sb-num">{children}</span>
   return (
-    <a href={safe} target="_blank" rel="noopener noreferrer" className="sb-num text-accent hover:underline">
+    <a href={safe} target="_blank" rel="noopener noreferrer" className="sb-num text-primary hover:underline">
       {children}
     </a>
   )
@@ -61,10 +87,10 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
 function PartList({ label, items }: { label: string; items: ReactNode[] }) {
   return (
     <div>
-      <dt className="text-muted">{label}</dt>
+      <dt className="text-muted-foreground">{label}</dt>
       <dd className="mt-0.5">
         {items.length === 0 ? (
-          <span className="text-muted">None</span>
+          <span className="text-muted-foreground">None</span>
         ) : (
           <ul className="space-y-0.5">
             {items.map((item, i) => (
@@ -96,7 +122,7 @@ export function ReviewParts({ review, of }: { review: PackageReview; of: Package
       />
       {(review.builtin_tools?.length ?? 0) > 0 && <PartList label="Built-in tools" items={review.builtin_tools!} />}
       {(review.refused?.length ?? 0) > 0 && (
-        <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-2 sm:col-span-2">
+        <div className="rounded-lg bg-warn/8 p-2.5 ring-1 ring-warn/40 sm:col-span-2">
           <dt className="font-medium text-warn">Refused by the vetting rules</dt>
           <dd>
             <ul className="mt-1 list-disc space-y-0.5 pl-5" aria-label={`What the rules refuse in ${review.name}`}>
@@ -106,7 +132,7 @@ export function ReviewParts({ review, of }: { review: PackageReview; of: Package
                 </li>
               ))}
             </ul>
-            <p className="mt-1 text-muted">
+            <p className="mt-1 text-muted-foreground">
               It loads only if you allow this when approving. Its commands, hooks and local servers then run as the
               assistant service, able to read the Claude credential, the database URL and the secrets key.
             </p>
@@ -131,10 +157,12 @@ function MovedNotice({ pkg }: { pkg: PluginPackage }) {
     </span>
   )
   return (
-    <p role="note" className="rounded-[6px] border border-warn/40 bg-warn/8 p-2 text-[12px]">
-      This re-pin is fetched from a different place: {place(pkg.pending.plugin_url, pkg.pending.plugin_path)}, not{' '}
-      {place(from.url, from.path)}. Approving it leaves the package disabled until you enable it again.
-    </p>
+    <Card role="note" size="sm" className="bg-warn/8 text-xs ring-warn/40">
+      <CardContent>
+        This re-pin is fetched from a different place: {place(pkg.pending.plugin_url, pkg.pending.plugin_path)}, not{' '}
+        {place(from.url, from.path)}. Approving it leaves the package disabled until you enable it again.
+      </CardContent>
+    </Card>
   )
 }
 
@@ -149,14 +177,14 @@ function Diff({ diff }: { diff: FileDiff }) {
       {rows.flatMap(([mark, label, files]) =>
         files.map((f) => (
           <li key={`${label}:${f}`} className="sb-num break-all">
-            <span aria-label={label} className="mr-1.5 inline-block w-3 text-muted">
+            <span aria-label={label} className="mr-1.5 inline-block w-3 text-muted-foreground">
               {mark}
             </span>
             {f}
           </li>
         )),
       )}
-      {rows.every(([, , files]) => files.length === 0) && <li className="text-muted">No file changes.</li>}
+      {rows.every(([, , files]) => files.length === 0) && <li className="text-muted-foreground">No file changes.</li>}
     </ul>
   )
 }
@@ -211,18 +239,65 @@ function ApproveDialog({
   }
 
   return (
-    <Dialog
-      open
-      title={pending ? `Approve the re-pin of ${pkg.name}` : `Approve ${pkg.name}`}
-      description="Only this commit, with exactly these files, will load. Anything else needs a new approval."
-      onClose={close}
-      footer={
-        <>
+    <Dialog open onOpenChange={(open) => !open && close()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{pending ? `Approve the re-pin of ${pkg.name}` : `Approve ${pkg.name}`}</DialogTitle>
+          <DialogDescription>
+            Only this commit, with exactly these files, will load. Anything else needs a new approval.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-w-0 space-y-3 text-sm">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-muted-foreground">Commit</dt>
+            <dd className="sb-num break-all" data-testid="approve-commit">
+              {pin.commit_sha}
+            </dd>
+            <dt className="text-muted-foreground">Content hash</dt>
+            <dd className="sb-num break-all" data-testid="approve-hash">
+              {pin.content_hash}
+            </dd>
+          </dl>
+          {pending && <MovedNotice pkg={pkg} />}
+          <ReviewParts review={pin.review} of={{ name: pkg.name, pending: pending && pkg.pending !== null }} />
+          <div className="flex items-start gap-2.5" {...USER_ONLY}>
+            <Checkbox
+              id="approve-reviewed"
+              checked={confirmed}
+              onCheckedChange={(next) => setConfirmed(next === true)}
+              className="mt-0.5"
+            />
+            <Label htmlFor="approve-reviewed" className="block leading-snug font-normal">
+              I reviewed commit <span className="sb-num">{pin.commit_sha.slice(0, 12)}</span> and content hash{' '}
+              <span className="sb-num">{pin.content_hash.slice(0, 19)}…</span>
+            </Label>
+          </div>
+          {refused.length > 0 && (
+            <div className="flex items-start gap-2.5" {...USER_ONLY}>
+              <Checkbox
+                id="approve-allow-refused"
+                checked={allowRefused}
+                onCheckedChange={(next) => setAllowRefused(next === true)}
+                className="mt-0.5"
+              />
+              <Label htmlFor="approve-allow-refused" className="block leading-snug font-normal">
+                Load it as it is, despite the {refused.length === 1 ? 'refusal' : `${refused.length} refusals`} above.
+                Its code runs as the assistant service itself: it can read the Claude credential, the database URL
+                and the key that decrypts every stored secret.
+              </Label>
+            </div>
+          )}
+          {error && (
+            <p role="alert" className="text-warn">
+              {error}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
           <Button
-            variant="primary"
             onClick={() => void approve()}
             disabled={!confirmed || (refused.length > 0 && !allowRefused) || busy}
             aria-busy={busy}
@@ -231,55 +306,8 @@ function ApproveDialog({
             {busy && <Spinner />}
             Approve this pin
           </Button>
-        </>
-      }
-    >
-      <div className="space-y-3 text-[13px]">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
-          <dt className="text-muted">Commit</dt>
-          <dd className="sb-num break-all" data-testid="approve-commit">
-            {pin.commit_sha}
-          </dd>
-          <dt className="text-muted">Content hash</dt>
-          <dd className="sb-num break-all" data-testid="approve-hash">
-            {pin.content_hash}
-          </dd>
-        </dl>
-        {pending && <MovedNotice pkg={pkg} />}
-        <ReviewParts review={pin.review} of={{ name: pkg.name, pending: pending && pkg.pending !== null }} />
-        <label className="flex items-start gap-2" {...USER_ONLY}>
-          <input
-            type="checkbox"
-            checked={confirmed}
-            onChange={(event) => setConfirmed(event.target.checked)}
-            className="mt-0.5"
-          />
-          <span>
-            I reviewed commit <span className="sb-num">{pin.commit_sha.slice(0, 12)}</span> and content hash{' '}
-            <span className="sb-num">{pin.content_hash.slice(0, 19)}…</span>
-          </span>
-        </label>
-        {refused.length > 0 && (
-          <label className="flex items-start gap-2" {...USER_ONLY}>
-            <input
-              type="checkbox"
-              checked={allowRefused}
-              onChange={(event) => setAllowRefused(event.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              Load it as it is, despite the {refused.length === 1 ? 'refusal' : `${refused.length} refusals`} above.
-              Its code runs as the assistant service itself: it can read the Claude credential, the database URL
-              and the key that decrypts every stored secret.
-            </span>
-          </label>
-        )}
-        {error && (
-          <p role="alert" className="text-warn">
-            {error}
-          </p>
-        )}
-      </div>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -326,68 +354,79 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
 
   return (
     <form onSubmit={(event) => void submit(event)} className="space-y-3" aria-label="Install a plugin package" {...USER_ONLY}>
-      <fieldset className="flex gap-4 text-[13px]">
+      <fieldset>
         <legend className="sr-only">Source</legend>
-        <label className="flex items-center gap-1.5">
-          <input type="radio" name="pkg-kind" checked={kind === 'git'} onChange={() => setKind('git')} />
-          Git repository
-        </label>
-        <label className="flex items-center gap-1.5">
-          <input type="radio" name="pkg-kind" checked={kind === 'marketplace'} onChange={() => setKind('marketplace')} />
-          Marketplace entry
-        </label>
+        <RadioGroup
+          name="pkg-kind"
+          value={kind}
+          onValueChange={(next) => setKind(next as 'git' | 'marketplace')}
+          className="flex flex-wrap gap-4"
+        >
+          <div className="flex items-center gap-2">
+            <RadioGroupItem id="pkg-kind-git" value="git" />
+            <Label htmlFor="pkg-kind-git" className="font-normal">
+              Git repository
+            </Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <RadioGroupItem id="pkg-kind-marketplace" value="marketplace" />
+            <Label htmlFor="pkg-kind-marketplace" className="font-normal">
+              Marketplace entry
+            </Label>
+          </div>
+        </RadioGroup>
       </fieldset>
       <div>
-        <label htmlFor="pkg-url" className="block text-[13px]">
+        <Label htmlFor="pkg-url" className="mb-1.5 font-normal">
           {kind === 'git' ? 'Repository URL' : 'Marketplace repository URL'}
-        </label>
-        <input
+        </Label>
+        <Input
           id="pkg-url"
           type="url"
           required
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           placeholder="https://github.com/owner/repo.git"
-          className="sb-field sb-num mt-1.5"
+          className="sb-num"
         />
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
-          <label htmlFor="pkg-ref" className="block text-[13px]">
+          <Label htmlFor="pkg-ref" className="mb-1.5 font-normal">
             Branch, tag or commit
-          </label>
-          <input
+          </Label>
+          <Input
             id="pkg-ref"
             value={ref}
             onChange={(event) => setRef(event.target.value)}
             placeholder="HEAD"
-            className="sb-field sb-num mt-1.5"
+            className="sb-num"
           />
         </div>
         {kind === 'git' ? (
           <div>
-            <label htmlFor="pkg-path" className="block text-[13px]">
+            <Label htmlFor="pkg-path" className="mb-1.5 font-normal">
               Directory in the repository
-            </label>
-            <input
+            </Label>
+            <Input
               id="pkg-path"
               value={path}
               onChange={(event) => setPath(event.target.value)}
               placeholder="the root"
-              className="sb-field sb-num mt-1.5"
+              className="sb-num"
             />
           </div>
         ) : (
           <div>
-            <label htmlFor="pkg-entry" className="block text-[13px]">
+            <Label htmlFor="pkg-entry" className="mb-1.5 font-normal">
               Plugin name in the marketplace
-            </label>
-            <input
+            </Label>
+            <Input
               id="pkg-entry"
               required
               value={entry}
               onChange={(event) => setEntry(event.target.value)}
-              className="sb-field sb-num mt-1.5"
+              className="sb-num"
             />
           </div>
         )}
@@ -397,15 +436,15 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
           {busy && <Spinner />}
           Fetch and review
         </Button>
-        <p className="text-[12px] text-muted">Nothing loads until you approve the pin.</p>
+        <p className="text-xs text-muted-foreground">Nothing loads until you approve the pin.</p>
       </div>
       {notice && (
-        <p role="status" className="rounded-[6px] border border-line p-2 text-[12px] text-muted">
+        <p role="status" className="rounded-lg p-2.5 text-xs text-muted-foreground ring-1 ring-foreground/10">
           {notice}
         </p>
       )}
       {error && (
-        <div role="alert" className="text-[12px] text-warn">
+        <div role="alert" className="text-xs text-warn">
           <p>{error}</p>
           {problems.length > 0 && (
             <ul className="mt-1 list-disc space-y-0.5 pl-5" aria-label="Why the package was refused">
@@ -422,9 +461,34 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
   )
 }
 
-function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'muted'; children: ReactNode }) {
-  const cls = tone === 'ok' ? 'border-ok/40 text-ok' : tone === 'warn' ? 'border-warn/40 text-warn' : 'border-line text-muted'
-  return <span className={`rounded-full border px-2 py-px text-[11px] ${cls}`}>{children}</span>
+const TONE = {
+  ok: 'border-ok/40 bg-ok/10 text-ok',
+  warn: 'border-warn/40 bg-warn/10 text-warn',
+  muted: 'text-muted-foreground',
+} as const
+
+function Badge({ tone, children }: { tone: keyof typeof TONE; children: ReactNode }) {
+  return (
+    <UiBadge variant="outline" className={TONE[tone]}>
+      {children}
+    </UiBadge>
+  )
+}
+
+/** A card's "Review" fold: its parts, kept mounted while folded. */
+function ReviewFold({ defaultOpen = false, children }: { defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="mt-2">
+      <CollapsibleTrigger className="inline-flex min-h-6 items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+        <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
+        Review
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount hidden={!open} className="mt-2">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  )
 }
 
 /** A built-in's skills and subagents on its card, not only in its review (#1297). */
@@ -434,13 +498,13 @@ function BuiltInParts({ review }: { review: PackageReview }) {
     <div aria-label={`What ${review.name} adds`} className="mt-2 space-y-0.5 text-[12px]">
       {review.skills.length > 0 && (
         <p className="[overflow-wrap:anywhere]">
-          <span className="text-muted">Skills: </span>
+          <span className="text-muted-foreground">Skills: </span>
           <span className="sb-num">{review.skills.map((s) => `/${s}`).join(', ')}</span>
         </p>
       )}
       {review.agents.length > 0 && (
         <p className="[overflow-wrap:anywhere]">
-          <span className="text-muted">Subagents: </span>
+          <span className="text-muted-foreground">Subagents: </span>
           <span className="sb-num">{review.agents.join(', ')}</span>
         </p>
       )}
@@ -466,39 +530,40 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
   }
 
   return (
-    <li className="rounded-[6px] border border-line p-3" aria-label={`Built-in plugin ${pkg.name}`}>
+    <li aria-label={`Built-in plugin ${pkg.name}`}>
+      <Card size="sm">
+      <CardContent>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13px] font-medium">{pkg.name}</span>
-        {pkg.review.version && <span className="sb-num text-[12px] text-muted">v{pkg.review.version}</span>}
+        <span className="text-sm font-medium">{pkg.name}</span>
+        {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
         <Badge tone="muted">Built in</Badge>
         {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
       </div>
-      {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
+      {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
       <BuiltInParts review={pkg.review} />
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
-        <dt className="text-muted">Source</dt>
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+        <dt className="text-muted-foreground">Source</dt>
         <dd>
           Ships with ScadBuddy · <span className="sb-num break-all">{pkg.source.path}</span>
         </dd>
       </dl>
-      <details className="mt-2">
-        <summary className="cursor-pointer text-[12px] text-muted">Review</summary>
-        <div className="mt-2">
-          <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
-        </div>
-      </details>
+      <ReviewFold>
+        <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
+      </ReviewFold>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
+        <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
           {busy && <Spinner />}
           {pkg.enabled ? 'Disable' : 'Enable'}
         </Button>
-        <p className="text-[12px] text-muted">Built in: it cannot be removed or re-pinned.</p>
+        <p className="text-xs text-muted-foreground">Built in: it cannot be removed or re-pinned.</p>
       </div>
       {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
+        <p role="alert" className="mt-2 text-xs text-warn">
           {error}
         </p>
       )}
+      </CardContent>
+      </Card>
     </li>
   )
 }
@@ -537,10 +602,12 @@ function PackageCard({
 
   const source = pkg.source
   return (
-    <li className="rounded-[6px] border border-line p-3" aria-label={`Plugin package ${pkg.name}`}>
+    <li aria-label={`Plugin package ${pkg.name}`}>
+      <Card size="sm">
+      <CardContent>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13px] font-medium">{pkg.name}</span>
-        {pkg.review.version && <span className="sb-num text-[12px] text-muted">v{pkg.review.version}</span>}
+        <span className="text-sm font-medium">{pkg.name}</span>
+        {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
         {pkg.enabled ? (
           <Badge tone="ok">Enabled</Badge>
         ) : pkg.approved ? (
@@ -553,41 +620,39 @@ function PackageCard({
         {shadowed && <Badge tone="warn">Not loaded</Badge>}
       </div>
       {shadowed && (
-        <p role="note" className="mt-1 text-[12px] text-warn">
+        <p role="note" className="mt-1 text-xs text-warn">
           &ldquo;{pkg.name}&rdquo; is built in, so this installed copy is never loaded. Remove it.
         </p>
       )}
-      {pkg.review.description && <p className="mt-1 text-[12px] text-muted">{pkg.review.description}</p>}
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
-        <dt className="text-muted">Source</dt>
+      {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+        <dt className="text-muted-foreground">Source</dt>
         <dd className="break-all">
           <ExternalLink href={source.url}>{source.url}</ExternalLink>
           {source.kind === 'git' && source.path && <span className="sb-num"> · {source.path}</span>}
           {source.kind === 'marketplace' && <span className="sb-num"> · entry {source.entry}</span>}
-          <span className="sb-num text-muted"> @ {source.ref}</span>
+          <span className="sb-num text-muted-foreground"> @ {source.ref}</span>
         </dd>
-        <dt className="text-muted">Commit</dt>
+        <dt className="text-muted-foreground">Commit</dt>
         <dd className="sb-num break-all">{pkg.commit_sha}</dd>
-        <dt className="text-muted">Content hash</dt>
+        <dt className="text-muted-foreground">Content hash</dt>
         <dd className="sb-num break-all">{pkg.content_hash}</dd>
       </dl>
 
-      <details className="mt-2" open={!pkg.approved}>
-        <summary className="cursor-pointer text-[12px] text-muted">Review</summary>
-        <div className="mt-2">
-          <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
-        </div>
-      </details>
+      <ReviewFold defaultOpen={!pkg.approved}>
+        <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
+      </ReviewFold>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {!pkg.approved && !shadowed && (
-          <Button size="sm" variant="primary" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
+          <Button size="sm" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
             Approve…
           </Button>
         )}
         {pkg.approved && !shadowed && (
           <Button
             size="sm"
+            variant="outline"
             onClick={() =>
               void act('enable', async () => onChange(await aiPlugins.setPackageEnabled(pkg.name, !pkg.enabled)))
             }
@@ -599,14 +664,14 @@ function PackageCard({
             {pkg.enabled ? 'Disable' : 'Enable'}
           </Button>
         )}
-        <Button size="sm" variant="danger" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
+        <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
           Remove
         </Button>
       </div>
 
       {shadowed ? null : pkg.pending ? (
-        <div className="mt-3 rounded-[6px] border border-accent/40 bg-accent/8 p-3" aria-label="Pending re-pin">
-          <p className="text-[12px]">
+        <div className="mt-3 rounded-lg bg-primary/8 p-3 ring-1 ring-primary/40" aria-label="Pending re-pin">
+          <p className="text-xs">
             Re-pin to <span className="sb-num">{pkg.pending.ref}</span> at{' '}
             <span className="sb-num break-all">{pkg.pending.commit_sha}</span>. The current pin keeps loading until you
             approve this one.
@@ -618,7 +683,7 @@ function PackageCard({
             <Diff diff={pkg.pending.diff} />
           </div>
           <div className="mt-2 flex gap-2">
-            <Button size="sm" variant="primary" onClick={() => onApprove({ pkg, pending: true })} {...USER_ONLY}>
+            <Button size="sm" onClick={() => onApprove({ pkg, pending: true })} {...USER_ONLY}>
               Approve re-pin…
             </Button>
             <Button
@@ -642,18 +707,18 @@ function PackageCard({
           {...USER_ONLY}
         >
           <div className="grow">
-            <label htmlFor={`repin-${pkg.name}`} className="block text-[12px] text-muted">
+            <Label htmlFor={`repin-${pkg.name}`} className="mb-1.5 text-xs font-normal text-muted-foreground">
               Re-pin to branch, tag or commit
-            </label>
-            <input
+            </Label>
+            <Input
               id={`repin-${pkg.name}`}
               value={repinRef}
               onChange={(event) => setRepinRef(event.target.value)}
               placeholder={source.ref}
-              className="sb-field sb-num mt-1"
+              className="sb-num"
             />
           </div>
-          <Button size="sm" type="submit" disabled={busy !== null} aria-busy={busy === 'repin'} {...USER_ONLY}>
+          <Button size="sm" variant="outline" type="submit" disabled={busy !== null} aria-busy={busy === 'repin'} {...USER_ONLY}>
             {busy === 'repin' && <Spinner />}
             Fetch re-pin
           </Button>
@@ -661,23 +726,27 @@ function PackageCard({
       )}
 
       {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
+        <p role="alert" className="mt-2 text-xs text-warn">
           {error}
         </p>
       )}
 
-      <Dialog
-        open={confirmDelete}
-        title={`Remove ${pkg.name}?`}
-        description="Its pin is deleted and its cached files are removed. Installing it again needs a new review."
-        onClose={() => setConfirmDelete(false)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
-              Cancel
-            </Button>
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Remove ${pkg.name}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Its pin is deleted and its cached files are removed. Installing it again needs a new review. Sessions
+              stop loading it from their next turn.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            {/* Not an AlertDialogAction: the dialog closes once the delete is done. */}
             <Button
-              variant="danger"
+              variant="destructive"
+              disabled={busy === 'delete'}
+              aria-busy={busy === 'delete'}
               onClick={() =>
                 void act('delete', async () => {
                   await aiPlugins.deletePackage(pkg.name)
@@ -687,13 +756,14 @@ function PackageCard({
               }
               {...USER_ONLY}
             >
+              {busy === 'delete' && <Spinner />}
               Remove package
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px]">Sessions stop loading it from their next turn.</p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      </CardContent>
+      </Card>
     </li>
   )
 }
@@ -709,20 +779,17 @@ export function PluginPackagesPanel() {
     state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="plugin-packages-heading">
-      <h2 id="plugin-packages-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        Plugin packages
-      </h2>
-      <div className="space-y-4 p-4">
-        <p className="text-[12px] text-muted">
+    <SettingCard title="Plugin packages" headingId="plugin-packages-heading">
+      <SettingBody>
+        <p className="text-xs text-muted-foreground">
           Claude plugins (skills, subagents, hooks and MCP servers) from a git repository or a marketplace, pinned to a
           commit. The assistant loads them from the next turn once approved and enabled. A plugin that runs commands
           loads only if you allow it when approving, and a plugin&rsquo;s own tools always ask before they act.
           ScadBuddy&rsquo;s own plugin is built in: switch it here like any other.
         </p>
-        {state.loading && <Spinner />}
+        {state.loading && <LoadingLines label="Loading plugin packages" lines={['h-20 w-full', 'h-20 w-full']} />}
         {state.error && (
-          <p role="alert" className="text-[12px] text-warn">
+          <p role="alert" className="text-xs text-warn">
             Plugin packages are unavailable: {state.error.message}
           </p>
         )}
@@ -745,10 +812,10 @@ export function PluginPackagesPanel() {
           </ul>
         )}
         {!state.loading && !state.error && !packages.some((p) => !isBuiltIn(p)) && (
-          <p className="text-[12px] text-muted">No plugin packages installed.</p>
+          <p className="text-xs text-muted-foreground">No plugin packages installed.</p>
         )}
         <InstallForm onInstalled={replace} />
-      </div>
+      </SettingBody>
       <ApproveDialog
         target={approve}
         onClose={() => setApprove(null)}
@@ -757,6 +824,6 @@ export function PluginPackagesPanel() {
           setApprove(null)
         }}
       />
-    </section>
+    </SettingCard>
   )
 }

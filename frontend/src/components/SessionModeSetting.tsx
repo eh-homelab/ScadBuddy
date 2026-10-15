@@ -1,10 +1,9 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { SessionModeSetting as Setting } from '../api/types'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { Label } from '@/components/ui/label'
+import { ChoiceSelect, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /**
  * Plan 5d — the mode a new assistant session gets when whoever starts it names none,
@@ -45,52 +44,47 @@ export function SessionModeSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant session mode</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <label className="flex flex-col gap-1 text-[13px]">
-          Default session mode
-          <select
-            value={chosen}
-            onChange={(event) => setMode(event.target.value as Setting['mode'])}
-            className="sb-field w-40"
-            aria-describedby="session-mode-help"
-          >
-            <option value="durable">Durable</option>
-            <option value="classic">Classic</option>
-          </select>
-        </label>
-        <p id="session-mode-help" className="text-[12px] text-muted">
-          Both modes have the same tools, plugins, skills, subagents and settings, except that a durable subagent
-          has only ScadBuddy&apos;s own tools, and a durable session leaves out the push notifications an approved plugin
-          package may name. Durable sessions run as Temporal
-          workflows: a turn survives a restart of the assistant, and an approval or question waits for you as long as
-          it needs. Classic sessions run inside the assistant service, and can be forked. A new chat uses this default
-          unless you pick a mode under Session mode in the composer. Applies to sessions started from now on.
-        </p>
-        {!current.durable_available && (
-          <p data-testid="session-mode-unavailable" className="text-[12px] text-warn">
-            Durable sessions cannot start right now, so new chats that use this default run as Classic
-            {current.durable_unavailable_reason ? `: ${current.durable_unavailable_reason}.` : '.'}
+    <SettingCard title="Assistant session mode">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="session-mode" className="font-normal">
+              Default session mode
+            </Label>
+            <ChoiceSelect
+              id="session-mode"
+              value={chosen}
+              onValueChange={(next) => setMode(next as Setting['mode'])}
+              choices={[
+                { value: 'durable', label: 'Durable' },
+                { value: 'classic', label: 'Classic' },
+              ]}
+              className="w-40"
+              aria-describedby="session-mode-help"
+            />
+          </div>
+          <p id="session-mode-help" className="text-xs text-muted-foreground">
+            Both modes have the same tools, plugins, skills, subagents and settings, except that a durable subagent
+            has only ScadBuddy&apos;s own tools, and a durable session leaves out the push notifications an approved plugin
+            package may name. Durable sessions run as Temporal
+            workflows: a turn survives a restart of the assistant, and an approval or question waits for you as long as
+            it needs. Classic sessions run inside the assistant service, and can be forked. A new chat uses this default
+            unless you pick a mode under Session mode in the composer. Applies to sessions started from now on.
           </p>
-        )}
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. New sessions use it.
-            </span>
+          {!current.durable_available && (
+            <p data-testid="session-mode-unavailable" className="text-xs text-warn">
+              Durable sessions cannot start right now, so new chats that use this default run as Classic
+              {current.durable_unavailable_reason ? `: ${current.durable_unavailable_reason}.` : '.'}
+            </p>
           )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
-          </p>
-        )}
+        </SettingBody>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={saved && !changed ? 'Saved. New sessions use it.' : null}
+          error={error}
+        />
       </form>
-    </section>
+    </SettingCard>
   )
 }

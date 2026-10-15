@@ -9,7 +9,20 @@ import type {
   RememberedChoices,
 } from '../../api/types'
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
-import { Button } from '../../components/ui/Button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { LoadingLines } from '../../components/settings/form'
 import { Spinner } from '../../components/ui/Spinner'
 import { libraryFileOfScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
@@ -65,7 +78,6 @@ export function RememberedChoicesPanel({
 }) {
   const state = useAsync(() => api.getRemembered(), [], ['settings'])
   const [busy, setBusy] = useState<string | null>(null)
-  const [confirmAll, setConfirmAll] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const printerName = (id: number | string) =>
@@ -178,15 +190,11 @@ export function RememberedChoicesPanel({
   }
 
   if (state.loading) {
-    return (
-      <p className="flex items-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading
-      </p>
-    )
+    return <LoadingLines label="Loading" lines={['w-full', 'w-full', 'w-2/3']} />
   }
   if (state.error) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-sm text-warn">
         {state.error instanceof ApiError ? state.error.detail : 'Could not read the remembered choices.'}
       </p>
     )
@@ -195,75 +203,77 @@ export function RememberedChoicesPanel({
   return (
     <div className="space-y-3">
       {rows.length === 0 ? (
-        <p className="text-[13px] text-muted">Nothing is remembered yet.</p>
+        <p className="text-sm text-muted-foreground">Nothing is remembered yet.</p>
       ) : (
-        <table className="w-full text-left text-[13px]" aria-label="Remembered choices">
-          <thead className="text-[12px] text-muted">
-            <tr>
-              <th className="py-1 pr-3 font-normal">What</th>
-              <th className="py-1 pr-3 font-normal">For</th>
-              <th className="py-1 pr-3 font-normal">Remembered</th>
-              <th className="py-1 font-normal">
-                <span className="sr-only">Forget</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.key} className="border-t border-line align-top">
-                <td className="py-1.5 pr-3 text-muted">{row.kind}</td>
-                <td className="sb-num py-1.5 pr-3">{row.subject}</td>
-                <td className="py-1.5 pr-3">{row.value}</td>
-                <td className="py-1.5 text-right">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => void run(row.key, row.forget)}
-                    disabled={busy !== null}
-                    aria-label={`Forget ${row.kind.toLowerCase()} for ${row.subject}`}
-                    {...USER_ONLY}
-                  >
-                    {busy === row.key && <Spinner />}
-                    Forget
-                  </Button>
-                </td>
+        <Card size="sm" className="overflow-x-auto py-0">
+          <table className="w-full text-left text-sm" aria-label="Remembered choices">
+            <thead className="border-b text-xs text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">What</th>
+                <th className="px-3 py-2 font-medium">For</th>
+                <th className="px-3 py-2 font-medium">Remembered</th>
+                <th className="px-3 py-2 font-medium">
+                  <span className="sr-only">Forget</span>
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y">
+              {rows.map((row) => (
+                <tr key={row.key} className="align-top transition-colors hover:bg-ui-muted/50">
+                  <td className="px-3 py-2 text-muted-foreground">{row.kind}</td>
+                  <td className="sb-num px-3 py-2">{row.subject}</td>
+                  <td className="px-3 py-2">{row.value}</td>
+                  <td className="px-3 py-1.5 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void run(row.key, row.forget)}
+                      disabled={busy !== null}
+                      aria-label={`Forget ${row.kind.toLowerCase()} for ${row.subject}`}
+                      {...USER_ONLY}
+                    >
+                      {busy === row.key && <Spinner />}
+                      Forget
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
       )}
       {error && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-xs text-warn">
           {error}
         </p>
       )}
       {rows.length > 0 && (
-        <div className="flex items-center gap-2">
-          {confirmAll ? (
-            <>
-              <span className="text-[12px] text-muted">Forget all {rows.length}?</span>
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => {
-                  setConfirmAll(false)
-                  void run('all', () => api.forgetAllRemembered())
-                }}
-                {...USER_ONLY}
-              >
-                Yes, forget all
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmAll(false)}>
-                Keep them
-              </Button>
-            </>
-          ) : (
-            <Button size="sm" variant="danger" onClick={() => setConfirmAll(true)} disabled={busy !== null} {...USER_ONLY}>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button size="sm" variant="destructive" disabled={busy !== null} aria-busy={busy === 'all'} {...USER_ONLY}>
               {busy === 'all' && <Spinner />}
               Forget all
             </Button>
-          )}
-        </div>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Forget all {rows.length}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                The print dialog then opens on its own defaults for every model and printer.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep them</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => void run('all', () => api.forgetAllRemembered())}
+                {...USER_ONLY}
+              >
+                Yes, forget all
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       )}
     </div>
   )

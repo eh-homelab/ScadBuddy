@@ -3,6 +3,8 @@ import { api } from '../api/client'
 import type { McpTokenTier } from '../api/mcpTokens'
 import { useMcpAuthVersion } from '../lib/mcpAuthChanges'
 import { useAsync } from '../lib/useAsync'
+import { Card, CardContent } from '@/components/ui/card'
+import { cn } from '@/lib/utils'
 
 const CAP_WORDS: Record<McpTokenTier, string> = {
   read: 'read-only access',
@@ -25,25 +27,28 @@ export function McpAuthBanner({ link = false, className = '' }: { link?: boolean
   const auth = useAsync(() => api.getMcpAuth(), [version])
   if (auth.data?.mode !== 'disabled') return null
   return (
-    <div
+    <Card
       role="alert"
+      size="sm"
       data-testid="mcp-auth-banner"
-      className={`rounded-[6px] border border-warn/50 bg-warn/10 px-3 py-2 text-[12px] text-warn ${className}`}
+      className={cn('bg-warn/10 text-xs text-warn ring-warn/50', className)}
     >
-      <strong className="font-medium">MCP authentication is off.</strong> Anyone who can reach{' '}
-      <code>/mcp</code> over HTTPS can call ScadBuddy&rsquo;s tools without a token, with{' '}
-      {CAP_WORDS[auth.data.anonymous_cap]}.{' '}
-      {link ? (
-        <>
-          Turn it back on in{' '}
-          <Link to="/settings#assistant" className="underline">
-            Settings
-          </Link>
-          .
-        </>
-      ) : (
-        <>Turn it back on under Assistant &rarr; MCP authentication.</>
-      )}
-    </div>
+      <CardContent>
+        <strong className="font-medium">MCP authentication is off.</strong> Anyone who can reach{' '}
+        <code>/mcp</code> over HTTPS can call ScadBuddy&rsquo;s tools without a token, with{' '}
+        {CAP_WORDS[auth.data.anonymous_cap]}.{' '}
+        {link ? (
+          <>
+            Turn it back on in{' '}
+            <Link to="/settings#assistant" className="underline">
+              Settings
+            </Link>
+            .
+          </>
+        ) : (
+          <>Turn it back on under Assistant &rarr; MCP authentication.</>
+        )}
+      </CardContent>
+    </Card>
   )
 }

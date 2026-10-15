@@ -108,9 +108,10 @@ describe('SettingsPage activity settings', () => {
   it('keeps the retention fields under Advanced', async () => {
     renderPage(<SettingsPage />)
     await loaded()
-    const details = screen.getByLabelText('Keep activity for (seconds)').closest('details')
-    expect(details).not.toBeNull()
-    expect(details).not.toBe(screen.getByLabelText('Notify me about activity from').closest('details'))
+    const fold = '[data-slot=collapsible]'
+    const details = screen.getByLabelText('Keep activity for (seconds)').closest(fold)
+    expect(details).toHaveTextContent('Advanced: activity retention')
+    expect(details).not.toBe(screen.getByLabelText('Notify me about activity from').closest(fold))
     expect(details).toContainElement(screen.getByLabelText('Repair activity rows from the last (seconds)'))
   })
 })
