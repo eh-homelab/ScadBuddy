@@ -344,6 +344,8 @@ describe('ArrangeDialog', () => {
       )
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       expect(await screen.findByRole('list', { name: 'Re-render progress' })).toHaveTextContent('Nova')
+      // #2283 — the stage, above each output's own line.
+      expect(screen.getByText('Re-rendering 2 outputs first…')).toBeInTheDocument()
       await waitFor(() => expect(onArranged).toHaveBeenCalledOnce(), { timeout: 5000 })
       expect(backfill.mock.calls.map(([id]) => id).sort()).toEqual([nova.id, workshop.id].sort())
       expect(lastArrangeRequest()?.objects).toEqual([
@@ -387,10 +389,10 @@ describe('ArrangeDialog', () => {
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
       const tracing = installTestTracing()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
       try {
-        const { user } = renderPage(
-          <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
-        )
         await user.click(screen.getByRole('button', { name: 'Arrange' }))
         await user.click(screen.getByRole('button', { name: 'Re-render' }))
         expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
@@ -405,6 +407,11 @@ describe('ArrangeDialog', () => {
       }
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
+      // #2286 — tried again from here, at once: no second question.
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      await user.click(screen.getByRole('button', { name: 'Re-render again' }))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(nova.id, expect.any(AbortSignal)))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
     })
 
     it('arranges the outputs that never needed a re-render when every re-render fails', async () => {
@@ -424,6 +431,27 @@ describe('ArrangeDialog', () => {
         expect.objectContaining({ skipped: 'Nova could not be re-rendered: revision abc is gone. It was left out of the arrange.' }),
       )
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: first.id, part: 'piece-wall', count: 2 }])
+    })
+
+    it('names the saved arrange by what was arranged, not an output whose re-render failed (#2749 review)', async () => {
+      const bin: Output = { ...first, id: 'b'.repeat(32), slug: 'gridfinity-bin', name: 'Bin', manifest: [] }
+      addMockOutput(bin)
+      server.use(
+        http.post(`/api/v1/outputs/${bin.id}/backfill`, () => problem(422, 'Unprocessable Content', 'revision abc is gone')),
+      )
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const binName = fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name
+      // Before Arrange, the stale one is about to be re-rendered: it is in the placeholder.
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${binName}`),
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
     })
 
     it('opens again without the last alert or prompt', async () => {
@@ -474,6 +502,20 @@ describe('ArrangeDialog', () => {
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 
+    it('keeps the rows as they are while the re-render question is open (#3528)', async () => {
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const removes = await screen.findAllByRole('button', { name: /^Remove / })
+      await user.click(removes[0]!)
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await screen.findByRole('group', { name: 'Re-render first' })
+      // Unanswered, the question is about this arrange: nothing changes it underneath.
+      expect(screen.getByRole('button', { name: /^Restore 1 removed row/ })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Add from a model' })).toBeDisabled()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
@@ -517,9 +559,149 @@ describe('ArrangeDialog', () => {
       <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
-    const progress = await screen.findByText('Arranging…')
+    const progress = await screen.findByText('Laying out the objects…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  describe('controls (#2286)', () => {
+    it('has a Close button, a primary Arrange, and starts on the name', async () => {
+      const onClose = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={onClose} onArranged={vi.fn()} />,
+      )
+      const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
+      expect(within(dialog).getByLabelText('Name')).toHaveFocus()
+      expect(within(dialog).getByRole('button', { name: 'Arrange' }).className).toContain('bg-accent')
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('takes a row out with Remove, and leaves it out of the request', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '8'.repeat(32),
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const label = await screen.findByLabelText(/^Copies of .*Bin/)
+      const rowLabel = label.getAttribute('aria-label')!.replace(/^Copies of /, '')
+      await user.click(screen.getByRole('button', { name: `Remove ${rowLabel}` }))
+      expect(screen.queryByLabelText(`Copies of ${rowLabel}`)).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
+    })
+
+    it('files under the other template once every row of the first is removed', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '7'.repeat(32),
+        slug: 'gridfinity-bin',
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText('Copies of bin — Bin')
+      const firstName = first.name ?? first.id
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${firstName}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.queryByLabelText(new RegExp(`^Copies of .* — ${firstName}$`))).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()).toMatchObject({
+        slug: 'gridfinity-bin',
+        objects: [{ output_id: bin.id, part: 'piece-bin', count: 1 }],
+        // Named for what it holds, not the template it no longer does.
+        name: `Arrange of ${fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name}`,
+      })
+    })
+
+    it('saves an unnamed arrange under the models it holds, shown as the placeholder', async () => {
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
+    })
+  })
+
+  describe('the default name (#2286)', () => {
+    const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+    it('stays within the 200 characters the server takes, however long the names', async () => {
+      const onArranged = vi.fn()
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([long])]} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', expect.stringContaining('1 more')),
+      )
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder.length).toBeLessThanOrEqual(200)
+      // The model's name fits; the file that does not is counted rather than cut off.
+      expect(placeholder).toBe('Arrange of Name Keychain, 1 more')
+      expect(screen.getByLabelText('Name')).toHaveAttribute('maxLength', '200')
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe(placeholder)
+    })
+
+    it('cuts a lone name too long to fit, with an ellipsis', async () => {
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      renderPage(<ArrangeDialog open sources={fromFiles([long])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder).toHaveLength(200)
+      expect(placeholder).toMatch(/^Arrange of w+…$/)
+    })
+
+    it('leaves out a library file whose every row was removed, and Restore brings them back', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([wand])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const stemmed = wand.filename.replace(/\.[^.]+$/, '')
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`),
+      )
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${wand.filename}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain')
+      await user.click(screen.getByRole('button', { name: 'Restore 2 removed rows' }))
+      expect(screen.getByLabelText(`Copies of Wand — ${wand.filename}`)).toBeInTheDocument()
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`)
+      expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
+    })
+  })
+
+  it('says it is saving once the layout is done, and how long a stage has run (#2283)', async () => {
+    server.use(http.post('/api/v1/models/:slug/outputs', () => new Promise<never>(() => {})))
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByText('Saving the arranged output…', {}, { timeout: 5000 })).toHaveAttribute(
+      'aria-live',
+      'polite',
+    )
+    expect(screen.queryByText('Laying out the objects…')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('arrange-elapsed', {}, { timeout: 5000 })).toHaveTextContent(/^\d+ s$/)
   })
 
   it('stops waiting when it is closed, so the job is never saved behind its back', async () => {
@@ -581,6 +763,50 @@ describe('ArrangeDialog', () => {
     expect(again![1]).toBe(failed![1])
     expect(failed![5]).toBeTruthy()
     expect(again![5]).toBe(failed![5])
+  })
+
+  it('keeps the save key on Try again when the model list answered in between (#2749 review)', async () => {
+    let answer: (models: typeof fixtures.models) => void = () => {}
+    vi.spyOn(api, 'listModels').mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    // The default name exists only now, after the first attempt.
+    answer(fixtures.models)
+    await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('joins the arrange it started on Try again, under the same key (#3526)', async () => {
+    const arrange = vi
+      .spyOn(api, 'arrangeOutputs')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = arrange.mock.calls
+    expect(failed![2]).toBeTruthy()
+    expect(again![2]).toBe(failed![2])
   })
 
   it('offers no Try again for a request the server refused as it is', async () => {

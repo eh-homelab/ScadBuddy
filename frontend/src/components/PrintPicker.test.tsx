@@ -838,7 +838,7 @@ describe('PrintPicker', () => {
       await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
-      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id)
+      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id, expect.any(AbortSignal))
       expect(lastArrangeRequest()).toMatchObject({
         objects: [{ output_id: nova.id, part: 'piece-body', count: 1 }],
         name: 'Nova (arranged)',
