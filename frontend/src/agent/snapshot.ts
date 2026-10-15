@@ -1,3 +1,4 @@
+import { fillableOf } from './fillable'
 import {
   activeDialog,
   FILLABLE_ROLES,
@@ -78,6 +79,8 @@ function valueOf(element: Element): string | boolean | undefined {
     return element.value
   }
   if (element instanceof HTMLSelectElement) return element.value
+  const fillable = fillableOf(element)
+  if (fillable) return fillable.value()
   if (element instanceof HTMLTextAreaElement) return element.value
   const ariaValue = element.getAttribute('aria-valuenow') ?? element.getAttribute('aria-valuetext')
   return ariaValue ?? undefined

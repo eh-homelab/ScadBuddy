@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError, api, type ColourBreakdown } from '../api/client'
 import { inkOn, normalizeHex } from '../lib/format'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { useFillable } from '../agent/fillable'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 
 /** The named views the backend draws from (`ViewName`). */
 const VIEWS = ['iso', 'front', 'back', 'left', 'right', 'top', 'bottom'] as const
 type View = (typeof VIEWS)[number]
+const viewLabel = (name: View) => name[0]!.toUpperCase() + name.slice(1)
 
 interface Props {
   open: boolean
@@ -67,40 +72,57 @@ export function ColoursDialog({ open, jobId, colors, onClose }: Props) {
   const problem = failed?.key === key ? failed.message : null
   const extruders = colors.map(normalizeHex)
 
+  const viewId = useId()
+  const trigger = useRef<HTMLButtonElement>(null)
+  useFillable(trigger, {
+    options: () => VIEWS.map((name) => ({ value: name, label: viewLabel(name) })),
+    value: () => view,
+    set: (next) => setView(next as View),
+  })
+
   return (
-    <Dialog
-      open={open}
-      title="Colours"
-      description="The render drawn once per colour: each tile shows where that colour goes, with everything else in grey."
-      onClose={onClose}
-      size="wide"
-    >
-      <label className="mb-3 flex items-center gap-2 text-[13px]">
-        View
-        <select
-          value={view}
-          onChange={(event) => setView(event.target.value as View)}
-          className="rounded-[4px] border border-line bg-surface px-2 py-1"
-        >
-          {VIEWS.map((name) => (
-            <option key={name} value={name}>
-              {name[0]!.toUpperCase() + name.slice(1)}
-            </option>
-          ))}
-        </select>
-      </label>
-      {problem ? (
-        <p role="alert" className="text-[13px] text-warn">
-          {problem}
-        </p>
-      ) : !shown ? (
-        <div className="flex items-center gap-2 text-[13px] text-muted" role="status">
-          <Spinner />
-          Drawing each colour…
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Colours</DialogTitle>
+          <DialogDescription>
+            The render drawn once per colour: each tile shows where that colour goes, with everything else in grey.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+          <div className="flex items-center gap-2">
+            <Label htmlFor={viewId}>View</Label>
+            <Select value={view} onValueChange={(next) => setView(next as View)}>
+              <SelectTrigger ref={trigger} id={viewId} size="sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {VIEWS.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {viewLabel(name)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {problem ? (
+            <p role="alert" className="text-sm text-destructive">
+              {problem}
+            </p>
+          ) : !shown ? (
+            <div role="status" aria-label="Drawing each colour…" className="mx-auto w-full max-w-[640px]">
+              <Skeleton className="aspect-[2/1] w-full rounded-xl" />
+            </div>
+          ) : (
+            <Breakdown breakdown={shown.breakdown} url={shown.url} extruders={extruders} />
+          )}
         </div>
-      ) : (
-        <Breakdown breakdown={shown.breakdown} url={shown.url} extruders={extruders} />
-      )}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -136,7 +158,7 @@ function Breakdown({ breakdown, url, extruders }: { breakdown: ColourBreakdown; 
           })}
         </ol>
       </div>
-      <ol aria-label="Tiles, row by row" className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
+      <ol aria-label="Tiles, row by row" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
         {colours.map((colour, index) => {
           const hex = normalizeHex(colour)
           return (

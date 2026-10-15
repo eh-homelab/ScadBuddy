@@ -9,9 +9,19 @@ import { refusedCheck } from '../lib/problems'
 import { useDebounced } from '../lib/useDebounced'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 import { SourceEditor, type SourceEditHandle } from './SourceEditor'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 
 /** Long enough that a burst of typing is one check, short enough to feel live. */
 export const CHECK_DEBOUNCE_MS = 700
@@ -205,24 +215,21 @@ export function SourceWorkbench({
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
-      <div className="border-b border-line bg-surface">
+      <div className="border-b bg-background">
         <div className="flex items-center justify-between gap-3 px-3 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">{breadcrumb}</div>
           {readOnly ? (
             <div className="flex shrink-0 items-center gap-2">
-              <span
-                data-testid="builtin-badge"
-                className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
-              >
+              <Badge data-testid="builtin-badge" variant="outline" className="shrink-0 text-muted-foreground">
                 Built-in template — read-only
-              </span>
+              </Badge>
               {readOnlyActions}
             </div>
           ) : (
             <div className="flex shrink-0 items-center gap-2">
               <Button
+                type="button"
                 size="sm"
-                variant="primary"
                 onClick={() => void save(false)}
                 disabled={saveDisabled}
               >
@@ -230,7 +237,7 @@ export function SourceWorkbench({
                 {saveLabel}
               </Button>
               {refused && (
-                <Button size="sm" variant="danger" onClick={() => void save(true)} disabled={busy || !canSave}>
+                <Button type="button" size="sm" variant="destructive" onClick={() => void save(true)} disabled={busy || !canSave}>
                   Save anyway
                 </Button>
               )}
@@ -240,7 +247,7 @@ export function SourceWorkbench({
         {fields}
       </div>
 
-      <div ref={editorBox} className="min-h-0 border-b border-line">
+      <div ref={editorBox} className="min-h-0 border-b">
         <SourceEditor
           editRef={editRef}
           value={source}
@@ -260,31 +267,29 @@ export function SourceWorkbench({
 
       <div className="max-h-[35vh] overflow-y-auto px-3 py-2">
         {error && (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         )}
         <CheckReport check={check} checking={checking} />
       </div>
 
-      <Dialog
-        open={guard.pending !== null}
-        title="Leave without saving?"
-        description="Your edits to this source have not been saved, and will be lost."
-        onClose={guard.stay}
-        footer={
-          <>
-            <Button variant="ghost" onClick={guard.stay}>
-              Stay
-            </Button>
-            <Button variant="danger" onClick={guard.leave}>
+      <AlertDialog open={guard.pending !== null} onOpenChange={(open) => !open && guard.stay()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your edits to this source have not been saved, and will be lost. Save first to keep them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={guard.leave}>
               Leave without saving
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">Save first to keep them.</p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -307,15 +312,17 @@ function offsetOf(source: string, line: number, column: number): number {
 function CheckReport({ check, checking }: { check: SourceCheck | undefined; checking: boolean }) {
   if (checking && !check) {
     return (
-      <p className="flex items-center gap-2 text-[12px] text-muted">
-        <Spinner /> Asking OpenSCAD
-      </p>
+      <div role="status" aria-label="Asking OpenSCAD" className="flex flex-col gap-1.5">
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="h-4 w-72" />
+        <span className="sr-only">Asking OpenSCAD</span>
+      </div>
     )
   }
 
   if (!check) {
     return (
-      <p className="text-[12px] text-faint">
+      <p className="text-xs text-muted-foreground">
         OpenSCAD parses the source as you type. Errors appear here and in the editor,
         against their line.
       </p>
@@ -324,7 +331,7 @@ function CheckReport({ check, checking }: { check: SourceCheck | undefined; chec
 
   if (check.timed_out) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-sm text-destructive">
         The check timed out. The source may be valid but slow to evaluate — saving it
         will hit the same limit.
       </p>
@@ -333,7 +340,7 @@ function CheckReport({ check, checking }: { check: SourceCheck | undefined; chec
 
   if (check.ok) {
     return (
-      <p role="status" className="text-[13px] text-ok">
+      <p role="status" className="text-sm text-ok">
         {check.checked
           ? `Parses cleanly${check.parameters == null ? '' : ` — ${check.parameters} parameters`}.`
           : 'No OpenSCAD available here, so the source was not checked.'}
@@ -344,22 +351,22 @@ function CheckReport({ check, checking }: { check: SourceCheck | undefined; chec
   const diagnostics = check.diagnostics ?? []
   return (
     <div role="alert" data-testid="check-report">
-      <p className="text-[13px] font-medium text-warn">OpenSCAD could not parse this.</p>
+      <p className="text-sm font-medium text-destructive">OpenSCAD could not parse this.</p>
       {diagnostics.length > 0 ? (
         <ul className="mt-1.5 space-y-1">
           {diagnostics.map((diagnostic, index) => (
-            <li key={index} className="flex gap-2 text-[13px]">
-              <span className="sb-num shrink-0 text-faint">
+            <li key={index} className="flex gap-2 text-sm">
+              <span className="sb-num shrink-0 text-muted-foreground">
                 {diagnostic.line == null ? '—' : `Line ${diagnostic.line}`}
               </span>
-              <span className={diagnostic.severity === 'error' ? 'text-warn' : 'text-muted'}>
+              <span className={diagnostic.severity === 'error' ? 'text-destructive' : 'text-muted-foreground'}>
                 {diagnostic.message}
               </span>
             </li>
           ))}
         </ul>
       ) : (
-        <pre className="sb-num mt-1.5 overflow-x-auto text-[12px] text-muted">
+        <pre className="sb-num mt-1.5 overflow-x-auto text-xs text-muted-foreground">
           {(check.log_tail ?? []).join('\n')}
         </pre>
       )}

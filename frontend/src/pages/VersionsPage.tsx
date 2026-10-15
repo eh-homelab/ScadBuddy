@@ -5,15 +5,34 @@ import { useAssistantOpener } from '../agent/chat/opener'
 import { api, ApiError } from '../api/client'
 import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
-import { Button } from '../components/ui/Button'
-import { Dialog } from '../components/ui/Dialog'
-import { Spinner } from '../components/ui/Spinner'
+import { useFillable } from '../agent/fillable'
+import { Hint } from '../components/Hint'
+import { PageLoading, PageProblem } from '../components/PageState'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge, badgeVariants } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Toggle } from '@/components/ui/toggle'
+import { cn } from '@/lib/utils'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 
 /** The revision's parent, which is what the diff endpoint compares against by default. */
 const PARENT = ''
+/** The previous revision in the Compare select: Radix refuses an item whose value is "". */
+const PARENT_ITEM = 'parent'
 
 export function VersionsPage() {
   const { slug = '' } = useParams()
@@ -97,24 +116,31 @@ export function VersionsPage() {
     }
   }
 
+  // #1445 — the assistant's fill picks what to compare with, by commit or by its label.
+  const compare = useRef<HTMLButtonElement>(null)
+  useFillable(compare, {
+    options: () => [
+      { value: PARENT, label: 'Previous revision' },
+      ...(versions ?? [])
+        .filter((version) => version.commit !== selected)
+        .map((version) => ({ value: version.commit, label: `${version.short} — ${version.message}` })),
+    ],
+    value: () => base,
+    set: setBase,
+  })
+
   // The model too: whether Restore is offered depends on its origin.
   if (versionsState.loading || modelState.loading) {
-    return (
-      <p className="flex items-center gap-2 px-4 py-16 text-[13px] text-muted">
-        <Spinner /> Loading versions
-      </p>
-    )
+    return <PageLoading label="Loading versions" />
   }
 
   if (versionsState.error) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">No version history</h1>
-        <p className="mt-2 text-[13px] text-muted">{versionsState.error.message}</p>
-        <Link to={modelPath(slug)} className="mt-4 inline-block text-[13px] text-accent underline">
-          Back to the customizer
-        </Link>
-      </div>
+      <PageProblem title="No version history" message={versionsState.error.message}>
+        <Button asChild variant="outline">
+          <Link to={modelPath(slug)}>Back to the customizer</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
@@ -122,54 +148,53 @@ export function VersionsPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
         <div className="mb-5 flex items-baseline gap-2">
-          <Link to="/" className="text-[12px] text-muted hover:text-ink">
+          <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
             Models
           </Link>
-          <span className="text-faint">/</span>
-          <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
+          <span className="text-muted-foreground">/</span>
+          <Link to={modelPath(slug)} className="text-sm text-muted-foreground hover:text-foreground">
             {modelState.data?.name ?? slug}
           </Link>
-          <span className="text-faint">/</span>
-          <h1 className="text-[13px] font-medium">Versions</h1>
+          <span className="text-muted-foreground">/</span>
+          <h1 className="text-sm font-medium">Versions</h1>
           {modelState.data?.origin === 'builtin' && (
-            <span
-              data-testid="builtin-badge"
-              className="rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
-            >
+            <Badge data-testid="builtin-badge" variant="outline" className="text-muted-foreground">
               Built-in template — read-only
-            </span>
+            </Badge>
           )}
         </div>
 
         {modelState.error && (
-          <div role="alert" className="mb-3 rounded-[6px] border border-warn/40 bg-warn/8 p-3">
-            <p className="text-[12px] text-warn">
+          <div role="alert" className="mb-3 flex flex-col items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/10 p-3">
+            <p className="text-xs text-destructive">
               Could not load this model&apos;s details: {modelState.error.message}
             </p>
-            <Button size="sm" className="mt-2" onClick={modelState.reload}>
+            <Button type="button" variant="outline" size="sm" onClick={modelState.reload}>
               Try again
             </Button>
           </div>
         )}
 
         {/* Always in the page, so the message is announced when it lands. */}
-        <p data-testid="versions-status" role="status" className={`text-[12px] text-ok ${restored ? 'mb-3' : ''}`}>
+        <p data-testid="versions-status" role="status" className={`text-xs text-ok ${restored ? 'mb-3' : ''}`}>
           {restored}
         </p>
 
         {error && (
-          <p role="alert" className="mb-3 rounded-[6px] bg-warn/10 px-3 py-2 text-[12px] text-warn">
+          <p role="alert" className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
           </p>
         )}
 
         {versions?.length === 0 && (
-          <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
-            <h2 className="text-[15px] font-medium">No revisions yet</h2>
-            <p className="mt-2 text-[13px] text-muted">
-              Every upload, edit and restore of this model is recorded here.
-            </p>
-          </div>
+          <Card className="border border-dashed text-center ring-0">
+            <CardHeader>
+              <CardTitle>
+                <h2>No revisions yet</h2>
+              </CardTitle>
+              <CardDescription>Every upload, edit and restore of this model is recorded here.</CardDescription>
+            </CardHeader>
+          </Card>
         )}
 
         {versions && versions.length > 0 && (
@@ -196,61 +221,66 @@ export function VersionsPage() {
               ))}
             </ul>
 
-            <section className="min-w-0 rounded-[6px] border border-line bg-surface">
-              <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
-                <h2 className="text-[12px] font-medium">Changes</h2>
-                {/* #1036 — may shrink: the select is as wide as its longest option, a whole
-                    commit message, and ran past the card on a phone. */}
-                <label className="ml-auto flex min-w-0 max-w-full items-center gap-2 text-[12px] text-muted">
-                  Compare with
-                  <select
-                    value={base}
-                    onChange={(event) => setBase(event.target.value)}
-                    className="min-w-0 max-w-full rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[12px] text-ink"
-                  >
-                    <option value={PARENT}>Previous revision</option>
-                    {versions
-                      .filter((version) => version.commit !== selected)
-                      .map((version) => (
-                        <option key={version.commit} value={version.commit}>
-                          {version.short} — {version.message}
-                        </option>
-                      ))}
-                  </select>
-                </label>
+            <section className="min-w-0 overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
+              <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+                <h2 className="text-sm font-medium">Changes</h2>
+                {/* #1036 — may shrink: an option is a whole commit message, and ran past the
+                    card on a phone. */}
+                <div className="ml-auto flex min-w-0 max-w-full items-center gap-2">
+                  <Label htmlFor="versions-compare" className="shrink-0 text-xs font-normal text-muted-foreground">
+                    Compare with
+                  </Label>
+                  <Select value={base === PARENT ? PARENT_ITEM : base} onValueChange={(next) => setBase(next === PARENT_ITEM ? PARENT : next)}>
+                    <SelectTrigger ref={compare} id="versions-compare" size="sm" className="min-w-0 max-w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent position="popper" align="end" className="max-w-[min(32rem,calc(100vw-2rem))]">
+                      <SelectItem value={PARENT_ITEM}>Previous revision</SelectItem>
+                      {versions
+                        .filter((version) => version.commit !== selected)
+                        .map((version) => (
+                          <SelectItem key={version.commit} value={version.commit}>
+                            <span className="truncate">
+                              {version.short} — {version.message}
+                            </span>
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </header>
 
               {diffError && (
-                <p role="alert" className="p-4 text-[12px] text-warn">
+                <p role="alert" className="p-4 text-xs text-destructive">
                   {diffError}
                 </p>
               )}
               {!diffError && !diff && (
-                <p className="flex items-center gap-2 p-4 text-[12px] text-muted">
-                  <Spinner /> Reading the diff
-                </p>
+                <div role="status" aria-label="Reading the diff" className="flex flex-col gap-2 p-4">
+                  <Skeleton className="h-4 w-2/3" />
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="h-4 w-3/4" />
+                </div>
               )}
               {!diffError && diff && <UnifiedDiff patch={diff.patch} />}
             </section>
           </div>
         )}
 
-        <Dialog
-          open={confirming !== null}
-          title={`Restore version ${confirming?.short ?? ''}?`}
-          description={
-            current
-              ? `The model's source goes back to ${confirming?.short ?? ''}, as a new version on top of ${current.short}. Nothing is lost: ${current.short} stays in the history.`
-              : undefined
-          }
-          onClose={() => setConfirming(null)}
-          footer={
-            <>
-              <Button variant="ghost" onClick={() => setConfirming(null)}>
-                Cancel
-              </Button>
+        <AlertDialog open={confirming !== null} onOpenChange={(open) => !open && setConfirming(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{`Restore version ${confirming?.short ?? ''}?`}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {current &&
+                  `The model's source goes back to ${confirming?.short ?? ''}, as a new version on top of ${current.short}. Nothing is lost: ${current.short} stays in the history.`}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <p className="text-sm text-muted-foreground">{confirming?.message}</p>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
               <Button
-                variant="primary"
+                type="button"
                 onClick={() => {
                   const version = confirming
                   setConfirming(null)
@@ -259,14 +289,12 @@ export function VersionsPage() {
               >
                 Restore
               </Button>
-            </>
-          }
-        >
-          <p className="text-[13px] text-muted">{confirming?.message}</p>
-        </Dialog>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {current && (
-          <p className="sb-num mt-4 text-[12px] text-faint">
+          <p className="sb-num mt-4 text-xs text-muted-foreground">
             This model is at {current.short}.
           </p>
         )}
@@ -296,41 +324,48 @@ function VersionRow({
 
   return (
     <li
-      className={`rounded-[6px] border bg-surface p-3 ${
-        selected ? 'border-accent' : 'border-line'
-      }`}
+      className={cn(
+        'rounded-xl bg-card p-1 ring-1 transition-shadow',
+        selected ? 'ring-2 ring-primary' : 'ring-foreground/10',
+      )}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-pressed={selected}
+      {/* #3672 — a toggle: pressed is the revision whose changes are shown. */}
+      <Toggle
+        pressed={selected}
+        onPressedChange={() => onSelect()}
         data-version-select={version.commit}
-        className="block w-full text-left"
+        className="block h-auto w-full rounded-lg px-2 py-1.5 text-left font-normal whitespace-normal data-[state=on]:bg-transparent hover:bg-ui-muted/60"
       >
         <span className="flex items-center gap-2">
-          <span className="sb-num text-[12px] text-accent">{version.short}</span>
-          <span className="truncate text-[13px] text-ink">{version.message}</span>
-          {version.current && <span className="text-[11px] text-ok">current</span>}
+          <span className="sb-num text-xs text-primary">{version.short}</span>
+          <span className="truncate text-sm">{version.message}</span>
+          {version.current && (
+            <Badge variant="outline" className="text-ok">
+              current
+            </Badge>
+          )}
         </span>
-        <span className="mt-1 block text-[12px] text-muted">
+        <span className="mt-1 block text-xs text-muted-foreground">
           {version.author} · {timeAgo(version.date)}
         </span>
-        <span className="sb-num mt-1 block truncate text-[12px] text-faint">
+        <span className="sb-num mt-1 block truncate text-xs text-muted-foreground">
           {files.length === 0
             ? 'no files changed'
             : files.map((file) => `${file.status} ${file.path}`).join(', ')}
         </span>
-      </button>
+      </Toggle>
 
       {version.agent && <AgentAuthor agent={version.agent} short={version.short} />}
 
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 px-2 pt-1 pb-1.5">
         {/* #975 — named after the revision, so a list of these buttons tells them apart. */}
-        <Button size="sm" onClick={onCustomize} aria-label={`Customize this version, ${version.short}`}>
+        <Button type="button" variant="outline" size="sm" onClick={onCustomize} aria-label={`Customize this version, ${version.short}`}>
           Customize this version
         </Button>
         {canRestore && (
           <Button
+            type="button"
+            variant="outline"
             size="sm"
             onClick={onRestore}
             disabled={busy || version.current}
@@ -365,7 +400,7 @@ function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent'
     }
   }, [])
   const who = principalLabel(agent.principal)
-  const badge = 'rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted'
+  const badge = cn(badgeVariants({ variant: 'secondary' }), 'text-muted-foreground')
   const session = agent.session
 
   async function open(id: string) {
@@ -388,24 +423,23 @@ function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent'
   }
 
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-2">
-      {session && opener ? (
-        <button
-          type="button"
-          onClick={() => void open(session)}
-          disabled={opening}
-          title={agent.principal ?? undefined}
-          aria-label={`Agent, for ${who}: open the chat that made ${short}`}
-          className={`${badge} hover:bg-surface-3 hover:text-ink`}
-        >
-          Agent · {who} · open chat
-        </button>
-      ) : (
-        <span title={agent.principal ?? undefined} className={badge}>
-          Agent · {who}
-        </span>
-      )}
-      <span role="status" className="text-[11px] text-warn">
+    <div className="flex flex-wrap items-center gap-2 px-2">
+      <Hint content={agent.principal}>
+        {session && opener ? (
+          <button
+            type="button"
+            onClick={() => void open(session)}
+            disabled={opening}
+            aria-label={`Agent, for ${who}: open the chat that made ${short}`}
+            className={cn(badge, 'hover:text-foreground')}
+          >
+            Agent · {who} · open chat
+          </button>
+        ) : (
+          <span className={badge}>Agent · {who}</span>
+        )}
+      </Hint>
+      <span role="status" className="text-[11px] text-destructive">
         {problem}
       </span>
     </div>

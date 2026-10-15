@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import type { ModelSummary } from '../api/types'
 import { copyImage } from '../lib/clipboard'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
@@ -6,9 +6,13 @@ import { addMedia, failure, fileStamp, makeCover, mediaProblem, useUploadLimit }
 import { framedSize, type CameraView } from '../lib/framing'
 import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
 import { FramingSurface } from './FramingSurface'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Skeleton } from '@/components/ui/skeleton'
 
 /** Pixels per CSS pixel of the viewer, offered as the image's size. */
 const IMAGE_SCALES = [2, 3, 4] as const
@@ -178,178 +182,188 @@ export function ImageDialog({
 
   const canCopy = typeof ClipboardItem !== 'undefined' && Boolean(navigator.clipboard?.write)
 
+  const ids = useId()
+
   return (
-    <Dialog
-      open={open}
-      title="Rendered image"
-      description={
-        view
-          ? 'Frame it here without moving the viewer, then draw it at a higher resolution to share.'
-          : 'The preview as it is framed now, drawn at a higher resolution to share.'
-      }
-      onClose={close}
-      footer={
-        <>
+    <Dialog open={open} onOpenChange={(next) => !next && close()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Rendered image</DialogTitle>
+          <DialogDescription>
+            {view
+              ? 'Frame it here without moving the viewer, then draw it at a higher resolution to share.'
+              : 'The preview as it is framed now, drawn at a higher resolution to share.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="-mx-4 min-h-0 space-y-4 overflow-y-auto px-4">
+          <FramingSurface
+            view={view}
+            // The shape is the dialog's own choice, not part of the pose.
+            onChange={(next) => setPose({ position: next.position, target: next.target, fov: next.fov })}
+            className="mx-auto flex items-center justify-center overflow-hidden rounded-lg border outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            style={{
+              // The image's own shape, no taller than half the window.
+              aspectRatio: String(frame.width > 0 && frame.height > 0 ? frame.width / frame.height : 16 / 9),
+              width: `min(100%, calc(50vh * ${frame.width > 0 && frame.height > 0 ? frame.width / frame.height : 16 / 9}))`,
+              ...(transparent
+                ? {
+                    backgroundImage:
+                      'repeating-conic-gradient(var(--sb-surface-3, #333) 0% 25%, transparent 0% 50%)',
+                    backgroundSize: '16px 16px',
+                  }
+                : {}),
+            }}
+          >
+            {preview ? (
+              <img
+                src={preview}
+                alt="What the image will show"
+                data-testid="image-preview"
+                draggable={false}
+                className="pointer-events-none h-full w-full object-contain select-none"
+              />
+            ) : (
+              <Skeleton className="size-full rounded-none" />
+            )}
+          </FramingSurface>
+
+          {view && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span className="mr-auto text-xs text-muted-foreground">
+                Drag to orbit · Shift- or right-drag to pan · Scroll or pinch to zoom
+              </span>
+              <Button type="button" variant="outline" size="sm" onClick={reset} disabled={busy} data-testid="image-reset-view">
+                Reset to view
+              </Button>
+            </div>
+          )}
+
+          {view && (
+            <div className="flex flex-col gap-2">
+              <Label id={`${ids}-shape`} className="text-xs font-normal text-muted-foreground">
+                Shape
+              </Label>
+              <RadioGroup
+                aria-labelledby={`${ids}-shape`}
+                value={aspectKey}
+                onValueChange={(next) => setAspectKey(next as AspectKey)}
+                className="flex flex-wrap gap-4"
+              >
+                {ASPECTS.map((option) => (
+                  <div key={option.key} className="flex items-center gap-2">
+                    <RadioGroupItem id={`${ids}-aspect-${option.key}`} value={option.key} />
+                    <Label htmlFor={`${ids}-aspect-${option.key}`} className="font-normal">
+                      {option.label}
+                    </Label>
+                  </div>
+                ))}
+              </RadioGroup>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <Label id={`${ids}-size`} className="text-xs font-normal text-muted-foreground">
+              Size
+            </Label>
+            <RadioGroup
+              aria-labelledby={`${ids}-size`}
+              value={String(scale)}
+              onValueChange={(next) => setScale(Number(next))}
+              className="flex flex-wrap gap-4"
+            >
+              {IMAGE_SCALES.map((option) => {
+                const pixels = snapshotSize(frame.width, frame.height, option)
+                return (
+                  <div key={option} className="flex items-center gap-2">
+                    <RadioGroupItem id={`${ids}-scale-${option}`} value={String(option)} />
+                    <Label htmlFor={`${ids}-scale-${option}`} className="font-normal">
+                      {option}×
+                      <span className="sb-num text-xs text-muted-foreground">
+                        {pixels.width} × {pixels.height}
+                      </span>
+                    </Label>
+                  </div>
+                )
+              })}
+            </RadioGroup>
+          </div>
+
+          <div className="flex flex-wrap gap-4">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={`${ids}-plate`}
+                checked={plate}
+                onCheckedChange={(next) => setPlate(next === true)}
+                data-testid="image-plate"
+              />
+              <Label htmlFor={`${ids}-plate`} className="font-normal">
+                Show the build plate
+              </Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={`${ids}-transparent`}
+                checked={transparent}
+                onCheckedChange={(next) => setTransparent(next === true)}
+                data-testid="image-transparent"
+              />
+              <Label htmlFor={`${ids}-transparent`} className="font-normal">
+                Transparent background
+              </Label>
+            </div>
+          </div>
+
+          <section aria-label="Template media" className="flex flex-wrap items-center gap-2 border-t pt-3">
+            <span className="mr-auto text-xs text-muted-foreground">
+              Keep it with the template, to use as its cover or in any image picker.
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void keep(false)}
+              disabled={busy || !model}
+              data-testid="image-add-media"
+            >
+              Add to media
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void keep(true)}
+              disabled={busy || !model}
+              data-testid="image-add-cover"
+            >
+              Add as cover
+            </Button>
+          </section>
+        </div>
+        <DialogFooter className="sm:items-center">
           {error && (
-            <span role="alert" className="mr-auto text-[12px] text-warn">
+            <span role="alert" className="text-xs text-destructive sm:mr-auto">
               {error}
             </span>
           )}
           {!error && (copied || added) && (
-            <span role="status" className="mr-auto text-[12px] text-ok">
+            <span role="status" className="text-xs text-ok sm:mr-auto">
               {added ?? 'Copied'}
             </span>
           )}
-          <Button onClick={close} disabled={busy}>
+          <Button type="button" variant="outline" onClick={close} disabled={busy}>
             {added ? 'Done' : 'Cancel'}
           </Button>
           {canCopy && (
-            <Button onClick={() => void copy()} disabled={busy} data-testid="image-copy">
+            <Button type="button" variant="outline" onClick={() => void copy()} disabled={busy} data-testid="image-copy">
               Copy
             </Button>
           )}
-          <Button variant="primary" onClick={() => void save()} disabled={busy} data-testid="image-save">
+          <Button type="button" onClick={() => void save()} disabled={busy} data-testid="image-save">
             {busy && <Spinner />}
             Save PNG
           </Button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        <FramingSurface
-          view={view}
-          // The shape is the dialog's own choice, not part of the pose.
-          onChange={(next) => setPose({ position: next.position, target: next.target, fov: next.fov })}
-          className="mx-auto flex items-center justify-center overflow-hidden rounded-[6px] border border-line outline-none focus-visible:border-accent"
-          style={{
-            // The image's own shape, no taller than half the window.
-            aspectRatio: String(frame.width > 0 && frame.height > 0 ? frame.width / frame.height : 16 / 9),
-            width: `min(100%, calc(50vh * ${frame.width > 0 && frame.height > 0 ? frame.width / frame.height : 16 / 9}))`,
-            ...(transparent
-              ? {
-                  backgroundImage:
-                    'repeating-conic-gradient(var(--sb-surface-3, #333) 0% 25%, transparent 0% 50%)',
-                  backgroundSize: '16px 16px',
-                }
-              : {}),
-          }}
-        >
-          {preview ? (
-            <img
-              src={preview}
-              alt="What the image will show"
-              data-testid="image-preview"
-              draggable={false}
-              className="pointer-events-none h-full w-full object-contain select-none"
-            />
-          ) : (
-            <Spinner />
-          )}
-        </FramingSurface>
-
-        {view && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <span className="mr-auto text-[12px] text-faint">
-              Drag to orbit · Shift- or right-drag to pan · Scroll or pinch to zoom
-            </span>
-            <Button size="sm" onClick={reset} disabled={busy} data-testid="image-reset-view">
-              Reset to view
-            </Button>
-          </div>
-        )}
-
-        {view && (
-          <fieldset>
-            <legend className="text-[12px] text-muted">Shape</legend>
-            <div className="mt-1.5 flex flex-wrap gap-4">
-              {ASPECTS.map((option) => (
-                <label key={option.key} className="flex cursor-pointer items-center gap-2 text-[13px]">
-                  <input
-                    type="radio"
-                    name="image-aspect"
-                    checked={aspectKey === option.key}
-                    onChange={() => setAspectKey(option.key)}
-                    className="accent-[var(--sb-accent)]"
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
-        )}
-
-        <fieldset>
-          <legend className="text-[12px] text-muted">Size</legend>
-          <div className="mt-1.5 flex flex-wrap gap-4">
-            {IMAGE_SCALES.map((option) => {
-              const pixels = snapshotSize(frame.width, frame.height, option)
-              return (
-                <label key={option} className="flex cursor-pointer items-center gap-2 text-[13px]">
-                  <input
-                    type="radio"
-                    name="image-scale"
-                    checked={scale === option}
-                    onChange={() => setScale(option)}
-                    className="accent-[var(--sb-accent)]"
-                  />
-                  {option}×
-                  <span className="sb-num text-[12px] text-faint">
-                    {pixels.width} × {pixels.height}
-                  </span>
-                </label>
-              )
-            })}
-          </div>
-        </fieldset>
-
-        <div className="flex flex-wrap gap-4">
-          <label className="flex cursor-pointer items-center gap-2 text-[13px]">
-            <input
-              type="checkbox"
-              checked={plate}
-              onChange={(event) => setPlate(event.target.checked)}
-              className="accent-[var(--sb-accent)]"
-              data-testid="image-plate"
-            />
-            Show the build plate
-          </label>
-          <label className="flex cursor-pointer items-center gap-2 text-[13px]">
-            <input
-              type="checkbox"
-              checked={transparent}
-              onChange={(event) => setTransparent(event.target.checked)}
-              className="accent-[var(--sb-accent)]"
-              data-testid="image-transparent"
-            />
-            Transparent background
-          </label>
-        </div>
-
-        <section
-          aria-label="Template media"
-          className="flex flex-wrap items-center gap-2 border-t border-line pt-3"
-        >
-          <span className="mr-auto text-[12px] text-muted">
-            Keep it with the template, to use as its cover or in any image picker.
-          </span>
-          <Button
-            size="sm"
-            onClick={() => void keep(false)}
-            disabled={busy || !model}
-            data-testid="image-add-media"
-          >
-            Add to media
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => void keep(true)}
-            disabled={busy || !model}
-            data-testid="image-add-cover"
-          >
-            Add as cover
-          </Button>
-        </section>
-      </div>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

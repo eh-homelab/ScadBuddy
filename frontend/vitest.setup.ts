@@ -79,3 +79,11 @@ if (!globalThis.IntersectionObserver) {
   globalThis.IntersectionObserver =
     FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }
+
+// #3672 — Radix's select asks for pointer capture and scrolls its items into view, and
+// cmdk scrolls the active item into view; jsdom has none of the three.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.releasePointerCapture = () => {}
+}
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}

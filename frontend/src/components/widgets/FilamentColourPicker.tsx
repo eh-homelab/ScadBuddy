@@ -1,12 +1,13 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
+import { Skeleton } from '@/components/ui/skeleton'
 
 type State =
-  | { kind: 'closed' }
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
   | { kind: 'open'; spools: InventorySpool[] }
@@ -19,9 +20,9 @@ function order(a: InventorySpool, b: InventorySpool): number {
 
 /**
  * #1026 — take a colour parameter's hex from a filament in Bambuddy's inventory, so the
- * preview shows what will actually print. The inventory is read when the list is
- * opened, never on page load. A clear spool with no recorded tint has no colour to
- * take and is listed disabled; a translucent one gives its tint.
+ * preview shows what will actually print. The inventory is read when the list is shown
+ * (the colour popover opens), never on page load. A clear spool with no recorded tint
+ * has no colour to take and is listed disabled; a translucent one gives its tint.
  */
 export function FilamentColourPicker({
   label,
@@ -32,101 +33,83 @@ export function FilamentColourPicker({
   value: string
   onPick: (hex: string) => void
 }) {
-  const [state, setState] = useState<State>({ kind: 'closed' })
-  const listId = useId()
-  const open = state.kind !== 'closed'
-  // Each open is a new read; closing, reopening or unmounting makes an older one stale,
-  // so a late answer can neither reopen the list nor overwrite a newer one.
-  const reading = useRef(0)
-  useEffect(
-    () => () => {
-      reading.current += 1
-    },
-    [],
-  )
-
-  const toggle = () => {
-    const read = ++reading.current
-    if (open) {
-      setState({ kind: 'closed' })
-      return
-    }
-    setState({ kind: 'loading' })
+  const [state, setState] = useState<State>({ kind: 'loading' })
+  // Each mount is one read; closing the popover unmounts the list, so a late answer
+  // never lands anywhere.
+  useEffect(() => {
+    let live = true
     api.getSpoolInventory().then(
       (view) => {
-        if (read !== reading.current) return
-        setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) })
+        if (live) setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) })
       },
       (cause: unknown) => {
-        if (read !== reading.current) return
+        if (!live) return
         setState({
           kind: 'failed',
           message: cause instanceof ApiError ? cause.detail : "Bambuddy's filaments could not be read.",
         })
       },
     )
+    return () => {
+      live = false
+    }
+  }, [])
+
+  if (state.kind === 'loading') {
+    return (
+      <div role="status" aria-label="Reading Bambuddy's filaments" className="flex flex-col gap-1.5 p-1">
+        <Skeleton className="h-7 w-full" />
+        <Skeleton className="h-7 w-full" />
+      </div>
+    )
   }
+  if (state.kind === 'failed') {
+    return (
+      <p className="px-1 text-xs text-destructive" role="alert">
+        {state.message}
+      </p>
+    )
+  }
+  if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">Bambuddy has no spools.</p>
 
   return (
-    <div className="mt-1.5 text-[12px]">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={listId}
-        onClick={toggle}
-        className="text-accent hover:underline"
-      >
-        {open ? 'Hide filaments' : 'Choose from a filament'}
-      </button>
-      {open && (
-        <div id={listId} className="mt-1.5 rounded-[6px] border border-line bg-surface p-1.5">
-          {state.kind === 'loading' && <p className="px-1 text-muted">Reading Bambuddy's filaments…</p>}
-          {state.kind === 'failed' && (
-            <p className="px-1 text-warn" role="alert">
-              {state.message}
-            </p>
-          )}
-          {state.kind === 'open' && state.spools.length === 0 && (
-            <p className="px-1 text-muted">Bambuddy has no spools.</p>
-          )}
-          {state.kind === 'open' && state.spools.length > 0 && (
-            <ul aria-label={`Filaments for ${label}`} className="max-h-64 space-y-0.5 overflow-y-auto">
-              {state.spools.map((spool) => {
-                const colour = spoolColour(spool)
-                const name = spoolName(spool)
-                const chosen = colour !== null && colour.hex === value
-                // The printer too: on a farm, two spools can both be in AMS-A slot 1.
-                const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
-                return (
-                  <li key={spool.id}>
-                    <button
-                      type="button"
-                      disabled={colour === null}
-                      aria-pressed={chosen}
-                      onClick={() => {
-                        if (!colour) return
-                        onPick(colour.hex)
-                        setState({ kind: 'closed' })
-                      }}
-                      className="flex w-full items-center gap-2 rounded-[4px] px-1.5 py-1 text-left hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 aria-pressed:bg-accent/10"
-                    >
-                      {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
-                      <span className="min-w-0 flex-1 truncate text-ink">{name}</span>
-                      <span className="sb-num shrink-0 text-muted">
-                        {colour === null
-                          ? 'clear, no tint recorded'
-                          : [colour.translucent ? 'translucent' : null, where, `${Math.round(spool.remaining_g)} g`]
-                              .filter(Boolean)
-                              .join(' · ')}
-                      </span>
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
-      )}
-    </div>
+    <Command className="rounded-lg! border p-0">
+      {state.spools.length > 6 && <CommandInput placeholder="Search filaments" />}
+      <CommandList aria-label={`Filaments for ${label}`} className="max-h-60">
+        <CommandEmpty>No filament matches.</CommandEmpty>
+        <CommandGroup>
+          {state.spools.map((spool) => {
+            const colour = spoolColour(spool)
+            const name = spoolName(spool)
+            const chosen = colour !== null && colour.hex === value
+            // The printer too: on a farm, two spools can both be in AMS-A slot 1.
+            const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
+            const detail =
+              colour === null
+                ? 'clear, no tint recorded'
+                : [colour.translucent ? 'translucent' : null, where, `${Math.round(spool.remaining_g)} g`]
+                    .filter(Boolean)
+                    .join(' · ')
+            return (
+              <CommandItem
+                key={spool.id}
+                value={`${spool.id} ${name} ${detail}`}
+                disabled={colour === null}
+                data-checked={chosen}
+                onSelect={() => {
+                  if (colour) onPick(colour.hex)
+                }}
+                className="text-xs"
+              >
+                {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                <span className="sb-num shrink-0 text-muted-foreground">{detail}</span>
+                {chosen && <span className="sr-only">(the colour now)</span>}
+              </CommandItem>
+            )
+          })}
+        </CommandGroup>
+      </CommandList>
+    </Command>
   )
 }

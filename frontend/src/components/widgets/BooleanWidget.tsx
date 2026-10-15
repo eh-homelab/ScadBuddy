@@ -1,5 +1,7 @@
 import type { Param } from '../../api/types'
 import { paramLabel } from '../../lib/params'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 
 export function BooleanWidget({
   param,
@@ -13,26 +15,11 @@ export function BooleanWidget({
   const id = `p-${param.name}`
 
   return (
-    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
-      <label htmlFor={id} className="text-[13px] text-ink">
+    <div className="flex items-center justify-between gap-3 px-3 py-3">
+      <Label htmlFor={id} className="leading-snug">
         {paramLabel(param)}
-      </label>
-      <button
-        id={id}
-        type="button"
-        role="switch"
-        aria-checked={value}
-        onClick={() => onChange(!value)}
-        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
-          value ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
-        }`}
-      >
-        <span
-          className={`absolute top-[2px] size-3.5 rounded-full transition-[left] ${
-            value ? 'left-[18px] bg-accent-ink' : 'left-[2px] bg-muted'
-          }`}
-        />
-      </button>
+      </Label>
+      <Switch id={id} checked={value} onCheckedChange={onChange} />
     </div>
   )
 }

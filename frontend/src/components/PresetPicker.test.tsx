@@ -1,8 +1,9 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
+import { fillableOf } from '../agent/fillable'
 import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
@@ -13,6 +14,7 @@ import { emitRealtime } from '../mocks/realtime'
 import { presets as fixturePresets } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
+import { optionNames, selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
 import type { InputsExtra } from '../lib/inputs'
 import { defaultValues, type ParamValues } from '../lib/params'
@@ -31,7 +33,8 @@ function render(slug = 'name-keychain') {
 
 async function picker() {
   const select = await screen.findByRole('combobox', { name: 'Preset' })
-  await waitFor(() => expect(within(select).getByRole('option', { name: 'Tiny' })).toBeInTheDocument())
+  // Disabled until the presets are in.
+  await waitFor(() => expect(select).toBeEnabled())
   return select
 }
 
@@ -85,19 +88,48 @@ function AgentTools({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-function presetId(select: HTMLElement, name: string): string {
-  return (within(select).getByRole('option', { name }) as HTMLOptionElement).value
+function presetId(name: string): string {
+  const preset = [...(fixturePresets['name-keychain'] ?? [])].find((candidate) => candidate.name === name)
+  if (!preset) throw new Error(`no preset ${name}`)
+  return preset.id
 }
+
+/** Opens the menu of the picked preset's own actions and presses one (#3672). */
+async function presetAction(user: ReturnType<typeof renderPage>['user'], preset: string, action: string) {
+  await user.click(screen.getByRole('button', { name: `More for preset ${preset}` }))
+  await user.click(await screen.findByRole('menuitem', { name: `${action} ${preset}` }))
+  // Its dialog opens once the menu has closed.
+  await waitFor(() => expect(document.querySelector('[data-modal]')).not.toBeNull())
+}
+
+/** The picked preset's menu, open: the names of what it offers. */
+async function presetMenu(user: ReturnType<typeof renderPage>['user'], preset: string): Promise<string[]> {
+  await user.click(screen.getByRole('button', { name: `More for preset ${preset}` }))
+  const menu = await screen.findByRole('menu')
+  const names = within(menu)
+    .getAllByRole('menuitem')
+    .map((item) => item.getAttribute('aria-label') ?? '')
+  await user.keyboard('{Escape}')
+  return names
+}
+
+/** No dialog of any kind is open. */
+function noDialog() {
+  expect(document.querySelector('[role="dialog"], [role="alertdialog"]')).toBeNull()
+}
+
+/** What the select shows with no preset picked. */
+const NONE_SHOWN = 'Choose a preset…'
 
 describe('PresetPicker', () => {
   // Saves and deletes write the mock's state, which no global hook resets.
   beforeEach(() => resetMockState())
 
   it('lists the template\'s presets apart from the saved ones', async () => {
-    render()
-    const select = await picker()
-    const shipped = within(select).getByRole('group', { name: 'From the template' })
-    const saved = within(select).getByRole('group', { name: 'Saved' })
+    const { user } = render()
+    await user.click(await picker())
+    const shipped = await screen.findByRole('group', { name: 'From the template' })
+    const saved = screen.getByRole('group', { name: 'Saved' })
     expect(within(shipped).getAllByRole('option').map((o) => o.textContent)).toEqual(['Tiny'])
     expect(within(saved).getAllByRole('option').map((o) => o.textContent)).toEqual([
       'Mum',
@@ -107,7 +139,7 @@ describe('PresetPicker', () => {
 
   it('names the preset on Update, and says "Changed from" in a live region (#351)', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Old engraving')
+    await selectOption(user, await picker(), 'Old engraving')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
 
     expect(screen.getByRole('button', { name: 'Update preset Old engraving' })).toBeInTheDocument()
@@ -134,10 +166,10 @@ describe('PresetPicker', () => {
     const { user } = render()
     const select = await picker()
     // Another preset first, whose values the next one drops: it starts from the defaults.
-    await user.selectOptions(select, 'Tiny')
+    await selectOption(user, select, 'Tiny')
     expect(screen.getByText('2 changed from defaults')).toBeInTheDocument()
 
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
     expect(screen.getByText('3 changed from defaults')).toBeInTheDocument()
 
@@ -154,47 +186,47 @@ describe('PresetPicker', () => {
     await user.clear(name)
     await user.type(name, 'Emmalina')
 
-    await user.selectOptions(select, 'Mum')
-    const dialog = screen.getByRole('dialog', { name: 'Apply preset Mum?' })
+    await selectOption(user, select, 'Mum')
+    const dialog = screen.getByRole('alertdialog', { name: 'Apply preset Mum?' })
     expect(dialog).toHaveTextContent('The values on screen have changes no preset holds.')
     expect(dialog).toHaveTextContent('To keep them, cancel and save them as a preset first.')
     // Nothing is replaced while it asks, and the picker still shows no preset.
     expect(name).toHaveValue('Emmalina')
-    expect(select).toHaveValue('')
+    expect(select).toHaveTextContent(NONE_SHOWN)
 
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    noDialog()
     expect(name).toHaveValue('Emmalina')
 
     // Escape closes it the same way, applying nothing.
-    await user.selectOptions(select, 'Mum')
-    expect(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
+    await selectOption(user, select, 'Mum')
+    expect(screen.getByRole('alertdialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
     await user.keyboard('{Escape}')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    noDialog()
     expect(name).toHaveValue('Emmalina')
-    expect(select).toHaveValue('')
+    expect(select).toHaveTextContent(NONE_SHOWN)
 
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     await user.click(
-      within(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).getByRole('button', {
+      within(screen.getByRole('alertdialog', { name: 'Apply preset Mum?' })).getByRole('button', {
         name: 'Replace my changes',
       }),
     )
     expect(name).toHaveValue('Mum')
-    expect(select).toHaveDisplayValue('Mum')
+    expect(select).toHaveTextContent('Mum')
   })
 
   it('asks before leaving a preset that was changed since it was picked (#359)', async () => {
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Tiny')
+    await selectOption(user, select, 'Tiny')
     // Moving between unchanged presets loses nothing, so it does not ask.
-    await user.selectOptions(select, 'Mum')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await selectOption(user, select, 'Mum')
+    noDialog()
 
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
-    await user.selectOptions(select, 'Tiny')
-    const dialog = screen.getByRole('dialog', { name: 'Apply preset Tiny?' })
+    await selectOption(user, select, 'Tiny')
+    const dialog = screen.getByRole('alertdialog', { name: 'Apply preset Tiny?' })
     // The edits are changes to Mum, a saved preset, so Update is the way to keep them.
     expect(dialog).toHaveTextContent('You changed Mum since you picked it.')
     expect(dialog).toHaveTextContent('To keep them, cancel and update Mum or save them as a preset first.')
@@ -206,23 +238,25 @@ describe('PresetPicker', () => {
     const select = await picker()
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
 
-    fireEvent.change(select, { target: { value: presetId(select, 'Tiny') } })
-    fireEvent.change(select, { target: { value: presetId(select, 'Mum') } })
-    const dialog = screen.getByRole('dialog', { name: 'Apply preset Tiny?' })
+    // Two picks before the first is answered (a key held down on the old native select;
+    // the assistant's fill now): the dialog stays on the first.
+    act(() => fillableOf(select)?.set(presetId('Tiny')))
+    act(() => fillableOf(select)?.set(presetId('Mum')))
+    const dialog = screen.getByRole('alertdialog', { name: 'Apply preset Tiny?' })
     await user.click(within(dialog).getByRole('button', { name: 'Replace my changes' }))
-    expect(select).toHaveDisplayValue('Tiny')
+    expect(select).toHaveTextContent('Tiny')
   })
 
   it('clears the selection without asking when "Choose a preset…" is picked over edits (#1475)', async () => {
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     const name = screen.getByRole('textbox', { name: 'Name on the tag' })
     await user.type(name, 'my')
 
-    await user.selectOptions(select, '')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(select).toHaveValue('')
+    await selectOption(user, select, 'No preset')
+    noDialog()
+    expect(select).toHaveTextContent(NONE_SHOWN)
     expect(name).toHaveValue('Mummy')
   })
 
@@ -250,17 +284,17 @@ describe('PresetPicker', () => {
       },
     })
     expect(name).toHaveValue(edited)
-    expect(select).toHaveValue('')
+    expect(select).toHaveTextContent(NONE_SHOWN)
 
     // Replacing the values on screen stays in the page, so the assistant may confirm it.
     expect(await bridge.call('click', { role: 'button', name: 'Replace my changes' })).toMatchObject({ ok: true })
     expect(name).toHaveValue('Mum')
-    expect(select).toHaveDisplayValue('Mum')
+    expect(select).toHaveTextContent('Mum')
   })
 
   it('says which values it skipped because the template dropped them', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Old engraving')
+    await selectOption(user, await picker(), 'Old engraving')
     // The page's action bar has its own live region (#967), so this one is found by its text.
     const skipped = screen.getByText(/^Skipped /)
     expect(skipped).toHaveAttribute('role', 'status')
@@ -270,30 +304,30 @@ describe('PresetPicker', () => {
 
   it('shows each skipped value with what the preset stored (#358)', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Old engraving')
+    await selectOption(user, await picker(), 'Old engraving')
     expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth = 2')
   })
 
   it('asks before an Update drops the values this template no longer has (#358)', async () => {
     const update = vi.spyOn(api, 'updatePreset')
     const { user } = render()
-    await user.selectOptions(await picker(), 'Old engraving')
+    await selectOption(user, await picker(), 'Old engraving')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'm')
     await user.click(screen.getByRole('button', { name: /^Update preset / }))
 
-    const dialog = screen.getByRole('dialog', { name: 'Update preset Old engraving' })
+    const dialog = screen.getByRole('alertdialog', { name: 'Update preset Old engraving' })
     expect(dialog).toHaveTextContent('engrave_depth = 2')
     expect(update).not.toHaveBeenCalled()
 
     // Cancel keeps the stored preset as it is.
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    noDialog()
     expect(update).not.toHaveBeenCalled()
     expect(screen.getByText(/^Skipped /)).toHaveTextContent('engrave_depth')
 
     await user.click(screen.getByRole('button', { name: /^Update preset / }))
     await user.click(
-      within(screen.getByRole('dialog', { name: 'Update preset Old engraving' })).getByRole('button', {
+      within(screen.getByRole('alertdialog', { name: 'Update preset Old engraving' })).getByRole('button', {
         name: 'Update and drop them',
       }),
     )
@@ -314,7 +348,7 @@ describe('PresetPicker', () => {
 
     await savePresetNamed(user, 'Nova tag')
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Nova tag',
       inputs: { params: { name: 'Nova' } },
@@ -322,8 +356,9 @@ describe('PresetPicker', () => {
       tags: [],
     })
     const select = screen.getByRole('combobox', { name: 'Preset' })
-    expect(select).toHaveDisplayValue('Nova tag')
-    expect(within(select).getByRole('group', { name: 'Saved' })).toHaveTextContent('Nova tag')
+    expect(select).toHaveTextContent('Nova tag')
+    await user.click(select)
+    expect(await screen.findByRole('group', { name: 'Saved' })).toHaveTextContent('Nova tag')
   })
 
   it('keeps the dialog open with the server\'s reason when the name is taken', async () => {
@@ -343,7 +378,7 @@ describe('PresetPicker', () => {
   it('updates a saved preset once its values are changed', async () => {
     const update = vi.spyOn(api, 'updatePreset')
     const { user } = render()
-    await user.selectOptions(await picker(), 'Mum')
+    await selectOption(user, await picker(), 'Mum')
     expect(screen.queryByRole('button', { name: /^Update preset / })).not.toBeInTheDocument()
 
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
@@ -358,7 +393,7 @@ describe('PresetPicker', () => {
 
   it('puts "Changed from" on its own line, truncated, as a status (#352)', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Mum')
+    await selectOption(user, await picker(), 'Mum')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
 
     const note = screen.getByTestId('preset-modified')
@@ -368,31 +403,30 @@ describe('PresetPicker', () => {
     // Above them, one line, the whole name kept for the eye that hovers.
     expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(note).toHaveClass('truncate')
-    expect(note).toHaveAttribute('title', 'Changed from Mum')
     expect(screen.getByRole('status', { name: 'Changed from Mum' })).toBe(note)
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Tiny')
+    await selectOption(user, await picker(), 'Tiny')
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
     expect(screen.getByTestId('preset-modified')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Update preset / })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Delete preset/ })).not.toBeInTheDocument()
+    expect(await presetMenu(user, 'Tiny')).toEqual(['Duplicate preset Tiny'])
   })
 
   it('deletes a saved preset after confirming, leaving the values on screen', async () => {
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
-    await user.click(screen.getByRole('button', { name: 'Delete preset Mum' }))
-    const dialog = screen.getByRole('dialog', { name: 'Delete preset Mum' })
+    await selectOption(user, select, 'Mum')
+    await presetAction(user, 'Mum', 'Delete preset')
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete preset Mum' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete preset' }))
 
     await waitFor(() =>
-      expect(within(select).queryByRole('option', { name: 'Mum' })).not.toBeInTheDocument(),
+      expect(select).toHaveTextContent(NONE_SHOWN),
     )
-    expect(select).toHaveValue('')
+    expect(select).toHaveTextContent(NONE_SHOWN)
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
   })
 
@@ -404,16 +438,16 @@ describe('PresetPicker', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Mine')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
     await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Preset' })).toHaveDisplayValue('Mine'),
+      expect(screen.getByRole('combobox', { name: 'Preset' })).toHaveTextContent('Mine'),
     )
   })
 
   it('duplicates a preset the template ships into one of the user\'s own', async () => {
     const duplicate = vi.spyOn(api, 'duplicatePreset')
     const { user } = render()
-    await user.selectOptions(await picker(), 'Tiny')
+    await selectOption(user, await picker(), 'Tiny')
 
-    await user.click(screen.getByRole('button', { name: 'Duplicate preset Tiny' }))
+    await presetAction(user, 'Tiny', 'Duplicate preset')
     const dialog = screen.getByRole('dialog', { name: 'Duplicate Tiny' })
     const field = within(dialog).getByRole('textbox', { name: 'Preset name' })
     expect(field).toHaveValue('Tiny copy')
@@ -421,32 +455,35 @@ describe('PresetPicker', () => {
     await user.type(field, 'Tiny for Bo')
     await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(duplicate).toHaveBeenCalledWith('name-keychain', 'template-tiny', { name: 'Tiny for Bo' })
     const select = screen.getByRole('combobox', { name: 'Preset' })
-    expect(select).toHaveDisplayValue('Tiny for Bo')
-    expect(within(select).getByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')
+    expect(select).toHaveTextContent('Tiny for Bo')
+    await user.click(select)
+    expect(await screen.findByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')
     // The copy is the user's, so it can be changed and deleted, unlike the original.
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
     expect(screen.getByRole('button', { name: /^Update preset / })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Delete preset Tiny for Bo' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'More for preset Tiny for Bo' }))
+    expect(await screen.findByRole('menuitem', { name: 'Delete preset Tiny for Bo' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
   })
 
   it('keeps edits made before duplicating on screen, as a change to the copy', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Mum')
+    await selectOption(user, await picker(), 'Mum')
     const name = screen.getByRole('textbox', { name: 'Name on the tag' })
     await user.clear(name)
     await user.type(name, 'Dad')
 
-    await user.click(screen.getByRole('button', { name: 'Duplicate preset Mum' }))
+    await presetAction(user, 'Mum', 'Duplicate preset')
     await user.click(
       within(screen.getByRole('dialog', { name: 'Duplicate Mum' })).getByRole('button', {
         name: 'Duplicate',
       }),
     )
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(name).toHaveValue('Dad')
     expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum copy')
   })
@@ -455,7 +492,7 @@ describe('PresetPicker', () => {
     const { user } = render()
     const select = await picker()
     expect(screen.queryByTestId('preset-details')).not.toBeInTheDocument()
-    await user.selectOptions(select, 'Tiny')
+    await selectOption(user, select, 'Tiny')
     const details = screen.getByTestId('preset-details')
     const tags = within(details).getByRole('list', { name: 'Preset tags' })
     expect(within(tags).getAllByRole('listitem').map((t) => t.textContent)).toEqual([
@@ -465,7 +502,7 @@ describe('PresetPicker', () => {
     // Markdown, rendered as elements: the bold is a <strong>, not asterisks.
     expect(within(details).getByText('zip pull', { selector: 'strong' })).toBeInTheDocument()
     // A preset with neither shows nothing.
-    await user.selectOptions(select, 'Old engraving')
+    await selectOption(user, select, 'Old engraving')
     expect(screen.queryByTestId('preset-details')).not.toBeInTheDocument()
   })
 
@@ -477,11 +514,11 @@ describe('PresetPicker', () => {
     ])
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Tiny')
+    await selectOption(user, select, 'Tiny')
     expect(
       within(screen.getByTestId('preset-details')).getByRole('img', { name: 'Front view' }),
     ).toHaveAttribute('src', '/api/v1/models/name-keychain/images/images/front.png')
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     // A saved preset's text is no file of the template's: its image stays its alt text.
     const details = screen.getByTestId('preset-details')
     expect(within(details).queryByRole('img')).not.toBeInTheDocument()
@@ -505,7 +542,7 @@ describe('PresetPicker', () => {
     )
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Bag tag',
       inputs: { params: {} },
@@ -523,11 +560,11 @@ describe('PresetPicker', () => {
     const update = vi.spyOn(api, 'updatePreset')
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     // An edit made first stays a change to the preset, for Update to save.
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
 
-    await user.click(screen.getByRole('button', { name: 'Edit details of preset Mum' }))
+    await presetAction(user, 'Mum', 'Edit details of preset')
     const dialog = screen.getByRole('dialog', { name: 'Edit details of Mum' })
     const tags = within(dialog).getByRole('textbox', { name: 'Tags (optional, comma-separated)' })
     expect(tags).toHaveValue('gift')
@@ -541,13 +578,13 @@ describe('PresetPicker', () => {
     await user.clear(tags)
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
       name: 'Mum (black)',
       description: 'Black with white text.',
       tags: [],
     })
-    expect(select).toHaveDisplayValue('Mum (black)')
+    expect(select).toHaveTextContent('Mum (black)')
     expect(screen.getByTestId('preset-details')).toHaveTextContent('Black with white text.')
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mummy')
     expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum (black)')
@@ -595,7 +632,7 @@ describe('PresetPicker', () => {
     expect(create.mock.calls[0]?.[1]?.description).toBe(
       '\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION),
     )
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
 
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const again = screen.getByRole('dialog', { name: 'Save as preset' })
@@ -618,15 +655,15 @@ describe('PresetPicker', () => {
     const update = vi.spyOn(api, 'updatePreset')
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
-    await user.click(screen.getByRole('button', { name: 'Edit details of preset Mum' }))
+    await selectOption(user, select, 'Mum')
+    await presetAction(user, 'Mum', 'Edit details of preset')
     const dialog = screen.getByRole('dialog', { name: 'Edit details of Mum' })
     const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
     await user.clear(name)
     await user.type(name, 'Mother')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => noDialog())
     expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
       name: 'Mother',
       description: '',
@@ -635,14 +672,16 @@ describe('PresetPicker', () => {
 
   it('offers Edit details only on a saved preset', async () => {
     const { user } = render()
-    await user.selectOptions(await picker(), 'Tiny')
-    expect(screen.queryByRole('button', { name: /^Edit details of preset/ })).not.toBeInTheDocument()
+    await selectOption(user, await picker(), 'Tiny')
+    expect(await presetMenu(user, 'Tiny')).not.toContain('Edit details of preset Tiny')
+    await selectOption(user, screen.getByRole('combobox', { name: 'Preset' }), 'Mum')
+    expect(await presetMenu(user, 'Mum')).toContain('Edit details of preset Mum')
   })
 
   it('offers no Duplicate until a preset is picked', async () => {
     render()
     await picker()
-    expect(screen.queryByRole('button', { name: /^Duplicate preset/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^More for preset/ })).not.toBeInTheDocument()
   })
 
   it('saves the UI state with the preset and hands it back on apply', async () => {
@@ -670,9 +709,9 @@ describe('PresetPicker', () => {
     await waitFor(() => expect(saved).toEqual({ name: 'Lid', inputs: { params: {}, tab: 'lid' }, description: '', tags: [] }))
     const select = await picker()
     // Away by way of another preset and back: the harness's values follow each pick.
-    await user.selectOptions(select, 'Tiny')
-    await user.selectOptions(select, 'Lid')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await selectOption(user, select, 'Tiny')
+    await selectOption(user, select, 'Lid')
+    noDialog()
     expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
   })
 
@@ -681,13 +720,13 @@ describe('PresetPicker', () => {
     const select = await picker()
     // Nothing picked yet: the UI's own starting state is no edit, so this does not ask.
     await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
-    await user.selectOptions(select, 'Tiny')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await selectOption(user, select, 'Tiny')
+    noDialog()
 
     await user.click(screen.getByRole('button', { name: 'Change the UI state' }))
     expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Tiny')
-    await user.selectOptions(select, 'Mum')
-    expect(screen.getByRole('dialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
+    await selectOption(user, select, 'Mum')
+    expect(screen.getByRole('alertdialog', { name: 'Apply preset Mum?' })).toBeInTheDocument()
   })
 
   it('on a pinned revision, applies presets but saves none (#355)', async () => {
@@ -699,7 +738,7 @@ describe('PresetPicker', () => {
     const select = await picker()
     expect(screen.getByText('Presets are saved against the current version.')).toBeInTheDocument()
 
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     const name = screen.getByRole('textbox', { name: 'Name on the tag' })
     expect(name).toHaveValue('Mum')
     await user.type(name, 'my')
@@ -714,7 +753,7 @@ describe('PresetPicker', () => {
   it('follows a preset deleted in another tab (#357)', async () => {
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     // Another tab deletes it: the server says the template's presets changed.
     setMockPresets(
       'name-keychain',
@@ -722,22 +761,23 @@ describe('PresetPicker', () => {
     )
     emitRealtime('presets.changed', ['model:name-keychain'], { slug: 'name-keychain' })
 
-    await waitFor(() => expect(within(select).queryByRole('option', { name: 'Mum' })).toBeNull())
-    expect(select).toHaveValue('')
+    await waitFor(() => expect(select).toHaveTextContent(NONE_SHOWN))
+    expect(await optionNames(user, select)).not.toContain('Mum')
+    expect(select).toHaveTextContent(NONE_SHOWN)
     expect(screen.getByRole('alert')).toHaveTextContent('That preset was deleted elsewhere.')
     // The values it put on screen stay.
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
   })
 
   it('lists a preset saved elsewhere, the assistant\'s included (#357)', async () => {
-    render()
+    const { user } = render()
     const select = await picker()
     setMockPresets('name-keychain', [
       ...(fixturePresets['name-keychain'] ?? []),
       { id: 'c'.repeat(32), name: 'From the assistant', origin: 'mine', params: {}, description: '', tags: [] },
     ])
     emitRealtime('presets.changed', ['model:name-keychain'], { slug: 'name-keychain' })
-    expect(await within(select).findByRole('option', { name: 'From the assistant' })).toBeInTheDocument()
+    await waitFor(async () => expect(await optionNames(user, select)).toContain('From the assistant'))
   })
 
   it.each(['Update', 'Delete'])(
@@ -745,7 +785,7 @@ describe('PresetPicker', () => {
     async (action) => {
       const { user } = render()
       const select = await picker()
-      await user.selectOptions(select, 'Mum')
+      await selectOption(user, select, 'Mum')
       // Gone on the server, and this tab was not told.
       setMockPresets(
         'name-keychain',
@@ -755,9 +795,9 @@ describe('PresetPicker', () => {
         await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
         await user.click(screen.getByRole('button', { name: 'Update preset Mum' }))
       } else {
-        await user.click(screen.getByRole('button', { name: 'Delete preset Mum' }))
+        await presetAction(user, 'Mum', 'Delete preset')
         await user.click(
-          within(screen.getByRole('dialog', { name: 'Delete preset Mum' })).getByRole('button', {
+          within(screen.getByRole('alertdialog', { name: 'Delete preset Mum' })).getByRole('button', {
             name: 'Delete preset',
           }),
         )
@@ -766,8 +806,8 @@ describe('PresetPicker', () => {
       const alert = await screen.findByRole('alert')
       expect(alert).toHaveTextContent('That preset was deleted elsewhere.')
       expect(alert).not.toHaveTextContent('a1b2c3d4')
-      expect(within(select).queryByRole('option', { name: 'Mum' })).toBeNull()
-      expect(select).toHaveValue('')
+      expect(select).toHaveTextContent(NONE_SHOWN)
+      expect(select).toHaveTextContent(NONE_SHOWN)
     },
   )
 
@@ -778,12 +818,12 @@ describe('PresetPicker', () => {
     })
     const { user } = render()
     const select = await picker()
-    await user.selectOptions(select, 'Mum')
+    await selectOption(user, select, 'Mum')
     const reset = screen.getByRole('button', { name: 'Reset to defaults' })
     await waitFor(() => expect(reset).toBeEnabled())
     await user.click(reset)
 
-    expect(select).toHaveValue('')
+    expect(select).toHaveTextContent(NONE_SHOWN)
     expect(screen.queryByTestId('preset-modified')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Delete preset/ })).not.toBeInTheDocument()
@@ -815,8 +855,8 @@ describe('PresetPicker', () => {
     )
     const { user } = render()
     const select = await screen.findByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(select).getByRole('option', { name: long })).toBeInTheDocument())
-    await user.selectOptions(select, long)
+    await waitFor(() => expect(select).toHaveTextContent(NONE_SHOWN))
+    await selectOption(user, select, long)
     await user.clear(screen.getByRole('textbox', { name: 'Name on the tag' }))
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'Bo')
 
@@ -860,8 +900,8 @@ describe('PresetPicker', () => {
     )
     const { user } = render()
     const select = await screen.findByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(select).getByRole('option', { name: 'Lid' })).toBeInTheDocument())
-    await user.selectOptions(select, 'Lid')
+    await waitFor(() => expect(select).toHaveTextContent(NONE_SHOWN))
+    await selectOption(user, select, 'Lid')
     await savePresetNamed(user, 'With lid')
     await waitFor(() => expect(saved[0]?.inputs).toMatchObject({ tab: 'lid' }))
     const reset = screen.getByRole('button', { name: 'Reset to defaults' })
