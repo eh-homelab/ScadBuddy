@@ -82,7 +82,7 @@ describe('SettingsPage activity settings', () => {
     await user.type(ttl, '3600')
     await user.type(repair, '5')
     await user.click(save())
-    expect(await screen.findByText('Enter at least 86400 seconds.')).toBeInTheDocument()
+    expect(await screen.findByText('Enter 86400 to 315360000 seconds.')).toBeInTheDocument()
     expect(screen.getByText('Enter 600 to 604800 seconds.')).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
 
