@@ -24,6 +24,18 @@ jobs:
           fetch-depth: 1
       # v2.9.0, which runs lychee v0.24.2. --include-fragments also checks
       # #anchors, in-repo ones included. 429 is a rate limit, not a dead link.
+      # Excluded, each a live page that answers a bot with an error (#2622):
+      #   npmjs.com and makerworld.com answer 403 to any client without a
+      #   browser's cookies (bot protection), whatever the page. Nothing checks
+      #   those links now, so a renamed package or a removed MakerWorld model
+      #   goes unflagged: check them by hand when editing a file that has one,
+      #   in docs/ (docs/user-guide.md and the AI integration spec today) or
+      #   elsewhere;
+      #   github.com/eh-homelab/clusters is a private repository, a 404 to an
+      #   unauthenticated request. Only that repository: the pattern ends at a
+      #   path, query or fragment, so an eh-homelab/clusters-* one is checked;
+      #   *.internal.nullreference.io are the homelab's LAN-only hosts, which a
+      #   GitHub runner cannot reach (every one times out).
       - name: lychee
         id: lychee
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
@@ -33,6 +45,10 @@ jobs:
             --include-fragments
             --max-concurrency 16
             --accept '100..=103,200..=299,429'
+            --exclude '^https://www\.npmjs\.com/'
+            --exclude '^https://makerworld\.com/'
+            --exclude '^https://github\.com/eh-homelab/clusters([/?#]|$)'
+            --exclude '^https?://[^/]*\.internal\.nullreference\.io'
             'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
           fail: true
       - name: Open an issue

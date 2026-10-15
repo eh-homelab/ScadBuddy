@@ -1,11 +1,21 @@
 """A flow's typed inputs (#2483): the schema's check, a run's values, and the script's
 type check against them."""
 
+import time
+import warnings
 from typing import Any
 
 import pytest
 
-from scadbuddy.flows.inputs import InputsError, resolve_inputs, schema_problems
+from scadbuddy.flows.inputs import (
+    MAX_PATTERNED_LENGTH,
+    PATTERN_TIMEOUT_S,
+    PATTERNS_BUDGET_S,
+    InputsError,
+    inputs_model,
+    resolve_inputs,
+    schema_problems,
+)
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {
@@ -113,6 +123,206 @@ async def test_a_boolean_left_out_reads_as_bool_in_the_script() -> None:
 def test_a_long_pattern_is_refused() -> None:
     schema = {"type": "object", "properties": {"s": {"type": "string", "pattern": "a" * 300}}}
     assert any("pattern" in p for p in schema_problems(schema))
+
+
+def test_a_required_boolean_is_refused() -> None:
+    """#2661: left out, a boolean is false, so `required` could never refuse it."""
+    schema = {"type": "object", "properties": {"dry": {"type": "boolean"}}, "required": ["dry"]}
+    assert any("never missing" in p for p in schema_problems(schema))
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "string", "pattern": "^(a+)+$"},
+        {"type": "string", "pattern": "^(a+)+$", "maxLength": 100_000},
+        {"type": "array", "items": {"type": "string", "pattern": "^(a+)+$"}},
+    ],
+)
+def test_a_pattern_needs_a_bounded_max_length(prop: dict[str, Any]) -> None:
+    """#2661: every start runs the pattern; a short backtracking one on a long value is slow."""
+    schema = {"type": "object", "properties": {"s": prop}}
+    assert any("maxLength" in p for p in schema_problems(schema))
+
+
+def test_a_pattern_with_a_bounded_max_length_is_accepted() -> None:
+    bounded = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 64}},
+    }
+    assert schema_problems(bounded) == []
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "integer", "pattern": "^1$"},
+        {"type": "array", "items": {"type": "integer", "pattern": "^1$"}},
+    ],
+)
+def test_a_pattern_on_another_type_is_not_supported_and_asks_no_max_length(
+    prop: dict[str, Any],
+) -> None:
+    problems = schema_problems({"type": "object", "properties": {"s": prop}})
+    assert any("'pattern' is not supported" in p for p in problems), problems
+    assert not any("maxLength" in p for p in problems), problems
+
+
+def test_many_slow_values_share_one_budget() -> None:
+    """Each value's deadline alone would let an array of slow items hold the loop for
+    each: the run's patterns share PATTERNS_BUDGET_S."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "s": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64},
+            }
+        },
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"s": ["a" * 60 + "!"] * 40})
+    assert time.monotonic() - started < PATTERNS_BUDGET_S + 0.5
+    assert len(err.value.problems) == 40
+    assert any("took over" in p and "together" in p for p in err.value.problems)
+
+
+def test_an_exponential_pattern_within_its_max_length_is_cut_off() -> None:
+    """#2661 review: a bounded maxLength bounds a linear pattern, not `^(a|aa)+$`; the
+    value is refused at PATTERN_TIMEOUT_S rather than backtracking for minutes."""
+    schema = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64}},
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"s": "a" * 60 + "!"})
+    assert time.monotonic() - started < 1.0
+    assert err.value.problems == [
+        f"s: is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it"
+    ]
+    assert resolve_inputs(schema, {"s": "aaa"}) == {"s": "aaa"}
+
+
+SLOW = {"type": "string", "pattern": "^[a-z]+$", "maxLength": 64}
+
+
+@pytest.mark.parametrize(
+    ("schema", "values", "where"),
+    [
+        ({"type": "object", "properties": {"name": SLOW}}, {"name": "A" * 5000}, "name"),
+        (
+            {"type": "object", "properties": {"tags": {"type": "array", "items": SLOW}}},
+            {"tags": ["ok", "A" * 5000]},
+            "tags.1",
+        ),
+    ],
+)
+def test_an_over_long_patterned_value_is_refused_before_its_pattern_runs(
+    schema: dict[str, Any], values: dict[str, Any], where: str
+) -> None:
+    """#2661 review: maxLength is what bounds a pattern's work, and the validator runs
+    every keyword, so the length is checked first and the pattern never sees the value."""
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, values)
+    assert err.value.problems == [f"{where}: is longer than its maxLength of 64"]
+
+
+def test_a_backtracking_pattern_never_sees_a_long_value() -> None:
+    """27 characters against `^(a+)+$` take seconds of backtracking; refused on length,
+    they take none. (Longer would only make the old code hang rather than fail.)"""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": "^(a+)+$", "maxLength": 16}},
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError):
+        resolve_inputs(schema, {"name": "a" * 26 + "!"})
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_stored_maxlength_above_the_cap_does_not_lift_it() -> None:
+    """A schema stored before #2661 may carry any maxLength: the pattern still never sees a
+    value longer than MAX_PATTERNED_LENGTH."""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": "^a*$", "maxLength": 10**6}},
+    }
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"name": "a" * (MAX_PATTERNED_LENGTH + 1)})
+    assert err.value.problems == [f"name: is longer than its maxLength of {MAX_PATTERNED_LENGTH}"]
+    assert resolve_inputs(schema, {"name": "a" * MAX_PATTERNED_LENGTH})["name"]
+
+
+def test_an_over_long_value_is_said_beside_every_other_problem() -> None:
+    """One 422 says them all: the over-long input, and what else is wrong, its pattern
+    never run."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "pattern": "^(a+)+$", "maxLength": 16},
+            "count": {"type": "integer"},
+        },
+        "required": ["count"],
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"name": "a" * 26 + "!", "count": "three"})
+    assert time.monotonic() - started < 0.5
+    assert err.value.problems == [
+        "name: is longer than its maxLength of 16",
+        "count: 'three' is not of type 'integer'",
+    ]
+
+
+def test_each_over_long_item_is_said() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^a*$", "maxLength": 2},
+            }
+        },
+    }
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"tags": ["aaa", "a", "aaaa"]})
+    assert err.value.problems == [
+        "tags.0: is longer than its maxLength of 2",
+        "tags.2: is longer than its maxLength of 2",
+    ]
+
+
+def test_a_stored_schema_keeps_starting_under_the_rules_added_since() -> None:
+    """#2661's two rules are a registration's: a version registered before them still
+    starts (its pattern is capped as it runs; a required boolean is false when left out)."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "pattern": "^[a-z]+$"},
+            "on": {"type": "boolean"},
+        },
+        "required": ["on"],
+    }
+    assert len(schema_problems(schema)) == 2
+    assert schema_problems(schema, stored=True) == []
+    assert resolve_inputs(schema, {"code": "abc"}) == {"code": "abc", "on": False}
+
+
+def test_an_input_in_pydantics_protected_namespace_raises_no_warning() -> None:
+    """#2661: pydantic's protected namespaces (`model_validate`, `model_dump`) are not the
+    script's."""
+    schema = {
+        "type": "object",
+        "properties": {"model_validate_size": {"type": "integer", "default": 1}},
+    }
+    assert schema_problems(schema) == []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = inputs_model(schema)
+    assert resolve_inputs(schema, {}) == {"model_validate_size": 1}
+    assert "model_validate_size" in model.model_fields
 
 
 def test_a_flow_without_a_schema_takes_no_inputs() -> None:

@@ -1563,17 +1563,51 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const hung = new Promise<void>((resolve) => {
         release = resolve
       })
+      let arrived!: () => void
+      const first = new Promise<void>((resolve) => {
+        arrived = resolve
+      })
       server.use(
         http.get('/api/v1/settings', async () => {
           reads += 1
           const n = reads
-          if (n === 1) await hung
+          if (n === 1) {
+            arrived()
+            await hung
+          }
           return HttpResponse.json({ display_unit: 'mm', n })
         }),
       )
+      // The order fetches reach the handler is not the order they were made in: msw runs
+      // undici over its sockets, and a pooled socket an earlier test left behind can
+      // send a later fetch first. The first fetch is held back here as such a socket
+      // would, so the test cannot pass by counting arrivals as calls. The hold works only
+      // because `send` reads `globalThis.fetch` on every call (client.ts), not once.
+      const realFetch = globalThis.fetch
+      let settingsSent = 0
+      const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        // Only the settings reads count: another request first would take the hold (#3398).
+        const url = input instanceof Request ? input.url : String(input)
+        if (new URL(url, 'http://x').pathname === '/api/v1/settings' && ++settingsSent === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        return realFetch(input, init)
+      })
       const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
       try {
         const stuck = api.getSettings()
+        // The hung read must be the first to arrive before the next caller asks; if it
+        // never does, say so rather than wait out the test's timeout.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          first,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('the first settings read never reached the handler')),
+              2_000,
+            )
+          }),
+        ]).finally(() => clearTimeout(timer))
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS - 1)
         const joined = api.getSettings()
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS)
@@ -1582,9 +1616,13 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
         await expect(stuck).resolves.toMatchObject({ n: 1 })
         await expect(joined).resolves.toMatchObject({ n: 1 })
         expect(reads).toBe(2)
+        // The hold saw both reads sent (the joined caller sent none), so it cannot go
+        // quietly inert if `send` ever stops calling the global fetch (#3398).
+        expect(settingsSent).toBe(2)
       } finally {
         release()
         now.mockRestore()
+        fetched.mockRestore()
       }
     })
   })

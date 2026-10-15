@@ -12,6 +12,7 @@ import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
 import {
@@ -35,6 +36,15 @@ const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
 const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
+
+/** An `sql` for a test that saves no http body: a call (a read) throws, and so does any
+ * property, `begin` included, which a save opens with. */
+function noDatabase(): unknown {
+  const refuse = () => {
+    throw new Error('this test saves no http body: no database is set up for one')
+  }
+  return new Proxy(refuse, { apply: refuse, get: refuse })
+}
 
 function notes(calls: string[]): () => McpServer {
   return () => {
@@ -75,6 +85,9 @@ const tierOf = (name: string, input: unknown): RiskTier => {
 }
 const mayPark = (name: string) => !name.endsWith('__read_note')
 
+/** The fake audit's input hash, which the checks are bound to. */
+const fakeHash = (tool: string, input: unknown) => `hash:${tool}:${JSON.stringify(input)}`
+
 function harness(
   options: {
     owner?: Owner & { turnTiers?: string[] }
@@ -95,6 +108,8 @@ function harness(
   const audits: AuditEntry[] = []
   const reported: string[] = []
   const stored: string[] = []
+  /** The input hash each session approval check was bound to (#2649). */
+  const bindings: (string | undefined)[] = []
   const owner = options.owner ?? BROWSER
   let connects = 0
   const server: TurnServer = {
@@ -116,18 +131,23 @@ function harness(
       release: () => {},
     }),
     hostQueue: 'agent-tools.host-1',
-    approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    approvals: {
+      approved: async (requestId, binding) => {
+        bindings.push(binding?.inputHash)
+        return requestId.endsWith(':toolu_approved')
+      },
+    },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
       // Only the backend's workflow_run_decisions approves a flow's call, and only for the
       // input it was decided on (PgFlowRuns refuses a call with no hash, #2728).
       approved: async (requestId, inputHash) =>
-        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === `hash:notes__post:${JSON.stringify({ method: 'POST', body: 'x' })}`,
+        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === fakeHash('notes__post', { method: 'POST', body: 'x' }),
     },
     currentTiers: async () => options.starterTiers,
     audit: {
       record: async (entry) => void audits.push(entry),
-      hash: (tool, input) => `hash:${tool}:${JSON.stringify(input)}`,
+      hash: fakeHash,
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
@@ -140,6 +160,7 @@ function harness(
     audits,
     reported,
     stored,
+    bindings,
     connects: () => connects,
     activities: turnToolActivities(deps),
     call: turnToolActivity(deps),
@@ -276,7 +297,13 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      servers: turnServers({ httpRequest: { saveRoot } }),
+      // Its saved bodies are in Postgres; this test saves none, and says so if it ever does.
+      servers: turnServers({
+        httpRequest: {
+          saveRoot,
+          sql: noDatabase() as never,
+        },
+      }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
@@ -331,8 +358,13 @@ describe('turn tools in a durable session', () => {
     expect(refused.type).toBe('NotApproved')
     expect(h.calls).toEqual([])
     expect(await env('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+    // #2649: each check is bound to the call's own input hash, as a ScadBuddy tool's is,
+    // so an approval (a person's, or a run grant's use) covers only the input it was for.
+    const hash = fakeHash('notes__post', { method: 'POST', body: 'x' })
+    expect(h.bindings).toEqual([hash, hash])
     // A GET needs none.
     expect(await env('turn:notes__post').run(h.call, { method: 'GET', body: 'y' })).toBe('posted y')
+    expect(h.bindings).toHaveLength(2)
   })
 
   it("holds a call to the turn's tiers", async () => {
@@ -489,6 +521,15 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe('the no-database sql stub (#2963 review)', () => {
+  it('says why on a save, which opens with sql.begin, as well as on a read', async () => {
+    const bodies = new PgHttpBodies(noDatabase() as never, SESSION)
+    const meta = { url: 'http://example.test/', content_type: null, size_bytes: 1, complete: true }
+    await expect(bodies.save('b1', Buffer.from('x'), meta)).rejects.toThrow('this test saves no http body')
+    await expect(bodies.meta('b1')).rejects.toThrow('this test saves no http body')
   })
 })
 

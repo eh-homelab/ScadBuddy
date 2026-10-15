@@ -135,3 +135,6 @@ export async function AgentOperation(input: OperationInput): Promise<OperationRe
   await condition(allHandlersFinished)
   return done
 }
+
+// A session's cron jobs and wakeups (src/background/).
+export { BackgroundTask } from './backgroundTask.js'

@@ -22,7 +22,12 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.bambuddy.library_objects import piece_key, publish_library_pieces
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
-from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, laid_out_plates, write_bambu_3mf
+from scadbuddy.render.bambu3mf import (
+    CORE_NS,
+    PROJECT_SETTINGS_NAME,
+    laid_out_plates,
+    write_bambu_3mf,
+)
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import PlateLayout, plates_thumbnails
@@ -514,7 +519,10 @@ async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
         ``asyncio.to_thread``'s worker keeps its finished work item, whose future's
         result is the layout, until it gets the CPU back, and under a loaded CI runner
         the event loop resumes first. So wait, briefly, for it to go; one really held
-        stays alive past the wait and still fails."""
+        stays alive past the wait and still fails.
+
+        Only for checks that expect nothing held: one that expects a layout still held
+        would spend the whole 5 s here every time."""
         deadline = time.monotonic() + 5
         while True:
             gc.collect()
@@ -582,6 +590,14 @@ async def _objects_of_output(
     tmp_path: Path, read: list[Any], copies: int, key: str
 ) -> list[set[str]]:
     """Each object of the written plate, as the subtypes of its parts."""
+    return [subtypes for subtypes, _, _ in await _written_objects(tmp_path, read, copies, key)]
+
+
+async def _written_objects(
+    tmp_path: Path, read: list[Any], copies: int, key: str
+) -> list[tuple[set[str], int, str | None]]:
+    """Each object of the written plate: its parts' subtypes, how many parts it holds,
+    and its build item's transform."""
     deps, paths = _deps(tmp_path)
     entry, library = _library_piece(read, key, 92, copies)
     await publish_library_pieces(deps.blobs, [entry], read)
@@ -610,11 +626,19 @@ async def _objects_of_output(
     with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
         [plate] = laid_out_plates(archive)
         config = ET.fromstring(archive.read("Metadata/model_settings.config"))
-    subtypes = {
-        obj.get("id"): {part.get("subtype") or "" for part in obj.findall("part")}
-        for obj in config.iter("object")
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+    parts = {obj.get("id"): obj.findall("part") for obj in config.iter("object")}
+    moved = {
+        item.get("objectid"): item.get("transform") for item in root.iter(f"{{{CORE_NS}}}item")
     }
-    return [subtypes[assembly] for assembly in plate.assembly_ids]
+    return [
+        (
+            {part.get("subtype") or "" for part in parts[assembly]},
+            len(parts[assembly]),
+            moved[assembly],
+        )
+        for assembly in plate.assembly_ids
+    ]
 
 
 async def test_each_copy_of_a_cut_piece_is_an_object_with_its_own_cut(tmp_path: Path) -> None:
@@ -652,9 +676,12 @@ async def test_a_pieces_declared_objects_stay_apart_in_the_output(
 
     monkeypatch.setattr(PlateLayout, "load", staticmethod(declared))
 
-    objects = await _objects_of_output(tmp_path, read, 1, "ce")
+    objects = await _written_objects(tmp_path, read, 1, "ce")
 
-    assert len(objects) == 2
+    # Split per object, not per colour: one part each, moved together by the one copy.
+    assert [count for _, count, _ in objects] == [1, 1]
+    transforms = {transform for _, _, transform in objects}
+    assert len(transforms) == 1 and None not in transforms
 
 
 async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -> None:

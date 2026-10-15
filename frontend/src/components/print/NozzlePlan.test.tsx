@@ -45,4 +45,17 @@ describe('NozzlePlanStep (#2166)', () => {
     fireEvent.change(first, { target: { value: '' } })
     expect(onSide).toHaveBeenLastCalledWith(1, null)
   })
+
+  it('says nothing of regrouping for a plan held to one side (#2737 review)', () => {
+    const oneSide = { ...plan, slots: (plan.slots ?? []).map((slot) => ({ ...slot, side: 'L' as const })) }
+    render(<NozzlePlanStep plan={oneSide} sides={{}} onSide={vi.fn()} />)
+    expect(screen.queryByTestId('nozzle-side-hint')).toBeNull()
+  })
+
+  it('says the slicer may not keep a side set here (#2737 review)', () => {
+    render(<NozzlePlanStep plan={plan} sides={{ '1': 'L' }} onSide={vi.fn()} />)
+    expect(screen.getByTestId('nozzle-side-hint')).toHaveTextContent(
+      'The slicer groups filaments itself to cut purging, so it may put one on the other side',
+    )
+  })
 })

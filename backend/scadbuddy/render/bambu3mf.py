@@ -30,6 +30,7 @@ from scadbuddy.render.plate import (
 )
 from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
+from scadbuddy.render.zipcopy import ENCRYPTED, copy_raw, raw_copy_checked
 
 #: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
 #: model's ``Application`` metadata starts with ``BambuStudio-``; otherwise
@@ -302,11 +303,21 @@ def _assemblies(plates: Sequence[PlateParts]) -> list[list[_Assembly]]:
 
 
 def root_model(
-    plates: Sequence[PlateParts], model_name: str, offsets: Sequence[Sequence[float]]
+    plates: Sequence[PlateParts],
+    model_name: str,
+    offsets: Sequence[Sequence[float]],
+    *,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """The package's root model: each plate's objects and their build items.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     items: list[str] = []
-    for assemblies, offset in zip(_assemblies(plates), offsets, strict=True):
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for assemblies, offset in zip(each_plate, offsets, strict=True):
         translation = " ".join(_number(value) for value in offset)
         for assembly in assemblies:
             components = "".join(
@@ -349,10 +360,23 @@ def _subtype(part: ColourPart) -> str:
     return "negative_part" if part.negative else "normal_part"
 
 
-def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
+def model_settings(
+    plates: Sequence[PlateParts],
+    model_name: str,
+    *,
+    covers: bool,
+    assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
+) -> str:
+    """``Metadata/model_settings.config``: each object's parts and extruders, and each
+    plate.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     plate_entries: list[str] = []
-    for plate_index, assemblies in enumerate(_assemblies(plates), start=1):
+    each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
+    for plate_index, assemblies in enumerate(each_plate, start=1):
         instances: list[str] = []
         for assembly in assemblies:
             entries = "".join(
@@ -378,10 +402,16 @@ def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: boo
                 '   <metadata key="instance_id" value="0"/>\n'
                 "  </model_instance>\n"
             )
+        # A plate of several objects is named as a plate, not as every object's name
+        # joined (#2874 review: a 20-copy plate). One object leaves it to Bambu Studio,
+        # as the file always did.
+        plater_name = (
+            _assembly_name(model_name, plate_index, len(plates)) if len(assemblies) > 1 else ""
+        )
         plate_entries.append(
             " <plate>\n"
             f'  <metadata key="plater_id" value="{plate_index}"/>\n'
-            '  <metadata key="plater_name" value=""/>\n'
+            f'  <metadata key="plater_name" value={quoteattr(plater_name)}/>\n'
             '  <metadata key="locked" value="false"/>\n'
             f"{_cover_metadata(plate_index) if covers else ''}"
             f"{''.join(instances)}"
@@ -586,7 +616,10 @@ class PlateEntry:
     index: int
     thumbnail: str | None
     #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
-    #: the objects on it joined with " + ", else ``None``.
+    #: the objects on it joined with " + ", else ``None``. A plate ScadBuddy wrote with
+    #: several objects carries the model's name (with " (plate N)" when the file has
+    #: several plates) as its ``plater_name``; a one-object plate has none, so it is
+    #: named by its object.
     name: str | None = None
 
 
@@ -734,19 +767,27 @@ def write_plates_3mf(
         for index, placement in enumerate(placements, start=1)
     ]
     ids = _object_ids(plates)
+    # Once, for both files that number the objects, so their ids cannot drift apart.
+    assemblies = _assemblies(plates)
     entries: list[tuple[str, bytes]] = [
         (name, payload.encode("utf-8"))
         for name, payload in (
             ("[Content_Types].xml", _content_types(covers=covers)),
             ("_rels/.rels", _package_rels(covers=covers)),
-            (ROOT_MODEL_NAME, root_model(plates, model_name, offsets)),
+            (
+                ROOT_MODEL_NAME,
+                root_model(plates, model_name, offsets, assemblies_by_plate=assemblies),
+            ),
             ("3D/_rels/3dmodel.model.rels", _model_rels(ids[-1].stop - 1)),
             *(
                 (f"3D/Objects/object_{index}.model", object_model(part, index))
                 for each, numbers in zip(plates, ids, strict=True)
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
-            (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
+            (
+                MODEL_SETTINGS_NAME,
+                model_settings(plates, model_name, covers=covers, assemblies_by_plate=assemblies),
+            ),
             (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
@@ -796,22 +837,148 @@ def _attribute(tag: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: The longest coordinate :func:`object_model` writes (``_number``: six decimals) is far
+#: under this; a longer one is not that writer's, and is parsed instead. It bounds what
+#: one vertex costs as an array row, whatever the file holds (#2877).
+_MAX_WRITTEN_NUMBER = 32
+#: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
+#: two counted against each other, so a file written any other way is parsed instead.
+_WRITTEN_VERTEX = re.compile(
+    rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
+)
+_ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
+#: How far into a ``<triangle>`` tag its paint code is looked for: the writer puts it after
+#: three vertex indices, well inside this.
+_MAX_TRIANGLE_LEAD = 256
+#: A triangle's paint code, as the parse reads it (a ``<triangle>``'s attribute), and
+#: the attribute anywhere: the two counted against each other. Both runs are bounded, so
+#: a file of unterminated tags or quotes costs a pass, not a pass per tag (quadratic: 200
+#: KB took 14 s); a code they miss leaves the counts unequal, and the file to the parse.
+_PAINT_CODE = re.compile(
+    rb"<triangle\b[^>]{0,%d}?\s%s=\"([^\"]{0,%d})\""
+    % (_MAX_TRIANGLE_LEAD, PAINT_ATTRIBUTE.encode(), MAX_CODE_DIGITS + 1)
+)
+_ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
+#: The elements :func:`object_model` writes exactly one of; another count is the shape
+#: the parse refuses or reads otherwise (#2024), so it is left to the parse.
+_ONE_EACH = tuple(
+    re.compile(rb"<(?:[\w.-]+:)?%s\b" % tag)
+    for tag in (b"object", b"mesh", b"vertices", b"triangles")
+)
+#: Vertices turned into numbers at a time, so the copy never costs more than a batch.
+_VERTEX_BATCH = 65536
+#: The writer's root, in the core namespace that makes its bare ``<vertex>`` tags the
+#: 3MF's own; and any default namespace declared, the two counted against each other,
+#: so a file that puts its vertices in another namespace is left to the parse.
+_CORE_ROOT = re.compile(rb'<model\b[^>]{0,1024}?\sxmlns="%s"' % re.escape(CORE_NS.encode()))
+_ANY_DEFAULT_NAMESPACE = re.compile(rb"\sxmlns\s*=")
+_LEADING_SPACE = re.compile(rb"\s*")
+
+
+def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
+    """The ``(2, 3)`` box and painted filaments of an object file :func:`object_model`
+    wrote, read off its bytes by pattern rather than parsed vertex by vertex (#2877):
+    a re-placed print only needs the box, and the parse of an 86 MB file held a worker
+    for 39 s. ``None`` when the file is not in that writer's shape (a vertex written
+    otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
+    entity, a processing instruction, no vertex at all, other than one object, mesh,
+    ``<vertices>`` and ``<triangles>``, a paint code off a triangle or past its cap),
+    which :func:`_plate_geometry` then parses as it always has. Its root must declare
+    the core namespace as its one default, as the parse requires of every vertex.
+
+    Triangles are not read, so a vertex index out of range is not refused here as the
+    parse refuses it: the box does not need them, and a re-placed object file is copied
+    as it was written, never rebuilt from its triangles.
+
+    Every value is bounded before it is copied: no entity is expanded (none is
+    accepted), coordinates are read a batch at a time into rows of at most
+    :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
+    # The writer's one processing instruction is its XML declaration; any other, like a
+    # comment, CDATA or an entity, is something the pattern does not read as XML does.
+    # Searched from an offset, never sliced: a slice is a copy of the whole file.
+    start = data.find(b"?>") + 2 if data.startswith(b"<?xml ") else 0
+    if start == 1:
+        return None
+    if any(data.find(marker, start) != -1 for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+        return None
+    # Matched where the root element starts, the first thing after the declaration:
+    # a ``<model>`` inside some other root is not the 3MF's. Searched for instead, the
+    # bounded run would be retried from every ``<model`` in a file of them, 1 KB a time.
+    root = _LEADING_SPACE.match(data, start)
+    if (
+        root is None
+        or _CORE_ROOT.match(data, root.end()) is None
+        or sum(1 for _ in _ANY_DEFAULT_NAMESPACE.finditer(data)) != 1
+    ):
+        return None
+    if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
+        return None
+    low = np.full(3, np.inf)
+    high = np.full(3, -np.inf)
+    count = 0
+    batch: list[tuple[bytes, bytes, bytes]] = []
+
+    def reduce() -> None:
+        points = np.array(batch, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
+        np.minimum(low, points.min(axis=0), out=low)
+        np.maximum(high, points.max(axis=0), out=high)
+        batch.clear()
+
+    try:
+        for match in _WRITTEN_VERTEX.finditer(data):
+            batch.append((match[1], match[2], match[3]))
+            count += 1
+            if len(batch) == _VERTEX_BATCH:
+                reduce()
+        if batch:
+            reduce()
+    except ValueError:
+        return None
+    if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
+        return None
+    codes: set[bytes] = set()
+    found = 0
+    for match in _PAINT_CODE.finditer(data):
+        code = match.group(1)
+        if len(code) > MAX_CODE_DIGITS or not code.isascii():
+            return None
+        codes.add(code)
+        found += 1
+    if found != sum(1 for _ in _ANY_PAINT.finditer(data)):
+        return None
+    painted: set[int] = set()
+    for code in codes:
+        if code:
+            painted.update(states(code.decode("ascii")))
+    return np.array([low, high]), frozenset(painted)
+
+
 def _plate_geometry(
-    archive: zipfile.ZipFile, names: Sequence[str]
+    archive: zipfile.ZipFile, names: Sequence[str], entries: Mapping[str, bytes]
 ) -> tuple[np.ndarray, frozenset[int]]:
-    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive,
-    and the filaments their painting uses (#1965): what a plate's tower counts beside
-    its parts' extruders (#2108), which ``model_settings.config`` does not state.
+    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive
+    whose entries' bytes are ``entries``, and the filaments their painting uses
+    (#1965): what a plate's tower counts beside its parts' extruders (#2108), which
+    ``model_settings.config`` does not state.
 
     The component transforms this writer emits are the identity, so the vertex
     extents *are* the assembly's extents; the build item carries the whole
     placement. Reading them back rather than trusting a recorded plate size keeps
     :func:`replate_3mf` correct for files written before plates were per printer.
+    A file this writer wrote is read by pattern (:func:`_written_extents`, #2877);
+    any other is parsed.
     """
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
     painted: set[int] = set()
     for name in names:
+        written = _written_extents(entries[name])
+        if written is not None:
+            box, codes = written
+            lows.append(box[0])
+            highs.append(box[1])
+            painted.update(codes)
+            continue
         for mesh in parse_model(archive, name).meshes.values():
             points = mesh.vertices
             if points.size:
@@ -935,8 +1102,9 @@ def replate_3mf(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
         laid_out = laid_out_plates(archive)
+        contents = dict(entries)
         geometry = {
-            each.assembly_id: _plate_geometry(archive, each.object_files)
+            each.assembly_id: _plate_geometry(archive, each.object_files, contents)
             for each in laid_out
             if each.object_files
         }
@@ -959,6 +1127,9 @@ def replate_3mf(
             if len(each.assembly_ids) > 1 and each.extruders is not None:
                 tower = len(each.extruders | painted) > 1
             else:
+                # One object; or several whose model_settings name no extruders, so the
+                # filaments are unknown and a tower is reserved whenever there is more
+                # than one part: room to spare rather than a plate that will not slice.
                 tower = len(each.object_files) > 1
             placement = place_on_plate(bounds, plate, tower=tower)
         except PlateFitError as error:
@@ -980,10 +1151,10 @@ def replate_3mf(
             raise ValueError("the 3MF's build item carries no transform to re-place")
         return re.sub(r'\btransform="[^"]*"', f'transform="{transform}"', tag, count=1)
 
-    rewritten: list[tuple[str, bytes]] = []
+    changed: dict[str, bytes] = {}
     for name, data in entries:
         if name == ROOT_MODEL_NAME:
-            data = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
+            changed[name] = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
         elif name == PROJECT_SETTINGS_NAME:
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
@@ -999,9 +1170,8 @@ def replate_3mf(
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
             _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
-            data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
-        rewritten.append((name, data))
-    return _zipped(rewritten)
+            changed[name] = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+    return _rezipped(payload, changed)
 
 
 @dataclass(frozen=True)
@@ -1415,11 +1585,31 @@ def _entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def _zipped(entries: Sequence[tuple[str, bytes]]) -> bytes:
+def _rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
+    """``payload`` with each entry in ``changed`` replaced, written in the writer's policy
+    (:func:`_entry`), so a replated file is byte-identical to one written for this plate
+    directly, covers included.
+
+    An entry left unchanged and already in that policy is copied as its compressed
+    bytes (:func:`~scadbuddy.render.zipcopy.copy_raw`, #2942) rather than inflated and
+    deflated again: those are the mesh objects, nearly all of a large file."""
+    source = io.BytesIO(payload)
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in entries:
-            # Same policy as the writer, so a replated file is byte-identical to
-            # one written for this plate directly — covers included.
-            out.writestr(_entry(name), data)
+    raw_copy = raw_copy_checked()
+    with (
+        zipfile.ZipFile(source) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            name = info.filename
+            entry = _entry(name)
+            if (
+                raw_copy
+                and name not in changed
+                and info.compress_type == entry.compress_type
+                and not info.flag_bits & ENCRYPTED
+            ):
+                copy_raw(source, info, out, date_time=ZIP_TIMESTAMP)
+                continue
+            out.writestr(entry, changed[name] if name in changed else archive.read(info))
     return buffer.getvalue()

@@ -1,4 +1,4 @@
-import type { Context, Hono } from 'hono'
+import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import {
   type Credential,
@@ -28,10 +28,12 @@ import { ready, type RouteModule } from './module.js'
 // Two sets of routes over the same rows:
 //
 //   GET|PUT|DELETE /api/v1/ai/credentials, POST /api/v1/ai/credentials/test
-//     The single-credential routes #255 began with, kept for Settings as it is
-//     (#1000). They act on the FIRST credential by priority: PUT saves over it
-//     (creating one when there is none), DELETE removes it (so the next one
-//     moves up), test tests it.
+//     DEPRECATED (#2768): the single-credential routes #255 began with. Settings
+//     no longer calls them (it uses the routes below); they are kept for scripts
+//     written against them and answer with a `Deprecation` header (RFC 9745)
+//     naming `/entries` as the successor. They act on the FIRST credential by
+//     priority: PUT saves over it (creating one when there is none), DELETE
+//     removes it (so the next one moves up), test tests it.
 //
 //   /api/v1/ai/credentials/entries[/:id[/test|/reset]], /api/v1/ai/credentials/order
 //     Every credential (#1093): list, create, save, delete, test, reset, and
@@ -120,6 +122,11 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 /** The largest credential body read: a secret and a base URL, with room to spare. */
 const BODY_MAX = 16 * 1024
+/**
+ * The `Deprecation` value of the single-credential routes (#2768): RFC 9745's Structured
+ * Field Date for 2026-10-14T00:00:00Z, when they were deprecated.
+ */
+export const LEGACY_CREDENTIALS_DEPRECATED = '@1791936000'
 
 function cannotSave(kek: KekStatus): string | null {
   // `reason` is the public one (no file path or errno; secrets.ts `loadKek`).
@@ -231,6 +238,17 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     ...(body.secret === undefined ? {} : { secret: body.secret }),
   })
   const kekOrUndefined = kek.ok ? kek.kek : undefined
+
+  // Deprecated (#2768): every answer from the single-credential routes says so, a guard's
+  // 403 included (so registered before the guards), and names the routes that replace
+  // them. RFC 9745's form: a Structured Field Date, `@` and the Unix seconds of when.
+  const deprecated: MiddlewareHandler = async (c, next) => {
+    await next()
+    c.header('Deprecation', LEGACY_CREDENTIALS_DEPRECATED)
+    c.header('Link', `<${entries}>; rel="successor-version"`)
+  }
+  app.on(['GET', 'PUT', 'DELETE'], base, deprecated)
+  app.post(`${base}/test`, deprecated)
 
   // Every write is outward tier; see guard.ts for what is and is not checked.
   app.on(['PUT', 'DELETE', 'POST'], [base, `${base}/*`], async (c, next) => {

@@ -1018,8 +1018,10 @@ jobs:
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
   # The LFS fixtures, pulled once per change of them into the Actions cache the four
-  # shards restore from: a miss (a new fixture, or an eviction from the full cache)
-  # costs one ~290 MB pull of the LFS bandwidth quota, not four. A failure here
+  # shards restore from: a new fixture costs one ~290 MB pull of the LFS bandwidth
+  # quota, not four. An entry evicted from the full cache since, or a save that never
+  # landed, is the exception: each shard then pulls them itself, four pulls in all
+  # (#2488). A failure here
   # skips the required backend-pytest, which CI Summary reports as a failure.
   lfs-fixtures:
     name: LFS fixtures
@@ -1639,7 +1641,7 @@ jobs:
         env:
           LINES: ${{ steps.diff.outputs.changed_lines }}
           # As go-module-ci.yml: a newer runner Go would write a different vendor/.
-          GOTOOLCHAIN: go1.25.6+auto
+          GOTOOLCHAIN: go1.26.9+auto
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
@@ -1675,7 +1677,7 @@ jobs:
         if: ${{ steps.goclient.outputs.state == 'stale' && env.CAN_COMMENT == 'true' }}
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          GOTOOLCHAIN: go1.25.6+auto
+          GOTOOLCHAIN: go1.26.9+auto
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "refs/heads/${HEAD_REF}"

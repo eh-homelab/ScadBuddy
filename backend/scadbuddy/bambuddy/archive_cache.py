@@ -13,10 +13,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
-from typing import TypeVar, cast
+from typing import NamedTuple, TypeVar, cast
 
 from fastapi import status
 
@@ -37,10 +38,23 @@ _ALL = 0
 #: ffmpeg on every read, 20-26 s for one print, and a timelapse does not change once
 #: made. They are kept by the timelapse's path, so a different one is read afresh.
 TIMELAPSE_TTL = 6 * 3600.0
+#: How long a failed extraction of a timelapse's stills is kept (#2903): Bambuddy runs
+#: ffmpeg for each read, and one that always fails would otherwise run on every view.
+FAILED_FRAMES_TTL = 60.0
 #: Enough for every print of a busy homelab several times over.
 MAX_ENTRIES = 4096
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+
+class Primed(NamedTuple):
+    """What :meth:`ArchiveCache.prime` did: how many of the archives it was given were
+    not already kept, and how many of those the list read held."""
+
+    missing: int
+    listed: int
 
 
 class ArchiveCache:
@@ -78,14 +92,19 @@ class ArchiveCache:
         date_from: date | None,
         date_to: date | None,
         limit: int,
-    ) -> None:
+    ) -> Primed:
         """Keep as many of ``archive_ids`` as one list read holds, ahead of `archive`
         (#2359). Bambuddy's list answers the same ``ArchiveResponse`` as a single read,
         but filters only by the day it created the archive, not by id: it is read over
         ``date_from``..``date_to``, ``limit`` rows at most, newest first. An archive it
         does not hold (outside the window, past the limit, deleted, or not visible to the
         key's user) is left to `archive` to read on its own. Nothing is read when at most
-        one of them is missing: the list is then no cheaper."""
+        one of them is missing: the list is then no cheaper.
+
+        Returns how many were missing and how many of them the list held. Only an
+        optimisation, so a failed list read is logged and leaves them all to `archive`
+        (#2818), and a row that does not parse (one ScadBuddy may never have linked) is
+        left out, keeping the rows that do."""
         now = self._clock()
         missing = {
             archive_id
@@ -94,10 +113,18 @@ class ArchiveCache:
             or hit[0] <= now
         }
         if len(missing) < 2:
-            return
-        for row in await client.archive_outcomes(date_from=date_from, date_to=date_to, limit=limit):
-            if row.id in missing:
-                self._put(self._key(client, "archive", row.id), row, self._ttl)
+            return Primed(len(missing), 0)
+        try:
+            rows = await client.archive_outcomes(
+                date_from=date_from, date_to=date_to, limit=limit, skip_invalid=True
+            )
+        except (ApiError, ValueError) as error:
+            logger.info("could not list the archives", extra={"error": type(error).__name__})
+            return Primed(len(missing), 0)
+        held = [row for row in rows if row.id in missing]
+        for row in held:
+            self._put(self._key(client, "archive", row.id), row, self._ttl)
+        return Primed(len(missing), len(held))
 
     async def printers(self, client: BambuddyClient) -> list[Printer]:
         """Bambuddy's printers: what the prints name a printer by (#2363)."""
@@ -137,7 +164,12 @@ class ArchiveCache:
         self, client: BambuddyClient, archive_id: int, timelapse_path: str
     ) -> list[tuple[float, bytes]]:
         """The stills of the timelapse at ``timelapse_path``, each its time and its JPEG,
-        decoded once (#2512). A failed read raises and is not kept."""
+        decoded once (#2512). A failed read raises, and raises again without asking
+        Bambuddy for `FAILED_FRAMES_TTL` (#2903)."""
+        failed = self._key(client, f"timelapse_frames_failed:{timelapse_path}", archive_id)
+        hit = self._entries.get(failed)
+        if hit is not None and hit[0] > self._clock():
+            raise cast(ApiError, hit[1])
 
         async def load() -> list[tuple[float, bytes]]:
             frames = await client.timelapse_thumbnails(archive_id)
@@ -149,9 +181,13 @@ class ArchiveCache:
                     continue
             return decoded
 
-        return await self._get(
-            client, f"timelapse_frames:{timelapse_path}", archive_id, load, ttl=TIMELAPSE_TTL
-        )
+        try:
+            return await self._get(
+                client, f"timelapse_frames:{timelapse_path}", archive_id, load, ttl=TIMELAPSE_TTL
+            )
+        except ApiError as error:
+            self._put(failed, error, FAILED_FRAMES_TTL)
+            raise
 
     def forget(self, client: BambuddyClient, archive_id: int) -> None:
         """Drop everything kept for the archive, after ScadBuddy changed it."""

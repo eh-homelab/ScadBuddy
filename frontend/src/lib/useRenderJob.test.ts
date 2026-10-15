@@ -715,11 +715,13 @@ describe('useRenderAutoRetry', () => {
   /** A failed submit, as a new error object each time, as each failed try gives. */
   const unanswered = () => new ApiError({ type: UNANSWERED, title: 'No answer', status: 503 })
 
-  function setup(values: unknown = { a: 1 }) {
+  function setup(values: unknown = { a: 1 }, enabled = true) {
     const retry = vi.fn()
+    type Props = { error: unknown; values: unknown; rendering?: boolean; enabled?: boolean }
     const view = renderHook(
-      ({ error, values }: { error: unknown; values: unknown }) => useRenderAutoRetry(error, false, retry, values),
-      { initialProps: { error: unanswered() as unknown, values } },
+      ({ error, values, rendering = false, enabled = true }: Props) =>
+        useRenderAutoRetry(error, rendering, retry, values, enabled),
+      { initialProps: { error: unanswered(), values, enabled } as Props },
     )
     return { retry, view }
   }
@@ -751,13 +753,58 @@ describe('useRenderAutoRetry', () => {
     const values = { a: 1 }
     const { retry, view } = setup(values)
     for (let n = 0; n < RENDER_AUTO_RETRIES; n++) {
-      act(() => window.dispatchEvent(new Event('online')))
+      act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS))
       view.rerender({ error: unanswered(), values })
     }
     expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES)
     view.rerender({ error: unanswered(), values: { a: 2 } })
     act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
     expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
+  })
+
+  it('keeps the count while a retry is in flight, and starts it over once a render goes through', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(1)
+    // The retry is in flight (no error yet), then fails again: the second wait, doubled.
+    view.rerender({ error: undefined, values, rendering: true })
+    view.rerender({ error: unanswered(), values })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS * 2 - 1))
+    expect(retry).toHaveBeenCalledTimes(1)
+    act(() => vi.advanceTimersByTime(1))
+    expect(retry).toHaveBeenCalledTimes(2)
+    // That retry goes through (no error, not rendering): the next failure waits the first wait.
+    view.rerender({ error: undefined, values })
+    view.rerender({ error: unanswered(), values })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not count a try the browser coming back online made (#3341)', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    // A connection that keeps dropping: each return is tried at once, none counted.
+    for (let n = 0; n < RENDER_AUTO_RETRIES + 2; n++) {
+      act(() => window.dispatchEvent(new Event('online')))
+      view.rerender({ error: unanswered(), values })
+    }
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 2)
+    // The server's tries are all still there, from the first wait.
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 3)
+  })
+
+  it('is not armed while the values cannot be rendered, and keeps every try for when they can (#3341)', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values, false)
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    act(() => window.dispatchEvent(new Event('online')))
+    expect(retry).not.toHaveBeenCalled()
+    // Valid again with the error still on screen: the first wait, as if nothing was tried.
+    view.rerender({ error: unanswered(), values, enabled: true })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(1)
   })
 
   it('leaves an error a retry cannot fix alone', () => {

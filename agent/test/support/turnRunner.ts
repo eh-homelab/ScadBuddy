@@ -1,3 +1,4 @@
+import type { Sql } from 'postgres'
 import { randomUUID } from 'node:crypto'
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
@@ -38,6 +39,16 @@ export type TurnRunnerTestOptions = {
   recallMaxQueryChars?: number
 }
 
+/** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
+export const unusedSql = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error('turnRunnerForTest has no database')
+    },
+  },
+) as unknown as Sql
+
 export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const paths = await tempPaths()
   const now = new Date().toISOString()
@@ -63,10 +74,14 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     updatedAt: now,
     archivedAt: null,
     unpricedCostUsd: 0,
+    agentModel: null,
+    agentEffort: null,
+    agentType: null,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}
   const runner = new TurnRunner({
+    sql: unusedSql,
     paths,
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     settings: {

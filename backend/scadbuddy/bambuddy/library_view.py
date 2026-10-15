@@ -22,11 +22,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import re
 import shutil
 import tempfile
-import uuid
 from collections.abc import AsyncIterator, Callable
 from functools import partial
 from pathlib import Path
@@ -47,12 +45,20 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     ReadOutOfMemoryError,
     SpoolFullError,
+    is_sliced,
     printable,
 )
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
 from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.store.download_cache import (
+    RESERVE_BYTES,
+    DownloadCache,
+    is_sha256,
+    store_bytes,
+    touch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,7 @@ SPOOL_DIRNAME = "library-spool"
 #: What a spooled download leaves free on its volume: a file of any size is read, but
 #: not by filling the volume that holds the models, outputs and their history. Checked
 #: before each 1 MiB chunk, so spools running at once may each go one chunk past it.
-SPOOL_RESERVE_BYTES = 1024**3
+SPOOL_RESERVE_BYTES = RESERVE_BYTES
 
 
 def _room(spool: Path) -> Callable[[], bool]:
@@ -96,14 +102,52 @@ def _room(spool: Path) -> Callable[[], bool]:
 
 @contextlib.asynccontextmanager
 async def spooled_3mf(
-    client: BambuddyClient, source: LibrarySource, cache: Path, budget: ReadBudget
+    client: BambuddyClient,
+    source: LibrarySource,
+    cache: Path,
+    budget: ReadBudget,
+    *,
+    downloads: DownloadCache | None = None,
+    file_hash: str | None = None,
 ) -> AsyncIterator[BinaryIO | None]:
     """``source``'s 3MF downloaded whole into an unnamed file under ``cache``, open at
     its start; ``None`` for an STL that holds no mesh. A library file of any size can be
     read this way: what the read may cost is ``budget``'s to say, not the file's size
     (an STL past it is :class:`~scadbuddy.render.objects3mf.OverBudgetError` before it
     is wrapped). It stops as :class:`SpoolFullError` before the volume's last
-    :data:`SPOOL_RESERVE_BYTES`."""
+    :data:`SPOOL_RESERVE_BYTES`.
+
+    #2788: a 3MF whose hash Bambuddy states is read from ``downloads`` when another
+    read, in any process, downloaded the same bytes; else it is downloaded into it.
+    An STL is not kept: what is read is its wrapped 3MF, not the file's bytes."""
+    if downloads is not None and source.file_type == "3mf" and is_sha256(file_hash):
+        assert file_hash is not None
+        spool = cache / SPOOL_DIRNAME
+        # Read from a checked private copy, never the shared entry itself. A fault in
+        # the cache reads as a miss.
+        copy = await asyncio.to_thread(
+            downloads.private_copy, file_hash, spool, what="library_file"
+        )
+        if copy is not None:
+            with copy:
+                yield copy
+            return
+        await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
+        with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
+            # Downloaded into this read's own file, as without a cache; a copy is kept.
+            # Bytes that are not the stated hash (the file changed since) are read all
+            # the same, and not kept. Keeping it is best effort: a volume that fails is
+            # a later miss, never a failed read.
+            await source.write_3mf(client, out, budget, _room(spool))
+            try:
+                await asyncio.to_thread(downloads.keep_file, file_hash, out)
+            except OSError:
+                logger.warning(
+                    "could not keep a library file", extra={"sha256": file_hash}, exc_info=True
+                )
+            await asyncio.to_thread(out.seek, 0)
+            yield out
+        return
     spool = cache / SPOOL_DIRNAME
     await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
     with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
@@ -120,6 +164,7 @@ async def _read(
     file: LibraryFile,
     plate: int,
     budget: ReadBudget | None,
+    downloads: DownloadCache | None,
 ) -> PlateRead:
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
@@ -133,7 +178,14 @@ async def _read(
         file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
     try:
-        async with spooled_3mf(client, source, cache, budget or ReadBudget()) as payload:
+        async with spooled_3mf(
+            client,
+            source,
+            cache,
+            budget or ReadBudget(),
+            downloads=downloads,
+            file_hash=file.file_hash,
+        ) as payload:
             if payload is None:
                 raise NotViewableError(file, "it holds no mesh ScadBuddy can read")
             slots = _filaments_at(cache, file) if kind == "3mf" else None
@@ -154,9 +206,12 @@ async def _keep_filaments(
     cache: Path, file: LibraryFile, payload: BinaryIO, budget: ReadBudget | None
 ) -> LocalFilaments | None:
     """``payload``'s filament slots, cached for ``file`` when it has a hash; ``None``
-    when they cannot be read here. Leaves ``payload`` at its start."""
+    when they cannot be read here. Leaves ``payload`` at its start. A sliced file's are
+    read with what it was sliced for (#2671)."""
     try:
-        local = await asyncio.to_thread(read_filaments, payload, budget)
+        local = await asyncio.to_thread(
+            partial(read_filaments, sliced=is_sliced(file.file_type)), payload, budget
+        )
     except UnreadableFilamentsError as error:
         logger.info(
             "could not read the library file's filament slots; Bambuddy is asked instead",
@@ -173,13 +228,18 @@ async def _keep_filaments(
 
 
 async def library_filaments(
-    client: BambuddyClient, cache: Path, file: LibraryFile, budget: ReadBudget | None = None
+    client: BambuddyClient,
+    cache: Path,
+    file: LibraryFile,
+    budget: ReadBudget | None = None,
+    downloads: DownloadCache | None = None,
 ) -> LocalFilaments | None:
     """The filament slots of library file ``file``, read from the file itself (#2550):
     from the cache when its preview, or an earlier read, fetched the same bytes, else
     from a download of it. ``None`` for a file ScadBuddy cannot read them from (not a
     3MF, unreadable, too large for the volume), which Bambuddy is then asked about."""
-    if (file.file_type or "").lower() != "3mf":
+    file_type = (file.file_type or "").lower()
+    if file_type not in ("3mf", SLICED_TYPE):
         return None
     path = _filaments_at(cache, file)
     if path is not None:
@@ -192,10 +252,17 @@ async def library_filaments(
             await asyncio.to_thread(_hit, path)
             return cached
     source = LibrarySource(
-        file_id=file.id, colours=[], plates=[], filename=file.filename, file_type="3mf"
+        file_id=file.id, colours=[], plates=[], filename=file.filename, file_type=file_type
     )
     try:
-        async with spooled_3mf(client, source, cache, budget or ReadBudget()) as payload:
+        async with spooled_3mf(
+            client,
+            source,
+            cache,
+            budget or ReadBudget(),
+            downloads=downloads,
+            file_hash=file.file_hash,
+        ) as payload:
             if payload is None:
                 return None
             return await _keep_filaments(cache, file, payload, budget)
@@ -220,29 +287,15 @@ def _filaments_at(cache: Path, file: LibraryFile) -> Path | None:
 
 def _store(path: Path, data: bytes, keep: int) -> None:
     """Write ``path`` aside and rename it in, then drop all but the ``keep`` most recently
-    used files (a hit touches its file: :func:`_hit`)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    partial.write_bytes(data)
-    partial.replace(path)
-    used: list[tuple[int, Path]] = []
-    for entry in path.parent.iterdir():
-        if entry.name.startswith("."):
-            continue
-        try:
-            used.append((entry.stat().st_mtime_ns, entry))
-        except FileNotFoundError:
-            continue  # another prune removed it between the listing and the stat
-    used.sort(key=lambda item: item[0], reverse=True)
-    for _, stale in used[keep:]:
-        stale.unlink(missing_ok=True)
+    used files (a hit touches its file: :func:`_hit`). The downloads' own pruning
+    (#2788), to a count here."""
+    store_bytes(path, data, keep=keep)
 
 
 def _hit(path: Path) -> None:
     """Mark a cached file used, so the prune keeps it (#2160). One pruned meanwhile is
     simply not marked."""
-    with contextlib.suppress(FileNotFoundError):
-        os.utime(path)
+    touch(path)
 
 
 async def _off_thread[T](work: Callable[[], T], file: LibraryFile) -> T:
@@ -265,8 +318,13 @@ def _glb(read: PlateRead) -> bytes:
 def plate_glb(payload: bytes, plate: int, budget: ReadBudget | None = None) -> bytes:
     """Plate ``plate`` of a 3MF as a preview GLB, its parts in their colours (#2169: an
     output's plate in the print dialog's pane, as a library file's is). A plate the file
-    lacks is :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
-    return _glb(read_plate_parts(payload, plate, budget))
+    lacks is :class:`~scadbuddy.render.geometry.NoSuchPlateError`; running out of memory
+    reading it is :class:`ReadOutOfMemoryError`, as a library file's read is (#2767), so
+    no caller maps a bare :class:`MemoryError` itself."""
+    try:
+        return _glb(read_plate_parts(payload, plate, budget))
+    except MemoryError:
+        raise ReadOutOfMemoryError from None
 
 
 def _analysis(read: PlateRead, plate: int) -> GeometryAnalysis:
@@ -280,6 +338,7 @@ async def library_preview(
     file_id: int,
     plate: int = 1,
     budget: ReadBudget | None = None,
+    downloads: DownloadCache | None = None,
 ) -> bytes:
     """Plate ``plate`` of library file ``file_id`` as a preview GLB, its parts in their
     colours. A file deleted in Bambuddy is the client's 404; one that cannot be read is
@@ -295,7 +354,7 @@ async def library_preview(
         else:
             await asyncio.to_thread(_hit, path)
             return cached
-    read = await _read(client, cache, file, plate, budget)
+    read = await _read(client, cache, file, plate, budget, downloads)
     data = await _off_thread(partial(_glb, read), file)
     if path is not None:
         await asyncio.to_thread(_store, path, data, MAX_CACHED)
@@ -308,6 +367,7 @@ async def library_geometry(
     file_id: int,
     plate: int = 1,
     budget: ReadBudget | None = None,
+    downloads: DownloadCache | None = None,
 ) -> GeometryAnalysis:
     """The mesh analysis of plate ``plate`` of library file ``file_id``, as
     ``OutputStore.geometry`` measures an output's; refused as :func:`library_preview`."""
@@ -322,7 +382,7 @@ async def library_geometry(
         if cached is not None and cached.version == ANALYSIS_VERSION:
             await asyncio.to_thread(_hit, path)
             return cached
-    read = await _read(client, cache, file, plate, budget)
+    read = await _read(client, cache, file, plate, budget, downloads)
     analysis = await _off_thread(partial(_analysis, read, plate), file)
     if path is not None:
         data = (analysis.model_dump_json(indent=2) + "\n").encode("utf-8")

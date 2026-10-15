@@ -11,6 +11,7 @@ import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handl
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+import { SETTLE_MS } from './settings/sectionNav'
 
 // #322 — every runtime setting in the UI, with where its value came from; a save per
 // section; the remembered choices; About.
@@ -33,7 +34,7 @@ async function enter(user: UserEvent, field: HTMLElement, text: string) {
  * ran into their 5 s under load (#1485); so buttons are looked for in their section.
  */
 function region(name: string): HTMLElement {
-  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
   if (!section) throw new Error(`no section headed ${name}`)
   return section
 }
@@ -110,24 +111,111 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     }
   })
 
-  it('keeps a deep-linked section in view while the sections above it load, until the reader scrolls', async () => {
-    const tops = { libraries: 5000 }
-    const { scrolls, restore } = stubLayout(tops)
+  it.each(['wheel', 'touchstart', 'keydown', 'pointerdown'])(
+    'keeps a deep-linked section in view while the sections above it load, until a %s',
+    async (stop) => {
+      const tops = { libraries: 5000 }
+      const { scrolls, restore } = stubLayout(tops)
+      const observers = stubResizeObserver()
+      try {
+        renderPage(<SettingsPage />, { route: '/settings#libraries' })
+        await seeded()
+        await waitFor(() => expect(scrolls).toContain(4992))
+        // The first is the deep link's follow; the section-in-view one comes after it.
+        const observer = observers[0]!
+        // Remembered choices finish loading above it and push it down.
+        tops.libraries = 6900
+        act(() => observer.fire())
+        expect(scrolls.at(-1)).toBe(6892)
+        document.querySelector('.sb-settings')!.dispatchEvent(new Event(stop))
+        expect(observer.disconnected).toBe(true)
+      } finally {
+        restore()
+        vi.unstubAllGlobals()
+      }
+    },
+  )
+
+  it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
+    const timeouts = vi.spyOn(window, 'setTimeout')
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
       await seeded()
       await waitFor(() => expect(scrolls).toContain(4992))
-      const observer = observers.at(-1)!
-      // Remembered choices finish loading above it and push it down.
-      tops.libraries = 6900
-      act(() => observer.fire())
-      expect(scrolls.at(-1)).toBe(6892)
-      document.querySelector('.sb-settings')!.dispatchEvent(new Event('wheel'))
-      expect(observer.disconnected).toBe(true)
+      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
+      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
+      expect(settle).toBeDefined()
+      act(() => (settle![0] as () => void)())
+      expect(observers[0]!.disconnected).toBe(true)
+    } finally {
+      timeouts.mockRestore()
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('marks the section that a load above moves into view current, without a scroll (#2947 review)', async () => {
+    const tops: Record<string, number> = {}
+    const { restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings' })
+      await seeded()
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      const ids = within(nav)
+        .getAllByRole('link')
+        .map((link) => link.getAttribute('href')!.slice(1))
+      const at = ids.indexOf('libraries')
+      // Each section 1000 px below the last, the first at the top.
+      ids.forEach((id, index) => (tops[id] = index * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      const libraries = within(nav).getByRole('link', { name: 'Libraries' })
+      expect(libraries).not.toHaveAttribute('aria-current')
+      // Everything above Libraries shrinks as it loads: Libraries is now at the top.
+      ids.forEach((id, index) => (tops[id] = (index - at) * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      expect(libraries).toHaveAttribute('aria-current', 'location')
     } finally {
       restore()
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('a section link on a page with unsaved changes scrolls there without a hash, so one Back is still held (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    window.history.replaceState(null, '', '/')
+    window.history.pushState(null, '', '/settings')
+    try {
+      const user = userEvent.setup()
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/" element={<p>The catalogue</p>} />
+          </Routes>
+        </BrowserRouter>,
+      )
+      await seeded()
+      await user.clear(screen.getByLabelText('Render timeout'))
+      await user.type(screen.getByLabelText('Render timeout'), '45')
+
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      await user.click(within(nav).getByRole('link', { name: 'Libraries' }))
+      expect(scrolls).toContain(4992)
+      await waitFor(() => expect(document.activeElement).toBe(document.getElementById('libraries-heading')))
+      expect(window.location.hash).toBe('')
+
+      act(() => window.history.back())
+      expect(await screen.findByRole('dialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+      expect(window.location.pathname).toBe('/settings')
+    } finally {
+      restore()
     }
   })
 
@@ -946,5 +1034,58 @@ describe('SettingsPage Administration (#668)', () => {
     const link = await within(region('Administration')).findByRole('link', { name: /Temporal UI/ })
     expect(link).toHaveAttribute('href', 'https://temporal.env')
     expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
+  })
+})
+
+// #2173 — every section folds from its heading, remembered per browser.
+describe('SettingsPage folded sections (#2173)', () => {
+  function fold(name: string): HTMLElement {
+    return within(region(name)).getByRole('button', { name })
+  }
+
+  it('folds a section from its heading, and the next visit keeps it folded', async () => {
+    localStorage.clear()
+    const { user, unmount } = renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true')
+    await user.click(fold('Rendering'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByLabelText('Render timeout')).not.toBeVisible()
+    unmount()
+
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(fold('Connection')).toHaveAttribute('aria-expanded', 'true')
+    localStorage.clear()
+  })
+
+  it('keeps a folded section’s edits, its Unsaved badge and its Save bar', async () => {
+    localStorage.clear()
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(fold('Rendering'))
+
+    expect(within(region('Rendering')).getByText('Unsaved')).toBeVisible()
+    expect(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' })).toBeEnabled()
+    await user.click(fold('Rendering'))
+    expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
+    localStorage.clear()
+  })
+
+  it('unfolds the section a link or the nav goes to', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['libraries', 'rendering']))
+    const { user } = renderPage(<SettingsPage />, { route: '/settings#libraries' })
+    await seeded()
+    await waitFor(() => expect(fold('Libraries')).toHaveAttribute('aria-expanded', 'true'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+    await user.click(within(nav).getByRole('link', { name: 'Rendering' }))
+    await waitFor(() => expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true'))
+    localStorage.clear()
   })
 })

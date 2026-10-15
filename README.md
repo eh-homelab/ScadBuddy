@@ -299,7 +299,9 @@ on shutdown.
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
-  the app.
+  the app. Alert on `scadbuddy_render_project_retries_total` rising, not on its log
+  line: a job's row write is retried without limit, and the warning is logged only at
+  the 12th attempt and every 100th after, hours apart once the backoff is capped.
 
 **Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
 backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
@@ -405,11 +407,15 @@ Both call `deploy.reusable.yml`, which:
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
    dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
-   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`, to
-   the same revision. That line is optional: an overlay that does not mention
+   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`,
+   optionally followed by exactly `&timeout=<n>s|m|h`, to the same revision,
+   keeping that suffix as it is. The suffix raises kustomize's 27s default git
+   timeout, which a checkout of this repo (with its LFS test fixtures) now
+   outlasts. That line is optional: an overlay that does not mention
    `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
    notice; one that mentions it in any other form (a short SHA, a branch, a
-   comment, other casing or spacing) or twice stops the deploy;
+   comment, other casing or spacing, any other query parameter) or twice stops
+   the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -733,6 +739,8 @@ workers restart.
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
 | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
+| `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked, so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
+| `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` | 4 GiB | Its cap, least recently used first, trimmed on each write. An entry used within the activity timeout is kept even past it, so a read under way keeps its file. `0` keeps nothing. |
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →

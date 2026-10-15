@@ -23,6 +23,7 @@ from scadbuddy.bambuddy import print_source, send
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.filaments3mf import LocalFilaments, SlicedPlate, SlicedProfile
 from scadbuddy.bambuddy.models import Folder, LibraryFile, Printer, SlotChoice, Spool
 from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
@@ -30,6 +31,8 @@ from scadbuddy.bambuddy.print_source import (
     LibrarySource,
     OutputSource,
     PrintSource,
+    given_filaments,
+    is_sliced,
     printable,
 )
 from scadbuddy.bambuddy.send import Target
@@ -79,11 +82,14 @@ def _file(file_id: int, file_type: str) -> None:
     )
 
 
-def test_only_an_unsliced_3mf_or_stl_is_printable() -> None:
+def test_a_3mf_a_sliced_3mf_or_an_stl_is_printable() -> None:
     assert printable("3mf")
-    assert not printable("gcode.3mf")
+    # #2671: a sliced file is queued as it is.
+    assert printable("gcode.3mf") and is_sliced("GCODE.3MF")
+    assert not is_sliced("3mf")
     assert printable("stl")
     assert not printable(None)
+    assert not printable("svg")
     assert printable("3MF")
 
 
@@ -173,7 +179,7 @@ async def test_a_file_with_no_plates_or_filaments_is_one_plate_one_filament(
 
 
 @respx.mock
-@pytest.mark.parametrize("file_type", ["gcode.3mf"])
+@pytest.mark.parametrize("file_type", ["svg", "step"])
 async def test_a_file_the_dialog_cannot_print_is_a_422(
     bambuddy: BambuddyClient, file_type: str
 ) -> None:
@@ -187,16 +193,25 @@ async def test_a_file_the_dialog_cannot_print_is_a_422(
 
 
 @respx.mock
-async def test_an_uppercase_sliced_type_still_gets_the_sliced_message(
+async def test_a_sliced_file_prints_only_the_plates_it_holds_and_lays_out_nothing(
     bambuddy: BambuddyClient,
 ) -> None:
+    """#2671: a sliced file is its own print, never downloaded to be laid out, and its
+    plates are the ones it was sliced with, not every plate Bambuddy lists."""
     _file(105, "GCODE.3MF")
+    respx.get(f"{API}/library/files/105/plates").mock(
+        return_value=httpx.Response(200, json=recording("library-plates-multi.json"))
+    )
+    profile = SlicedProfile(plates=[SlicedPlate(index=2)])
 
-    with pytest.raises(ApiError) as refused:
-        await LibrarySource.load(bambuddy, 105)
+    source = await LibrarySource.load(
+        bambuddy, 105, filaments=given_filaments(LocalFilaments(profile=profile))
+    )
 
-    assert refused.value.status == 422
-    assert "is sliced already" in refused.value.detail
+    assert source.is_sliced and source.sliced_profile == profile
+    assert await source.plate_ids(bambuddy) == [2]
+    assert await source.fetch_3mf(bambuddy) is None
+    assert not await source.states_nozzles(bambuddy)
 
 
 @respx.mock
@@ -436,8 +451,10 @@ def _authors_3mf(tmp_path: Path) -> bytes:
 
 
 def _sliced_3mf() -> bytes:
-    """The same bytes on every call: a name alone stamps each entry with the current
-    time, so two calls a second apart differed and a test comparing them flaked."""
+    """The same bytes on every call. A name alone stamps each entry with the current
+    time, which the zip header stores at 2-second resolution, so two calls differed
+    only when they straddled a 2-second boundary, and a test comparing them flaked.
+    A pinned date_time makes every build byte-identical."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, text in (
@@ -692,3 +709,28 @@ async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_
     assert (read.id, read.own_colours) == (ORIGIN, None)
     assert already == read
     assert bambuddy.uploaded == [] and bambuddy.downloads == 0
+
+
+class _ManySlices(_Copies):
+    """Ten recorded slices of the copy, newest first, none of which Bambuddy still has."""
+
+    async def slices_of(
+        self, output_id: str, library_file_id: int, preset_key: str
+    ) -> list[SlicedCopy]:
+        return [SlicedCopy(id=i, file_hash=f"{i:064x}") for i in range(100, 110)]
+
+
+@respx.mock
+async def test_a_reprint_checks_only_the_newest_recorded_slices(bambuddy: BambuddyClient) -> None:
+    """#2955: each recorded slice is a GET, one after another, and rows of deleted slices
+    are kept, so a reprint checks only the newest few before slicing again."""
+    gone = respx.get(url__regex=rf"{API}/library/files/1\d\d$").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+
+    reused = await _library(_ManySlices()).recorded_slice(bambuddy, 11, "key")
+
+    assert reused is None
+    assert [call.request.url.path.rsplit("/", 1)[-1] for call in gone.calls] == [
+        str(sliced_id) for sliced_id in range(100, 100 + print_source.MAX_RECORDED_SLICES)
+    ]

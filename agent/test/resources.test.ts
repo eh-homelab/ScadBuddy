@@ -116,6 +116,13 @@ describe('event → resource mapping', () => {
     ])
   })
 
+  it('a job cancelled with no replacement touches the job (#607)', () => {
+    expect(affectedBy({ id: '1', kind: 'job.cancelled', job_id: 'j1', slug: 'k' })).toEqual({
+      uris: ['scadbuddy://jobs/j1'],
+      listChanged: false,
+    })
+  })
+
   it('a model created or deleted changes the list; an update does not', () => {
     expect(affectedBy({ id: '1', kind: 'model.created', slug: 'k' }).listChanged).toBe(true)
     expect(affectedBy({ id: '1', kind: 'model.deleted', slug: 'k' }).listChanged).toBe(true)

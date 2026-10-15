@@ -605,6 +605,36 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(plain.body).not.toHaveProperty('print_sequence')
   })
 
+  it('sends supports when asked for, names them in its approval line, and omits them otherwise (#1899)', async () => {
+    const chosen: { body?: unknown } = {}
+    const off: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, supports: { enabled: true, threshold_angle: 40 } }, ctx())
+    server.use(...capturedRun(off))
+    // The other fields go unsent with supports off: the backend applies none of them (#3179).
+    await t.execute({ ...args, supports: { enabled: false, type: 'normal', threshold_angle: 40 } }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    // Only what was asked for: the backend keeps the template's type and plate setting.
+    expect((chosen.body as { supports?: unknown }).supports).toEqual({ enabled: true, threshold_angle: 40 })
+    expect((off.body as { supports: unknown }).supports).toEqual({ enabled: false })
+    expect(plain.body).not.toHaveProperty('supports')
+    expect(t.summarize({ ...args, supports: { enabled: true, type: 'normal', threshold_angle: 40, on_build_plate_only: true } })).toContain(
+      'with normal supports at 40° on the build plate only',
+    )
+    expect(t.summarize({ ...args, supports: { enabled: false } })).toContain('without supports')
+    // Turning off a template's build-plate-only is said, not approved silently (#2840 review).
+    expect(t.summarize({ ...args, supports: { enabled: true, on_build_plate_only: false } })).toContain(
+      ', with supports, from the model too',
+    )
+    // Only what was given is named: no type, angle or build-plate clause (#2840 review).
+    expect(t.summarize({ ...args, supports: { enabled: true } })).toContain(', with supports')
+    expect(t.summarize({ ...args, supports: { enabled: true } })).not.toMatch(/supports (at|on)|tree|normal/)
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}
@@ -942,6 +972,76 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(executed.isError).toBe(true)
     expect(firstText(executed)).toContain('"untrusted_data"')
     expect(firstText(executed)).toContain('needs \\"Manage Library\\"')
+  })
+})
+
+describe('render slot deadline (#2846)', () => {
+  const JOB = 'e'.repeat(32)
+  const running = { id: JOB, slug: 'box', created_at: '', status: 'running' }
+  const CALLS = [
+    { name: 'render_model', args: { slug: 'box', params: { width: 5 } }, post: `${BACKEND}/api/v1/models/box/render`, accepted: { job_id: JOB, status_url: '' } },
+    { name: 'arrange', args: { objects: [{ output_id: 'a'.repeat(32) }] }, post: `${BACKEND}/api/v1/outputs/arrange`, accepted: running },
+  ]
+  const RENDER_WAIT_MS = 60_000
+
+  /** A held slot and a call queued behind it, on fake timers; `posts` counts submits. */
+  async function queued(name: string, args: Record<string, unknown>, post: string, accepted: object) {
+    const posts = { count: 0 }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(post, () => {
+        posts.count++
+        return HttpResponse.json(accepted, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json(running)),
+    )
+    const limiter = new RenderLimiter({ ...RENDER_LIMITS, concurrent: 1, perWindow: 0 })
+    const held = await limiter.acquire('test')
+    let answered = false
+    // vi.waitFor below advances the fake clock too: the call's deadline is from here.
+    const deadline = performance.now() + ACCEPTING_MS + RENDER_WAIT_MS
+    const call = runTool(
+      tool(name),
+      args,
+      ctx({ renderLimiter: limiter, renderWaitMs: RENDER_WAIT_MS, pollIntervalMs: 1 }),
+    ).finally(() => {
+      answered = true
+    })
+    await vi.waitFor(() => expect(limiter.queued).toBe(1))
+    return { posts, held, call, answered: () => answered, left: () => deadline - performance.now() }
+  }
+
+  it.each(CALLS)('$name answers a slot that never frees as not rendered, submitting nothing', async ({ name, args, post, accepted }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { posts, held, call } = await queued(name, args, post, accepted)
+      // The call took its deadline at most now: the whole wait from here passes it.
+      await vi.advanceTimersByTimeAsync(ACCEPTING_MS + RENDER_WAIT_MS)
+      const result = await call
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('nothing was submitted')
+      expect(posts.count).toBe(0)
+      held()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(CALLS)('$name gives a job only what a late slot left of the call, not its whole wait', async ({ name, args, post, accepted }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const { posts, held, call, answered, left } = await queued(name, args, post, accepted)
+      // The slot frees just before the call's own waits end (it took its deadline at
+      // or after `queued` took this one, so this is before it).
+      await vi.advanceTimersByTimeAsync(left() - 10)
+      held()
+      // Answered within moments of the deadline, not after another RENDER_WAIT_MS of polls.
+      await vi.waitFor(() => expect(answered()).toBe(true), { timeout: 1000, interval: 20 })
+      expect(posts.count).toBe(1)
+      expect(firstText(await call)).toMatchObject({ job_id: JOB, status: 'running' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -2031,6 +2131,7 @@ describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
   it.each([
     ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
     ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
+    ['rename_output', { output_id: OUT, name: 'Shed sign' }, 'patch', `/api/v1/outputs/${OUT}`, { id: OUT }],
     ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
     ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
     ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],

@@ -16,7 +16,8 @@ publishes them on the bus as before -- ``version.committed`` for every commit
 (`api.deps.announce_commits`), ``source.changed`` from the routes that change a
 source -- and they are NOTIFYed after the HEAD is, which commits under the write lock
 first. Postgres delivers a session's notifications in commit order, both channels
-share this process's listener, and the refresh is made in the callback itself, so a
+share this process's listener, and the listener awaits the refresh before it reads
+the next notification (the NFS work itself runs on a thread, off the event loop), so a
 Customize or editor page that hears "changed elsewhere" and reads again is answered
 by a replica that already sees the change, whichever one it lands on. Publishing a
 second copy from each replica would only send every page each event twice.
@@ -30,8 +31,10 @@ events the writer publishes after it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, revalidate_dirs
@@ -52,27 +55,78 @@ class ModelsHeadFollower:
         self.paths = paths
         self.history = history
         self.catalogue: Catalogue | None = None
+        #: A refresh slower than this is logged as a warning, and said while it runs: it
+        #: holds up every channel on the shared listener, and that listener's own
+        #: liveness check (pg_listener.py), so it is that check's interval.
+        self.slow_after: float = listener.check_interval
         #: The last HEAD announced here.
         self.head: str | None = None
         listener.listen(HEAD_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
-    def _received(self, payload: str) -> None:
+    async def _received(self, payload: str) -> None:
         try:
             change = decode_change(payload)
         except ValueError:
             logger.warning("ignored an undecodable models HEAD payload")
             return
+        await self.refresh(change.models)
+        # Only once this replica sees it (#2617): whatever waits on `head` reads it then.
         self.head = change.commit
-        self.refresh(change.models)
 
-    def _connected(self, reconnected: bool) -> None:
+    async def _connected(self, reconnected: bool) -> None:
         if reconnected:
             logger.warning("the models HEAD listener reconnected; refreshing every template")
-            self.refresh(None)
+            await self.refresh(None)
 
-    def refresh(self, model_ids: list[str] | None) -> None:
+    async def refresh(self, model_ids: list[str] | None) -> None:
         """Revalidate the repository and the templates ``model_ids`` -- every one for
-        None -- and forget what is cached about them."""
+        None -- and forget what is cached about them. The revalidation walks and opens
+        directories over NFS, so it runs on a thread (#2617): a large library or a slow
+        mount holds up this channel, never the event loop."""
+        # Not cancellable: a listener cancelled at shutdown leaves the walk running on
+        # the default executor until it ends, and the loop's close joins it.
+        started = time.monotonic()
+        walk = asyncio.ensure_future(asyncio.to_thread(self.revalidate, model_ids))
+        stalled = False
+        try:
+            try:
+                await asyncio.wait_for(asyncio.shield(walk), self.slow_after)
+            except asyncio.CancelledError:
+                # The walk outlives the cancelled listener; whatever it raises then is
+                # retrieved here, not reported as never retrieved at shutdown.
+                walk.add_done_callback(_settled)
+                raise
+            except TimeoutError:
+                stalled = True
+                # No limit on the walk itself: moving on before it ends would name a HEAD
+                # this replica has not revalidated for (#2617). A hung hard-mounted NFS is
+                # said instead, since every channel on the shared listener waits for it.
+                logger.warning(
+                    "the models library refresh is still walking the mount; the event bus"
+                    " and the listener's liveness check wait for it",
+                    extra={"models": _count(model_ids), "seconds": self.slow_after},
+                )
+                try:
+                    await walk
+                except asyncio.CancelledError:
+                    walk.add_done_callback(_settled)
+                    raise
+        finally:
+            # Even when the walk failed (#3375): `head` stays where it was, but what is
+            # cached about these templates may be stale, so it goes either way.
+            if self.catalogue is not None:
+                self.catalogue.forget(model_ids)
+        took = round(time.monotonic() - started, 3)
+        logger.log(
+            logging.WARNING if took > self.slow_after else logging.DEBUG,
+            "refreshed the models library",
+            # `stalled` tells this record from the "still walking" one already logged for
+            # the same refresh, so one stuck mount is not counted twice (#3375).
+            extra={"models": _count(model_ids), "seconds": took, "stalled": stalled},
+        )
+
+    def revalidate(self, model_ids: list[str] | None) -> None:
+        """Have the NFS client revalidate the repository and those templates."""
         self.history.revalidate()
         directories: list[Path] = [self.paths.models, self.paths.builtins]
         if model_ids is None:
@@ -81,8 +135,10 @@ class ModelsHeadFollower:
         else:
             directories += [self.paths.model_dir(model_id) for model_id in model_ids]
         revalidate_dirs(*directories)
-        if self.catalogue is not None:
-            self.catalogue.forget(model_ids)
+
+
+def _count(model_ids: list[str] | None) -> int | None:
+    return None if model_ids is None else len(model_ids)
 
 
 def _template_dirs(parent: Path) -> list[Path]:
@@ -95,3 +151,9 @@ def _template_dirs(parent: Path) -> list[Path]:
             ]
     except OSError:
         return []
+
+
+def _settled(walk: asyncio.Future[None]) -> None:
+    """Retrieve an orphaned walk's outcome: it failed after its refresh was cancelled."""
+    if not walk.cancelled() and (exc := walk.exception()) is not None:
+        logger.debug("a cancelled models library refresh's walk failed", exc_info=exc)

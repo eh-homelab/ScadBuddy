@@ -8,7 +8,7 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +17,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.housekeeping import GIT_SWEEP, PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
@@ -42,6 +43,11 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "ensure_schedules", no_schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
@@ -145,6 +151,11 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
@@ -549,3 +560,39 @@ async def test_the_background_slice_sweep_also_sweeps_lost_slice_starts(
     await main._sweep_preview_slices_logged(state)  # type: ignore[arg-type]
 
     assert swept == ["previews", "lost"]
+
+
+@pytest.mark.parametrize("failing", ["previews", "lost"])
+async def test_each_slice_sweep_runs_and_logs_when_the_other_fails(
+    failing: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2912: the lost-slice sweep no longer waits on the background-slice sweep, and
+    either one failing keeps the other's count in the log; the failure still fails the
+    activity."""
+    swept: list[str] = []
+
+    def sweep(name: str) -> Callable[..., Awaitable[int]]:
+        async def run(*args: object) -> int:
+            swept.append(name)
+            if name == failing:
+                raise ApiError(503, "Bambuddy is busy")
+            return 2
+
+        return run
+
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", sweep("previews"))
+    monkeypatch.setattr(main, "sweep_lost_slices", sweep("lost"))
+    state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"), pytest.raises(ApiError):
+        await main._sweep_preview_slices_logged(state)  # type: ignore[arg-type]
+
+    assert swept == ["previews", "lost"]
+    logged = {record.getMessage() for record in caplog.records}
+    other = (
+        "removed the files of lost slice starts"
+        if failing == "previews"
+        else "removed unprinted background slices"
+    )
+    assert other in logged

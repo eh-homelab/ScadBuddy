@@ -618,6 +618,25 @@ def test_an_upload_answers_the_folder_bambuddy_put_it_in(client: TestClient) -> 
 
 
 @respx.mock
+def test_an_upload_answers_the_folder_it_asked_for_when_bambuddy_names_none(
+    client: TestClient,
+) -> None:
+    # Bambuddy's FileUploadResponse carries no folder_id (bambuddy/models.py LibraryFile).
+    configure(client)
+    respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 52, "filename": "box.3mf"})
+    )
+    response = client.post(
+        "/api/v1/print/library/files",
+        files={"file": ("box.3mf", b"PK\x03\x04data", "application/octet-stream")},
+        data={"folder_id": "3"},
+        headers=press(),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": 52, "filename": "box.3mf", "folder_id": 3}
+
+
+@respx.mock
 def test_a_repeated_upload_uploads_once(client: TestClient) -> None:
     configure(client)
     up = respx.post(f"{API}/library/files").mock(

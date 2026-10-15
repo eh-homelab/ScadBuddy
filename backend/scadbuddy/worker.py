@@ -79,6 +79,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -189,6 +190,8 @@ def build_worker_deps(
             history=None,
             fonts=FontService(settings.data_dir),
             metrics=metrics,
+            # #2788: none unless set, and never one the API reads (README).
+            downloads_dir=config.download_cache_dir,
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.
@@ -201,6 +204,7 @@ def build_worker_deps(
         blobs=store.blobs,
         refs=BlobRefs(projection.pool),
         projection=projection,
+        geometry=GeometryIndex(projection.pool),
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
@@ -226,6 +230,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         blobs=state.store.blobs,
         refs=state.refs,
         projection=state.projection,
+        geometry=GeometryIndex(state.refs.pool),
         history=state.history,
         checkouts=state.checkouts,
         fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
@@ -1052,7 +1057,9 @@ def main() -> None:
     settings = Settings()
     configure_logging(settings.log_level)
     # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
-    assert queue in SERVICE_NAMES, f"queue {queue!r} has no service name"
+    if queue not in SERVICE_NAMES:
+        # Not an assert, which python -O strips (#3020 review).
+        raise SystemExit(f"queue {queue!r} has no service name")
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 

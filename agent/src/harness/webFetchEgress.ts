@@ -13,19 +13,22 @@ import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Re
 // own services (the plugin forwarder, the subagent MCP route).
 //
 // Claude Code resolves the name again when it connects, so a name re-pointed between
-// this check and that connection is not caught here; a durable turn's WebFetch (the
-// agent's own, builtins/web.ts) connects to the checked address.
+// this check and that connection is not caught here. Since #2684 a classic turn is never
+// offered Claude Code's WebFetch: it gets the agent's (builtins/web.ts), which connects to
+// the checked address, as a durable turn does. This hook stays as a second line.
 
 export const WEB_FETCH = 'WebFetch'
 
 /** Why `url` may not be fetched, or undefined when it may. */
 export async function webFetchRefusal(url: unknown, resolve: Resolver = systemResolver): Promise<string | undefined> {
+  // #2758: anything but a string is a missing url, not a malformed one ("[object Object]").
+  if (typeof url !== 'string') return 'WebFetch refused: url missing or not a string'
   try {
-    const parsed = assertHttpUrl(String(url), 'url')
+    const parsed = assertHttpUrl(url, 'url')
     // Claude Code parses the string again itself; only a URL already in its normal form
     // is sure to name the host checked here (no decimal or short IPv4, backslashes,
     // stray whitespace or case that another parser could read differently).
-    if (parsed.href !== url && parsed.href !== `${String(url)}/`) {
+    if (parsed.href !== url && parsed.href !== `${url}/`) {
       return `WebFetch refused: give the URL in its normal form, ${parsed.href}`
     }
     if (isLoopbackHost(parsed.hostname)) return `WebFetch refused: url host ${parsed.hostname} is this pod's loopback, not a web page`

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type {
@@ -27,7 +27,7 @@ import { useAdvanced } from '../lib/advanced'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
 import { folderLabel } from '../lib/libraryTransfer'
-import { useMediaQuery } from '../lib/useMediaQuery'
+import { NARROW_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -62,9 +62,10 @@ function plural(count: number, word: string): string {
 /**
  * #313 — Bambuddy's library by folder. Each unsliced 3MF has Print, which opens the same
  * spool-first dialog an output uses; the file is sliced as it stands in Bambuddy.
- * Advanced also lists sliced files and STLs; a sliced file is printed from Bambuddy.
+ * Advanced also lists sliced files and STLs. A sliced file's Print queues it as it is,
+ * with no slice (#2671).
  * #1864 — each file has a tick, kept across folders; Arrange selected opens Arrange on
- * the ticked printable files.
+ * the ticked printable files that are not sliced already.
  * #2165 — the folders are a tree, and the URL says where the page is:
  * `/library/<folder path>` the folder, `?file=<id>` a file highlighted (its folder found
  * when the path names none), `?print=<id>` its print dialog open. Back and forward move
@@ -74,9 +75,6 @@ function plural(count: number, word: string): string {
  * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
  * reorganise the library through Bambuddy; a move says which project loses a file.
  */
-/** Below Tailwind's `md`, where the tree stacks above the files. */
-const NARROW_QUERY = '(max-width: 767.98px)'
-
 export function LibraryPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -90,12 +88,24 @@ export function LibraryPage() {
   // #2368 — below md the tree is a collapsed disclosure, so the files come first.
   const narrow = useMediaQuery(NARROW_QUERY)
   const [foldersOpen, setFoldersOpen] = useState(false)
+  const foldersId = useId()
+  // Where focus goes back once a folder is chosen and the tree folds away (#3315).
+  const foldersToggle = useRef<HTMLButtonElement>(null)
   const [listing, setListing] = useState<LibraryListing | null>(null)
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
   // reopening the dialog on a fresh copy of the file, which then reads everything
-  // twice (#2361).
-  const printListed = printParam !== null && (listing?.files ?? []).some((file) => file.id === printParam)
+  // twice (#2361). While a listing is read again (Advanced, a reload) there is none on
+  // screen, so the last one's answer holds; else the file alone is read meanwhile (#2822).
+  const [listedPrint, setListedPrint] = useState<number | null>(null)
+  const seenPrint =
+    listing === null
+      ? listedPrint
+      : printParam !== null && (listing.files ?? []).some((file) => file.id === printParam)
+        ? printParam
+        : null
+  if (seenPrint !== listedPrint) setListedPrint(seenPrint)
+  const printListed = printParam !== null && seenPrint === printParam
   const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
@@ -251,7 +261,10 @@ export function LibraryPage() {
 
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
-  const printable = picked.filter((file) => file.printable)
+  // #2671 — a sliced file prints, but has no objects to arrange.
+  // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
+  // a change to this filter, or to what the server calls `printable`, changes that too.
+  const printable = picked.filter((file) => file.printable && !file.sliced)
   const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
 
@@ -276,26 +289,27 @@ export function LibraryPage() {
             <>
               <button
                 type="button"
+                ref={foldersToggle}
                 aria-expanded={foldersOpen}
-                aria-controls="library-folders"
+                aria-controls={foldersId}
                 onClick={() => setFoldersOpen((open) => !open)}
                 className="flex w-full items-center justify-between gap-2 rounded-md border border-line px-3 py-2 text-left text-[13px] text-ink"
               >
                 <span className="min-w-0 truncate">Folder: {folderLabel(tree, folderId)}</span>
                 <span aria-hidden="true">{foldersOpen ? '▴' : '▾'}</span>
               </button>
-              {foldersOpen && (
-                <div id="library-folders" className="mt-2">
-                  <LibraryTree
-                    folders={tree}
-                    selected={folderId}
-                    onSelect={(id) => {
-                      setFoldersOpen(false)
-                      selectFolder(id)
-                    }}
-                  />
-                </div>
-              )}
+              {/* Always there, so `aria-controls` names an element when folded too. */}
+              <div id={foldersId} hidden={!foldersOpen} className="mt-2">
+                <LibraryTree
+                  folders={tree}
+                  selected={folderId}
+                  onSelect={(id) => {
+                    setFoldersOpen(false)
+                    selectFolder(id)
+                    foldersToggle.current?.focus()
+                  }}
+                />
+              </div>
             </>
           ) : tree ? (
             <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
@@ -319,6 +333,14 @@ export function LibraryPage() {
             >
               Arrange selected ({printable.length})
             </Button>
+            {/* #2286 — a ticked file Arrange cannot take is said, not silently dropped. */}
+            {picked.length > printable.length && (
+              <span role="note" className="text-[12px] text-muted">
+                {`${picked.length - printable.length} selected ${
+                  picked.length - printable.length === 1 ? 'file' : 'files'
+                } can't be arranged: only unsliced 3MF and STL files can.`}
+              </span>
+            )}
             <Button
               size="sm"
               data-testid="library-copy-selected"
@@ -461,11 +483,7 @@ export function LibraryPage() {
                       Print
                     </Button>
                   ) : (
-                    <p className="text-[12px] text-faint">
-                      {file.file_type?.toLowerCase() === 'gcode.3mf'
-                        ? 'Sliced already. Print it from Bambuddy.'
-                        : 'ScadBuddy cannot print this file type.'}
-                    </p>
+                    <p className="text-[12px] text-faint">ScadBuddy cannot print this file type.</p>
                   )}
                   <div className="flex items-center justify-between gap-2 text-[12px]">
                     {file.printable ? (

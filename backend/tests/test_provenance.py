@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ import trimesh
 
 from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
-from scadbuddy.render import provenance
+from scadbuddy.render import provenance, zipcopy
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     PRODUCTION_NS,
@@ -31,6 +32,7 @@ from scadbuddy.render.provenance import (
     read,
     source_version,
     stamp,
+    with_print_settings,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.split import ColourPart
@@ -137,6 +139,39 @@ def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> N
     assert read(target) == PROVENANCE
     # The source is the job's file, read and never written.
     assert _compressed(source) == before and read(source) is None
+
+
+def test_the_raw_copy_is_checked_on_this_python() -> None:
+    """#2910: copy_raw writes through zipfile's private state. A Python minor bump fails
+    here until test_every_other_part_is_copied_as_its_compressed_bytes is run on it and
+    RAW_COPY_CHECKED moved; until then the stamp reads and writes every entry again."""
+    assert sys.version_info[:2] == zipcopy.RAW_COPY_CHECKED
+
+
+def test_an_unchecked_python_stamps_without_the_raw_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2910: on a Python the raw copy was not checked on, every entry is read and
+    written again through zipfile's public API, and the file is whole."""
+    source = tmp_path / "source.3mf"
+    mesh = b"<vertex x='1' y='2' z='3'/>" * 2_000
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
+        archive.writestr("3D/Objects/object_1.model", mesh)
+    monkeypatch.setattr(zipcopy, "RAW_COPY_CHECKED", (0, 0))
+
+    def unused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("copy_raw ran on an unchecked Python")
+
+    monkeypatch.setattr(provenance, "copy_raw", unused)
+    target = tmp_path / "model.3mf"
+
+    stamp(target, PROVENANCE, source=source)
+
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert archive.read("3D/Objects/object_1.model") == mesh
+    assert read(target) == PROVENANCE
 
 
 def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
@@ -397,15 +432,15 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
     original = written.read_bytes()
     calls = {"n": 0}
     # Every entry but the root model is copied raw (#2755): fail the second of those.
-    real = provenance._copy_raw
+    real = zipcopy.copy_raw
 
-    def fail_partway(*args: Any) -> None:
+    def fail_partway(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError("no space left on device")
-        real(*args)
+        real(*args, **kwargs)
 
-    monkeypatch.setattr(provenance, "_copy_raw", fail_partway)
+    monkeypatch.setattr(provenance, "copy_raw", fail_partway)
     with pytest.raises(OSError, match="no space"):
         stamp(written, PROVENANCE)
 
@@ -473,6 +508,47 @@ def test_print_settings_are_stamped_as_edits_to_the_system_process(written: Path
     added = {"enable_prime_tower", "wipe_tower_no_sparse_layers", "different_settings_to_system"}
     assert {key: value for key, value in settings.items() if key not in added} == before
     assert read(written) == PROVENANCE
+
+
+def test_a_print_setting_takes_the_shape_the_project_stores_it_in() -> None:
+    """A key kept per extruder variant stays a list of that length; others stay scalars."""
+    project = json.dumps(
+        {"support_threshold_angle": ["30", "30"], "enable_support": "0", "filament_settings_id": []}
+    ).encode()
+
+    settings = json.loads(
+        with_print_settings(project, {"support_threshold_angle": "25", "enable_support": "1"})
+    )
+
+    assert settings["support_threshold_angle"] == ["25", "25"]
+    assert settings["enable_support"] == "1"
+
+
+def test_print_settings_list_one_entry_per_filament_of_a_multi_filament_project() -> None:
+    """#2869: ``different_settings_to_system`` is the process's edits, then one empty
+    entry per ``filament_settings_id``, then the printer's, however many filaments."""
+    before = {
+        "filament_settings_id": ["Bambu PLA Basic @BBL H2C"] * 3,
+        "layer_height": "0.2",
+        "print_settings_id": "0.20mm Standard @BBL H2C",
+    }
+
+    settings = json.loads(
+        provenance.with_print_settings(
+            json.dumps(before).encode(), {"enable_prime_tower": "1", "wall_loops": "3"}
+        )
+    )
+
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wall_loops",
+        "",
+        "",
+        "",
+        "",
+    ]
+    assert (settings["enable_prime_tower"], settings["wall_loops"]) == ("1", "3")
+    added = {"enable_prime_tower", "wall_loops", "different_settings_to_system"}
+    assert {key: value for key, value in settings.items() if key not in added} == before
 
 
 def test_print_settings_change_no_other_part(written: Path) -> None:

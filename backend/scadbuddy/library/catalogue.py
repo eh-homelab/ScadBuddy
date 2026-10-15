@@ -290,13 +290,16 @@ PrintSequence = Literal["by layer", "by object"]
 #: enums are ``s_keys_map_SupportType``, ``s_keys_map_BrimType`` and
 #: ``s_keys_map_PrintSequence`` (#907) in Bambu Studio's
 #: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
-#: number of millimetres. Only these: a template states how it prints best, not a
-#: whole profile.
+#: number of millimetres, or ``support_threshold_angle``, whole degrees (#1899).
+#: Only these: a template states how it prints best, not a whole profile.
 PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
     "enable_prime_tower": _BOOLEAN,
     "wipe_tower_no_sparse_layers": _BOOLEAN,
     "enable_support": _BOOLEAN,
     "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
+    # #1899: whole degrees from vertical, 0-90.
+    "support_threshold_angle": None,
+    "support_on_build_plate_only": _BOOLEAN,
     "brim_width": None,
     "brim_type": (
         "auto_brim",
@@ -309,11 +312,17 @@ PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
     "print_sequence": get_args(PrintSequence),
 }
 PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
+#: The settings among those that are an angle, not millimetres (#1899).
+_DEGREES = frozenset({"support_threshold_angle"})
 
 
 def _print_setting_problem(key: str, value: str) -> str | None:
     """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
     allowed = PRINT_SETTING_VALUES[key]
+    if key in _DEGREES:
+        if value.isascii() and value.isdigit() and int(value) <= 90:
+            return None
+        return f"{key} is {value!r}; it must be a whole number of degrees from 0 to 90"
     if allowed is not None:
         if value in allowed:
             return None
@@ -666,6 +675,11 @@ class Catalogue:
             return
         for model_id in model_ids:
             self._ui_versions.pop(model_id, None)
+
+    def caches_ui_version(self, slug: str) -> bool:
+        """Whether the template's `ui_version` is cached, and so not read again until
+        HEAD moves or :meth:`forget` drops it."""
+        return slug in self._ui_versions
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class

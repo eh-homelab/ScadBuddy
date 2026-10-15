@@ -20,13 +20,22 @@ export const handlers = [
   http.put('/api/v1/ai/settings/durable-subagents', async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>
     const { url, peers } = body
-    if (url !== null && (typeof url !== 'string' || !/^https?:\/\//.test(url))) {
-      return HttpResponse.json({ detail: 'url: must be an http(s) URL' }, { status: 400 })
+    let href: string | null = null
+    if (url !== null) {
+      try {
+        href = typeof url === 'string' ? new URL(url).href : null
+      } catch {
+        href = null
+      }
+      if (href === null || !/^https?:$/.test(new URL(href).protocol)) {
+        return HttpResponse.json({ detail: 'url: must be an http(s) URL' }, { status: 400 })
+      }
     }
     if (!Array.isArray(peers) || !peers.every((p) => typeof p === 'string' && CIDR.test(p.trim()))) {
       return HttpResponse.json({ detail: 'peers: each entry must be an IP address or CIDR range' }, { status: 400 })
     }
-    state.url = url
+    // As the agent's route stores it: WHATWG's parse of what was sent.
+    state.url = href
     state.peers = peers.map((p: string) => p.trim())
     return HttpResponse.json({ ...state })
   }),

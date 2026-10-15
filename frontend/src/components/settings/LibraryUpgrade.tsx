@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError, api } from '../../api/client'
-import type { LibraryCheck, LibraryUser, ModelSummary } from '../../api/types'
+import type { InstalledLibrary, LibraryCheck, LibraryUser, ModelSummary } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -119,6 +119,8 @@ export function LibraryUpgrade() {
           Could not read the models, so rows show slugs: {models.error.message}
         </p>
       )}
+      {/* A refresh, not a reload: the panel keeps its library, checks and ticks on screen. */}
+      <UnusedCheckouts installed={installed} onRemoved={() => libraries.refresh()} />
       {/* Keyed by library: another library's checks and ticks never carry over. */}
       {library && (
         <LibraryUsers
@@ -452,5 +454,77 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
         </details>
       )}
     </div>
+  )
+}
+
+/**
+ * #2770 — checkouts on the volume that no model's live pin reads (`used_by` empty): an
+ * unpin keeps its checkout, so they build up. Each can be removed
+ * (`DELETE /libraries/{name}?commit=`); the route still refuses one a pin or a running
+ * render reads, and a later render of an older revision that pinned it clones it again.
+ */
+function UnusedCheckouts({ installed, onRemoved }: { installed: readonly InstalledLibrary[]; onRemoved: () => void }) {
+  const unused = installed.filter((row) => (row.used_by ?? []).length === 0)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const [errors, setErrors] = useState<Readonly<Record<string, string>>>({})
+  const headingId = useId()
+  if (unused.length === 0) return null
+
+  async function remove(row: InstalledLibrary) {
+    const key = `${row.name}@${row.commit}`
+    setRemoving(key)
+    setErrors(({ [key]: _, ...rest }) => rest)
+    try {
+      // Each press is a new Idempotency-Key, a press after a failure included: under the
+      // failed attempt's key the server would answer that attempt's refusal again, and the
+      // delete is safe to repeat. A "Try again" for an answer that never came would pass
+      // that attempt's key instead (`command()`'s `key`).
+      await api.removeLibraryCheckout(row.name, row.commit)
+      // The rows are re-listed in place: another row's refusal may no longer hold.
+      setErrors({})
+      onRemoved()
+    } catch (caught) {
+      setErrors((current) => ({ ...current, [key]: message(caught) }))
+    } finally {
+      setRemoving(null)
+    }
+  }
+
+  return (
+    <section aria-labelledby={headingId} className="space-y-2">
+      <h3 id={headingId} className="text-[13px] font-medium">
+        Checkouts no model uses
+      </h3>
+      <p className="text-[12px] text-muted">
+        Unpinning a library keeps its checkout on the volume. Remove the ones nothing pins any more.
+      </p>
+      <ul aria-labelledby={headingId} className="space-y-1">
+        {unused.map((row) => {
+          const key = `${row.name}@${row.commit}`
+          const label = `${row.name} ${short(row.commit)}`
+          return (
+            <li key={key} aria-label={label} className="flex flex-wrap items-center gap-3 text-[13px]">
+              <span>
+                {row.name} <span className="sb-num text-muted">{short(row.commit)}</span>
+              </span>
+              <Button
+                size="sm"
+                onClick={() => void remove(row)}
+                disabled={removing !== null}
+                aria-busy={removing === key}
+                aria-label={`Remove ${label}`}
+              >
+                {removing === key ? 'Removing' : 'Remove'}
+              </Button>
+              {errors[key] && (
+                <span role="alert" className="text-warn">
+                  {errors[key]}
+                </span>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </section>
   )
 }

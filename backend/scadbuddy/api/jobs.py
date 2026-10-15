@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -43,6 +44,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
@@ -556,6 +558,41 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     return view
 
 
+#: A done job's plate cut, which never changes: the piece its 3MF is in is keyed by
+#: its content.
+PLATE_GLB_CACHE_CONTROL = "private, max-age=86400, immutable"
+#: The most bytes of plate cuts this process keeps (#2913): the plate picker invites
+#: switching back and forth, and each cut re-reads and re-cuts the whole 3MF.
+PLATE_GLB_CACHE_BYTES = 64 * 1024 * 1024
+
+
+class _PlateCache:
+    """The most recently cut plates, least recently used out first, up to a byte cap."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._items: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+        self._size = 0
+
+    def get(self, key: tuple[str, int]) -> bytes | None:
+        data = self._items.get(key)
+        if data is not None:
+            self._items.move_to_end(key)
+        return data
+
+    def put(self, key: tuple[str, int], data: bytes) -> None:
+        if len(data) > self.max_bytes or key in self._items:
+            return
+        self._items[key] = data
+        self._size += len(data)
+        while self._size > self.max_bytes:
+            _, dropped = self._items.popitem(last=False)
+            self._size -= len(dropped)
+
+
+_PLATE_GLBS = _PlateCache(PLATE_GLB_CACHE_BYTES)
+
+
 @router.get(
     "/jobs/{job_id}/preview.glb",
     response_class=FileResponse,
@@ -582,20 +619,30 @@ async def get_job_preview(
         )
     await materialize_result(state.store.blobs, job.result)
     if plate is not None:
-        model = paths.root / job.result.model_3mf
-        try:
-            payload = await asyncio.to_thread(model.read_bytes)
-        except FileNotFoundError:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND, f"the 3MF of job {job_id!r} is gone"
-            ) from None
-        try:
-            data = await asyncio.to_thread(plate_glb, payload, plate, budget)
-        except NoSuchPlateError as error:
-            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
-        except UnreadableObjectsError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        return Response(data, media_type=GLB_MEDIA_TYPE)
+        key = (job.result.model_3mf, plate)
+        data = _PLATE_GLBS.get(key)
+        if data is None:
+            model = paths.root / job.result.model_3mf
+            try:
+                payload = await asyncio.to_thread(model.read_bytes)
+            except FileNotFoundError:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"the 3MF of job {job_id!r} is gone"
+                ) from None
+            try:
+                data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+            except NoSuchPlateError as error:
+                raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+            except UnreadableObjectsError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            except ReadOutOfMemoryError as error:
+                # #2767: refused as an output's plate is (outputs.py), not a 500.
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            _PLATE_GLBS.put(key, data)
+        # A done job's result never changes, so the browser keeps the cut too (#2913).
+        return Response(
+            data, media_type=GLB_MEDIA_TYPE, headers={"Cache-Control": PLATE_GLB_CACHE_CONTROL}
+        )
     preview = paths.root / job.result.preview_glb
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")

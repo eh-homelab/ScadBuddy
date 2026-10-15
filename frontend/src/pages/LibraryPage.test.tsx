@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -8,6 +8,7 @@ import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
@@ -91,7 +92,8 @@ describe('LibraryPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
     const done = await screen.findByRole('status', { name: 'Arranged' })
     expect(done).toHaveTextContent('Arranged onto 2 plates.')
-    expect(done).toHaveTextContent("Saved in Name Keychain's history.")
+    // #2286 — unnamed, it is saved under a name made of what it holds.
+    expect(done).toHaveTextContent("Saved as Arrange of Name Keychain, Clara's Wand in Name Keychain's history.")
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
     // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
@@ -102,16 +104,42 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
-  it('Advanced lists the sliced file without Print and is remembered', async () => {
+  it('Advanced lists the sliced file with Print and is remembered', async () => {
     const { user, unmount } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     const sliced = await screen.findByTestId('library-file-104')
-    expect(within(sliced).queryByRole('button', { name: /^Print / })).toBeNull()
-    expect(within(sliced).getByText(/print it from Bambuddy/i)).toBeInTheDocument()
+    // #2671 — printed as it is, through the same dialog.
+    expect(within(sliced).getByRole('button', { name: /^Print / })).toBeInTheDocument()
+    expect(within(sliced).queryByText(/print it from Bambuddy/i)).toBeNull()
     unmount()
     renderPage(<LibraryPage />, { route: '/library' })
     expect(await screen.findByTestId('library-file-104')).toBeInTheDocument()
+  })
+
+  it('leaves a ticked sliced file out of Arrange selected (#2671)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(await screen.findByRole('checkbox', { name: /Select .*\.gcode\.3mf/ }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    await user.click(screen.getAllByRole('checkbox', { name: /Select .*\.3mf$/ })[0] as HTMLElement)
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+  })
+
+  it('says a ticked sliced file is left out of Arrange (#2286)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(
+      within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }),
+    )
+    await user.click(within(await screen.findByTestId('library-file-104')).getByRole('checkbox'))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete selected (2)' })).toBeEnabled()
+    expect(screen.getByRole('note')).toHaveTextContent(
+      "1 selected file can't be arranged: only unsliced 3MF and STL files can.",
+    )
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
@@ -151,16 +179,11 @@ describe('LibraryPage', () => {
 
   it("reads the dialog's choices, plates, projects and options once per open (#2361)", async () => {
     const asked: string[] = []
-    const analysed: unknown[] = []
+    const analysed: Promise<unknown>[] = []
     const listen = ({ request }: { request: Request }) => {
       const url = new URL(request.url)
       asked.push(`${request.method} ${url.pathname}${url.search}`)
-      if (url.pathname === '/api/v1/analyzers/run') {
-        void request
-          .clone()
-          .json()
-          .then((body: unknown) => analysed.push(body))
-      }
+      if (url.pathname === '/api/v1/analyzers/run') analysed.push(request.clone().json())
     }
     server.events.on('request:start', listen)
     try {
@@ -179,9 +202,34 @@ describe('LibraryPage', () => {
       // The file the page listed is not read again to open its dialog.
       expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
       // No analysis of an empty plan before the suggested spools are set.
-      for (const body of analysed) {
+      for (const body of await Promise.all(analysed)) {
         expect((body as { request: { filament_plan: { slots: unknown[] } } }).request.filament_plan.slots).not.toEqual([])
       }
+    } finally {
+      server.events.removeListener('request:start', listen)
+    }
+  })
+
+  it('does not read the printed file on its own when the listing is read again (#2822)', async () => {
+    const asked: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      asked.push(`${request.method} ${url.pathname}${url.search}`)
+    }
+    server.events.on('request:start', listen)
+    try {
+      renderPage(<LibraryPage />, { route: '/library' })
+      fireEvent.click(await screen.findByTestId('library-print-89'))
+      await screen.findByRole('dialog', { name: 'Print' })
+      const lists = () => asked.filter((line) => line.startsWith('GET /api/v1/print/library?')).length
+      const before = lists()
+
+      // Advanced empties the listing and reads it again, with the dialog still open.
+      fireEvent.click(screen.getByTestId('library-advanced'))
+      await waitFor(() => expect(lists()).toBeGreaterThan(before))
+      await screen.findByTestId('library-file-104')
+
+      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
     } finally {
       server.events.removeListener('request:start', listen)
     }
@@ -194,8 +242,8 @@ describe('LibraryPage', () => {
       ),
     )
     const run = vi.spyOn(api, 'runLibraryPrint')
-    // MSW's answers to the run's POST and to the progress read the sent dialog makes,
-    // counted until the test ends (see below).
+    // MSW's answers to the run's POST, the choices it remembers and the progress read
+    // the sent dialog makes, counted until the test ends (see below).
     const answered: string[] = []
     const onAnswer = ({ request }: { request: Request }) => {
       answered.push(`${request.method} ${new URL(request.url).pathname}`)
@@ -223,10 +271,11 @@ describe('LibraryPage', () => {
     )
     // Not ended with a request in flight: unmounting aborts it, and in CI the next
     // test's listing read then bypassed MSW ("could not reach its server") and never
-    // showed its loading state (the #2944 shape). The run's POST, then the sent dialog's
-    // first progress read; its next is seconds away.
+    // showed its loading state (the #2944 shape). The run's POST, the choices it
+    // remembers, then the sent dialog's first progress read; its next is seconds away.
     await waitFor(() => {
       expect(answered).toContain('POST /api/v1/print/library/89/run')
+      expect(answered).toContain('PUT /api/v1/print/library/89/choices')
       expect(answered).toContain('GET /api/v1/print/library/89/progress')
     })
     run.mockRestore()
@@ -309,11 +358,12 @@ describe('LibraryPage, item context (#975)', () => {
     const tree = screen.getByRole('tree', { name: 'Library folders' })
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'true')
 
-    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk 300 files' })
+    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk' })
+    expect(bulk).toHaveAccessibleDescription('300 files')
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-selected', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
-    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld 2 files' })).toBeInTheDocument()
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld' })).toHaveAccessibleDescription('2 files')
   })
 
   it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {
@@ -355,7 +405,7 @@ describe('LibraryPage, item context (#975)', () => {
 
   it('on a phone, folds the folder tree behind a button naming the open folder (#2368)', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: query === '(max-width: 767.98px)',
+      matches: query === NARROW_QUERY,
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -374,10 +424,17 @@ describe('LibraryPage, item context (#975)', () => {
       expect(toggle).toHaveAttribute('aria-controls', tree.parentElement?.id)
       await user.click(within(tree).getByRole('treeitem', { name: 'Top level' }))
 
-      // Choosing a folder folds the tree away again.
+      // Choosing a folder folds the tree away again, and focus goes back to the button
+      // rather than falling to the page (#3315).
       expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
       expect(screen.queryByRole('tree', { name: 'Library folders' })).toBeNull()
-      expect(await screen.findByRole('button', { name: /^Folder: Top level/ })).toHaveAttribute('aria-expanded', 'false')
+      const folded = await screen.findByRole('button', { name: /^Folder: Top level/ })
+      expect(folded).toHaveAttribute('aria-expanded', 'false')
+      expect(folded).toHaveFocus()
+      // What it controls is there while folded too, only hidden.
+      const controls = document.getElementById(folded.getAttribute('aria-controls') ?? '')
+      expect(controls).not.toBeNull()
+      expect(controls).not.toBeVisible()
     } finally {
       vi.unstubAllGlobals()
     }

@@ -88,23 +88,43 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
 export async function pendingInput(
   sessions: SessionManager,
   principal: Owner = BROWSER_USER,
-  filter: { sessionId?: string } = {},
+  filter: { sessionId?: string; runs?: boolean } = {},
 ): Promise<PendingInputPage> {
   const browser = principal.kind === 'browser'
   const grant = !browser && (await sessions.approvals.holdsGrant(principal))
-  const [approvals, { questions: answers, summariesTruncated }, durable] = await Promise.all([
+  // A flow run's own parked calls are the person's (#2482, spec 2026-10-11 §4.5): in the
+  // browser user's aggregate read, the badge's, and in no other principal's.
+  const withRuns = browser && filter.runs === true && filter.sessionId === undefined
+  const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
     sessions.approvals.listVisiblePending(principal),
     sessions.questions.listPending(principal),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
       ...(browser ? {} : { ownedBy: principal, allApprovals: grant }),
     }),
+    withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
+  const runEntries: PendingInputEntry[] = own.map(({ run, starter_session, entry }) => ({
+    id: entry.id,
+    kind: entry.kind,
+    session_id: null,
+    tool: entry.fn,
+    summary: '',
+    input_hash: null,
+    prompt: entry.kind === 'answer' ? (entry.prompt ?? '') : '',
+    requested_by: null,
+    responders: ['browser'],
+    // An entry with no `since` of its own sorts by when its run last moved, not first.
+    created_at: entry.since ?? run.updated_at,
+    expires_at: null,
+    run: { id: run.id, name: run.name, hop: entry.hop, reason: entry.reason, starter_session },
+  }))
   const inSession = (e: PendingInputEntry) => filter.sessionId === undefined || e.session_id === filter.sessionId
   const entries: PendingInputEntry[] = [
     ...approvals.map(approvalEntry).filter(inSession),
     ...answers.map(questionEntry).filter(inSession),
     ...durable,
+    ...runEntries,
   ]
   return { entries: entries.sort((a, b) => a.created_at.localeCompare(b.created_at)), summaries_truncated: summariesTruncated }
 }
@@ -131,9 +151,10 @@ export async function sessionPendingInput(
     if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
     // A grant holder that does not own the session sees its approvals only, as in the
     // aggregate, and none of a flow run's, which are the person's (#2482).
-    const visible: PendingInputEntry[] = []
-    for (const e of entries) if (e.kind === 'approval' && !(await sessions.projection.inRun(e.id))) visible.push(e)
-    return { entries: visible, summaries_truncated: false }
+    // One query for every entry, not one per approval (#2863).
+    const approvals = entries.filter((e) => e.kind === 'approval')
+    const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
+    return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
   }
   return pendingInput(sessions, principal, { sessionId })
 }
@@ -359,7 +380,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
-    return c.json(await pendingInput(deps.sessions))
+    return c.json(await pendingInput(deps.sessions, BROWSER_USER, { runs: true }))
   })
 
   app.get('/api/v1/ai/sessions/:id/pending-input', async (c) => {

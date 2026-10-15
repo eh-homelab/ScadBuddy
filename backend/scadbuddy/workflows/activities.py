@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import AbstractContextManager
@@ -28,9 +31,20 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
+from scadbuddy.render.bambu3mf import ArchiveTooLargeError, TooManyTrianglesError
+from scadbuddy.render.geometry_cache import (
+    mesh_geometry,
+    recolour_piece,
+    reusable,
+)
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, now
 from scadbuddy.render.jobs import (
+    LAYOUT_NAME,
+    MODEL_NAME,
+    PREVIEW_NAME,
+    RAW_RENDER_NAME,
     Prepared,
+    _thread_to_end,
     finish_piece_stage,
     library_lease,
     prepare_source,
@@ -39,13 +53,17 @@ from scadbuddy.render.jobs import (
     source_directory,
     timed_stage,
 )
+from scadbuddy.render.objects3mf import UnreadableObjectsError
+from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
+from scadbuddy.render.split import MaterialSplitError
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
@@ -86,6 +104,9 @@ class WorkerDeps:
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
     remote_assets: RemoteAssets | None = None
+    #: Where a piece's geometry is found for a later piece in other colours; None turns
+    #: that reuse off.
+    geometry: GeometryIndex | None = None
     #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
     revision: str = ""
     openscad_version: str = ""
@@ -117,6 +138,47 @@ def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextMa
     if not activity.in_activity():
         return timed_stage(metrics)
     return timed_stage(metrics, attempt=activity.info().attempt, retried=_retried)
+
+
+#: What a piece's stages raise on a bad render that no retry changes: a raw 3MF that
+#: does not split or parse, a mesh past the 3MF's limits (#604). Retrying one only
+#: triples the time to the failure. A truncated cache copy cannot raise these here:
+#: `_checkout` runs before the stage's ``try`` (its own errors stay retryable), and it
+#: unpacks a blob into a staging directory swapped in whole (`store.archive.unpack_dir`),
+#: so a stage never reads a half-written file.
+DETERMINISTIC = (
+    MaterialSplitError,
+    PaintCodeError,
+    UnreadableObjectsError,
+    ArchiveTooLargeError,
+    TooManyTrianglesError,
+    zipfile.BadZipFile,
+    ET.ParseError,
+)
+
+
+class IncompleteRenderError(Exception):
+    """The main render left a raw 3MF that is not a whole zip (a full disk, say). Not in
+    `DETERMINISTIC`, so the attempt is retried: a later stage's `zipfile.BadZipFile` on
+    a published 3MF is then a bad render, not a short write (#2997 review)."""
+
+
+def require_whole_3mf(path: Path) -> None:
+    """Raise `IncompleteRenderError` unless ``path`` opens as a zip whose members all
+    read back intact."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            broken = archive.testzip()
+    except (OSError, zipfile.BadZipFile, EOFError) as error:
+        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {error}") from None
+    if broken is not None:
+        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {broken} is corrupt")
+
+
+def _deterministic(error: Exception) -> ApplicationError:
+    """Non-retryable, named by its own type: the workflow's failure says which stage
+    raised what (`pipelines._failure_of`)."""
+    return ApplicationError(str(error), type=type(error).__name__, non_retryable=True)
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -319,6 +381,26 @@ def _observe_settled(metrics: Metrics, job: Job) -> None:
     )
 
 
+#: The attempt at which a still-failing ``project`` is logged: PROJECT_RETRY never gives
+#: up, so past here (some three minutes in) the write is likely failing for good (#857).
+PROJECT_RETRY_WARN_ATTEMPT = 12
+
+
+def _note_project_retry(metrics: Metrics | None, projection: Projection) -> None:
+    """Count a retried ``project`` and log one that keeps failing (#857)."""
+    attempt = activity.info().attempt if activity.in_activity() else 1
+    if attempt <= 1:
+        return
+    if metrics is not None:
+        metrics.project_retries.inc()
+    if attempt == PROJECT_RETRY_WARN_ATTEMPT or attempt % 100 == 0:
+        logger.warning(
+            "a render job's row has not been written after %d attempts",
+            attempt - 1,
+            extra={"job_id": projection.job_id, "state": projection.state},
+        )
+
+
 class RenderActivities:
     def __init__(self, deps: WorkerDeps) -> None:
         self.deps = deps
@@ -327,6 +409,7 @@ class RenderActivities:
         return [
             self.cached_piece,
             self.prepare,
+            self.reuse_geometry,
             self.render_main,
             self.render_solids,
             self.finish_piece,
@@ -442,7 +525,76 @@ class RenderActivities:
         problem = params_problem(schema, req.params)
         if problem is not None:
             raise _parameter_error(problem)
+        if req.revision is not None:
+            geometry = await asyncio.to_thread(
+                mesh_geometry,
+                req.slug,
+                req.file,
+                model_dir(prepared.scad, req.file),
+                prepared.libraries,
+                req.params,
+            )
+            if geometry is not None:
+                result.geometry_key, result.colours = geometry
         return result
+
+    @activity.defn(name="reuse_geometry")
+    async def reuse_geometry(
+        self, req: PieceRequest, prepared: PrepareResult
+    ) -> RenderMainResult | None:
+        """The piece as an earlier piece's geometry in its own colours, ready for
+        `finish_piece`; None when no finished piece shares its geometry key."""
+        d = self.deps
+        key = prepared.geometry_key
+        if d.geometry is None or key is None:
+            return None
+        row = await asyncio.to_thread(d.geometry.get, key)
+        if (
+            row is None
+            or row.piece_key == req.piece_key
+            or len(row.colours) != len(prepared.colours)
+        ):
+            return None
+        # Fetched first: on one volume `dir_for` would make the directory it looks for.
+        found = await _heartbeating(asyncio.create_task(d.blobs.fetch(row.piece_key)))
+        source = d.blobs.dir_for(row.piece_key)
+        if not found or not (source / PIECE_NAME).is_file():
+            await asyncio.to_thread(d.geometry.forget, key, row.piece_key)
+            return None
+        layout = json.loads(await asyncio.to_thread((source / LAYOUT_NAME).read_text, "utf-8"))
+        if not reusable(layout, row.colours):
+            return None
+        baseline = await _heartbeating(asyncio.create_task(d.blobs.checkout_fresh(req.piece_key)))
+        work = d.blobs.dir_for(req.piece_key)
+        with _stage(d.metrics)("recolour"):
+            await _heartbeating(
+                asyncio.create_task(
+                    _thread_to_end(
+                        recolour_piece,
+                        source,
+                        work,
+                        layout,
+                        RAW_RENDER_NAME,
+                        classes=row.colours,
+                        colours=prepared.colours,
+                        skip=frozenset({PIECE_NAME, MODEL_NAME, LAYOUT_NAME, PREVIEW_NAME}),
+                        layout_name=LAYOUT_NAME,
+                        preview_name=PREVIEW_NAME,
+                    )
+                )
+            )
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
+            )
+        )
+        logger.info(
+            "piece recoloured from an earlier piece's geometry",
+            extra={"piece_key": req.piece_key, "source": row.piece_key},
+        )
+        return RenderMainResult.model_validate(row.main)
 
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
@@ -473,6 +625,8 @@ class RenderActivities:
             raise _failure(error) from None
         except AssetUnavailableError as error:
             raise _unavailable(error, missing) from None
+        # Never published short: what `render_solids` reads is then whole.
+        await asyncio.to_thread(require_whole_3mf, d.blobs.dir_for(req.piece_key) / RAW_RENDER_NAME)
         await _heartbeating(
             asyncio.create_task(
                 d.blobs.publish_fresh(
@@ -511,6 +665,8 @@ class RenderActivities:
             raise _failure(error) from None
         except AssetUnavailableError as error:
             raise _unavailable(error, missing) from None
+        except DETERMINISTIC as error:
+            raise _deterministic(error) from None
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(
@@ -556,6 +712,8 @@ class RenderActivities:
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
+        except DETERMINISTIC as error:
+            raise _deterministic(error) from None
         piece = PieceResult(result=result, log_tail=main.log_tail)
         # Last, and atomically: from here on the piece is answered by `cached_piece`.
         await asyncio.to_thread(_write_piece, work, piece)
@@ -566,6 +724,22 @@ class RenderActivities:
                 )
             )
         )
+        if d.geometry is not None and prepared.geometry_key is not None:
+            # A cache's hint, after the piece is published: losing it costs a later
+            # recolour its shortcut, never this render. A recoloured piece comes with
+            # no key: its copied raw render keeps its source's colours.
+            try:
+                await asyncio.to_thread(
+                    d.geometry.put,
+                    prepared.geometry_key,
+                    req.piece_key,
+                    prepared.colours,
+                    main.model_dump(mode="json"),
+                )
+            except psycopg.Error:
+                logger.warning(
+                    "could not record the piece's geometry", extra={"piece_key": req.piece_key}
+                )
         return piece
 
     @activity.defn(name="render_preview_png")
@@ -676,6 +850,7 @@ class RenderActivities:
         For ``running``, whether the row is still open: an older build's API commits
         the row before it starts the run, so a release may have settled it first, and
         the run then renders nothing (#603). Every other state answers True."""
+        _note_project_retry(self.deps.metrics, projection)
         p = self.deps.projection
         if projection.state == "running":
             started = await asyncio.to_thread(p.mark_started, projection.job_id)

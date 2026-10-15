@@ -2,9 +2,11 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import type { AuditSink } from '../audit/log.js'
-import { BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
+import type { BackgroundTasks } from '../background/service.js'
 import type { NestedQueries } from '../builtins/web.js'
-import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { dirBodies, HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, type SavedBodies, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { PgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -28,14 +30,21 @@ import {
 // and each call, so a plugin disabled, removed or failing its egress check since is gone
 // at once, as it would be from a classic turn's next query.
 
-/** Under the state dir: a durable session's (or flow run's) saved http bodies, `<id>/http` (#2496). */
+/**
+ * Under the state dir: a flow run's saved http bodies, `flow-<id>/http` (#2496). A durable
+ * session's bodies are in Postgres since #2374; a bare `<id>` directory is one a pod left
+ * before that, cleared by the sweep and by forget.
+ */
 export const DURABLE_TURNS_DIR = 'durable-turns'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** How long a flow run's saved bodies are kept: its run has no row here to outlive. */
 export const FLOW_BODIES_KEPT_MS = 7 * 24 * 3600_000
 
-/** Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts). */
+/**
+ * Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts).
+ * A session's is only a directory left by a pod that ran before #2374.
+ */
 export async function removeTurnDir(root: string, subject: string): Promise<void> {
   const name = subject.startsWith('session-') ? subject.slice('session-'.length) : subject
   if (!UUID.test(name) && !(name.startsWith('flow-') && UUID.test(name.slice('flow-'.length)))) return
@@ -43,9 +52,10 @@ export async function removeTurnDir(root: string, subject: string): Promise<void
 }
 
 /**
- * The saved bodies of durable sessions that no longer exist, and of flow runs older than
- * FLOW_BODIES_KEPT_MS, on this pod (#2496): each replica keeps its own (the server is
- * pinned), so each sweeps its own, whichever pod the session was forgotten on.
+ * The saved bodies of flow runs older than FLOW_BODIES_KEPT_MS on this pod (#2496), and
+ * the directories of durable sessions that no longer exist, which only a pod that ran
+ * before #2374 wrote: each replica keeps its own (the server is pinned), so each sweeps
+ * its own, whichever pod the session was forgotten on.
  */
 export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
   const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
@@ -78,13 +88,14 @@ export type TurnServerDeps = {
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
-   * http_request, as a classic turn has it; its saved bodies under `saveRoot/<session>/http`,
-   * on this pod's own disk as a classic turn's are (never the shared payload volume), so
-   * the server is pinned to this replica.
+   * http_request, as a classic turn has it. A session's saved bodies are in Postgres
+   * (`sql`, #2374), as a classic turn's are; a flow's, which has no session, under
+   * `saveRoot/flow-<run>/http` on this pod's own disk (never the shared payload volume).
    */
   httpRequest?:
     | {
         saveRoot: string
+        sql: Sql
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
@@ -119,6 +130,8 @@ export type TurnServerDeps = {
         nested: (context: TurnContext) => NestedQueries
         audit?: AuditSink | undefined
         resolve?: Resolver
+        /** The session's background tasks (CronCreate, ScheduleWakeup, TaskStop); without them those are not offered. */
+        background?: { tasks: BackgroundTasks; tz: string; now?: () => Date; commandQueue?: string } | undefined
       }
     | undefined
 }
@@ -130,7 +143,11 @@ export function builtinNote(names: readonly string[]): string {
     `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
     'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
     'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
-    'shown under /workspace (the workspace_* tools see the same files), not a local disk.'
+    'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
+    (names.some((n) => BACKGROUND_BUILTINS.includes(n))
+      ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
+        'session as a new message when it is due and the session is idle.'
+      : '')
   )
 }
 
@@ -179,15 +196,19 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     }
     const http = deps.httpRequest
     if (http && httpRequestEnabled(await deps.settings?.get<unknown>(SETTING_HTTP_REQUEST))) {
-      const saveDir = path.join(http.saveRoot, context.session, 'http')
-      await mkdir(saveDir, { recursive: true })
+      let saved: SavedBodies
+      if (context.flow) {
+        const saveDir = path.join(http.saveRoot, context.session, 'http')
+        await mkdir(saveDir, { recursive: true })
+        saved = dirBodies(saveDir)
+      } else saved = new PgHttpBodies(http.sql, context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>
           connectInProcess(
             () =>
               httpRequestServer({
-                saveDir,
+                saved,
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,
@@ -214,7 +235,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     const problems = [...(forwarded?.problems ?? [])]
     const notes: string[] = []
     // A flow has no session workspace for the file tools to act on, nor a turn to tell.
-    const provided: ReadonlySet<string> = deps.builtins && !context.flow ? PROVIDED : new Set()
+    const provided: ReadonlySet<string> =
+      deps.builtins && !context.flow
+        ? new Set([...PROVIDED].filter((n) => deps.builtins!.background || !BACKGROUND_BUILTINS.includes(n)))
+        : new Set()
     const loaded = deps.packages ? await deps.packages.load() : undefined
     let forwardedPackages: PackageServers | undefined
     let shared: TurnPackage[] | undefined
@@ -271,9 +295,21 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           signal: context.signal,
           ...(builtins.resolve ? { resolve: builtins.resolve } : {}),
         }
+        const tasks = builtins.background
+        const background = tasks
+          ? {
+              tasks: tasks.tasks,
+              sessionId: context.session,
+              owner: context.owner,
+              tz: tasks.tz,
+              now: tasks.now ?? (() => new Date()),
+              commandQueue: tasks.commandQueue,
+              workspace: builtins.files,
+            }
+          : undefined
         servers.push({
           name: BUILTIN_SERVER,
-          connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web }))),
+          connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web, background }))),
           // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
           tierOf: () => 'outward',
           mayPark: () => true,

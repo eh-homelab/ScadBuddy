@@ -4,7 +4,8 @@ import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { createTurnSlot, slotHttpContext, type TurnContext } from '../src/sessions/turnSlot.js'
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 import { TurnTrace } from '../src/telemetry/turn.js'
-import { turnRunnerForTest, type TurnRunnerTestOptions } from './support/turnRunner.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
+import { turnRunnerForTest, type TurnRunnerTestOptions, unusedSql } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
 // callback it assembles reads the current turn from the slot, so the options
@@ -43,6 +44,17 @@ describe('TurnRunner', () => {
     slot.clear()
     expect(await decide(request('t2'))).toMatchObject({ approved: false, message: 'no turn is running' })
     expect(gateCalls.seen).toHaveLength(1)
+  })
+
+  it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
+    const { runner, session, principal } = await turnRunnerForTest()
+    const plain = await runner.assemble(session, principal)
+    const agent = { ...session, agentModel: 'claude-haiku-test', agentEffort: 'low' as const, agentType: 'model-author' }
+    const turn = await runner.assemble(agent, principal)
+    expect(turn.run).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agent: { name: 'model-author' } })
+    expect(turn.run.agent?.definition.prompt).toContain('You author ScadBuddy templates')
+    expect(turn.fingerprintParts).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agentType: 'model-author' })
+    expect(turn.fingerprintParts).not.toEqual(plain.fingerprintParts)
   })
 
   it('fingerprints an unchanged configuration the same on every assembly, and a moved plugin URL differently', async () => {
@@ -92,7 +104,7 @@ describe('TurnRunner', () => {
 
   it("gives the http tool the slot's turn id and signal as each request reads them, and an aborted signal between turns", () => {
     const slot = createTurnSlot()
-    const context = slotHttpContext({ saveDir: '/tmp/http', secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
+    const context = slotHttpContext({ saved: new PgHttpBodies(unusedSql, 'unused'), secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
     expect(context.turnId).toBeUndefined()
     expect(context.signal?.aborted).toBe(true)
     expect((context.signal?.reason as Error).message).toBe('no turn is running')
@@ -114,8 +126,11 @@ describe('TurnRunner', () => {
     const keys = new Set<string>()
     for (const resume of [false, true]) {
       const { runner, session, principal } = await turnRunnerForTest({ resume })
-      const turn = await runner.assemble(session, principal)
-      for (const key of Object.keys(turn.run)) keys.add(key)
+      // And a Workflow agent's chat, the only one given `effort` and `agent`.
+      for (const s of [session, { ...session, agentEffort: 'low' as const, agentType: 'model-author' }]) {
+        const turn = await runner.assemble(s, principal)
+        for (const key of Object.keys(turn.run)) keys.add(key)
+      }
     }
     // `maxRetries` is the one key set after assembly, per attempt (sessions/warmTurn.ts).
     keys.add('maxRetries')

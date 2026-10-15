@@ -39,6 +39,7 @@ from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.download_cache import DownloadCache
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ async def gather_context(
     library_subject: int | None = None,
     cache: Path | None = None,
     budget: ReadBudget | None = None,
+    downloads: DownloadCache | None = None,
 ) -> AnalysisContext:
     """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -93,7 +95,9 @@ async def gather_context(
         async with client_for(settings) as client:
             if library_subject is not None:
                 assert cache is not None, "a library file's mesh is cached"
-                await _read_library_geometry(context, client, cache, library_subject, budget)
+                await _read_library_geometry(
+                    context, client, cache, library_subject, budget, downloads
+                )
             await _read_bambuddy(context, client, settings, remembered, library_file_id)
 
     model = context.printer.model if context.printer and context.printer.model else None
@@ -133,11 +137,12 @@ async def _read_library_geometry(
     cache: Path,
     file_id: int,
     budget: ReadBudget | None,
+    downloads: DownloadCache | None = None,
 ) -> None:
     """The library file's plate, measured as an output's is (#1753)."""
     try:
         context.geometry = await library_geometry(
-            client, cache, file_id, context.request.plate_id, budget
+            client, cache, file_id, context.request.plate_id, budget, downloads
         )
     except NotViewableError as error:
         context.unavailable["geometry"] = f"the 3MF cannot be analysed: {error.reason}"

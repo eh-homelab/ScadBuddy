@@ -13,6 +13,12 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
+import { managerAgents } from './background/workflowAgents.js'
+import { backgroundActivities, managerSender } from './background/activities.js'
+import { agentTimezone } from './background/schedule.js'
+import { BackgroundTasks } from './background/service.js'
+import { BackgroundTaskStore } from './background/store.js'
+import { temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -78,7 +84,7 @@ import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
-import { DurableTurns } from './sessions/durable.js'
+import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
@@ -302,6 +308,22 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
+// This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
+// Monitor commands, which run where its turns' Bash runs.
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
+// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
+// payloads are task ids only, so its client has no codec.
+const backgroundTasks =
+  config.temporalAddress && database
+    ? new BackgroundTasks({
+        store: new BackgroundTaskStore(database.sql),
+        runner: temporalTaskRunner(
+          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
+          TASK_QUEUE,
+        ),
+      })
+    : undefined
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -370,6 +392,8 @@ const sessions =
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
+        // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
+        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: HOST_QUEUE } } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -492,8 +516,7 @@ if (database) {
 // What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
-// own queue, HOST_QUEUE, served by `hostWorkers` below.
-const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// own queue, HOST_QUEUE (above), served by `hostWorkers` below.
 // AgentSession's turns on this replica (unified runtime spec 2026-10-13 §5.2): its own queue,
 // `agent-sessions.<identity>`, beside HOST_QUEUE (temporal/session/hostWorkers.ts says why), on
 // this replica's warm processes. `acquire_worker` on agent-tools hands it out.
@@ -522,7 +545,7 @@ const turnToolDeps = temporal
         ...(settings ? { settings } : {}),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
         // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
@@ -540,6 +563,8 @@ const turnToolDeps = temporal
               builtins: {
                 files: workspace,
                 audit,
+                // A durable session's Monitor commands run in agent-durable, where its Bash does.
+                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: DURABLE_TASK_QUEUE } } : {}),
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
@@ -612,6 +637,19 @@ const sessionAcquire =
       })
     : undefined
 
+// One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
+const background =
+  backgroundTasks && sessions
+    ? backgroundActivities({
+        store: backgroundTasks.store,
+        send: managerSender(sessions),
+        tz: agentTimezone(),
+        paths,
+        secrets: toolServices.secrets,
+        agents: managerAgents(sessions),
+        workspace,
+      })
+    : undefined
 const temporalWorker =
   temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
@@ -658,6 +696,7 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
+          ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -686,7 +725,7 @@ const sessionWorker =
       })
     : undefined
 // This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
-// (#2320) on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
 const hostWorkers =
@@ -695,7 +734,12 @@ const hostWorkers =
         address: temporal.address,
         namespace: config.temporalNamespace,
         identity: replicaIdentity(),
-        pinned: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        pinned: {
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
+          // A classic session's Monitor commands, in its directory on this replica.
+          ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
+        },
         ...(sessionHosting
           ? {
               sessions: {
@@ -804,6 +848,8 @@ const app = createApp({
   ...(attachments ? { attachments } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
+  // The panel's background tasks (routes/backgroundTasks.ts).
+  ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,

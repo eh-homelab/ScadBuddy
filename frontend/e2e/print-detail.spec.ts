@@ -36,6 +36,29 @@ test.describe('print detail', () => {
     await expect(lightbox).toBeHidden()
   })
 
+  test('attaches a photo of the finished print, captions it and puts it in the gallery (#309)', async ({ page }) => {
+    await page.goto('/prints/35')
+    const section = page.getByRole('region', { name: 'Photos and videos' })
+    await section.getByLabel('Choose files').setInputFiles({
+      name: 'on-the-desk.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    })
+    const item = section.getByRole('listitem', { name: 'on-the-desk.png' })
+    await expect(item.getByRole('img', { name: 'on-the-desk.png' })).toBeVisible()
+
+    await item.getByLabel('Caption for on-the-desk.png').fill('Finished, on the desk')
+    await item.getByRole('button', { name: 'Save' }).click()
+    const captioned = section.getByRole('listitem', { name: 'Finished, on the desk' })
+    await expect(captioned).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'Gallery' }).getByRole('button', { name: 'Open Finished, on the desk' }),
+    ).toBeAttached()
+
+    await captioned.getByRole('button', { name: 'Add to the template’s gallery' }).click()
+    await expect(captioned.getByRole('button', { name: 'Added to the gallery' })).toBeDisabled()
+  })
+
   test('downloads a file and the parameters', async ({ page }) => {
     await page.goto('/prints/35')
     const files = page.getByRole('region', { name: 'Files' })

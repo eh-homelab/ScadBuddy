@@ -14,9 +14,12 @@ from httpx import Response
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy import library_view
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
@@ -33,7 +36,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
 )
-from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
+from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, job_file, set_fake_env, wait_for_job
 from tests.support.operations import press
 from tests.support.store import local_content, store_pool
 
@@ -169,6 +172,86 @@ def test_one_plate_of_a_render_is_its_own_preview(client: TestClient, model: str
     whole = client.get(f"/api/v1/jobs/{job_id}/preview.glb")
     assert plate.content != whole.content, "cut from the 3MF, not the whole preview"
     assert client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 9}).status_code == 404
+
+
+def test_a_plate_is_cut_once_and_the_browser_may_keep_it(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2913: switching plates back and forth does not re-read and re-cut the 3MF."""
+    cuts: list[int] = []
+    real = library_view.plate_glb
+
+    def counted(payload: bytes, plate: int, budget: object) -> bytes:
+        cuts.append(plate)
+        return real(payload, plate, budget)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jobs_api, "plate_glb", counted)
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 2}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    first = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    again = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+
+    assert first.status_code == again.status_code == 200
+    assert again.content == first.content
+    assert cuts == [1]
+    assert first.headers["cache-control"] == jobs_api.PLATE_GLB_CACHE_CONTROL
+
+
+def test_the_plate_cache_drops_the_least_recently_used_past_its_cap() -> None:
+    cache = jobs_api._PlateCache(10)
+    cache.put(("a", 1), b"12345")
+    cache.put(("b", 1), b"12345")
+    assert cache.get(("a", 1)) == b"12345"
+    cache.put(("c", 1), b"12345")
+    assert cache.get(("b", 1)) is None
+    assert cache.get(("a", 1)) == b"12345"
+    cache.put(("big", 1), b"x" * 11)
+    assert cache.get(("big", 1)) is None
+
+
+def test_a_plate_of_an_unreadable_or_vanished_3mf(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2913: a 3MF that no longer reads is a 422, one that is gone a 404."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+    three_mf = job_file(client, job_id, "model.3mf")
+
+    three_mf.write_bytes(b"not a zip")
+    unreadable = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert unreadable.status_code == 422, unreadable.text
+
+    three_mf.unlink()
+    gone = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert gone.status_code == 404, gone.text
+    assert "is gone" in gone.json()["detail"]
+
+
+def test_a_plate_too_big_to_read_is_refused_as_an_outputs_plate_is(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3554: out of memory cutting a job's plate is the output route's 422, not a 500."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 4}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    def oom(*_: object) -> object:
+        raise MemoryError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(library_view, "read_plate_parts", oom)
+        refused = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == str(ReadOutOfMemoryError())
 
 
 def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:

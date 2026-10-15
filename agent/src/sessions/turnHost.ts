@@ -265,7 +265,8 @@ export class TurnHost {
         failure: run.failure,
         secrets: run.secrets,
         turnUsd: run.spentUsd,
-        cutUsd: stopped !== undefined || !result ? run.cutUsd : 0,
+        // WebFetch's own model calls are in no result, so they are added in every outcome (#2684).
+        cutUsd: (stopped !== undefined || !result ? run.cutUsd : 0) + run.nestedUsd,
       }
       const tally = tallyTurn(session, end)
       outcome = tally.outcome

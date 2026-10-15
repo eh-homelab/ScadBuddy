@@ -150,7 +150,7 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     webUrl = `http://127.0.0.1:${(web.address() as { port: number }).port}/page`
     const turnDeps = {
       sessions: new PgSessionOwners(db.sql),
-      servers: turnServers({ httpRequest: { saveRoot: dir } }),
+      servers: turnServers({ httpRequest: { saveRoot: dir, sql: db.sql } }),
     }
     tools = AgentWorker.start({
       address: env.address,

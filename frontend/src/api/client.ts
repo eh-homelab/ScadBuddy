@@ -1,9 +1,13 @@
 import type {
   InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  BackgroundTask,
   DecisionCreate,
   FixApply,
   FixPreview,
@@ -22,6 +26,7 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  GlyphCoverage,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -82,6 +87,7 @@ import type {
   PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
   TimelapseFrames,
   PrintPage,
@@ -99,6 +105,7 @@ import type {
   PrintRun,
   FlowDecided,
   FlowProposal,
+  FlowRunQueue,
   FlowDefinition,
   FlowGrantSpec,
   FlowGrantView,
@@ -113,7 +120,11 @@ import type {
   FlowRunStarted,
   FlowRunView,
   FlowState,
+  FlowStandingGrant,
   FlowSummary,
+  FlowTrigger,
+  FlowTriggerCreate,
+  FlowTriggerUpdate,
   FlowVersion,
   Operation,
   OperationAccepted,
@@ -598,6 +609,51 @@ export async function command<T>(
 }
 
 /**
+ * A multipart upload as a command (#1054). XHR rather than `fetch`, which reports no
+ * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
+ * to 1. `form` builds the body afresh for each re-send.
+ */
+function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+  // A command (#1054): one key for this upload, kept on a re-send after an answer
+  // that never arrived, so the server adds the item once.
+  const key = newRequestId()
+  const send = () =>
+    new Promise<{ status: number; body: T | OperationAccepted }>((resolve, reject) => {
+      const body = form()
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}${path}`)
+      xhr.setRequestHeader('Accept', 'application/json')
+      xhr.setRequestHeader('Idempotency-Key', key)
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+      })
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as T | OperationAccepted })
+          return
+        }
+        reject(new ApiError(xhrProblem(xhr)))
+      }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
+      xhr.onerror = () =>
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
+      xhr.onabort = () =>
+        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+      xhr.send(body)
+    })
+  // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+  return reattach(send, undefined, { bounded: true }).then((first) => followOperation<T>(first))
+}
+
+/**
  * A command's first answer to its end: the route's own body, or a 202's operation
  * followed through `GET /operations/{id}` to its result, or to the problem the route
  * would have answered.
@@ -725,6 +781,9 @@ export const api = {
       }),
     }),
 
+  /** #2482 — a run's one queue, from the agent: its own calls, its child sessions' and its grant request. */
+  getFlowRunQueue: (id: string) => request<FlowRunQueue>(`/ai/flow-runs/${seg(id)}/queue`),
+
   /** #2482 — a parent's proposal beside the call it narrows (the person's only). */
   getFlowProposal: (id: string, callId: string) =>
     request<FlowProposal>(`/workflow-runs/${seg(id)}/proposals/${seg(callId)}`),
@@ -796,6 +855,36 @@ export const api = {
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/decline`, { method: 'POST' }),
   revokeFlowGrant: (id: string) =>
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
+  // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
+  // as whoever made it. A standing grant is approved as sent from here; only a person
+  // approves or declines an agent's.
+  /** The newest 200, the route's most. */
+  listFlowTriggers: (name?: string) =>
+    request<FlowTrigger[]>(`/flow-triggers?limit=200${name ? `&name=${encodeURIComponent(name)}` : ''}`),
+  getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
+  createFlowTrigger: (body: FlowTriggerCreate) =>
+    request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
+  updateFlowTrigger: (id: string, body: FlowTriggerUpdate) =>
+    request<FlowTrigger>(`/flow-triggers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  pauseFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/pause`, { method: 'POST' }),
+  resumeFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/resume`, { method: 'POST' }),
+  deleteFlowTrigger: (id: string) => request<void>(`/flow-triggers/${seg(id)}`, { method: 'DELETE' }),
+  /** `seen` is the trigger's as it was shown: the server refuses (409) when it changed since. */
+  attachFlowTriggerGrant: (id: string, spec: FlowGrantSpec, seen: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, seen }),
+    }),
+  approveFlowTriggerGrant: (id: string, seen: string, spec?: FlowGrantSpec) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec, seen } : { seen }),
+    }),
+  declineFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
 
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
@@ -1038,48 +1127,18 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ): Promise<ModelSummary> => {
-    // A command (#1054): one key for this upload, kept on a re-send after an answer
-    // that never arrived, so the server adds the item once.
-    const key = newRequestId()
-    const send = () =>
-      new Promise<{ status: number; body: ModelSummary | OperationAccepted }>((resolve, reject) => {
+  ): Promise<ModelSummary> =>
+    uploadForm<ModelSummary>(
+      `/models/${seg(slug)}/media`,
+      () => {
         const body = new FormData()
         body.append('file', file)
         if (options.caption) body.append('caption', options.caption)
         if (options.poster) body.append('poster', options.poster)
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-        xhr.setRequestHeader('Accept', 'application/json')
-        xhr.setRequestHeader('Idempotency-Key', key)
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-        })
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as ModelSummary | OperationAccepted })
-            return
-          }
-          reject(new ApiError(xhrProblem(xhr)))
-        }
-        // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-        // have landed, and `mayHaveRun` says so.
-        xhr.onerror = () =>
-          reject(
-            new ApiError({
-              type: UNANSWERED,
-              title: 'The upload failed',
-              status: 0,
-              detail: 'The upload failed',
-            }),
-          )
-        xhr.onabort = () =>
-          reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-        xhr.send(body)
-      })
-    // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
-    return reattach(send, undefined, { bounded: true }).then((first) => followOperation<ModelSummary>(first))
-  },
+        return body
+      },
+      onProgress,
+    ),
 
   patchMedia: (slug: string, id: string, caption: string) =>
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
@@ -1238,13 +1297,29 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
-  arrangeOutputs: (body: ArrangeRequest) =>
-    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
+   * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
+   */
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
+    )
+  },
 
-  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
-  backfillOutput: (outputId: string) =>
-    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+  /**
+   * #902 — re-render an output saved before Arrange; poll the job, then the output's
+   * `backfill`. #2280 — its render is started like any other, so it is sent again with
+   * the same key while the server is still accepting it, until `signal` aborts.
+   */
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
+  },
 
   /**
    * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
@@ -1284,6 +1359,10 @@ export const api = {
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
     command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
@@ -1313,6 +1392,41 @@ export const api = {
     command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
+    }),
+
+  /** #309 — adds a photo or video of the finished object to the print. */
+  addPrintAttachment: (
+    archiveId: number,
+    file: File,
+    caption: string,
+    onProgress?: (fraction: number) => void,
+  ): Promise<PrintAttachment> =>
+    uploadForm<PrintAttachment>(
+      `/prints/${archiveId}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (caption) body.append('caption', caption)
+        return body
+      },
+      onProgress,
+    ),
+
+  /** #309 — an empty caption takes it off. */
+  captionPrintAttachment: (archiveId: number, id: number, caption: string) =>
+    command<PrintAttachment>(`/prints/${archiveId}/attachments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    }),
+
+  deletePrintAttachment: (archiveId: number, id: number) =>
+    command<void>(`/prints/${archiveId}/attachments/${id}`, { method: 'DELETE' }),
+
+  /** #309 — copies the attachment into the template's gallery. */
+  promotePrintAttachment: (archiveId: number, id: number, slug: string) =>
+    command<ModelSummary>(`/prints/${archiveId}/attachments/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
     }),
 
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
@@ -1415,6 +1529,16 @@ export const api = {
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
+
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
 
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
@@ -1571,6 +1695,12 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #981 — the printer's live camera, Bambuddy's MJPEG for an `<img>`: closing the
+   * image (unmounting it) ends the stream. */
+  printerCameraStreamUrl: (printerId: number) => `${API_BASE}/print/printers/${printerId}/camera/stream`,
+  /** #796 — one camera frame; `at` makes each refresh a new request. */
+  printerCameraUrl: (printerId: number, at: number) => `${API_BASE}/print/printers/${printerId}/camera?at=${at}`,
 
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
@@ -1731,6 +1861,10 @@ export const api = {
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 
+  /** #2358 — the characters of `text` the font has no glyph for, which a render leaves out. */
+  getGlyphs: (font: string, text: string) =>
+    request<GlyphCoverage>(`/fonts/glyphs?${new URLSearchParams({ font, text })}`),
+
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
   listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
     const search = new URLSearchParams()
@@ -1786,6 +1920,10 @@ export const api = {
 
   /** #169 — library checkouts on the volume, with the models whose live pins read each. */
   listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
+
+  /** #2770 — removes one checkout from the volume; a 409 while any live pin or running render reads it. */
+  removeLibraryCheckout: (name: string, commit: string) =>
+    command<void>(`/libraries/${seg(name)}?commit=${encodeURIComponent(commit)}`, { method: 'DELETE' }),
 
   /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
   listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
@@ -1959,6 +2097,13 @@ export const api = {
   /** #2329 — deletes one file from a session's workspace. */
   deleteAiSessionFile: (id: string, path: string) =>
     request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
+
+  /** A session's background tasks (CronCreate, ScheduleWakeup): the active ones first, then the last ended. */
+  listAiBackgroundTasks: (id: string) => request<{ tasks: BackgroundTask[] }>(`/ai/sessions/${seg(id)}/background-tasks`),
+
+  /** Cancels one; the session's owner only. */
+  cancelAiBackgroundTask: (id: string, taskId: string) =>
+    request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
 
   /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
   getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),

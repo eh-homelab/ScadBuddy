@@ -11,6 +11,7 @@ import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { ReadmeButton } from '../components/readme/ReadmeButton'
 import { MediaButton } from '../components/media/MediaButton'
 import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
@@ -374,7 +375,8 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
-  useRenderAutoRetry(renderError, rendering, retryRender, debounced)
+  // Armed only while the values would render: retryRender does nothing without them.
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced, Boolean(settled && seed && !invalid))
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
@@ -1111,6 +1113,7 @@ export function CustomizePage() {
           {modelState.data && origin && (
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
+          {modelState.data?.has_readme && <ReadmeButton slug={slug} />}
           {origin && (
             <DuplicateModelButton slug={slug} name={displayName} />
           )}
@@ -1200,11 +1203,7 @@ export function CustomizePage() {
               {uiOrigin}
             </div>
             {/* Capped: in full screen this row's height comes out of the template's own. */}
-            {unmigrated && (
-              <div className="max-h-[30vh] overflow-auto">
-                <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />
-              </div>
-            )}
+            {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} rows={4} capped />}
           </div>
           {templateUi}
           {actionBar}

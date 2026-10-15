@@ -37,6 +37,7 @@ import type {
   Plate,
   PlateFit,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
   TimelapseFrames,
   PrintPage,
@@ -169,6 +170,9 @@ const state = {
   mediaFiles: new Map<string, ArrayBuffer>(),
   /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
   pulledTimelapses: new Map<number, string>(),
+  /** #309 — the photos and videos added to each print, by archive id. */
+  printAttachments: new Map<number, PrintAttachment[]>(),
+  nextAttachment: 1,
   /** #311 — the queue items "Print again" made, newest last. */
   reprints: [] as { archive_id: number; queue_item_id: number }[],
   /** #722 — each built-in's media overlay, read from its record on its first write. */
@@ -220,9 +224,10 @@ function runJob(jobId: string): void {
         job.status = 'cancelled'
         job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
-        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
-        announce('job.superseded')
+        // Withdrawn with no replacement: `render/projection.py`'s `_settled_kind`
+        // announces `job.cancelled`, keeping `job.superseded` for a job a newer render
+        // replaced (#607).
+        announce('job.cancelled')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
@@ -320,6 +325,8 @@ export function resetMockState(): void {
   state.renderColors = {}
   state.mediaFiles.clear()
   state.pulledTimelapses.clear()
+  state.printAttachments.clear()
+  state.nextAttachment = 1
   state.reprints = []
   state.mediaOverlays.clear()
   state.catalogueOffline = false
@@ -2923,6 +2930,14 @@ export const handlers = [
     })
   }),
 
+  http.patch(`${base}/outputs/:id`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const { name } = (await request.json()) as { name?: string | null }
+    output.name = name?.trim() || null
+    return HttpResponse.json(output)
+  }),
+
   http.delete(`${base}/outputs/:id`, ({ params }) => {
     state.outputs = state.outputs.filter((o) => o.id !== params['id'])
     return new HttpResponse(null, { status: 204 })
@@ -2977,14 +2992,17 @@ export const handlers = [
     const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
     const pulled = state.pulledTimelapses.get(print.archive_id)
     const remote = (fixtures.printerFiles[print.archive_id] ?? []).filter((file) => file.name !== pulled)
+    const added = state.printAttachments.get(print.archive_id) ?? []
+    const media = added.length > 0 ? { ...print.media, attachments: [...print.media.attachments, ...added] } : print.media
     return HttpResponse.json({
       ...print,
+      attachment_count: print.attachment_count + added.length,
       has_timelapse: print.has_timelapse || pulled !== undefined,
       media:
         pulled === undefined
-          ? print.media
+          ? media
           : {
-              ...print.media,
+              ...media,
               timelapse: {
                 url: `/api/v1/prints/${print.archive_id}/timelapse`,
                 poster_url: `/api/v1/prints/${print.archive_id}/timelapse/frames/0`,
@@ -2997,6 +3015,83 @@ export const handlers = [
           : null,
     } satisfies PrintDetail)
   }),
+
+  // #309 — a photo or video of the finished print, typed by its name here (the server
+  // reads the bytes).
+  http.post(`${base}/prints/:archiveId/attachments`, async ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    // Read as text, not `formData()`: undici's parser refuses the body jsdom's XHR
+    // sends. The part's type decides; a part sent with no name is named by it.
+    const raw = await request.text()
+    const type = /name="file";[^\r]*\r\nContent-Type: ([^\r]+)/.exec(raw)?.[1]
+    if (type === undefined) return problem(422, 'Unprocessable Content', 'the upload has no `file` part')
+    const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/webm': 'webm' }[type]
+    if (extension === undefined) {
+      return problem(415, 'Unsupported Media Type', 'the upload is not a PNG, JPEG or WebP photo, or an MP4 or WebM video')
+    }
+    const video = type.startsWith('video/')
+    const sent = /filename="([^"]*)"/.exec(raw)?.[1]
+    const file = {
+      name: sent && sent !== 'blob' ? sent : `${video ? 'video' : 'photo'}-${state.nextAttachment}.${extension}`,
+      size: raw.length,
+    }
+    const id = state.nextAttachment++
+    const caption = /name="caption"\r\n\r\n([^\r]*)\r\n/.exec(raw)?.[1]
+    const added: PrintAttachment = {
+      id,
+      kind: video ? 'video' : 'photo',
+      caption: caption || null,
+      url: `/api/v1/prints/${print.archive_id}/attachments/${id}/file`,
+      filename: file.name,
+      size_bytes: file.size,
+      promoted_to: [],
+      created_at: '2026-10-13T12:00:00Z',
+    }
+    state.printAttachments.set(print.archive_id, [...(state.printAttachments.get(print.archive_id) ?? []), added])
+    return HttpResponse.json(added, { status: 201 })
+  }),
+
+  http.patch(`${base}/prints/:archiveId/attachments/:id`, async ({ params, request }) => {
+    const list = state.printAttachments.get(Number(params['archiveId'])) ?? []
+    const found = list.find((each) => String(each.id) === params['id'])
+    if (!found) return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no attachment ${String(params['id'])}`)
+    const { caption } = (await request.json()) as { caption: string | null }
+    found.caption = caption?.trim() || null
+    return HttpResponse.json(found)
+  }),
+
+  http.delete(`${base}/prints/:archiveId/attachments/:id`, ({ params }) => {
+    const archiveId = Number(params['archiveId'])
+    const list = state.printAttachments.get(archiveId) ?? []
+    if (!list.some((each) => String(each.id) === params['id'])) {
+      return problem(404, 'Not Found', `print ${archiveId} has no attachment ${String(params['id'])}`)
+    }
+    state.printAttachments.set(
+      archiveId,
+      list.filter((each) => String(each.id) !== params['id']),
+    )
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  http.post(`${base}/prints/:archiveId/attachments/:id/promote`, async ({ params, request }) => {
+    const found = (state.printAttachments.get(Number(params['archiveId'])) ?? []).find(
+      (each) => String(each.id) === params['id'],
+    )
+    if (!found) return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no attachment ${String(params['id'])}`)
+    const { slug } = (await request.json()) as { slug: string }
+    const model = state.models.find((each) => each.slug === slug)
+    if (!model) return problem(404, 'Not Found', `there is no template ${slug}`)
+    if (found.promoted_to.includes(slug)) {
+      return problem(409, 'Conflict', `this attachment is in ${slug}'s gallery already`)
+    }
+    found.promoted_to = [...found.promoted_to, slug]
+    return HttpResponse.json(model)
+  }),
+
+  http.get(`${base}/prints/:archiveId/attachments/:id/file`, () =>
+    HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } }),
+  ),
 
   // #311 — "Print again": `POST /queue/` with the archive, on its printer.
   http.post(`${base}/prints/:archiveId/reprint`, ({ params }) => {

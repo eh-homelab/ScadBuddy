@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+import re
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, BinaryIO, Literal, Self
+from typing import IO, Any, Literal, Self
 
 import httpx
 from fastapi import status
@@ -53,6 +54,8 @@ from scadbuddy.bambuddy.models import (
     LocalPresetCatalogue,
     MoveResult,
     PresetCatalogue,
+    PresetRef,
+    PresetValues,
     Printer,
     PrinterMedia,
     PrinterStatus,
@@ -84,6 +87,9 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
+#: The largest camera frame read into memory: a JPEG of a printer's camera is well
+#: under a megabyte, so past this Bambuddy is answering something else (#1006).
+MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
@@ -91,11 +97,31 @@ TRASH_PAGE = 500
 #: The Bambuddy permission that shows a caller every user's trash (``Permission``,
 #: ``backend/app/core/permissions.py`` line 62 at v1.2.5.5).
 LIBRARY_DELETE_ALL = "library:delete_all"
+#: A live camera stream never ends, so it has no total timeout; a camera that sends no
+#: frame for ``read`` seconds has stalled, and the stream ends.
+CAMERA_STREAM_TIMEOUT = httpx.Timeout(10.0, read=30.0)
+#: What Bambuddy's ``/camera/stream`` answers with.
+MJPEG_TYPE = "multipart/x-mixed-replace; boundary=frame"
+#: A multipart MJPEG type with a plain boundary token: the only type a stream is
+#: served as, since ScadBuddy's origin would otherwise serve whatever Bambuddy (or an
+#: external camera behind it) labels the bytes, ``text/html`` included.
+_MJPEG = re.compile(
+    r"multipart/x-mixed-replace;\s*boundary=\"?([A-Za-z0-9'()+_,.\-]{1,70})\"?", re.I
+)
+
+
+def mjpeg_type(upstream: str | None) -> str:
+    """The content type to serve a camera stream as: ``multipart/x-mixed-replace`` with
+    the upstream's boundary, since the parts are split on it; :data:`MJPEG_TYPE` when the
+    upstream names no usable boundary. Never the upstream's type itself."""
+    match = _MJPEG.fullmatch((upstream or "").strip())
+    return f"multipart/x-mixed-replace; boundary={match.group(1)}" if match else MJPEG_TYPE
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
 #: 2026-10-01 §4). A closed set, so a span name never carries an id or free text.
 Operation = Literal[
+    "media.attachment",
     "archives.list",
     "archives.photo.delete",
     "archives.photo.upload",
@@ -142,6 +168,7 @@ Operation = Literal[
     "media.timelapse",
     "printers.available_filaments",
     "printers.camera.snapshot",
+    "printers.camera.stream",
     "printers.camera.token",
     "printers.inventory_remain",
     "printers.list",
@@ -159,6 +186,7 @@ Operation = Literal[
     "slice.job.status",
     "slice.start",
     "slicer.local_presets",
+    "slicer.preset_values",
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
@@ -180,6 +208,12 @@ def _call_span(
     if detached:
         return detached_span(name, kind=SpanKind.CLIENT, attributes=attributes)
     return span(name, kind=SpanKind.CLIENT, attributes=attributes)
+
+
+class BambuddyAnswerError(ApiError):
+    """What Bambuddy's answer did wrong, found while reading it inside
+    :meth:`BambuddyClient.stream`'s ``async with`` (a frame over its cap): it fails the
+    call's span, as a refusal does. Any other error the reader raises leaves it alone."""
 
 
 @dataclass(frozen=True)
@@ -313,6 +347,28 @@ class BambuddyClient:
         )
         return PrinterStatus.model_validate(response.json())
 
+    async def _camera_token(self, *, what: str) -> str:
+        """A camera stream token, minted under ``camera:view``. An answer without one is
+        a 502, as any unexpected body is (#2752 review)."""
+        minted = await self._send(
+            "POST",
+            "/printers/camera/stream-token",
+            scope=Scope.READ_STATUS,
+            operation="printers.camera.token",
+            what=what,
+        )
+        try:
+            body = minted.json()
+        except ValueError:
+            body = None
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no camera token when asked to {what}",
+            )
+        return token
+
     async def camera_snapshot(self, printer_id: int) -> bytes:
         """One JPEG frame from the printer's camera (#796).
 
@@ -322,22 +378,63 @@ class BambuddyClient:
         take Bambuddy up to 15 s; a camera that gives no frame is its 503.
         """
         what = f"capture the camera of printer {printer_id}"
-        minted = await self._send(
-            "POST",
-            "/printers/camera/stream-token",
-            scope=Scope.READ_STATUS,
-            operation="printers.camera.token",
-            what=what,
-        )
-        response = await self._send(
-            "GET",
+        token = await self._camera_token(what=what)
+        frame = bytearray()
+        async with self.stream(
             f"/printers/{printer_id}/camera/snapshot",
-            scope=Scope.READ_STATUS,
             operation="printers.camera.snapshot",
             what=what,
-            params={"token": minted.json()["token"]},
-        )
-        return response.content
+            params={"token": token},
+            # Nothing sends a Range here, so a 416 is no seek: map it, never a "frame".
+            pass_416=False,
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                frame += chunk
+                if len(frame) > MAX_CAMERA_FRAME_BYTES:
+                    raise BambuddyAnswerError(
+                        status.HTTP_502_BAD_GATEWAY,
+                        f"Bambuddy's frame was over {MAX_CAMERA_FRAME_BYTES} bytes when asked"
+                        f" to {what}",
+                    )
+        return bytes(frame)
+
+    @asynccontextmanager
+    async def camera_stream(
+        self, printer_id: int, *, fps: int
+    ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+        """The printer's live camera as Bambuddy's MJPEG stream (#981): its content type
+        (``multipart/x-mixed-replace; boundary=frame``) and its bytes, open until the
+        context exits. A refusal (no printer, no camera) raises before anything is
+        yielded, so a caller can still answer it as an error.
+
+        Leaving the context closes the connection, and that is the whole release:
+        Bambuddy fans one camera out to every viewer and stops it 5 s after the last
+        one disconnects (``camera.py``'s broadcaster). ``/camera/stop`` is never
+        called: once no subscriber is counted it force-stops every stream of the
+        printer, an external camera's other viewers included. The token is minted
+        here, as the snapshot's is, and never leaves the server."""
+        what = f"stream the camera of printer {printer_id}"
+        token = await self._camera_token(what=what)
+        path = f"/printers/{printer_id}/camera/stream"
+        with _call_span(
+            "printers.camera.stream", "GET", Scope.READ_STATUS, detached=True
+        ) as current:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    self.config.url(path),
+                    headers=self._headers,
+                    params={"token": token, "fps": fps},
+                    timeout=CAMERA_STREAM_TIMEOUT,
+                ) as response:
+                    current.set_attribute("http.response.status_code", response.status_code)
+                    if not response.is_success:
+                        await response.aread()
+                        raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                    yield mjpeg_type(response.headers.get("content-type")), response.aiter_bytes()
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
 
     async def available_filaments(
         self, model: str, *, location: str | None = None
@@ -379,7 +476,22 @@ class BambuddyClient:
             operation="slicer.presets",
             what="list the slicer presets",
         )
-        return PresetCatalogue.model_validate(response.json())
+        # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
+        return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues:
+        """``GET /slicer/preset-values`` — a process preset's effective values, flattened
+        by Bambuddy's slicer sidecar, so a change can be shown against the value it
+        replaces and written in the shape the preset stores it (#717)."""
+        response = await self._send(
+            "GET",
+            "/slicer/preset-values",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.preset_values",
+            what=f"read the values of process preset {ref.id}",
+            params={"source": ref.source, "id": ref.id, "slot": "process"},
+        )
+        return PresetValues.model_validate(response.json())
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.
@@ -534,9 +646,13 @@ class BambuddyClient:
         offset: int = 0,
         date_from: date | None = None,
         date_to: date | None = None,
+        skip_invalid: bool = False,
     ) -> list[ArchiveDetail]:
         """:meth:`archives` with each row's outcome (#1912): the list route answers
-        the whole ``ArchiveResponse``, the same schema as :meth:`archive`."""
+        the whole ``ArchiveResponse``, the same schema as :meth:`archive`.
+
+        With ``skip_invalid``, a row that does not parse is logged and left out rather
+        than failing the read, for a caller that reads the rest singly anyway."""
         what = "list the archives"
         response = await self._list_archives(
             what,
@@ -547,7 +663,24 @@ class BambuddyClient:
             date_from=date_from,
             date_to=date_to,
         )
-        return [ArchiveDetail.model_validate(row) for row in self._rows(response, what=what)]
+        rows = self._rows(response, what=what)
+        if not skip_invalid:
+            return [ArchiveDetail.model_validate(row) for row in rows]
+        parsed: list[ArchiveDetail] = []
+        unparsed = 0
+        for row in rows:
+            try:
+                parsed.append(ArchiveDetail.model_validate(row))
+            except ValueError:
+                unparsed += 1
+        if unparsed:
+            # One line per read, not per row (#3477 review): each such archive falls
+            # back to its own single read.
+            logger.info(
+                "archive rows did not parse; left out of the list read",
+                extra={"rows": unparsed},
+            )
+        return parsed
 
     async def _list_archives(
         self,
@@ -668,10 +801,11 @@ class BambuddyClient:
         )
 
     async def upload_archive_photo(
-        self, archive_id: int, filename: str, content: bytes
+        self, archive_id: int, filename: str, content: bytes | IO[bytes]
     ) -> ArchivePhotoUpload:
         """Bambuddy takes only ``.jpg``, ``.jpeg``, ``.png`` and ``.webp`` here, and
-        renames the file; the answer's ``filename`` is the name to keep."""
+        renames the file; the answer's ``filename`` is the name to keep. A file object
+        is streamed from where it is, never read whole (#309)."""
         response = await self._send(
             "POST",
             f"/archives/{archive_id}/photos",
@@ -701,22 +835,30 @@ class BambuddyClient:
         what: str,
         range_header: str | None = None,
         if_range: str | None = None,
+        params: Mapping[str, str] | None = None,
+        pass_416: bool = True,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
         ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
         a seek with a ``206`` and only those bytes. The response is open for the
-        duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
+        duration of the ``async with``. Read it with ``aiter_raw`` to pass the bytes on
+        as Bambuddy sent them (the media proxy keeps its ``Content-Encoding``), or with
+        ``aiter_bytes`` where the caller counts or uses the decoded bytes, as the camera
+        frame's cap does. A failure is mapped
         as every other call's is, once its (small) body has been read, except a ``416``:
         that is the answer to a seek past the end, and its ``Content-Range`` carries the
-        length the media element needs, so it is passed through.
+        length the media element needs, so it is passed through. ``pass_416=False`` maps
+        it as any refusal, for a caller that sends no ``Range`` (#3397).
         """
         headers = dict(self._headers)
         if range_header is not None:
             headers["Range"] = range_header
         if if_range is not None:
             headers["If-Range"] = if_range
-        request = self._http.build_request("GET", self.config.url(path), headers=headers)
+        request = self._http.build_request(
+            "GET", self.config.url(path), headers=headers, params=params
+        )
         # The span fails only on what Bambuddy did: an error the consumer raises inside
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         # A transport error there is the body's read failing, which is Bambuddy's.
@@ -729,7 +871,7 @@ class BambuddyClient:
                 raise map_transport(error, what=what) from error
             current.set_attribute("http.response.status_code", response.status_code)
             try:
-                if not response.is_success and response.status_code != 416:
+                if not response.is_success and (response.status_code != 416 or not pass_416):
                     await response.aread()
                     raise map_response(response, scope=Scope.READ_STATUS, what=what)
                 try:
@@ -737,6 +879,8 @@ class BambuddyClient:
                 except httpx.HTTPError as error:
                     logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
                     raise map_transport(error, what=what) from error
+                except BambuddyAnswerError:
+                    raise
                 except Exception as error:
                     consumer_error = error
             finally:
@@ -784,7 +928,7 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes | BinaryIO,
+        content: bytes | IO[bytes],
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,
@@ -1326,3 +1470,32 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
     """A client built from the stored settings, or a 409 saying what is missing."""
     async with BambuddyClient(BambuddyConfig.from_settings(settings)) as client:
         yield client
+
+
+#: Reads a process preset's values (#717); :func:`read_once` makes one that reads each
+#: preset at most once.
+ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
+
+
+def read_once(client: BambuddyClient) -> ReadPresetValues:
+    """``client.preset_values``, read at most once per preset by whoever shares it
+    (#2804 review): a print's filament profiles and its supports change the same process
+    preset. A failed read fails the same way for every one of them.
+
+    It assumes its callers take turns, as ``check_print`` and ``plan_run`` do: two reads
+    of the same preset gathered concurrently would both miss and both read."""
+    read: dict[tuple[str, str], PresetValues | ApiError] = {}
+
+    async def values(process: PresetRef) -> PresetValues:
+        key = (process.source, process.id)
+        if key not in read:
+            try:
+                read[key] = await client.preset_values(process)
+            except ApiError as error:
+                read[key] = error
+        answer = read[key]
+        if isinstance(answer, ApiError):
+            raise answer
+        return answer
+
+    return values

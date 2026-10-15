@@ -8,7 +8,9 @@ import { sessionHostQueue } from './names.js'
 //
 //   agent-tools.<identity>     DurableSession's pinned calls (#2320, #2581): http_request, the
 //                              browser and kept plugin clients, and the `turn_tools` listing,
-//                              which gets 5 s to start and one attempt. The SDK's default limit.
+//                              which gets 5 s to start and one attempt; and a classic or
+//                              unified session's Monitor commands (`bg_monitor_command`, which
+//                              run where its turns' Bash runs). The SDK's default limit.
 //   agent-sessions.<identity>  `session_turn` and `release_worker` only, limited to the largest
 //                              warm cache the setting allows plus two for releases (main.ts
 //                              SESSION_HOST_SLOTS), with the turns' shutdown grace.

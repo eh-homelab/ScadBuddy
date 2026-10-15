@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -41,7 +41,7 @@ from scadbuddy.workflows.pipelines import (
     TemplatePipeline,
 )
 from scadbuddy.workflows.printing import PrintRunWorkflow
-from scadbuddy.workflows.problems import OPERATION_LOST
+from scadbuddy.workflows.problems import operation_lost
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -147,7 +147,10 @@ def bambuddy_worker(
     replays every open run: a change to a workflow's commands goes behind ``patched``,
     and a new workflow type or activity name is only safe once no old build polls. The
     ``Recreate`` rollout is the usual one and gives that: the old pod stops before the
-    new one starts, and the runs wait for it rather than land on a build without them."""
+    new one starts, and the runs wait for it rather than land on a build without them.
+    Rolled instead, an old replica fails an activity it does not register, and that
+    failure counts against its retry policy: an effect that runs once is recorded
+    ``failed`` ("may have been done") without reaching Bambuddy."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -237,20 +240,12 @@ async def current_routing(
     return current.build_id or None, response.conflict_token
 
 
-async def current_build(
-    client: Client, *, namespace: str, deployment_name: str = DEPLOYMENT_NAME
-) -> str | None:
-    """The deployment's current build, or None while it has none."""
-    build, _ = await current_routing(client, namespace=namespace, deployment_name=deployment_name)
-    return build
-
-
 async def is_current(
     client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
 ) -> bool:
     """Whether `build_id` is the deployment's current version. Then any worker of this
     build serves the runs pinned to it, so one that stops need not drain (#874)."""
-    current = await current_build(client, namespace=namespace, deployment_name=deployment_name)
+    current, _ = await current_routing(client, namespace=namespace, deployment_name=deployment_name)
     return current == build_id
 
 
@@ -281,7 +276,7 @@ __all__ = [
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",
-    "current_build",
+    "current_routing",
     "drained",
     "follow_worker",
     "is_current",
@@ -389,14 +384,24 @@ async def reconcile_lost_runs(
 
 
 async def reconcile_lost_operations(
-    client: Client, store: OperationStore, *, older_than: timedelta = LOST_RUN_GRACE
+    client: Client,
+    store: OperationStore,
+    *,
+    older_than: timedelta = LOST_RUN_GRACE,
+    where: Mapping[str, str] | None = None,
 ) -> int:
     """End each ``running`` operation whose execution has closed or is gone (review
     #1063 1): terminated after ``op_insert``, or past a timeout, it never runs
-    ``op_finish``. The same rule as :func:`reconcile_lost_runs`. Returns how many it
-    ended."""
+    ``op_finish``. The same rule as :func:`reconcile_lost_runs`. ``where`` is each
+    kind's ``OperationKind.where``, what its problem says to check (#1174); Bambuddy
+    for a kind not in it. Returns how many it ended."""
+    rows = await store.running_executions(older_than)
+    # Each row's own kind, read with it: never parsed back out of the workflow ID.
+    kinds = {op_id: kind for op_id, _, _, kind in rows}
 
     async def end(op_id: str) -> bool:
-        return (await store.finish(op_id, error=OPERATION_LOST)).status == "failed"
+        lost = operation_lost((where or {}).get(kinds[op_id], "Bambuddy"))
+        return (await store.finish(op_id, error=lost)).status == "failed"
 
-    return await _end_closed(client, await store.running_executions(older_than), end, "operation")
+    executions = [(op_id, workflow_id, run_id) for op_id, workflow_id, run_id, _ in rows]
+    return await _end_closed(client, executions, end, "operation")

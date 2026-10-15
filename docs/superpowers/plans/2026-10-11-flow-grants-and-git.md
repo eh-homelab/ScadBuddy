@@ -439,8 +439,8 @@ denies as today.
 **Entry shape:** 10-01 §6.6's entry plus `{run_id, source: "flow"|"session"|"grant",
 hop, step: {seq, fn}, flow: {name, commit}, reasoning?, proposal_summary?,
 outside_reason, hops}`. `reasoning` is the child turn's assistant text before the call,
-last 2 KiB, wrapped as untrusted data. The read is visible to the browser user and the
-starter.
+last 2048 characters (`REASONING_MAX`), wrapped as untrusted data. The read is visible
+to the browser user and the starter.
 
 - [ ] Tests: the union of the three sources; a child entry outside a flow turn is not in
   it; the badge counts hop `person` only; the page answers each kind through its own

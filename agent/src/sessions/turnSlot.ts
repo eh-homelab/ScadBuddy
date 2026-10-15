@@ -15,6 +15,7 @@
 
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
 import type { TurnAuditor } from '../audit/turn.js'
+import type { WebContext } from '../builtins/web.js'
 import type { HttpRequestContext } from '../harness/httpRequest.js'
 import type { ApprovalGate } from '../harness/permissions.js'
 import type { QuestionGate } from '../harness/questions.js'
@@ -43,6 +44,8 @@ export type TurnContext = {
   auditor?: TurnAuditor
   trace: TurnTrace
   http?: HttpState
+  /** What the turn's WebFetch model calls cost (builtins/nested.ts), which no result prices (#2684). */
+  nested?: { usd: number }
   /** #815 §2: how this turn's browser_* calls wait for a missing tab; only with a question gate. */
   waitForTab?: WaitForTab
   /** The turn's automatic memory hooks (memory/hindsight.ts), built for its own prompt. */
@@ -74,6 +77,22 @@ export function createTurnSlot(): TurnSlot {
  * the signal is already aborted, so a request is never sent.
  */
 export function slotHttpContext(fixed: Omit<HttpRequestContext, 'turnId' | 'signal'>, slot: TurnSlot): HttpRequestContext {
+  return {
+    ...fixed,
+    get turnId() {
+      return slot.current?.http?.turnId
+    },
+    get signal() {
+      return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
+    },
+  }
+}
+
+/**
+ * WebFetch's context (builtins/web.ts), as `slotHttpContext`: the turn's id and
+ * abort signal read from the slot as each fetch runs.
+ */
+export function slotWebContext(fixed: Omit<WebContext, 'turnId' | 'signal'>, slot: TurnSlot): WebContext {
   return {
     ...fixed,
     get turnId() {

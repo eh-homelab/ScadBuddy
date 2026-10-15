@@ -70,6 +70,13 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+
+# Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
+# as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
+# HeldText stops holding anything, with no error. Guarded by the tests
+# test_the_plugins_runner_publishes_text_through_the_held_contextvar and
+# test_a_refused_credentials_scripted_notice_never_reaches_the_transcript (#3383).
+from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
@@ -96,6 +103,22 @@ def _http_url(value: object) -> TypeGuard[str]:
     except ValueError:
         return False
     return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+#: Schemes a refused URL may be named by. Any other "scheme" may be part of the URL:
+#: urlsplit reads ``localhost:8081/mcp``'s host as its scheme.
+NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", "wss"})
+
+
+def _url_problem(value: str) -> str:
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "unparseable"
+    if parts.scheme not in ("http", "https"):
+        return f"scheme {parts.scheme!r}" if parts.scheme in NAMED_SCHEMES else "no scheme"
+    return "no host"
 
 
 IMAGES_SERVER = "scadbuddy_images"
@@ -148,9 +171,10 @@ _FINAL = re.compile(
 # subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
 # words with the amount that follows, and only at the start: the SDK raises them as
 # "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
-# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
-# error's text is the session's content, and one that quotes the subtype or the words,
-# even the whole phrase, is not the cap (#2675).
+# (claude-agent-sdk 0.2.164, the pin in pyproject.toml: claude_agent_sdk/_internal/
+# query.py:523 builds that prefix; check it on every bump), the CLI's own errors first.
+# The rest of an error's text is the session's content, and one that quotes the subtype
+# or the words, even the whole phrase, is not the cap (#2675).
 _BUDGET_REACHED = re.compile(
     r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
 )
@@ -342,6 +366,10 @@ class TurnSettings:
     long_edge: int
     model: str | None
     own_plugin: bool
+    # A Workflow agent's chat (agent/src/background/workflowAgents.ts): its own effort and
+    # the subagent definition its turns run as; its own model is `model`.
+    effort: str | None = None
+    agent_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -474,6 +502,32 @@ def with_refusals(injected: dict[str, Any], refusals: dict[str, str]) -> dict[st
     return out
 
 
+class HeldText:
+    """A segment's live output with its ``text`` events held back until the next other
+    event, or until the attempt ends: then they go out in order (``flush``), unless the
+    attempt was refused and they are dropped (``drop``, #2945). A refused attempt's
+    text is the refusal notice, with nothing after it."""
+
+    def __init__(self, publish: Callable[[dict[str, Any]], None]) -> None:
+        self._publish = publish
+        self._held: list[dict[str, Any]] = []
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "text":
+            self._held.append(event)
+            return
+        self.flush()
+        self._publish(event)
+
+    def flush(self) -> None:
+        held, self._held = self._held, []
+        for event in held:
+            self._publish(event)
+
+    def drop(self) -> None:
+        self._held = []
+
+
 class ScadBuddyRunner:
     def __init__(
         self,
@@ -493,6 +547,8 @@ class ScadBuddyRunner:
         self._plugin_dir = plugin_dir
         self._package_root = package_root
         self._subagent_url = subagent_url
+        # The refused stored URL last warned of: warned once, not on every segment.
+        self._refused_url: str | None = None
         # Read once, at the first segment that gives subagents: the files are the image's.
         self._agents_dir = agents_dir
         self._agents: dict[str, AgentDefinition] | None = None
@@ -501,8 +557,9 @@ class ScadBuddyRunner:
     def __repr__(self) -> str:
         return f"ScadBuddyRunner(kek={self._kek.id})"
 
-    async def _settings(self) -> TurnSettings:
-        """What Settings says about this segment, read as it starts, as a classic turn reads it."""
+    async def _settings(self, session: str) -> TurnSettings:
+        """What Settings says about this segment, read as it starts, as a classic turn reads it,
+        and what the chat itself says over it (a Workflow agent's, ai_sessions.agent_*)."""
         async with self._connect() as conn:
             cur = await conn.execute(
                 "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
@@ -510,14 +567,21 @@ class ScadBuddyRunner:
             )
             # psycopg hands jsonb back decoded: a stored string is already a str.
             values = dict(await cur.fetchall())
+            cur = await conn.execute(
+                "SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = %s",
+                (session,),
+            )
+            own = await cur.fetchone() or (None, None, None)
         edge = values.get(LONG_EDGE_KEY)
         if isinstance(edge, bool) or not isinstance(edge, int):
             edge = DEFAULT_LONG_EDGE
-        model = values.get(MODEL_KEY)
+        model = own[0] or values.get(MODEL_KEY)
         return TurnSettings(
             long_edge=min(max(edge, MIN_LONG_EDGE), MAX_LONG_EDGE),
             model=model if isinstance(model, str) and model else None,
             own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
+            effort=own[1],
+            agent_type=own[2],
         )
 
     async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
@@ -543,8 +607,18 @@ class ScadBuddyRunner:
         url = stored.get("url") if isinstance(stored, dict) else None
         if not _http_url(url):
             # The agent's route stores only an http(s) URL; a row written any other way
-            # does not reach the subagents' definitions (#2883).
+            # does not reach the subagents' definitions (#2883). Said, so an operator
+            # sees why the setting has no effect; the URL itself is never logged (#3054).
+            if isinstance(url, str) and url and url != self._refused_url:
+                self._refused_url = url
+                logger.warning(
+                    "the stored subagent server URL is not an http(s) URL with a host (%s);"
+                    " using the worker's own",
+                    _url_problem(url),
+                )
             url = self._subagent_url
+        else:
+            self._refused_url = None
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
@@ -620,6 +694,13 @@ class ScadBuddyRunner:
                 extra_options=extra,
                 **({"model": settings.model} if settings.model else {}),
             )
+            # A credential Claude Code refuses answers as the assistant ("You've hit your
+            # session limit") before its ResultError, and the plugin publishes that text
+            # (#2945): held until the attempt is known not to be refused, while another
+            # credential could still take the segment over.
+            publish = _EMIT.get()
+            held = HeldText(publish) if publish is not None and i + 1 < len(credentials) else None
+            token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
                 if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
@@ -641,7 +722,22 @@ class ScadBuddyRunner:
                     type(err).__name__,
                     len(error_text(err).encode()),
                 )
+                if _BUDGET_REACHED.match(str(err)):
+                    # The cap raised rather than returned: today the plugin returns it,
+                    # but a raised one is the same cap, charged and ended the same way
+                    # as the returned one above, never a failure (#3356).
+                    return SegmentOutput(
+                        session_id=inp.session_id,
+                        is_error=True,
+                        error=BUDGET_EXHAUSTED,
+                        cost_usd=max(_cost(err), left),
+                    )
                 if credentials_fault(err) and i + 1 < len(credentials):
+                    if held is not None:
+                        # Mostly the refusal notice. A fault mid-segment also drops real
+                        # text since the last tool call, which the rerun on the next
+                        # credential writes again: dropped, never flushed.
+                        held.drop()
                     cost = _cost(err)
                     if cost > 0:
                         left -= cost
@@ -669,6 +765,13 @@ class ScadBuddyRunner:
                     error=bounded(str(err)),
                     cost_usd=_cost(err),
                 )
+            finally:
+                if token is not None:
+                    _EMIT.reset(token)
+                if held is not None:
+                    # Not a leak: a failure that is not the credential's ends the turn on
+                    # this credential, so what it said is the turn's and is published.
+                    held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
@@ -709,7 +812,7 @@ class ScadBuddyRunner:
             # Settings → Plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)
             inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
-        settings = await self._settings()
+        settings = await self._settings(session)
         images = await self._images(session, context)
         problem = image_problem(images, settings.long_edge) if images else None
         if problem is not None:
@@ -722,6 +825,11 @@ class ScadBuddyRunner:
         if self._plugin_dir and settings.own_plugin:
             # The own plugin's subagents, as a classic turn has them only with the plugin.
             await self._subagent_tools(session, extra)
+        if settings.effort:
+            extra["effort"] = settings.effort
+        if settings.agent_type and settings.agent_type in (self._agents or {}):
+            # The chat's turns run as that subagent (Claude Code's --agent), as a classic turn's do.
+            extra["extra_args"] = {"agent": settings.agent_type}
         plugins = (
             [{"type": "local", "path": self._plugin_dir}]
             if (self._plugin_dir and settings.own_plugin)

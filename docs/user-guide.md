@@ -85,6 +85,13 @@ The Debian package `fonts-lobster` provides a family called **"Lobster Two"**, a
 there is no family called "Lobster". If you ask for a family that doesn't exist,
 OpenSCAD silently uses a different font, and the text comes out a different size.
 
+OpenSCAD also leaves out, without a word, any character the font has no glyph for,
+such as an emoji. A render warns when a font parameter's family lacks a character
+used in the model's text parameters, and the font field says the same while you
+type. ScadBuddy cannot tell which text a font draws, so it checks every string
+parameter: a string that never reaches `text()`, such as a label or a file name,
+can raise the warning too.
+
 ### File parameters
 
 A parameter annotated `// file` takes a picture the viewer attaches in the
@@ -356,8 +363,18 @@ flow — either would otherwise apply unseen from Simple mode.
 
 The **Library** page lists everything already in Bambuddy's library, by folder. By
 default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
-browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
-shown without **Print**, since a sliced file is printed from Bambuddy directly.
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files.
+
+**Print** on a sliced file (#2671) queues the file itself, with no slice: the dialog
+offers the plates it holds G-code for, the spools for its slots, the printer and the
+print options (a held manual start among them), and shows what it was sliced for —
+printer, nozzle, process and plate type — read-only, with Bambu Studio's own time and
+filament estimate. A sliced file is never refused: a printer of another model, a nozzle
+diameter the printer has nowhere ("Sliced for a 0.6 mm nozzle; 0.4 mm is mounted"), or a
+plate the file does not hold (its first plate is queued instead) is a warning in Checks,
+so you can set it right before starting the print. A sliced file cannot be arranged.
+Printing a ScadBuddy copy again with the same presets queues the slice ScadBuddy already
+made of it, while Bambuddy still has that file, instead of slicing it again.
 
 **Print** on a file opens the same print picker an output uses, and the print goes
 exactly as an output's does (#1752): a copy of the file is laid out for the nozzle side

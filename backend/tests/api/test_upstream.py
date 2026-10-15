@@ -29,7 +29,7 @@ from scadbuddy.main import create_app
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows.commands import start_command
-from tests.api.conftest import PNG_BYTES
+from tests.api.conftest import PNG_BYTES, follow_operation
 from tests.api.test_model_operations import _workflow_ids
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
@@ -725,11 +725,7 @@ def test_a_re_sent_merge_whose_first_is_still_running_skips_the_conflict_check(
         assert again["id"] == first["id"]
     finally:
         release.set()
-    deadline = time.monotonic() + 60
-    op = first
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = _json(client.get(f"/api/v1/operations/{first['id']}"))
+    op = follow_operation(client, first)
     assert op["status"] != "running", op
 
 

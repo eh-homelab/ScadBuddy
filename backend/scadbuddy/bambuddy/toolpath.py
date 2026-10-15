@@ -47,9 +47,19 @@ _WORD = re.compile(r"([A-Z])([-+]?\d*\.?\d+)")
 
 #: Bambu Studio's markers. Orca and PrusaSlicer write ``;LAYER_CHANGE``.
 _LAYER_CHANGE = ("; CHANGE_LAYER", ";LAYER_CHANGE")
-_PRINT_END = ("; EXECUTABLE_BLOCK_END",)
+#: Where the print stops (#2885). Bambu Studio writes ``; MACHINE_END_GCODE_START``,
+#: then the filament and machine end code (the lift and park), and only then
+#: ``; EXECUTABLE_BLOCK_END``: ``GCode.cpp`` L3386-L3428 and ``GCodeProcessor.cpp`` L69
+#: at bambulab/BambuStudio@79df7ae309be398ed30c9f397c13c9911c2edc57. Ending at the
+#: first drew the end code as travel in the last layer.
+_PRINT_END = ("; MACHINE_END_GCODE_START", "; EXECUTABLE_BLOCK_END")
 
 TRAVEL = 0
+
+
+#: The wire format's version, in its header; `frontend/src/lib/toolpath.ts`'s
+#: `TOOLPATH_VERSION` refuses any other (#3360).
+VERSION = 1
 
 
 @dataclass
@@ -69,7 +79,7 @@ class Toolpath:
 
     def header(self) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": VERSION,
             "segment_count": self.count,
             "features": self.features,
             "layers": [{"z": round(z, 4), "first_segment": first} for z, first in self.layers],
@@ -257,6 +267,15 @@ class _Parser:
             if self.result.layers:
                 _, first = self.result.layers.pop()
                 del segments[first * 8 :]
+                # The scale is of what is drawn: the cut layer's moves go with it (#2885).
+                self.result.max_speed = max(
+                    (
+                        segments[at + 6]
+                        for at in range(0, len(segments), 8)
+                        if segments[at + 7] != TRAVEL
+                    ),
+                    default=0.0,
+                )
             return
         segments.extend((x0, y0, z0, x1, y1, z1, speed, float(kind)))
         if kind != TRAVEL:

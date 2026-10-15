@@ -21,6 +21,7 @@ from opentelemetry.trace import StatusCode
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import GLYPH_CHECK_TIMEOUT
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
@@ -1244,6 +1245,55 @@ async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
     assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
 
 
+async def test_the_last_stage_warns_of_a_glyph_the_font_lacks(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2358: ``finish_piece_stage`` gives the missing-glyph warning, asking fontconfig
+    with the short advisory timeout."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="word", type="string", initial="Hi 😀"),
+            Parameter(name="font", type="font", initial="Lobster Two"),
+        ]
+    )
+    asked: list[tuple[str, float]] = []
+
+    def coverage(font: str, env: object, timeout: float) -> tuple[str, list[tuple[int, int]]]:
+        asked.append((font, timeout))
+        return "Lobster Two", [(0x20, 0x7E)]
+
+    monkeypatch.setattr(jobs, "font_coverage", coverage)
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, {}, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        await render_solids_stage(
+            prepared, {}, work, output, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        result = await finish_piece_stage(
+            prepared,
+            {},
+            work,
+            output,
+            config=config,
+            paths=paths,
+            slug="demo",
+            thumbnail_executor=None,
+            schema=schema,
+        )
+
+    assert "font 'Lobster Two' has no glyph for 😀; the text leaves them out" in result.warnings
+    assert asked == [("Lobster Two", GLYPH_CHECK_TIMEOUT)]
+
+
 async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:
     """The colour warnings come from the schema the render used, derived while the
     checkouts were held (#253), not from a second read once the lease is gone."""
@@ -1482,6 +1532,22 @@ async def test_a_colour_only_one_object_draws_is_named_by_plate_and_object(
 async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
     with pytest.raises(OpenSCADError, match="asks for 17 objects"):
         await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=jobs.MAX_OBJECTS + 1)
+
+
+async def test_plates_times_objects_past_the_render_cap_fails_before_rendering(
+    tmp_path: Path,
+) -> None:
+    """#3250: each count was capped on its own, so 16 plates of 16 objects ran 256
+    OpenSCAD renders in one job. The renders a job runs are capped as a whole."""
+    plates, objects = 2, jobs.MAX_RENDERS // 2 + 1
+    assert plates <= jobs.MAX_PLATES and objects <= jobs.MAX_OBJECTS
+    # Every plate draws every object, so nothing but the cap stops the layout.
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]] = {
+        (p, o): [TRAY] for p in range(1, plates + 1) for o in range(1, objects + 1)
+    }
+    drawn[(None, None)] = [TRAY]
+    with pytest.raises(OpenSCADError, match=f"{plates} plates of {objects} objects"):
+        await _object_layout(tmp_path, drawn, plates=plates, objects=objects)
 
 
 async def test_a_layouts_objects_survive_saving_it(tmp_path: Path) -> None:

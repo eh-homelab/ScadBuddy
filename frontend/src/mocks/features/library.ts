@@ -20,6 +20,7 @@ import type {
   PrintRun,
   PrintRunRequest,
   PrintRunResult,
+  SlicedProfile,
 } from '../../api/types'
 import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
@@ -72,7 +73,8 @@ function entry(
     folder_id: folderId,
     has_thumbnail: fileType !== 'stl',
     print_count: 0,
-    printable: ['3mf', 'stl'].includes(fileType.toLowerCase()),
+    printable: ['3mf', 'stl', 'gcode.3mf'].includes(fileType.toLowerCase()),
+    sliced: fileType.toLowerCase() === 'gcode.3mf',
     file_size: added.file_size ?? 64_000,
     created_at: added.created_at ?? '2026-09-20T12:00:00Z',
     is_external: added.is_external ?? false,
@@ -103,6 +105,18 @@ export const libraryFiles: LibraryEntry[] = [
   entry(130, 'lamp-shade.3mf', '3mf', 13),
 ]
 
+/** #2671 — what each sliced file was sliced for, as the backend reads it from the file. */
+export const SLICED_PROFILES: Record<number, SlicedProfile> = {
+  104: {
+    printer_model: 'Bambu Lab H2C',
+    printer_preset: 'Bambu Lab H2C 0.4 nozzle',
+    process: '0.20mm Standard @BBL H2C',
+    bed_type: 'Textured PEI Plate',
+    nozzle_diameters: ['0.4'],
+    plates: [{ index: 1, print_seconds: 2700, weight_g: 9.8, nozzle_diameters: ['0.4'] }],
+  },
+}
+
 /** The two-plate file; every other 3MF is one plate and an STL none. */
 export const MULTI_PLATE_FILE = 67
 
@@ -116,14 +130,11 @@ function libraryRefusal(fileId: number) {
       `Bambuddy has no such resource when asked to read library file ${fileId}`,
     )
   }
-  if (file.file_type === 'gcode.3mf') {
-    return problem(422, 'Unprocessable Content', `${file.filename} is sliced already. Print it from Bambuddy.`)
-  }
   if (!file.printable) {
     return problem(
       422,
       'Unprocessable Content',
-      `ScadBuddy prints only 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
+      `ScadBuddy prints only 3MF, sliced 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
     )
   }
   return null
@@ -294,6 +305,7 @@ export const handlers = [
         printer_name: printerName,
       },
       model_choices: remembered,
+      sliced: SLICED_PROFILES[fileId] ?? null,
     } satisfies ChoicesView)
   }),
 

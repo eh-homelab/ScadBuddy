@@ -1,4 +1,7 @@
 import { writeFileSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -36,17 +39,27 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
     reply = () => ({ text: 'ok' })
     const names = Object.keys(BUILTINS)
     const from = fake.messageCalls().length
+    // A fresh HOME: what ~/.claude holds changes the schemas (CronCreate's `durable` reads
+    // "Has no effect" without a writable one), so CI and a developer's machine agree.
+    const home = await mkdtemp(path.join(os.tmpdir(), 'builtins-schemas-'))
     for await (const _ of query({
       prompt: 'go',
       // Only what the binary needs: a variable of the shell running the test (an
       // experimental feature's) would change the schemas it sends.
-      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp', ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN } },
+      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { PATH: process.env.PATH ?? '', HOME: home, ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN } },
     }))
       void _
     const sent = fake.messageCalls().slice(from).find((c) => c.body?.tools?.length)!.body!.tools!
+    // Monitor is behind a Claude Code feature flag cached in ~/.claude.json: a fresh HOME
+    // (CI's) is not offered it, so its schema is kept as last captured where it was.
+    const gated = new Set(['Monitor'])
+    const offered = names.filter((name) => sent.some((t) => t.name === name))
+    expect(names.filter((name) => !offered.includes(name) && !gated.has(name))).toEqual([])
     const theirs = Object.fromEntries(
       names.map((name) => {
-        const { $schema: _, ...schema } = (sent.find((t) => t.name === name) as unknown as { input_schema: Record<string, unknown> }).input_schema
+        const tool = sent.find((t) => t.name === name) as unknown as { input_schema: Record<string, unknown> } | undefined
+        if (!tool) return [name, (SCHEMAS as Record<string, unknown>)[name]]
+        const { $schema: _, ...schema } = tool.input_schema
         return [name, schema]
       }),
     )

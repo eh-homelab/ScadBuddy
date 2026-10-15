@@ -1,6 +1,8 @@
+import type { nestedQueries } from '../builtins/nested.js'
+import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import {
+  type EffortLevel,
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
@@ -52,6 +54,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -67,6 +70,7 @@ import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
 import { CoreTurn, type Refused, tallyTurn, type TurnCoreDeps, wordTail } from './turnCore.js'
+import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -522,6 +526,10 @@ export type SessionRecord = {
  */
 export type ClaimedSession = SessionRecord & {
   unpricedCostUsd: number
+  /** A Workflow agent's chat (startChild): its own model, effort and subagent definition. */
+  agentModel: string | null
+  agentEffort: EffortLevel | null
+  agentType: string | null
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -532,9 +540,14 @@ export type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+
+const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  agentModel: row.agent_model,
+  agentEffort: row.agent_effort,
+  agentType: row.agent_type,
   claimedAt: row.claimed_at,
 })
 
@@ -549,8 +562,9 @@ export async function runningDurableTurn(
   turnId: string,
 ): Promise<{ session: ClaimedSession; principal: TurnPrincipal } | undefined> {
   if (!isUuid(id)) return undefined
-  const [row] = await sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string; turn_tiers: { tiers?: Tier[] } | null })[]>(
-    `SELECT ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
+  // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
+  const [row] = await sql.unsafe<(ClaimRow & { turn_tiers: { tiers?: Tier[] } | null })[]>(
+    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
      WHERE id = $1 AND durable_turn_id = $2 AND status IN ('running', 'waiting_approval', 'waiting_input')`,
     [id, turnId],
   )
@@ -756,6 +770,12 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: SessionFiles
+  /**
+   * A session's background tasks (src/background/): a classic turn whose allowed packages
+   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
+   * end with the turn. Without it those are Claude Code's.
+   */
+  background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner
   /**
    * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
@@ -763,6 +783,8 @@ export type SessionManagerDeps = {
    * it says why each process went.
    */
   warm?: { maxEntries?: number; idleMs?: number; log?: (message: string) => void }
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -999,6 +1021,8 @@ export class SessionManager {
   readonly projection: PendingProjection
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
+  /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
+  readonly queue: FlowQueue
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -1075,6 +1099,7 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
+    this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
@@ -1090,6 +1115,7 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
       warm: this.warm,
+      endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
     this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
     this.turnCore = {
@@ -1126,10 +1152,14 @@ export class SessionManager {
    */
   revalidateWarm(): Promise<void> {
     return this.warm.revalidate(async (entry) => {
-      const session = await this.row(entry.sessionId)
-      if (!session) return undefined
+      // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
+      const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        [entry.sessionId],
+      )
+      if (!row) return undefined
       const parts = entry.turn.fingerprintParts
-      const fresh = await this.runner.assemble({ ...session, unpricedCostUsd: 0, claimedAt: session.updatedAt }, parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
+      const fresh = await this.runner.assemble(claimed(row), parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
         // A rate-limited credential is still the one a healthy process runs on.
         includeCooling: true,
       })
@@ -1171,7 +1201,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1360,6 +1390,38 @@ export class SessionManager {
   }
 
   /**
+   * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
+   * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
+   * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
+   * It starts empty: the agent's task is its first turn.
+   */
+  async startChild(
+    parentId: string,
+    principal: Owner,
+    options: { title: string; tags?: string[]; agent?: { model?: string | undefined; effort?: string | undefined; type?: string | undefined } },
+  ): Promise<SessionRecord> {
+    const parent = await this.get(parentId, principal)
+    const id = randomUUID()
+    const session = await this.insert(
+      id,
+      principal,
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
+      { budgetOf: parent },
+    )
+    const agent = options.agent
+    if (agent && (agent.model || agent.effort || agent.type)) {
+      await this.deps.sql`
+        UPDATE ai_sessions SET agent_model = ${agent.model ?? null}, agent_effort = ${agent.effort ?? null}, agent_type = ${agent.type ?? null}
+         WHERE id = ${id}`
+    }
+    await this.events.append(id, [
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
+      event({ type: 'session.status', sessionId: id, status: 'idle' }),
+    ])
+    return session
+  }
+
+  /**
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
@@ -1385,13 +1447,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1429,13 +1491,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1712,8 +1774,9 @@ export class SessionManager {
         run.secrets,
         run.spentUsd,
         // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result.
-        stopped !== undefined || !result ? run.cutUsd : 0,
+        // one that did has every request priced in its result. WebFetch's own
+        // model calls are in no result, so they are added the same way.
+        (stopped !== undefined || !result ? run.cutUsd : 0) + run.nestedUsd,
       )
       return outcome
     } catch (err) {
@@ -1748,6 +1811,10 @@ export class SessionManager {
      */
     turnUsd: number,
     /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id

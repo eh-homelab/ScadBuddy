@@ -10,7 +10,9 @@ import {
   diffFromDefaults,
   extrudersOf,
   extrudersIn,
+  colourHex,
   outOfRange,
+  paramLabel,
   rangeProblem,
 } from './params'
 
@@ -47,6 +49,25 @@ describe('colour order', () => {
         ['body_color', 1],
         ['text_color', 1],
         ['rim_color', 2],
+      ]),
+    )
+  })
+})
+
+// #2357 — a name is its hex for the extruders; a value that is no colour is never padded.
+describe('extrudersOf, by colour', () => {
+  it('shares an extruder between a name and its hex, and pads nothing', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: ['a', 'b', 'c', 'd'].map((name) => ({ name, type: 'color', initial: '#000000', group: 'Colours' })),
+    }
+    const values = { a: 'red', b: '#FF0000', c: '#RREEDD', d: '#RR0000' }
+    expect(extrudersOf(schema, values)).toEqual(
+      new Map([
+        ['a', 1],
+        ['b', 1],
+        ['c', 2],
+        ['d', 3],
       ]),
     )
   })
@@ -112,15 +133,20 @@ describe('extrudersIn', () => {
     )
   })
 
-  it('says nothing about a colour that is not hex, which the render reports resolved', () => {
+  it('reads a colour name as its hex, as the render reports it resolved', () => {
     // The backend resolves CSS names; the render reports "red" as #FF0000.
     const named = { ...values, body_color: 'red' }
     expect(extrudersIn(keychainSchema, named, ['#FF0000', '#E8532F'], named)).toEqual(
       new Map([
-        ['body_color', undefined],
+        ['body_color', 1],
         ['text_color', 2],
       ]),
     )
+  })
+
+  it('says nothing about a value that is no colour', () => {
+    const odd = { ...values, body_color: 'not-a-colour' }
+    expect(extrudersIn(keychainSchema, odd, ['#E8532F'], odd).get('body_color')).toBeUndefined()
   })
 })
 
@@ -157,7 +183,9 @@ describe('checkParamValue (#254)', () => {
 
   it('normalises a colour the way the colour field does', () => {
     expect(checkParamValue(param({ type: 'color' }), 'f80')).toEqual({ ok: true, value: '#FF8800' })
-    expect(checkParamValue(param({ type: 'color' }), 'orange').ok).toBe(false)
+    // #2357: the field turns a colour name into its hex, so an agent's name is taken the same way.
+    expect(checkParamValue(param({ type: 'color' }), 'orange')).toEqual({ ok: true, value: '#FFA500' })
+    expect(checkParamValue(param({ type: 'color' }), 'orangeish').ok).toBe(false)
   })
 
   it('holds numbers to their type and limits', () => {
@@ -214,9 +242,55 @@ describe('rangeProblem (#921)', () => {
     expect(rangeProblem({ ...size, type: 'slider' }, 41)).not.toBeNull()
   })
 
+  // #2357
+  it('refuses a colour value that is no colour, and takes a hex or a colour name', () => {
+    const colour: Param = { group: 'Colours', name: 'base_color', type: 'color', initial: '#FF1493', caption: 'Base' }
+    for (const bad of ['#RREEDD', 'red-ish', '#12', '']) {
+      expect(rangeProblem(colour, bad)).toBe('Base must be a colour: a hex such as #FF8800, or a name such as red.')
+    }
+    for (const good of ['#FF0000', '#f00', '#FF000080', 'Red', ' navy ', '#FF1493']) {
+      expect(rangeProblem(colour, good)).toBeNull()
+    }
+    // A model's own default is the model's business, as it always rendered.
+    expect(rangeProblem({ ...colour, initial: 'chartreuse-ish' }, 'chartreuse-ish')).toBeNull()
+    expect(colourHex('red')).toBe('#FF0000')
+    expect(colourHex('#abc')).toBe('#AABBCC')
+    expect(colourHex('#RREEDD')).toBeNull()
+    // The renderer needs the `#`: a bare hex reads as an unknown name there.
+    for (const bare of ['FF0000', 'add', 'f00']) {
+      expect(colourHex(bare)).toBeNull()
+      expect(rangeProblem(colour, bare)).not.toBeNull()
+    }
+    for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(colourHex(inherited)).toBeNull()
+      expect(rangeProblem(colour, inherited)).not.toBeNull()
+    }
+  })
+
   it('finds the first out-of-range value in a schema', () => {
     const values = defaultValues(keychainSchema)
     expect(outOfRange(keychainSchema, values)).toBeUndefined()
     expect(outOfRange(keychainSchema, { ...values, text_size: 500 })?.name).toBe('text_size')
+  })
+})
+
+// #3287 — one rule for a parameter's label: an empty caption is no caption.
+describe('paramLabel', () => {
+  const blank: Param = { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: '', min: 8, max: 40 }
+
+  it('is the caption, or the name when the caption is missing or empty', () => {
+    expect(paramLabel({ name: 'text_size', caption: 'Letter height' })).toBe('Letter height')
+    expect(paramLabel({ name: 'text_size', caption: null })).toBe('text_size')
+    expect(paramLabel({ name: 'text_size', caption: '' })).toBe('text_size')
+  })
+
+  it('is what every message and the change list say for an empty caption', () => {
+    expect(rangeProblem(blank, 500)).toBe('text_size must be between 8 and 40.')
+    const colour: Param = { group: 'Colours', name: 'base_color', type: 'color', initial: '#FF1493', caption: '' }
+    expect(rangeProblem(colour, 'red-ish')).toBe('base_color must be a colour: a hex such as #FF8800, or a name such as red.')
+    const schema: CustomizerSchema = { parameters: [blank] } as unknown as CustomizerSchema
+    expect(diffFromDefaults(schema, { text_size: 20 })).toEqual([
+      { name: 'text_size', caption: 'text_size', value: 20, initial: 14 },
+    ])
   })
 })

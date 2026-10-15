@@ -129,7 +129,10 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
         public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
-        # Written into the saved 3MF, which a download then serves as it is (#2652).
+        # Written into the saved 3MF, which a download then serves as it is (#2652). A
+        # model.json made invalid since the render fails the save on purpose (#2868):
+        # saved without them, the file would open in Bambu Studio missing the template's
+        # settings and nothing would say so. ``answered_as_routes`` answers it as a 409.
         print_settings = await asyncio.to_thread(state.catalogue.print_settings, job.slug)
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry
@@ -190,6 +193,14 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         await asyncio.to_thread(state.outputs.write_thumbnail, output_id, png)
         return {}
 
+    async def rename_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        meta = await asyncio.to_thread(state.outputs.rename, request["output_id"], request["name"])
+        emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
+        copies = await state.uploads.for_outputs([meta.id])
+        detail = await asyncio.to_thread(outputs_api.detail, state.outputs, meta, copies[meta.id])
+        dumped: dict[str, Any] = detail.model_dump(mode="json")
+        return dumped
+
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         output_id = request["output_id"]
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
@@ -247,6 +258,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
     return [
         kind("output_create", create_check, create_run, "the template's outputs"),
         kind("output_thumbnail", output_check, thumbnail_run, "the output"),
+        kind("output_rename", output_check, rename_run, "the output"),
         kind(
             "output_delete",
             output_check,

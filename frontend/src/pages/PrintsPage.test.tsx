@@ -7,6 +7,7 @@ import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { server } from '../mocks/server'
 import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
+import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
@@ -465,6 +466,7 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     expect(await within(list).findByText('Completed in Bambuddy')).toBeInTheDocument()
     expect(list).not.toHaveTextContent('No longer in Bambuddy')
   })
@@ -491,12 +493,40 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     const [first, second] = within(list).getAllByRole('listitem')
     expect(first).toHaveTextContent('Acceptance')
     expect(await within(first as HTMLElement).findByText('No longer in Bambuddy')).toBeInTheDocument()
     expect(first).not.toHaveTextContent('Waiting for Bambuddy')
     expect(second).toHaveTextContent('Luna')
     expect(second).toHaveTextContent('Waiting for Bambuddy')
+  })
+
+  it('reads a waiting row\'s progress only once the row comes into view (#1014)', async () => {
+    const acceptance = sent('1', 'Acceptance', 104)
+    const luna = sent('2', 'Luna', 4500)
+    const read: string[] = []
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([acceptance, luna, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json({ ...queuedSliceProgress, queue_item_id: 4500 } satisfies PrintProgress)
+      }),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    const [first, second] = within(list).getAllByRole('listitem')
+    expect(second).toHaveTextContent('Waiting for Bambuddy')
+    const waited = () => read.filter((id) => id === acceptance.id || id === luna.id)
+    expect(waited()).toEqual([])
+
+    intersect(first as HTMLElement)
+    await waitFor(() => expect(waited()).toContain(acceptance.id))
+    // The row still out of view is not read. Both rows mounted in one pass, so a read on
+    // mount would have gone out before the one the intersection started: no timed wait.
+    expect(waited()).not.toContain(luna.id)
+    intersect(second as HTMLElement)
+    await waitFor(() => expect(waited()).toContain(luna.id))
   })
 
   it('follows a waiting row live, without a reload (#954)', async () => {
@@ -521,6 +551,7 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     await waitFor(() => expect(realtime.following()).toContain(`print:${luna.id}`))
     expect(list).toHaveTextContent('Waiting for Bambuddy')
 
@@ -590,6 +621,7 @@ describe("a library file's print, as an output's (#1751)", () => {
     )
     render('/prints?file=89')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(waiting).toHaveTextContent('bracket.3mf')
     expect(waiting).toHaveTextContent('Waiting for Bambuddy')
     await waitFor(() => expect(realtime.following()).toContain('print:library:89'))
@@ -661,6 +693,7 @@ describe('an output whose newest run failed before queueing (#1831)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     expect(list).toHaveTextContent('Refused')
     expect(await within(list).findByText('Print failed: Slot 2 has no spool chosen.')).toBeInTheDocument()
     expect(list).not.toHaveTextContent('Waiting for Bambuddy')
@@ -688,6 +721,7 @@ describe('waiting for Bambuddy, with more pages to load (#310)', () => {
     firstPage([summaryOf(37), summaryOf(38)])
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(waiting).toHaveTextContent('Luna')
     // Reagan was sent before the oldest print loaded: its print may be on a later page.
     expect(waiting).not.toHaveTextContent('Reagan')
@@ -697,6 +731,7 @@ describe('waiting for Bambuddy, with more pages to load (#310)', () => {
     firstPage([summaryOf(38)])
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(waiting).toHaveTextContent('Luna')
   })
 })
@@ -775,6 +810,7 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
     )
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(within(waiting).getAllByRole('listitem')).toHaveLength(1)
     expect(waiting).toHaveTextContent('Luna')
     expect(waiting).toHaveTextContent('Waiting for Bambuddy')
@@ -803,7 +839,9 @@ describe('changed parameters markup (#2457)', () => {
       expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
     }
     expect(dl).not.toHaveTextContent('more')
-    expect(screen.getByTestId('params-more')).toHaveTextContent('+2 more')
+    // Found as a user sees it, beside the list and outside the <dl> (#2457, #2878).
+    const more = within(dl.parentElement!).getByText('+2 more')
+    expect(dl).not.toContainElement(more)
   })
 })
 

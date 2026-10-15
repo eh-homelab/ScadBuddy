@@ -633,7 +633,11 @@ export function PresetPicker({
               ))}
             </ul>
           )}
-          {selected.description && <Markdown text={selected.description} />}
+          {selected.description && (
+            // #1074 — a preset the template ships is one of its files: its relative images
+            // are the template's too. A saved one of mine has no folder to resolve them in.
+            <Markdown text={selected.description} base={selected.origin === 'template' ? { slug } : undefined} />
+          )}
         </div>
       )}
 

@@ -75,6 +75,7 @@ from scadbuddy.bambuddy.library_objects import (
     read_library_objects,
 )
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -425,7 +426,12 @@ async def read_plain_files(
     for file_id in file_ids:
         try:
             read[file_id] = await read_library_objects(
-                client, file_id, blobs=state.store.blobs, cache=state.paths.cache, budget=budget
+                client,
+                file_id,
+                blobs=state.store.blobs,
+                cache=state.paths.cache,
+                budget=budget,
+                downloads=state.store.downloads,
             )
         except NotArrangeableError as error:
             refused.append(error)
@@ -602,6 +608,7 @@ async def arrange_outputs(
     catalogue: CatalogueDep,
     state: StateDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
@@ -624,7 +631,9 @@ async def arrange_outputs(
         # Filed under any template (#2284), so it must be one.
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
-        job = await render.arrange(slug, inputs)
+        # #2280: a re-send while the start is still accepting keeps its key, so it is the
+        # same request, answered with the first outcome.
+        job = await render.arrange(slug, inputs, request_id=idempotency_key)
     await attribute_request(activity.index, f"render:{job.id}")
     return _job_status(job, None)
 
@@ -652,6 +661,7 @@ async def backfill_output(
     fetcher: FetcherDep,
     fonts: FontsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if await asyncio.to_thread(outputs.manifest, output_id):
@@ -710,6 +720,8 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # #2280: as the render route's, so a re-send still accepting is one claim.
+            idempotency_key,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).
@@ -899,6 +911,9 @@ async def get_output_preview(
             raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
         except UnreadableObjectsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except ReadOutOfMemoryError as error:
+            # #2767: the refusal a library file's plate gives for the same read (library_view.py).
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
     path = outputs.directory(output_id) / PREVIEW_NAME
     if not path.is_file():
@@ -1074,6 +1089,38 @@ async def put_output_thumbnail(
         claimed=Claimed(claims, [held]),
     )
     return _no_content(result)
+
+
+class RenameOutputRequest(BaseModel):
+    #: The output's new name; empty or null clears it, and History shows its short id.
+    name: str | None = Field(default=None, max_length=200)
+
+
+@router.patch(
+    "/outputs/{output_id}",
+    response_model=OutputDetail,
+    summary="Rename an output",
+    responses=OPERATION_RESPONSES,
+)
+async def rename_output(
+    output_id: OutputIdPath,
+    body: RenameOutputRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_rename`` operation (#2288): its check makes the 404, its run writes
+    the name and answers the output as it now reads."""
+    name = (body.name or "").strip() or None
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_rename"],
+        subject=output_id,
+        request={"output_id": output_id, "name": name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
 
 
 @router.post(

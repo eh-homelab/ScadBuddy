@@ -2,6 +2,8 @@
 name = "scadbuddy"
 version = "0.1.0"
 description = "Self-hosted OpenSCAD customizer for Bambuddy"
+# Moving off 3.12 also means re-checking provenance.RAW_COPY_CHECKED: its test
+# test_the_raw_copy_is_checked_on_this_python fails until it is (#2910).
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
@@ -34,6 +36,7 @@ dependencies = [
     "jsonschema>=4.23",
     # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
     "referencing>=0.28",
+    "regex>=2024.11.6",
 ]
 
 [build-system]
@@ -62,6 +65,7 @@ dev = [
     "types-lxml>=2026.2.16",
     "pytest-split>=0.11",
     "types-jsonschema>=4.26.0.20261006",
+    "types-regex>=2026.9.29.20261005",
 ]
 
 [tool.ruff]

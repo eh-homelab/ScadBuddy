@@ -39,10 +39,10 @@ from scadbuddy.workflows.operation_models import (
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED,
-    OPERATION_CANCELLED_RUNNING,
     OPERATION_CHECK_TIMED_OUT,
     OPERATION_UNEXPECTED_DETAIL,
-    OPERATION_UNEXPECTED_RUNNING_DETAIL,
+    operation_cancelled_running,
+    operation_unexpected_running_detail,
     problem_of,
 )
 from tests.support.temporal import temporal_client
@@ -135,7 +135,9 @@ async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
         yield queue
 
 
-def op_input(*, run_attempts: int = 1, answer_running: bool = False) -> OperationInput:
+def op_input(
+    *, run_attempts: int = 1, answer_running: bool = False, where: str = "Bambuddy"
+) -> OperationInput:
     return OperationInput(
         kind="test",
         subject="s",
@@ -143,6 +145,7 @@ def op_input(*, run_attempts: int = 1, answer_running: bool = False) -> Operatio
         request={"archive_id": 5},
         run_attempts=run_attempts,
         answer_running=answer_running,
+        where=where,
     )
 
 
@@ -226,8 +229,8 @@ async def test_an_unexpected_effect_error_says_the_effect_may_have_happened(
     answer = await start(client, worker, arg)
     assert answer.operation is not None and answer.operation.error is not None
     assert answer.operation.error.status == 500
-    assert answer.operation.error.detail == OPERATION_UNEXPECTED_RUNNING_DETAIL
-    assert OPERATION_UNEXPECTED_RUNNING_DETAIL != OPERATION_UNEXPECTED_DETAIL
+    assert answer.operation.error.detail == operation_unexpected_running_detail("Bambuddy")
+    assert operation_unexpected_running_detail("Bambuddy") != OPERATION_UNEXPECTED_DETAIL
 
 
 async def test_the_run_activity_takes_the_kinds_attempts(
@@ -431,8 +434,34 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     finally:
         fake.hold.set()
     assert answer.operation is not None
-    assert answer.operation.error == OPERATION_CANCELLED_RUNNING
+    assert answer.operation.error == operation_cancelled_running("Bambuddy")
     assert (await ended(client, arg)).status == "failed"
+
+
+async def test_a_library_kind_says_to_check_the_model_not_bambuddy(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#1174: a cancel mid-run, or an unexpected failure, of a kind whose effect is on
+    the model and its libraries names that, not Bambuddy."""
+    where = "the model and its libraries"
+    fake.hold.clear()
+    arg = op_input(where=where)
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "run" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        cancelled = await accepting
+    finally:
+        fake.hold.set()
+    assert cancelled.operation is not None and cancelled.operation.error is not None
+    assert "Check the model and its libraries before" in cancelled.operation.error.detail
+    assert "Bambuddy" not in cancelled.operation.error.detail
+
+    fake.run_error = RuntimeError("boom")
+    failed = await start(client, worker, op_input(where=where))
+    assert failed.operation is not None and failed.operation.error is not None
+    assert "Check the model and its libraries before" in failed.operation.error.detail
 
 
 # --- a prelude on another queue (#1060) ------------------------------------------
@@ -489,6 +518,34 @@ async def test_a_failed_prelude_fails_the_operation_and_the_run_never_starts(
     assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
     assert (await ended(client, arg)).status == "failed"
     assert fake.calls == ["check", "insert", "prelude", "finish:502"]
+
+
+async def test_a_failed_prelude_says_to_check_where_the_prelude_writes(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    """#1174 review: a prelude that dies unexpectedly may have done its part where it
+    writes (Bambuddy's inbox), not where the outer kind's run would have."""
+    queue, step = prelude
+    step.error = RuntimeError("boom")
+    arg = op_input(where="the model and its libraries").model_copy(
+        update={
+            "prelude": PreludeStep(
+                kind="inbox", task_queue=queue, where="the inbox folder in Bambuddy"
+            )
+        }
+    )
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error is not None
+    detail = answer.operation.error.detail
+    assert "Check the inbox folder in Bambuddy before" in detail
+    assert "the model and its libraries" not in detail
+
+    # Once the prelude is done, a failed run names the kind's own place again.
+    step.error = None
+    fake.run_error = RuntimeError("boom")
+    answer = await start(client, worker, arg.model_copy(update={"key": uuid.uuid4().hex}))
+    assert answer.operation is not None and answer.operation.error is not None
+    assert "Check the model and its libraries before" in answer.operation.error.detail
 
 
 async def test_an_operation_without_a_prelude_records_no_patch_marker(

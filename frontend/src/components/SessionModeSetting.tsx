@@ -62,8 +62,8 @@ export function SessionModeSetting() {
         </label>
         <p id="session-mode-help" className="text-[12px] text-muted">
           Both modes have the same tools, plugins, skills, subagents and settings, except that a durable subagent
-          has only ScadBuddy&apos;s own tools, and a durable session leaves out the background built-ins (scheduled
-          jobs, monitors, workflows) an approved plugin package may name. Durable sessions run as Temporal
+          has only ScadBuddy&apos;s own tools, and a durable session leaves out the push notifications an approved plugin
+          package may name. Durable sessions run as Temporal
           workflows: a turn survives a restart of the assistant, and an approval or question waits for you as long as
           it needs. Classic sessions run inside the assistant service, and can be forked. A new chat uses this default
           unless you pick a mode under Session mode in the composer. Applies to sessions started from now on.

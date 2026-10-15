@@ -3,6 +3,8 @@ import { USER_ONLY } from '../../agent/dom'
 import type { Settings, SettingSource } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
+import { Chevron } from '../../components/ui/Chevron'
+import { useCollapsible } from './collapseState'
 import {
   BYTE_UNITS,
   LOG_LEVELS,
@@ -112,7 +114,11 @@ export function FieldRow({
   const helpId = `${id}-help`
   const errorId = `${id}-error`
   // The control is whatever the caller rendered with `id` (an input, a select, the bytes
-  // input), so its description is set on it here rather than through every caller.
+  // input), so its description is set on it here rather than through every caller. It
+  // runs after every render of this row, and only then: a control that re-renders on its
+  // own and writes its own `aria-describedby` drops the help and error ids until the row
+  // renders again. No control here sets that prop; one that must should take the ids as
+  // props instead.
   useLayoutEffect(() => {
     const control = row.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
     if (!control) return
@@ -356,16 +362,29 @@ export function Section({
   children: ReactNode
 }) {
   const headingId = `${id}-heading`
+  // #2173 — folded from its heading, remembered per browser. Folding only hides the body:
+  // its fields keep their edits, and a dirty section keeps its badge and its Save bar.
+  const { open, toggle } = useCollapsible(id)
   return (
     <section
       id={id}
+      data-collapsible=""
       aria-labelledby={headingId}
       className="mt-4 scroll-mt-14 rounded-[6px] border border-line bg-surface first:mt-0"
     >
-      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
+      <div className={`flex items-center gap-2 px-4 py-1.5 ${open ? 'border-b border-line' : ''}`}>
         {/* #2346 — focusable from script only: a section link moves focus here. */}
         <h2 id={headingId} tabIndex={-1} className="text-[13px] font-medium outline-none">
-          {title}
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={`${id}-body`}
+            onClick={toggle}
+            className="flex min-h-6 items-center gap-1.5 text-left"
+          >
+            <Chevron open={open} />
+            {title}
+          </button>
         </h2>
         {dirty && (
           <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] text-accent" data-testid={`${id}-unsaved`}>
@@ -373,11 +392,11 @@ export function Section({
           </span>
         )}
       </div>
-      <div className="space-y-4 p-4">
+      <div id={`${id}-body`} hidden={!open} className="space-y-4 p-4">
         {description && <p className="text-[13px] text-muted">{description}</p>}
         {children}
       </div>
-      {onSave && (
+      {onSave && (open || dirty) && (
         <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
           <Button
             variant="primary"

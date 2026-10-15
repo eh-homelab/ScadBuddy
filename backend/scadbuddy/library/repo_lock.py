@@ -25,6 +25,7 @@ flows repository announces nothing: nothing caches it per replica.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -33,6 +34,8 @@ import psycopg
 from psycopg import sql
 
 from scadbuddy.library.history import LOCK_POLL_SECONDS, GitError, GitTimeoutError, HeadChange
+
+logger = logging.getLogger(__name__)
 
 #: Hashed into the advisory lock's key; no other lock hashes this text.
 LOCK_KEY = "scadbuddy:models-repository"
@@ -50,6 +53,11 @@ def encode_change(change: HeadChange) -> str:
     payload = json.dumps({"head": change.commit, "models": change.models})
     if len(payload.encode()) <= MAX_PAYLOAD_BYTES:
         return payload
+    # Why every replica is about to refresh every template (#2619).
+    logger.debug(
+        "a models HEAD names too many templates to announce; listeners refresh them all",
+        extra={"commit": change.commit, "models": len(change.models or [])},
+    )
     return json.dumps({"head": change.commit, "models": None})
 
 

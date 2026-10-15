@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import psycopg
 import pytest
@@ -141,10 +141,6 @@ class ProjectingActivities(FakeActivities):
             await self.hold_running.wait()
         await super().project(projection)
         return await self._real.project(projection)
-
-
-#: The render series of a counter labelled by job kind.
-RENDER = {"kind": "render"}
 
 
 #: The labels of a render submit's series (#2294).
@@ -1106,11 +1102,89 @@ def _spy_cancel(
     return cancelled
 
 
-def _legacy(projection: JobProjection) -> Job:
+def _legacy(projection: JobProjection, kind: Literal["render", "arrange"] = "render") -> Job:
     """A pending row an older release inserted: its workflow `render-<id>`."""
     params: dict[str, ParamValue] = {"width": _w()}
-    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
+    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now(), kind=kind)
     return legacy_row(projection, job)
+
+
+def test_an_arrange_the_api_settles_is_counted_as_arrange(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """#2294, #2889: a superseded or failed arrange that the API side settles
+    (``RenderService._settled``) counts under ``kind="arrange"``; the render series
+    stay where they were."""
+    service = make_service(None, "unused")
+    arrange = _legacy(projection, kind="arrange")
+
+    for outcome in ("superseded", "failed"):
+        service._settled(arrange, outcome)
+
+    sample = service.metrics.registry.get_sample_value
+    for outcome in ("superseded", "failed"):
+        labels = {"kind": "arrange", "outcome": outcome}
+        assert sample("scadbuddy_render_jobs_finished_total", labels) == 1
+        assert sample("scadbuddy_render_job_latency_seconds_count", labels) == 1
+        rendered = {"kind": "render", "outcome": outcome}
+        # Registered at zero by Metrics, so == 0 also catches a series never registered.
+        assert sample("scadbuddy_render_jobs_finished_total", rendered) == 0
+        assert sample("scadbuddy_render_job_latency_seconds_count", rendered) == 0
+
+
+async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3464: the public supersede path hands ``_settled`` the arrange row itself, so
+    its supersede counts under ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        arrange = _legacy(projection, kind="arrange")
+        _spy_cancel(monkeypatch, client)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            await service.submit(SLUG, {"width": _w()}, supersedes=arrange.id)
+        await service.aclose()
+
+    # The supersede itself, so the counts cannot pass by some other route to _settled.
+    dropped = await asyncio.to_thread(projection.read, arrange.id)
+    assert dropped is not None
+    assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
+    sample = service.metrics.registry.get_sample_value
+    superseded = {"kind": "arrange", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", superseded) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", superseded) == 1
+    as_render = {"kind": "render", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
+
+
+async def test_an_arrange_the_reconciler_fails_is_counted_as_arrange(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """#3464, #3487 review: the reconciler's fail path (``settle_legacy``) hands
+    ``_settled`` the arrange row itself, so its failure counts under
+    ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        orphan = _legacy(projection, kind="arrange")
+        _aged(projection, orphan.id)
+        failed = await service.settle_legacy()
+        await service.aclose()
+
+    assert failed == [orphan.id]
+    stored = await asyncio.to_thread(projection.read, orphan.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    sample = service.metrics.registry.get_sample_value
+    as_arrange = {"kind": "arrange", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_arrange) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_arrange) == 1
+    as_render = {"kind": "render", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
 
 
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(

@@ -39,7 +39,7 @@ RenderOutcome = Literal["done", "failed", "superseded"]
 #: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
 #: §7): spelled out here, not imported, so the metrics never load the render stack.
 RenderKind = Literal["render", "arrange"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
+RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write", "recolour"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
@@ -250,6 +250,14 @@ class Metrics:
             "Time from submit until its workflow began the render, by kind.",
             ["kind"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+        self.project_retries = Counter(
+            "scadbuddy_render_project_retries_total",
+            "Retried writes of a render job's row (the `project` activity), which retries "
+            "without limit: counted as each retry starts, so one per failed write. A "
+            "steady rise is a write that never lands (#857). Alert on this, not the log: "
+            "the warning is logged only at the 12th attempt and every 100th after.",
             registry=r,
         )
         self.render_duration = Histogram(

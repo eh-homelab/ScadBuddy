@@ -58,6 +58,8 @@ export type VersionFile = Schemas['VersionFile']
 export type VersionDiff = Schemas['VersionDiff']
 
 export type Job = Schemas['JobStatus']
+/** #1899 — a print's own support structures, over the template's `print_settings`. */
+export type SupportsChoice = Schemas['SupportsChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
@@ -82,6 +84,8 @@ export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
 export type ParamPresetDuplicate = Schemas['ParamPresetDuplicate']
 
 export type FontFamily = Schemas['FontFamily']
+/** #2358 — the characters of a text a font has no glyph for (`GET /fonts/glyphs`). */
+export type GlyphCoverage = Schemas['GlyphCoverage']
 export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
@@ -164,12 +168,24 @@ export type FlowGrantRule = Schemas['GrantRule']
 export type FlowGrantArg = Schemas['ArgBound']
 export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
+/** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
+export type FlowTrigger = Schemas['TriggerView']
+export type FlowTriggerCreate = Schemas['TriggerCreate']
+export type FlowTriggerUpdate = Schemas['TriggerUpdate']
+export type FlowTriggerSchedule = Schemas['ScheduleTiming']
+export type FlowTriggerEvent = Schemas['EventTiming']
+export type FlowTriggerFire = Schemas['Fire']
+export type FlowStandingGrant = Schemas['StandingGrantView']
+export type FlowRunTrigger = Schemas['RunTrigger']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
 export type PrintChoices = Schemas['PrintChoices']
+/** #717 — filament profiles: cited process changes suggested for a spool. */
+export type FilamentProfile = Schemas['FilamentProfile']
+export type ProfilePreview = Schemas['ProfilePreview']
 export type NozzleChoice = Schemas['NozzleChoice']
 export type InstalledNozzle = Schemas['InstalledNozzle']
 export type TierOption = Schemas['TierOption']
@@ -201,6 +217,8 @@ export type PlannedSlot = Schemas['PlannedSlot']
 export type UnknownTray = Schemas['UnknownTray']
 export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
+/** #2671 — what a sliced library file was sliced for, read from the file itself. */
+export type SlicedProfile = Schemas['SlicedProfile']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
@@ -256,6 +274,7 @@ export type PrintDetail = Schemas['PrintDetail']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
+export type PrintAttachment = Schemas['PrintAttachment']
 export type PrinterMedia = Schemas['PrinterMedia']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
@@ -477,6 +496,26 @@ export interface WorkspaceFile {
   updated_at: string
 }
 
+/**
+ * A session's background task (the agent's `routes/backgroundTasks.ts`): what its
+ * CronCreate or ScheduleWakeup left running, which sends `prompt` to the session when due.
+ */
+export interface BackgroundTask {
+  id: string
+  kind: 'cron' | 'wakeup' | 'monitor' | 'workflow'
+  description: string
+  /** The schedule as words: "Every 5 minutes", "once, 1200 s after it was set". */
+  schedule: string
+  prompt: string
+  state: 'active' | 'done' | 'cancelled' | 'failed'
+  next_at: string | null
+  fired: number
+  last_fired_at: string | null
+  expires_at: string | null
+  detail: string | null
+  created_at: string
+}
+
 export interface WorkspaceFileList {
   files: WorkspaceFile[]
   usage: { files: number; bytes: number }
@@ -518,6 +557,70 @@ export interface AiSessionView {
   archived_at?: string | null
   /** #1284 — a live handoff offer: to whom, until when. */
   offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
+}
+
+/** #2482 — a run's step, as a queue entry names it. */
+export interface FlowQueueStep {
+  seq: number
+  fn: string
+}
+
+/** #2482 — one hop action on an entry (`hops`), as the run page lists it. */
+export interface FlowQueueHop {
+  hop: string
+  action: string
+  actor: string
+  at: string
+  reason?: string | null
+}
+
+interface FlowQueueCommon {
+  id: string
+  hop: 'parent' | 'person' | null
+  hop_until: string | null
+  reason: string | null
+  hops: FlowQueueHop[]
+  step: FlowQueueStep | null
+}
+
+/**
+ * #2482 — one entry of a flow run's one queue (agent `flows/queue.ts` QueueEntry,
+ * `GET /api/v1/ai/flow-runs/:id/queue`): the run's own call, a child session's call
+ * (answered by `POST /api/v1/ai/pending-input/{id}`), or its requested grant. A child's
+ * `reasoning` is its model's text before the call: untrusted.
+ */
+export type FlowQueueEntry =
+  | (FlowQueueCommon & {
+      source: 'flow'
+      kind: 'approval' | 'answer'
+      call_id: string
+      fn: string
+      prompt: string | null
+      since: string | null
+      proposed: boolean
+    })
+  | (FlowQueueCommon & {
+      source: 'child'
+      kind: 'approval' | 'answer'
+      session_id: string
+      tool: string
+      summary: string
+      input_hash: string | null
+      created_at: string
+      expires_at: string
+      /** Past its timer, not yet resolved by its worker: no one can decide it now. */
+      expiring: boolean
+      reasoning: string
+    })
+  | { source: 'grant'; id: string; status: 'requested'; created_at: string }
+
+/** #2482 — a flow run's one queue (agent `flows/queue.ts` RunQueue). */
+export interface FlowRunQueue {
+  run_id: string
+  name: string
+  status: string
+  starter_session: string | null
+  entries: FlowQueueEntry[]
 }
 
 /**
