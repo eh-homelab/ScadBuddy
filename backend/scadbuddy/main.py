@@ -5,7 +5,7 @@ import importlib
 import logging
 import pkgutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -95,6 +95,7 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
+from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -941,7 +942,8 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
     # timeout on a slow Temporal.
     handoff = asyncio.create_task(_hand_off_watches(state, client))
     try:
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+        where = {name: kind.where for name, kind in ops.kinds.items()}
+        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
     finally:
         # A row whose follow did not start stays for the next boot.
         handoff.cancel()
@@ -1080,11 +1082,15 @@ async def _serve_until(
 
 
 async def _end_lost_runs_until(
-    client: Client, store: PrintRunStore, operations: OperationStore, stop: asyncio.Event
+    client: Client,
+    store: PrintRunStore,
+    operations: OperationStore,
+    stop: asyncio.Event,
+    where: Mapping[str, str] | None = None,
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
-    terminated in the Temporal UI."""
+    terminated in the Temporal UI. ``where``: each operation kind's what-to-check."""
     while not stop.is_set():
         try:
             ended = await reconcile_lost_runs(client, store)
@@ -1093,7 +1099,7 @@ async def _end_lost_runs_until(
         except Exception:
             logger.exception("could not check print runs for lost executions")
         try:
-            ended = await reconcile_lost_operations(client, operations)
+            ended = await reconcile_lost_operations(client, operations, where=where)
             if ended:
                 logger.warning("ended operations whose execution was gone", extra={"count": ended})
         except Exception:
@@ -1153,6 +1159,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
+            # #2788: on the API's /data, so every replica shares it.
+            downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
@@ -1278,16 +1286,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
-        if worker is not None:
-            stop.set()
-            await _stop_worker(state, *worker)
-        await components.aclose()
-        await state.render.aclose()
-        await asyncio.to_thread(state.projection.close)
-        await asyncio.to_thread(state.presets.close)
-        await state.events.aclose()
-        await state.store.aclose()
-        await asyncio.to_thread(state.settings_store.close)
+        # Each close runs even when one before it raises, so a component (or a pool)
+        # failing on its way out cannot leak the pools and the bus's listener (#653).
+        # The stack unwinds last-pushed first: pushed here in reverse of the order run.
+        async with AsyncExitStack() as closing:
+            closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
+            closing.push_async_callback(state.store.aclose)
+            closing.push_async_callback(state.events.aclose)
+            closing.push_async_callback(asyncio.to_thread, state.presets.close)
+            closing.push_async_callback(asyncio.to_thread, state.projection.close)
+            closing.push_async_callback(state.render.aclose)
+            closing.push_async_callback(components.aclose)
+            if worker is not None:
+                # Pushed last, so it runs first: the worker stops before the queue and
+                # the pools it uses close, and its failing still lets them close (#3125).
+                stop.set()
+                closing.push_async_callback(_stop_worker, state, *worker)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

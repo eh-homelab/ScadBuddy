@@ -33,6 +33,7 @@ export function affectedBy(event: BusEvent): Affected {
     case 'job.pending':
     case 'job.running':
     case 'job.superseded':
+    case 'job.cancelled':
       return event.job_id ? { uris: [u('scadbuddy://jobs/{job_id}', { job_id: event.job_id })], listChanged: false } : none
     case 'job.done':
     case 'job.failed':
