@@ -27,6 +27,11 @@ export function utf8Length(text: string): number {
 
 /** At most `limit` code points of `text`, as Python slices (`text[:limit]`): a pair is never split. */
 export function cut(text: string, limit: number): string {
-  const points = [...text]
-  return points.length <= limit ? text : points.slice(0, limit).join('')
+  // Walks at most `limit` code points, never the whole of a long text.
+  let end = 0
+  for (let n = 0; n < limit && end < text.length; n++) {
+    const c = text.charCodeAt(end)
+    end += c >= 0xd800 && c <= 0xdbff && end + 1 < text.length && (text.charCodeAt(end + 1) & 0xfc00) === 0xdc00 ? 2 : 1
+  }
+  return text.slice(0, end)
 }

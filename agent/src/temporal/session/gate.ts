@@ -242,8 +242,13 @@ export class SessionGate {
    * timer running in the scope it was opened in. A call that needs no entry is settled at
    * once and its resolution says how: a read turn tool and one inside the run's grant are
    * `approved`, one the flow denies is `denied`, a malformed answer is `cancelled`.
+   *
+   * `live`, when given, is asked before each write (a grant, the flow's refusal, the entry):
+   * a call whose turn ended while it was described is settled `cancelled` and writes nothing,
+   * so it can never mark an idle session waiting (AgentSession's `open_input` handler outlives
+   * its turn; DurableSession's parks are tasks its turn cancels).
    */
-  async open(call: GateCall): Promise<string> {
+  async open(call: GateCall, live?: () => boolean): Promise<string> {
     const { sessionId, owner, creator, host } = this.#opts
     const rid = durableRequestId(sessionId, workflowInfo().runId, call.id)
     const kind: 'approval' | 'answer' = this.#opts.kindOf(call.name) === 'answer' ? 'answer' : 'approval'
@@ -255,10 +260,12 @@ export class SessionGate {
       slot.resolve(resolution)
       return rid
     }
+    const gone = (): boolean => live !== undefined && !live()
+    const ended = (): string => settled(false, 'scadbuddy', { kind, outcome: 'cancelled' } satisfies Resolution)
     if (this.#opts.turnTools?.().has(call.name) && !(await this.#outward(call))) {
       // A read or write call goes straight through, as the permission seam lets it; its activity checks the tier again.
-      // A turn tool is never an answer tool (kindOf names only ask_user and wait_for_user), so this is an approval.
-      return settled(true, 'scadbuddy', { kind: 'approval', outcome: 'approved' })
+      // A turn tool is never an answer tool (kindOf names only ask_user and wait_for_user), so `answered` is unreachable.
+      return settled(true, 'scadbuddy', kind === 'approval' ? { kind, outcome: 'approved' } : { kind, outcome: 'answered' })
     }
     let summary = ''
     let inputHash: string | null = null
@@ -272,6 +279,7 @@ export class SessionGate {
     const flow = turn?.flow
     if (kind === 'approval' && flow && inputHash !== null) {
       const verdict = await this.#grantVerdict(rid, call, flow)
+      if (gone()) return ended()
       if (verdict?.verdict === 'inside') {
         const grantId = String(verdict.grant_id || '')
         if (
@@ -297,6 +305,7 @@ export class SessionGate {
     }
     // A flow turn's call is in its run's queue (#2482): the person's, never a grant's.
     const escalation = kind === 'approval' && flow !== undefined
+    if (gone()) return ended()
     if (escalation && outside?.on_outside === 'deny' && inputHash !== null) {
       const reason = String(outside.reason || '') || null
       await this.#grants[SESSION_GATE_ACTIVITIES.deny]!({
@@ -372,7 +381,9 @@ export class SessionGate {
       openFailed: false,
     }
     // Parked before its row is opened, so a respond that reads the row as soon as it is
-    // written finds the call here; every resolution waits for the open (resolve).
+    // written finds the call here; every resolution waits for the open (resolve). From here
+    // the turn's end cancels it (cancelAll, settle) before its end is written.
+    if (gone()) return ended()
     this.#parked.set(rid, parked)
     try {
       await this.#own[SESSION_GATE_ACTIVITIES.open]!({
@@ -409,9 +420,9 @@ export class SessionGate {
     return this.#parked.has(requestId)
   }
 
-  /** The one entry cancelled with `reason`, if it is still pending: a call whose turn ended while it was opened. */
-  async cancel(requestId: string, reason: string): Promise<boolean> {
-    const parked = this.#parked.get(requestId)
+  /** The entry of the call `callId` cancelled with `reason`, if it is still pending: a call its turn no longer waits on. */
+  async cancelCall(callId: string, reason: string): Promise<boolean> {
+    const parked = [...this.#parked.values()].find((p) => p.callId === callId)
     if (!parked || parked.entry.state !== 'pending') return false
     return await this.#resolve(parked, 'cancelled', SYSTEM, undefined, reason, true)
   }

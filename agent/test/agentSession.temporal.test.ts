@@ -1,14 +1,16 @@
-import { type Client, WithStartWorkflowOperation, WorkflowUpdateFailedError, WorkflowUpdateStage } from '@temporalio/client'
+import { type Client, WithStartWorkflowOperation, WorkflowNotFoundError, WorkflowUpdateFailedError, WorkflowUpdateStage } from '@temporalio/client'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
 import { historyFromJSON, historyToJSON } from '@temporalio/common/lib/proto-utils.js'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { sessionWorkflowId } from '../src/gate/durable.js'
+import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
+import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from '../src/db.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
@@ -78,7 +80,12 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let describeHold: Promise<void>
   let resolveHold: Promise<void>
   let described: number
-  let resolved: unknown[]
+  let opened: OpenInput[]
+  let resolved: ResolveInput[]
+  /** The gate's real writers (gate/store.ts) where a test reads the rows; the stubs write nothing. */
+  /** The sessions this test started: each one's workflow is terminated after it (#3716), so none runs into the next test. */
+  let started: Set<string>
+  let writes: { open: (args: OpenInput) => Promise<boolean>; resolve: (args: ResolveInput) => Promise<boolean> } | undefined
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -110,11 +117,14 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
             await describeHold
             return { summary: 'a call', input_hash: 'a'.repeat(64) }
           },
-          [GATE.open]: async () => true,
-          [GATE.resolve]: async (args: unknown) => {
+          [GATE.open]: async (args: OpenInput) => {
+            opened.push(args)
+            return writes ? writes.open(args) : true
+          },
+          [GATE.resolve]: async (args: ResolveInput) => {
             resolved.push(args)
             await resolveHold
-            return true
+            return writes ? writes.resolve(args) : true
           },
         },
         {},
@@ -150,7 +160,10 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     describeHold = Promise.resolve()
     resolveHold = Promise.resolve()
     described = 0
+    opened = []
     resolved = []
+    writes = undefined
+    started = new Set()
     settings = async () => {
       settingsRead++
       return RUNTIME_DEFAULTS
@@ -162,10 +175,26 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     }
   })
 
+  /** Terminates every workflow of `ids` still open: a session a test left running (an idle one waiting for its next message, or one whose run continued as new) must not take the next test's activities. */
+  async function terminateAll(ids: Iterable<string>): Promise<void> {
+    for (const id of ids) {
+      await env.client.workflow
+        .getHandle(sessionWorkflowId(id))
+        .terminate('the test ended')
+        .catch((err: unknown) => {
+          if (!(err instanceof WorkflowNotFoundError)) throw err
+        })
+    }
+  }
+  afterEach(async () => {
+    await terminateAll(started)
+  })
+
   const start = (id: string): SessionStart => ({ session_id: id, creator: OWNER, owner: OWNER, max_turns: 50, system_append: null })
 
   /** update-with-start of `send_message`, as DurableTurns sends the first message. */
   async function send(client: Client, id: string, m: Message) {
+    started.add(id)
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(id),
       taskQueue: SESSION_QUEUE,
@@ -346,21 +375,38 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  /** Writes one run's history as the fixture `name` (UPDATE_SESSION_HISTORIES=1), which `replays its recorded histories` replays. */
+  async function record(name: string, id: string, runId: string): Promise<void> {
+    if (!process.env.UPDATE_SESSION_HISTORIES) return
+    await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())}\n`)
+  }
+
+  /** Whether the run's history holds session_turn's completion. */
+  async function turnCompleted(id: string, runId: string): Promise<boolean> {
+    type Event = {
+      eventId: string
+      eventType: string
+      activityTaskScheduledEventAttributes?: { activityType?: { name?: string } }
+      activityTaskCompletedEventAttributes?: { scheduledEventId?: string }
+    }
+    const events = (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: Event[] }).events
+    const turnIds = new Set(events.filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === SESSION_TURN_ACTIVITY).map((e) => String(e.eventId)))
+    return events.some((e) => turnIds.has(String(e.activityTaskCompletedEventAttributes?.scheduledEventId)))
+  }
+
   /** The history's event types of one run. */
   const eventTypes = async (id: string, runId?: string) =>
     (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string }[] }).events.map((e) => e.eventType)
 
   /**
-   * A turn whose call is still being opened when the turn ends (its describe_call held), so
-   * `open_input` is the handler the workflow waits on after the turn's end; once the call is
-   * opened the handler cancels its entry (the turn is over), and that resolve_input is held.
-   * Resolves once the handler is in that resolve_input, the turn's end written.
+   * A turn whose call is still being described when the turn ends (its describe_call held), so
+   * `open_input` is the handler the workflow waits on after the turn's end. Once released, the
+   * call is settled `cancelled` with no entry (the turn is over) and the handler finishes.
+   * Resolves once the turn's end is written, the handler still in describe_call.
    */
-  async function lateOpen(id: string): Promise<{ turnRun: string; releaseResolve: () => void }> {
+  async function lateOpen(id: string): Promise<{ turnRun: string; releaseDescribe: () => void }> {
     const describing = held()
-    const resolving = held()
     describeHold = describing.promise
-    resolveHold = resolving.promise
     runTurn = async (input) => {
       // Accepted while the turn runs: its validator passes; the handler then waits on describe_call.
       await env.client.workflow.getHandle(sessionWorkflowId(input.sessionId)).startUpdate(OPEN_INPUT_UPDATE, {
@@ -373,11 +419,13 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     const turnRun = await runIdOf(id)
     await poll(() => finished.map((f) => f.turnId), ['t1'])
     await poll(() => described, 1)
-    describing.release()
-    await poll(() => resolved.length, 1)
-    expect(resolved[0]).toMatchObject({ requestId: `durable:${id}:${turnRun}:toolu_late`, outcome: 'cancelled', reason: 'the turn ended' })
     runTurn = async () => ({ status: 'done', hostQueue: '' })
-    return { turnRun, releaseResolve: resolving.release }
+    return {
+      turnRun,
+      releaseDescribe: () => {
+        describing.release()
+      },
+    }
   }
 
   /** The run that is running now, once it has completed or continued as new: what the session did after its handlers finished. */
@@ -394,23 +442,29 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
 
   it('an `end` while a handler finishes after the turn completes the session there: no new run, no new turn', async () => {
     const id = randomUUID()
-    const { turnRun, releaseResolve } = await lateOpen(id)
+    const { turnRun, releaseDescribe } = await lateOpen(id)
     await handleOf(id).signal('end')
-    expect(await eventTypes(id, turnRun)).toContain('EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED')
-    releaseResolve()
+    // In the turn's run's history before the release: a signal that lands while a workflow task is
+    // in flight is buffered by the server and written only once that task completes.
+    await poll(async () => (await eventTypes(id, turnRun)).includes('EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED'), true)
+    releaseDescribe()
     expect(await afterHandlers(id, turnRun)).toEqual({ runId: turnRun, status: 'COMPLETED' })
     expect(await eventTypes(id, turnRun)).not.toContain('EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW')
     expect(turns.map((t) => t.turnId)).toEqual(['t1'])
     expect(finished.map((f) => f.turnId)).toEqual(['t1'])
     expect(released).toEqual([id])
+    // The late call wrote nothing: no entry was opened, none resolved.
+    expect(opened).toEqual([])
+    expect(resolved).toEqual([])
+    await record('end_while_finishing', id, turnRun)
   })
 
   it('a message taken before that `end` still runs first, in the same run', async () => {
     const id = randomUUID()
-    const { turnRun, releaseResolve } = await lateOpen(id)
+    const { turnRun, releaseDescribe } = await lateOpen(id)
     expect(await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2', 'then this')] })).toEqual({ accepted: true, turn_id: 't2' })
     await handleOf(id).signal('end')
-    releaseResolve()
+    releaseDescribe()
     expect(await afterHandlers(id, turnRun)).toEqual({ runId: turnRun, status: 'COMPLETED' })
     expect(turns.map((t) => t.message?.text)).toEqual(['hello', 'then this'])
     expect(finished.map((f) => f.turnId)).toEqual(['t1', 't2'])
@@ -459,6 +513,50 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('two calls of one turn park side by side, each resolved on its own, and the turn`s close waits for both', async () => {
+    const id = randomUUID()
+    const turnHold = held()
+    const resolving = held()
+    let rids: string[] = []
+    runTurn = async (input) => {
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(input.sessionId))
+      const open = (call: string) =>
+        handle.executeUpdate<{ request_id: string }, [OpenInputArgs]>(OPEN_INPUT_UPDATE, {
+          args: [{ turn_id: input.turnId, call: { id: call, name: 'print_output', input: { output_id: call } } }],
+        })
+      // Both at once: neither waits on the other.
+      rids = (await Promise.all([open('toolu_a'), open('toolu_b')])).map((o) => o.request_id)
+      await turnHold.promise
+      return { status: 'done', hostQueue: '' }
+    }
+    await send(env.client, id, message('t1'))
+    const turnRun = await runIdOf(id)
+    await poll(() => rids.length, 2)
+    const listed = await handleOf(id).query<{ id: string }[]>(PENDING_INPUT_QUERY)
+    expect(listed.map((e) => e.id).sort()).toEqual([...rids].sort())
+    resolveHold = resolving.promise
+    const respond = (rid: string, decision: 'approve' | 'deny') =>
+      handleOf(id).executeUpdate(RESPOND_UPDATE, { args: [{ request_id: rid, response: { kind: 'approval', decision }, responder: OWNER, role: 'browser' }] })
+    const answers = Promise.all([respond(rids[0]!, 'approve'), respond(rids[1]!, 'deny')])
+    // Both in resolve_input at once, each for its own entry.
+    await poll(() => resolved.map((r) => `${r.requestId} ${r.outcome}`).sort(), [`${rids[0]} approved`, `${rids[1]} denied`].sort())
+    turnHold.release()
+    // The turn's activity has ended, and its close waits on both resolutions before its end is written.
+    await poll(() => turnCompleted(id, turnRun), true)
+    expect(finished).toEqual([])
+    resolving.release()
+    expect(await answers).toEqual([
+      { kind: 'approval', outcome: 'approved' },
+      { kind: 'approval', outcome: 'denied' },
+    ])
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    // Nothing was left to cancel.
+    expect(resolved).toHaveLength(2)
+    await record('park_respond', id, turnRun)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('refuses open_input for a turn that is not running, `stale`', async () => {
     const id = randomUUID()
     await send(env.client, id, message('t1'))
@@ -466,6 +564,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     const refused = await handleOf(id)
       .executeUpdate(OPEN_INPUT_UPDATE, { args: [{ turn_id: 't1', call: { id: 'toolu_x', name: 'print_output', input: {} } } satisfies OpenInputArgs] })
       .catch((err: unknown) => err)
+    expect(refused).toBeInstanceOf(WorkflowUpdateFailedError)
     expect(((refused as WorkflowUpdateFailedError).cause as ApplicationFailure).type).toBe('stale')
     expect(described).toBe(0)
     await handleOf(id).signal('end')
@@ -494,8 +593,10 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     if (process.env.UPDATE_SESSION_HISTORIES) {
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
+    const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing']))
     const fixtures = await Promise.all(
-      ['turn', 'ended'].map(async (name) => ({
+      names.map(async (name) => ({
         workflowId: `fixture-${name}`,
         history: historyFromJSON(JSON.parse(await readFile(new URL(`${name}.json`, FIXTURES), 'utf8'))),
       })),
@@ -514,6 +615,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await db.ready()).toBe(true)
     })
     afterEach(async () => {
+      // The sessions the managers started (#3716): their workflows end with the test.
+      await terminateAll((await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`).map((r) => r.id))
       await drop()
     })
 
@@ -596,6 +699,40 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
       expect(await runtimeOf(session.id)).toBe('durable')
       expect(turns).toEqual([])
+    })
+
+    it('a call whose turn ended while it was described writes nothing: the session stays idle and takes the next send', async () => {
+      await flag(true)
+      const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
+      // The real store writes (gate/store.ts), so the row is what a person's panel and the next send see.
+      writes = { open: (args) => openInput(db.sql, args), resolve: (args) => resolveInput(db.sql, args) }
+      const describing = held()
+      describeHold = describing.promise
+      runTurn = async (input) => {
+        // Accepted while the turn runs; its handler then waits on describe_call past the turn's end.
+        await env.client.workflow.getHandle(sessionWorkflowId(input.sessionId)).startUpdate(OPEN_INPUT_UPDATE, {
+          args: [{ turn_id: input.turnId, call: { id: 'toolu_late', name: 'print_output', input: { output_id: 'o1' } } } satisfies OpenInputArgs],
+          waitForStage: WorkflowUpdateStage.ACCEPTED,
+        })
+        return { status: 'done', hostQueue: '' }
+      }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'print it' })
+      const turnRun = await runIdOf(session.id)
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      await poll(() => described, 1)
+      const statusOf = async () => (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${session.id}`)[0]?.status
+      // session.finish_turn has written the turn's end.
+      expect(await statusOf()).toBe('idle')
+      describing.release()
+      // The handler has finished once the run continues as new.
+      await poll(async () => (await runIdOf(session.id)) !== turnRun, true)
+      expect(await statusOf()).toBe('idle')
+      expect(opened).toEqual([])
+      expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toHaveLength(0)
+      runTurn = async () => ({ status: 'done', hostQueue: '' })
+      const next = await m.send(session.id, browser, 'and again')
+      expect(await next.done).toMatchObject({ kind: 'result' })
     })
 
     it('refuses to fork a unified session, whatever its state, writing nothing', async () => {

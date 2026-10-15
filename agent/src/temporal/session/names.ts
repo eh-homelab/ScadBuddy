@@ -29,6 +29,8 @@ export const SHUTTING_DOWN_FAILURE = 'ShuttingDown'
 /** `session_turn`'s failure when the session no longer runs this turn (it ended, or was forgotten). */
 export const SESSION_GONE = 'SessionGone'
 export const OPEN_INPUT_UPDATE = 'open_input'
+/** The turn's activity no longer waits on a call it opened (its answer was lost, Claude Code dropped it): its entry is cancelled. */
+export const WITHDRAW_INPUT_UPDATE = 'withdraw_input'
 export const OWNER_CHANGED_SIGNAL = 'owner_changed'
 export const SEND_MESSAGE_UPDATE = 'send_message'
 export const TURN_QUERY = 'turn'

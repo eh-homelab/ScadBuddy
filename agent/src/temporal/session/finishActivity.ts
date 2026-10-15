@@ -41,7 +41,7 @@ export function sessionFinishActivities(sql: Sql, events: EventLog) {
       const written = await sql.begin(async (tx) => {
         const [row] = await tx.unsafe<{ turns: number; budget: string; spent: string | null }[]>(
           `SELECT ai_sessions.turns, ${POOL_BUDGET} AS budget, ${POOL_COST} AS spent
-           FROM ai_sessions WHERE id = $1 AND status = ANY($2) AND durable_turn_id::text = $3 FOR UPDATE`,
+           FROM ai_sessions WHERE id = $1 AND status = ANY($2) AND durable_turn_id = $3::uuid FOR UPDATE`,
           [sessionId, RUNNING, args.turnId],
         )
         // Written already, the next turn has the row, or the session is gone.

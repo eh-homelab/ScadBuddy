@@ -2,10 +2,11 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import { WorkflowNotFoundError } from '@temporalio/client'
+import { type Client, WorkflowNotFoundError } from '@temporalio/client'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
 import { AuditLog } from '../src/audit/log.js'
@@ -28,7 +29,7 @@ import { acquireActivities, releaseActivities } from '../src/temporal/session/af
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
-import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, OPEN_INPUT_UPDATE, SESSION_GATE_ACTIVITIES as GATE, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { gateActivities, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
@@ -85,7 +86,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
   let workflowWorker: Worker
   let workflowRun: Promise<void>
   let fake: FakeAnthropic
-  let script: (r: RecordedRequest) => Reply
+  let script: (r: RecordedRequest) => Reply | Promise<Reply>
   let db: Database
   let schema: string
   let url: string
@@ -99,6 +100,15 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
   let spawned: number
   /** The stub outward tool's calls, by `what`. */
   let sent: string[]
+  /** How many of TurnHost's next reads of a response row fail (a database blip during a hold). */
+  let readFailures: number
+  /** How many of the next `open_input` answers are lost on their way back (the workflow took the Update). */
+  let lostOpens: number
+  /** What describe_call waits on before it answers. */
+  let describeHold: Promise<void>
+  let describing: number
+  /** `open_input` calls of the turn's activity that have returned or failed. */
+  let opensSettled: number
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -129,6 +139,11 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     spawned = 0
     sent = []
+    readFailures = 0
+    lostOpens = 0
+    describeHold = Promise.resolve()
+    describing = 0
+    opensSettled = 0
     script = () => ({ text: 'ok' })
     const paths = await tempPaths()
     await ensureStateDirs(paths)
@@ -165,7 +180,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     listener.start()
     turnHost = new TurnHost({
       core: m.turnCore,
-      sql: pool.sql,
+      sql: flakyReads(pool.sql),
       images: new SessionBlobs(pool.sql),
       hostQueue,
       listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
@@ -181,7 +196,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
         ...sessionFinishActivities(pool.sql, m.events),
         // As main.ts: the gate's timers and writers, and describe_call (the summary and the hash).
         ...sessionGateActivities(pool.sql),
-        ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) }),
+        ...describeHeld(gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) })),
       },
       shutdownGraceMs: 1_000,
       log: () => {},
@@ -192,7 +207,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
       identity,
       pinned: { pinned_probe: async () => 'pinned' },
       sessions: {
-        activities: { ...sessionTurnActivity(turnHost, { client: env.client }), ...releaseActivities(m.warm), [ACQUIRE_WORKER_ACTIVITY]: acquire[ACQUIRE_WORKER_ACTIVITY] },
+        activities: { ...sessionTurnActivity(turnHost, { client: losing(env.client) }), ...releaseActivities(m.warm), [ACQUIRE_WORKER_ACTIVITY]: acquire[ACQUIRE_WORKER_ACTIVITY] },
         slots: 10,
         shutdownGraceMs: 2_000,
         shutdownForceMs: 3_000,
@@ -219,6 +234,57 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     await pool.close()
     await drop()
   }, 60_000)
+
+  /** `sql`, whose reads of a response row (TurnHost's hold) fail while `readFailures` lasts. */
+  function flakyReads(sql: Sql): Sql {
+    return new Proxy(sql, {
+      apply(target, self, args: unknown[]) {
+        const strings = args[0]
+        if (Array.isArray(strings) && strings.join('').includes('FROM ai_input_responses') && readFailures > 0) {
+          readFailures--
+          return Promise.reject(new Error('connection terminated unexpectedly'))
+        }
+        return Reflect.apply(target, self, args)
+      },
+    })
+  }
+  /** describe_call, held on `describeHold`. */
+  function describeHeld(activities: Record<string, (args: unknown) => Promise<unknown>>) {
+    const describe = activities[GATE.describe]!
+    return {
+      ...activities,
+      [GATE.describe]: async (args: unknown) => {
+        describing++
+        await describeHold
+        return describe(args)
+      },
+    }
+  }
+  /** The client the turn's activity opens its calls with: an `open_input` answer is lost while `lostOpens` lasts, after the workflow took it. */
+  function losing(client: Client): Client {
+    return {
+      withAbortSignal: <R>(signal: AbortSignal, fn: () => Promise<R>) => client.withAbortSignal(signal, fn),
+      workflow: {
+        getHandle: (workflowId: string) => {
+          const handle = client.workflow.getHandle(workflowId)
+          return {
+            executeUpdate: async (name: string, options: Parameters<typeof handle.executeUpdate>[1]) => {
+              try {
+                const answer = await handle.executeUpdate(name, options)
+                if (name === OPEN_INPUT_UPDATE && lostOpens > 0) {
+                  lostOpens--
+                  throw new Error('the answer was lost')
+                }
+                return answer
+              } finally {
+                if (name === OPEN_INPUT_UPDATE) opensSettled++
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Client
+  }
 
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
     const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name: queue }, taskQueueType: type })
@@ -284,6 +350,70 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     expect(await listed()).toEqual([])
     const [response] = await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE request_id = ${entry!.id}`
     expect(response?.outcome).toBe('approved')
+  })
+
+  it('a hold whose reads of the row fail goes on holding, and the approved call runs', async () => {
+    script = (r) => (lastMessage(r).includes('tool_result') ? { text: 'sent it' } : { toolUse: { name: SEND, input: { what: 'box' } } })
+    const started = await m.start(browser, { origin: 'chat', prompt: 'send the box' })
+    await pollUntil(async () => (await listed()).length, 1)
+    // The next reads fail, as a database blip would; the hold reads again on its next tick.
+    readFailures = 3
+    const [entry] = await listed()
+    await pollUntil(() => readFailures, 0)
+    expect(await respond(entry!.id, { kind: 'approval', decision: 'approve' })).toEqual({ status: 200, body: expect.objectContaining({ outcome: 'approved' }) })
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(sent).toEqual(['box'])
+  })
+
+  it('a call refused after its entry opened (the open`s answer lost) withdraws the entry, so nobody can approve it', async () => {
+    // The model's answer to the refusal waits, so the turn is still running while the entry is checked.
+    let answered!: () => void
+    const answering = new Promise<void>((r) => {
+      answered = r
+    })
+    script = (r) => (lastMessage(r).includes('tool_result') ? answering.then(() => ({ text: 'understood' })) : { toolUse: { name: SEND, input: { what: 'box' } } })
+    lostOpens = 1
+    const started = await m.start(browser, { origin: 'chat', prompt: 'send the box' })
+    try {
+      await pollUntil(() => fake.messageCalls().some((r) => lastMessage(r).includes('could not be put to the user for approval')), true)
+      // The workflow had opened it: its entry is cancelled while the turn still runs, never left to be approved.
+      await pollUntil(async () => (await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE session_id = ${started.session.id}`).map((r) => r.outcome), ['cancelled'])
+      expect(await listed()).toEqual([])
+      expect(await env.client.workflow.getHandle(sessionWorkflowId(started.session.id)).query<string | null>('turn')).not.toBeNull()
+    } finally {
+      answered()
+    }
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(sent).toEqual([])
+  })
+
+  it('a Stop while a call is still being opened ends the turn at once, never waiting on describe_call', async () => {
+    script = () => ({ toolUse: { name: SEND, input: { what: 'box' } } })
+    const describe = (() => {
+      let release!: () => void
+      const promise = new Promise<void>((r) => {
+        release = r
+      })
+      return { promise, release }
+    })()
+    describeHold = describe.promise
+    const started = await m.start(browser, { origin: 'chat', prompt: 'send the box' })
+    await pollUntil(() => describing, 1)
+    await env.client.workflow.getHandle(sessionWorkflowId(started.session.id)).signal('interrupt', { reason: 'stop' })
+    try {
+      // describe_call is still held: only the Stop can have ended the turn.
+      expect(await started.turn!.done).toMatchObject({ kind: 'interrupted' })
+      // The open was given up with the turn, not left waiting in the permission callback.
+      await pollUntil(() => opensSettled, 1, 10_000)
+      expect(describing).toBe(1)
+    } finally {
+      describe.release()
+    }
+    expect(sent).toEqual([])
+    // The call, described after its turn ended, opened nothing.
+    await pollUntil(async () => (await db.sql`SELECT 1 FROM ai_pending_input`).length, 0)
+    const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${started.session.id}`
+    expect(row?.status).toBe('idle')
   })
 
   it('a denied call is not run, and the model reads why in the gate`s words', async () => {

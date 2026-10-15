@@ -34,6 +34,7 @@ import {
   type OpenInputAnswer,
   type OpenInputArgs,
   type SendAnswer,
+  type WithdrawInputArgs,
   type SessionStart,
   type SessionTurnInput,
   type SessionTurnResult,
@@ -52,6 +53,7 @@ import {
   SESSION_TURN_ACTIVITY,
   SHUTTING_DOWN_FAILURE,
   TURN_QUERY,
+  WITHDRAW_INPUT_UPDATE,
 } from './names.js'
 
 // AgentSession (spec 2026-10-13 §5.1): the workflow that runs a session's turns as the
@@ -65,6 +67,7 @@ import {
 //   turn (Query)                                     <- turn
 //
 //   open_input (Update, a call of the running turn)  <- new (§5.4): SessionGate.open
+//   withdraw_input (Update, a call it gave up on)    <- new: SessionGate.cancelCall
 //
 // Not here: `fork_point` (forking an AgentSession session is refused until phase 6),
 // `segment_context` (no segment runner) and `owner_changed` (Task 5.6).
@@ -103,6 +106,7 @@ const interruptSignal = defineSignal<[{ reason?: string }?]>(INTERRUPT_SIGNAL)
 const endSignal = defineSignal<[unknown?]>(END_SIGNAL)
 const turnQuery = defineQuery<string | null>(TURN_QUERY)
 const openInputUpdate = defineUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE)
+const withdrawInputUpdate = defineUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_INPUT_UPDATE)
 
 /** `gate.settings` read as each turn starts (Task 5.3). */
 const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
@@ -163,7 +167,8 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   // From a message's acceptance until its turn's end is written.
   let inTurn = turn !== undefined
   // From the turn's `session.finish_turn` until it is closed: its end is written, so a message
-  // may be taken (it runs next) and an interrupt is the next message's.
+  // may be taken (it runs next) and an interrupt is the next message's. No call parks then
+  // (`runs`: the turn's activity has ended).
   let closing = false
   let interruptNext = false
   let interrupted: string | undefined = start.interrupted ?? undefined
@@ -219,22 +224,29 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     running?.cancel()
   })
   setHandler(turnQuery, () => turn?.turn_id ?? message?.turn_id ?? null)
+  /** Whether turn `turnId`'s activity still runs: only then may a call of it park (closeTurn sees every entry parked before it). */
+  const runs = (turnId: string): boolean => running !== undefined && turn?.turn_id === turnId
+  const stale = (turnId: string) => ApplicationFailure.nonRetryable(`turn ${String(turnId)} is not running`, 'stale')
   setHandler(
     openInputUpdate,
     async ({ turn_id, call }: OpenInputArgs): Promise<OpenInputAnswer> => {
-      const requestId = await gate.open({ id: call.id, name: call.name, input: call.input })
+      // A turn that ended while its call was described writes nothing: the call is settled `cancelled`.
+      const requestId = await gate.open({ id: call.id, name: call.name, input: call.input }, () => runs(turn_id))
       // Settled at once: no entry waits, and the activity is told how.
       if (!gate.isParked(requestId)) return { request_id: requestId, resolution: await gate.resolution(requestId) }
-      // The turn ended while its call was being opened (closeTurn saw no entry): nothing waits on it.
-      if (turn?.turn_id !== turn_id || closing) await gate.cancel(requestId, THE_TURN_ENDED)
       return { request_id: requestId }
     },
     {
       validator: ({ turn_id }: OpenInputArgs) => {
-        if (turn?.turn_id !== turn_id || closing) throw ApplicationFailure.nonRetryable(`turn ${String(turn_id)} is not running`, 'stale')
+        if (!runs(turn_id)) throw stale(turn_id)
       },
     },
   )
+  setHandler(withdrawInputUpdate, ({ tool_use_id, reason }: WithdrawInputArgs) => gate.cancelCall(tool_use_id, reason), {
+    validator: ({ turn_id }: WithdrawInputArgs) => {
+      if (!runs(turn_id)) throw stale(turn_id)
+    },
+  })
 
   /**
    * The turn on the session's home, acquired first when there is none; placed again when its
@@ -321,6 +333,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     const sent = message
     message = undefined
     const settings = await local[SESSION_SETTINGS_ACTIVITY]()
+    if (interrupted !== undefined) return { outcome: 'interrupted' }
     // The entries' timers as Settings has them now (Python's gate_settings).
     if (patched(GATE_SETTINGS_PATCH)) await gate.loadSettings()
     if (interrupted !== undefined) return { outcome: 'interrupted' }

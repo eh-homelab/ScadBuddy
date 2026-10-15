@@ -8,7 +8,7 @@ import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
-import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult } from '../temporal/session/models.js'
+import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
@@ -51,9 +51,14 @@ import type { WarmEntry } from './warm.js'
 // `NOTIFY scadbuddy_input` (gate/store.ts, sent as the row commits) and polled every
 // INPUT_POLL_MS besides. The row decides the call: an approved one runs in the turn as a
 // classic call does; any other end is what the model reads, in the gate's words
-// (gate/refusal.ts). Calls in one assistant message park side by side, each on its own
-// entry. The hold's end and the release (park_hold_seconds) are Task 5.4's; an attention
-// request and a browser call's tab wait still read NO_PARKS.
+// (gate/refusal.ts). Each call parks on an entry of its own, and the holds are independent;
+// Claude Code (2.1.296, test/sessionPark.temporal.test.ts) asks for the calls of one
+// assistant message one after another, so they park in turn. A call refused after its
+// entry opened (the open's answer lost, Claude Code dropping the request) withdraws the
+// entry (Update `withdraw_input`), so nobody can approve a call that will never run; a read
+// of the row that fails is tried again on the next tick. The hold's end and the release
+// (park_hold_seconds) are Task 5.4's; an attention request and a browser call's tab wait
+// still read NO_PARKS.
 //
 // A shutdown (`stop`) gives the running turns their grace, then cuts the rest: only those fail
 // with the retryable ShuttingDown, which places the turn on another replica; a turn that ended
@@ -81,8 +86,10 @@ export type TurnControl = {
   cancelled: AbortSignal
   /** Read when `cancelled` fires. */
   cancelReason: () => CancelReason
-  /** The Update `open_input` on the session's workflow (§5.4): how a call parks. Absent, every park reads NO_PARKS. */
-  openInput?: (args: OpenInputArgs) => Promise<OpenInputAnswer>
+  /** The Update `open_input` on the session's workflow (§5.4): how a call parks, given up when `signal` aborts. Absent, every park reads NO_PARKS. */
+  openInput?: (args: OpenInputArgs, signal: AbortSignal) => Promise<OpenInputAnswer>
+  /** The Update `withdraw_input`: the entry of a call the turn no longer waits on is cancelled. */
+  withdrawInput?: (args: WithdrawInputArgs) => Promise<boolean>
 }
 
 /** Why a placement was cut off: another holds the row, the turn ended, a newer one here, the shutdown. */
@@ -146,6 +153,7 @@ export class TurnHost {
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
+    // The only listener of this channel on the connection: listenAlso keeps one per channel, so a second would replace this one.
     deps.listen?.(INPUT_CHANNEL, (requestId) => {
       for (const wake of this.#waiters.get(requestId) ?? []) wake()
     })
@@ -353,12 +361,28 @@ export class TurnHost {
     }
     /** Each parked call's request id, by its tool_use id: the audit row's approval. */
     const parkedAs = new Map<string, string>()
+    /** The call's entry, if it opened one, cancelled: the turn will not run it (best-effort; the turn's end cancels it anyway). */
+    const withdraw = (callId: string, why: string) => {
+      void control.withdrawInput?.({ turn_id: turnId, tool_use_id: callId, reason: why }).catch(() => {})
+    }
     const park = async (call: OpenInputArgs['call'], signal: AbortSignal): Promise<{ requestId: string; row?: Response; early?: OpenInputAnswer['resolution'] }> => {
-      const opened = await open({ turn_id: turnId, call })
+      let opened: OpenInputAnswer
+      try {
+        opened = await open({ turn_id: turnId, call }, signal)
+      } catch (err) {
+        // The workflow may have opened it and the answer was lost.
+        if (!stop.aborted) withdraw(call.id, 'the call could not wait for its answer')
+        throw err
+      }
       parkedAs.set(call.id, opened.request_id)
       // Settled at once: a grant's or the flow's row is there already; a read call or a malformed question has none.
       if (opened.resolution) return { requestId: opened.request_id, row: await this.#row(opened.request_id), early: opened.resolution }
-      return { requestId: opened.request_id, row: await this.#hold(opened.request_id, signal) }
+      try {
+        return { requestId: opened.request_id, row: await this.#hold(opened.request_id, signal) }
+      } catch (err) {
+        if (!stop.aborted) withdraw(call.id, 'the call stopped waiting')
+        throw err
+      }
     }
     const approvalGate: ApprovalGate = async (request): Promise<ApprovalVerdict> => {
       if (stop.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.' }
@@ -390,6 +414,7 @@ export class TurnHost {
       try {
         parked = await park({ id: request.toolUseId, name: GATE_ASK, input: { questions: card } }, AbortSignal.any([stop, request.signal]))
       } catch (err) {
+        if (stop.aborted || request.signal.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
         return { answered: false, message: `The user did not answer: the question could not be asked (${describe(err)}).` }
       }
       const { row, early } = parked
@@ -409,11 +434,18 @@ export class TurnHost {
     }
   }
 
-  /** The entry's response row, once it is there: woken by its NOTIFY, read every INPUT_POLL_MS besides. Rejects when `signal` aborts. */
+  /**
+   * The entry's response row, once it is there: woken by its NOTIFY, read every INPUT_POLL_MS
+   * besides; a read that fails (a database blip) is tried again on the next tick, since the hold
+   * may last the entry's whole timer. Rejects only when `signal` aborts.
+   */
   async #hold(requestId: string, signal: AbortSignal): Promise<Response> {
     for (;;) {
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('the call stopped waiting')
-      const row = await this.#row(requestId)
+      const row = await this.#row(requestId).catch((err: unknown) => {
+        this.#deps.core.stderr?.(`held call ${requestId}: could not read its answer, trying again: ${describe(err)}\n`)
+        return undefined
+      })
       if (row) return row
       await this.#pause(requestId, signal)
     }

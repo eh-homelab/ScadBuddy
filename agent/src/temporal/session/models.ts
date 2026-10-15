@@ -48,6 +48,9 @@ export type OpenInputArgs = { turn_id: string; call: { id: string; name: string;
  */
 export type OpenInputAnswer = { request_id: string; resolution?: Resolution }
 
+/** The `withdraw_input` Update's argument: the call of the running turn whose entry nothing waits on any more. */
+export type WithdrawInputArgs = { turn_id: string; tool_use_id: string; reason: string }
+
 export type SessionStart = {
   session_id: string
   creator: Owner

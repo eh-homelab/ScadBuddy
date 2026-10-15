@@ -2,8 +2,8 @@ import { Context } from '@temporalio/activity'
 import type { Client } from '@temporalio/client'
 import { sessionWorkflowId } from '../../gate/durable.js'
 import type { CancelReason, TurnBeat, TurnHost } from '../../sessions/turnHost.js'
-import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult } from './models.js'
-import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY } from './names.js'
+import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from './models.js'
+import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY, WITHDRAW_INPUT_UPDATE } from './names.js'
 
 // `session_turn` (spec 2026-10-13 §5.2), on a replica's session host queue only: TurnHost.run
 // under the activity's heartbeat. It heartbeats every HEARTBEAT_MS (the workflow's
@@ -15,9 +15,9 @@ import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY } from './names.js'
 // waits on it (its heartbeat or StartToClose timed out) cuts it off, writing nothing more.
 //
 // A call the turn parks (§5.4) is opened by the Update `open_input` on the session's own
-// workflow, sent with `client`, the service's client (its data converter seals the payloads
-// as the workflow's are): ordinary client use from an activity. The call's tool_use id names
-// the Update, so a re-sent one is the same Update.
+// workflow, and withdrawn by `withdraw_input`, sent with `client`, the service's client (its
+// data converter seals the payloads as the workflow's are): ordinary client use from an
+// activity. The call's tool_use id names each Update, so a re-sent one is the same Update.
 
 export const HEARTBEAT_MS = 5_000
 
@@ -54,7 +54,7 @@ export function sessionTurnActivity(host: TurnHost, options: TurnActivityOptions
           },
           cancelled: options.cancelled ? options.cancelled(context) : context.cancellationSignal,
           cancelReason: () => reasonOf(context),
-          ...(options.client ? { openInput: openInput(options.client, input.sessionId) } : {}),
+          ...(options.client ? gateUpdates(options.client, input.sessionId) : {}),
         })
       } finally {
         clearInterval(timer)
@@ -63,7 +63,15 @@ export function sessionTurnActivity(host: TurnHost, options: TurnActivityOptions
   }
 }
 
-function openInput(client: Client, sessionId: string): (args: OpenInputArgs) => Promise<OpenInputAnswer> {
+function gateUpdates(client: Client, sessionId: string) {
   const handle = client.workflow.getHandle(sessionWorkflowId(sessionId))
-  return (args) => handle.executeUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE, { args: [args], updateId: `${OPEN_INPUT_UPDATE}:${args.call.id}` })
+  return {
+    // Given up with the turn: a Stop never waits on describe_call or the open's retries.
+    openInput: (args: OpenInputArgs, signal: AbortSignal) =>
+      client.withAbortSignal(signal, () =>
+        handle.executeUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE, { args: [args], updateId: `${OPEN_INPUT_UPDATE}:${args.call.id}` }),
+      ),
+    withdrawInput: (args: WithdrawInputArgs) =>
+      handle.executeUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_INPUT_UPDATE, { args: [args], updateId: `${WITHDRAW_INPUT_UPDATE}:${args.tool_use_id}` }),
+  }
 }
