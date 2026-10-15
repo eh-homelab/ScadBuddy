@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import { Button } from './Button'
+import { Button } from '.'
 
 describe('Button', () => {
   // #1488 — a pressed ghost toggle looked exactly like an unpressed one.

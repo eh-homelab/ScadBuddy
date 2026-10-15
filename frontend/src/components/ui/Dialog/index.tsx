@@ -8,8 +8,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react'
-import { ModalCompanionContext, focusInto, focusables } from '../../lib/modal'
-import { Button } from './Button'
+import { ModalCompanionContext, focusInto, focusables } from '../../../lib/modal'
+import { Button } from '../Button'
 
 interface Props {
   open: boolean

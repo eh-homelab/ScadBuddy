@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { defineConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -44,6 +45,8 @@ const proxy: Record<string, ProxyOptions> = {
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // `@/` is src/, the shadcn/ui import style (components.json, tsconfig.app.json).
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   server: {
     port: 5173,
     proxy: process.env.VITE_MOCK_API ? undefined : proxy,
