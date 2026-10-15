@@ -3,7 +3,7 @@ import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import { userMessage } from '../../src/harness/inbox.js'
+import { Inbox, userMessage } from '../../src/harness/inbox.js'
 import type { HarnessRun } from '../../src/harness/run.js'
 import { SessionManager, type SessionManagerDeps } from '../../src/sessions/manager.js'
 import type { Owner } from '../../src/sessions/protocol.js'
@@ -77,19 +77,31 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
     let total = 0
     /** How a turn in progress is stopped: `interrupt()`, or `close()` (the stream ends). */
     let stopped: ((how: 'interrupt' | 'close') => void) | undefined
-    /** An interrupt that came while the turn was still streaming its reply, kept until the turn asks (Claude Code takes it whenever). */
-    let pending: 'interrupt' | undefined
+    /** User messages read so far: the turn in progress is the `reads`-th. */
+    let reads = 0
+    /** Whether a turn is in progress (its message read, its result not yet out). */
+    let inTurn = false
+    /**
+     * An interrupt no turn has asked for yet, by the turn it is for (#3661). Claude Code
+     * reads stdin in order: one sent during a turn is that turn's, one sent after a message
+     * was pushed but before it was read is that message's turn's, and one with neither is nothing.
+     */
+    let pending: number | undefined
     let closed = false
+    const unread = () => (run.prompt instanceof Inbox ? run.prompt.waiting : 0)
     const stop = (how: 'interrupt' | 'close') => {
       if (how === 'close') closed = true
       const waiting = stopped
       stopped = undefined
       if (waiting) waiting(how)
-      else if (how === 'interrupt') pending = 'interrupt'
+      else if (how === 'interrupt') {
+        if (inTurn) pending = reads
+        else if (unread() > 0) pending = reads + 1
+      }
     }
     const whenStopped = () => {
       if (closed) return Promise.resolve('close' as const)
-      if (pending) {
+      if (pending === reads) {
         pending = undefined
         return Promise.resolve('interrupt' as const)
       }
@@ -104,8 +116,10 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
       const inbox = typeof run.prompt === 'string' ? [userMessage(run.prompt)] : run.prompt
       for await (const message of inbox) {
         if (closed) return
-        // An interrupt with no turn running is nothing to Claude Code; one that comes during this turn is this turn's.
-        pending = undefined
+        reads++
+        inTurn = true
+        // One for a turn that ended without asking for it is gone with that turn.
+        if (pending !== undefined && pending < reads) pending = undefined
         prompts.push(message)
         const turn = next(run)
         const msgId = `msg_fake_${++n}`
@@ -118,6 +132,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         if ('hang' in turn) {
           if ((await whenStopped()) === 'close') return
           if (turn.resultOnAbortUsd !== undefined) total = turn.resultOnAbortUsd
+          inTurn = false
           yield result({ subtype: 'error_during_execution', is_error: true, errors: [], num_turns: 1 })
           continue
         }
@@ -131,6 +146,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
           if ((await whenStopped()) === 'close') return
           if (turn.resultCostUsd === undefined) throw new Error('Claude Code process aborted by user')
           total = turn.resultCostUsd
+          inTurn = false
           yield result({ subtype: 'error_during_execution', is_error: true, errors: [], num_turns: 0, terminal_reason: 'aborted_streaming' })
           continue
         }
@@ -152,6 +168,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         }
         const subtype = turn.subtype ?? 'success'
         total = turn.costUsd ?? total + 0.01
+        inTurn = false
         yield result({
           subtype,
           is_error: subtype !== 'success',
