@@ -17,14 +17,17 @@ with full feature parity. ScadBuddy's version is a **template maker**:
   preview and Generate work like any template's.
 - **"Save as template" turns the current sign into a new, ordinary template**
   (preset → template). The new template has no fork or upstream link. It holds
-  `sign.json`, a generated `model.scad`, its layer SVGs and its fonts. Its texts,
+  `sign.json` (the MakerWorld document in ScadBuddy's envelope, §4), a generated
+  `model.scad`, its layer SVGs and its fonts. Its texts,
   colours, heights and plate size are customizer parameters, so it is customised
   like any template. It also opens back in the Sign Maker for layout edits, and it can
   be ejected to plain source as a mesh model can.
 - **A Make My Sign project imports 1:1.** The driving case is the Mahjong coaster,
   <https://makerworld.com/en/models/2573411> ("This model is created by Make My Sign").
   Importing it gives a template that renders the same sign and is geared to that
-  design: its parameters are the sign's own.
+  design: its parameters are the sign's own. **The sign document is MakerWorld's own
+  format, stored verbatim** (§4), so an import is a copy, not a translation, and a
+  sign can be written back out as a 3MF that MakerWorld's editor opens (§9.3).
 - **The geometry work runs server-side, in TypeScript.** This replaces MakerWorld's
   in-browser processing: importing, normalising and compiling a sign are Temporal
   activities served by a TypeScript worker, so MakerWorld's logic ports with the
@@ -37,7 +40,7 @@ The rest of MakerLab was surveyed so that the template-maker contract defined he
 Out of scope:
 - Laser output: SVG/DXF cut files.
 - MakerLab's AI generators, which need hosted models (§11).
-- Writing back to MakerWorld.
+- Writing to MakerWorld's API (a sign leaves ScadBuddy as a 3MF file, §9.3).
 - Publishing to MakerWorld.
 
 ## 2. Measured facts this rests on
@@ -84,8 +87,9 @@ each fact on the pinned image.
 
 ### 2.3 Make My Sign, measured in the logged-in editor and its shipped bundle
 
-The full reverse-engineered format and feature inventory is Appendix A. These are the
-facts the design depends on:
+The full reverse-engineered format, geometry semantics, 3MF layout and HTTP API are
+in **the format reference**, `docs/makerworld/make-my-sign.md`, with captured example
+documents under `docs/makerworld/examples/`. These are the facts the design depends on:
 
 - **A project is one JSON document.** Every autosave sends `PUT
   /api/v1/creation-service/my/make/<id>` with `{"content": "<JSON string>"}`. The
@@ -106,7 +110,7 @@ facts the design depends on:
 
   All of the processing runs in the browser.
 - **Text and emoji are glyph outlines shaped by HarfBuzz,** from fonts on a public CDN
-  (`public-cdn.bblmw.com/content-generator/fonts/<file>`, 19 families, Appendix A.3).
+  (`public-cdn.bblmw.com/content-generator/fonts/<file>`, 19 families, reference §7).
   Emoji are monochrome glyphs of `NotoEmoji-Bold.ttf`. OpenSCAD's `text()` also shapes
   with HarfBuzz and FreeType. So a `text()` with the same font file reproduces both,
   and both stay live parameters (§5.3).
@@ -158,8 +162,8 @@ facts the design depends on:
 
 | Piece | Where | Language |
 |---|---|---|
-| Sign document `sign.json` v1, its schema and validation | `signs/src/doc/` | TS (schema exported as JSON Schema for Python) |
-| MakerWorld importer (NamePlate V1.1 → `sign.json`) | `signs/src/import/` | TS |
+| Sign document `sign.json`: the NamePlate V1.1 document in ScadBuddy's envelope, its types (generated from the format reference §3), schema and validation | `signs/src/doc/` | TS (schema exported as JSON Schema for Python) |
+| Importer (make JSON, template JSON or 3MF → `sign.json` plus assets) and exporter (`sign.json` → a MakerWorld-compatible 3MF project) | `signs/src/import/`, `signs/src/export/` | TS |
 | Normaliser (shapes, emoji, SVG, vectorize → layer SVGs in mm; text metrics) | `signs/src/normalise/` | TS |
 | Compiler (`sign.json` → `model.scad` + `layers/` + `fonts/` manifest) | `signs/src/compile/` | TS |
 | The `signs` Temporal worker (activities over the three above) | `signs/src/worker.ts`, Dockerfile target `signs` | TS |
@@ -168,98 +172,99 @@ facts the design depends on:
 | `ctx.render(..., files=)` overlay and `ctx.service(...)` (§7.2) | `backend/scadbuddy/workflows/` | Python |
 | Agent tools | `agent/src/tools/signs.ts` | TS |
 
-## 4. The sign document (`sign.json`, version 1)
+## 4. The sign document (`sign.json`, envelope version 1)
 
-The source of truth for a sign, as `scene.json` is for a mesh model. It is a superset of
-NamePlate V1.1 in ScadBuddy's own terms: **millimetres, not canvas pixels; colours as
-hex; every element with its own height range**. Everything an imported project had is
-kept, so a round trip back to NamePlate V1.1 would be possible (it is not built, §1).
+The source of truth for a sign, as `scene.json` is for a mesh model. It is **MakerWorld's
+own "NamePlate V1.1" document, stored verbatim**, inside a small ScadBuddy envelope. The
+format reference (`docs/makerworld/make-my-sign.md`) is the authority on the MakerWorld
+half: every element type, field, unit and default, and what the geometry does with each.
+This section defines only the envelope and the rules around it.
 
-The example is the Mahjong coaster as imported: its plate, border and vector art,
-with the depths §2.3 measured in facedown. A text and a hole are added to show those
-types; the coaster itself has neither.
+Why verbatim, not a translation: MakerWorld's editor rebuilds every record from its
+Fabric.js objects on each save (reference §11), so a document can only round-trip if
+ScadBuddy keeps it exactly as the editor writes it. Keeping it also makes import a copy,
+makes the gallery templates usable as they are, and lets the Sign Maker's canvas load
+the same Fabric object shapes without a mapping layer.
 
 ```json
 {
   "version": 1,
-  "generated_sha256": "…",
-  "source": {"kind": "makerworld_make", "make_id": 85233397, "instance_id": 2837289,
-             "model_url": "https://makerworld.com/en/models/2573411", "format": "NamePlate V1.1"},
-  "units": {"display": "mm"},
-  "bed": {"printer": "A1 mini", "w": 180, "h": 180},
-  "facedown": true,
-  "thickness": {"plate": 3, "text": 0.6, "shape": 0.4, "svg": 0.4, "hole": 1},
-  "plate": {"shape": "circle", "w": 99, "h": 99, "colour": "#FFFFFF",
-            "border": {"enabled": true, "weight": "medium", "width": 2.0, "offset": 0, "colour": "#000000"},
-            "svg": null},
-  "elements": [
-    {"id": "e1", "type": "vector", "name": "Mahjong art", "layers": [
-       {"colour": "#050504", "svg": "layers/e1-0.svg"}, {"colour": "#E7232C", "svg": "layers/e1-1.svg"}],
-     "transform": {"x": 0, "y": 8, "w": 90.5, "h": 60.4, "rotate": 0, "flip_x": false},
-     "depth": 1, "lock": false},
-    {"id": "e2", "type": "text", "text": "MAHJONG", "font": {"family": "Roboto", "file": "fonts/Roboto-Bold.ttf", "weight": 700, "italic": false},
-     "size": 14, "align": "center", "line_height": 1.16, "letter_spacing": 0, "curve": null, "colour": "#000000",
-     "transform": {"x": 0, "y": -15, "rotate": 0, "flip_x": false},
-     "expose": {"text": "title_text", "colour": "title_colour"}},
-    {"id": "h1", "type": "hole", "kind": "inside", "position": "single_top", "size": "small", "d": 5,
-     "transform": {"x": 0, "y": 42}}
-  ],
-  "parameters": {"plate_colour": {"from": "plate.colour"}, "plate_height": {"from": "thickness.plate", "min": 0.6, "max": 10}}
+  "makerworld": {
+    "data": [
+      {"type": "BackdropElement", "version": "1.0", "shape": 0,
+       "group": {"mainObj": {"type": "circle", "left": -247.5, "top": -247.5, "radius": 247.5, "fill": "#FFFFFF", …},
+                 "backdropColor": "#FFFFFF", "borderColor": "#000000", "borderWidth": 10, "borderOffset": 0, "outlineEnabled": true}},
+      {"type": "VectorizeElement", "version": "1.0", "keyName": "Keychain Draft_1774223447148",
+       "props": {"left": -206.66, "top": -165.95, "width": 905.25, "height": 604.18, "scaleX": 0.4566, "scaleY": 0.4844,
+                 "angle": 0, "flipX": false, "flipY": false, "data": {"depth": 1}, "vectorizeContent": "{…}"}}
+    ],
+    "thickness": {"backdropHeight": 3, "textHeight": 0.6, "shapeHeight": 0.4, "svgHeight": 0.4, "holeHeight": 1},
+    "globalStatus": {"flatMode": true, "nonePlateMode": false},
+    "date": 1760000000000,
+    "version": "NamePlate V1.1"
+  },
+  "scadbuddy": {
+    "source": {"kind": "makerworld_3mf", "make_id": 85233397, "instance_id": 2837289,
+               "model_url": "https://makerworld.com/en/models/2573411", "imported_at": "2026-10-14T15:19:50Z"},
+    "assets": {
+      "Keychain Draft_1774223447148": {"asset": "a_01HX…", "sha256": "…", "media_type": "image/svg+xml"}
+    },
+    "elements": {"1": {"overlap": "occlude"}},
+    "expose": {"plate_colour": {"from": "backdrop.backdropColor"}, "plate_height": {"from": "thickness.backdropHeight", "min": 0.6, "max": 10}},
+    "generated_sha256": "…"
+  }
 }
 ```
 
-- **Element types:**
-  - `text` (straight or curved, `curve: {radius, direction}`)
-  - `icon` (an emoji: MakerWorld's `IconElement`)
-  - `shape` (circle, triangle, rectangle, pentagram: `BaseShapeElement` and
-    `SvgShapeElement`)
-  - `svg` (an uploaded SVG; each fill colour is a layer: `SvgImageElement`)
-  - `vector` (a vectorized image, one layer per colour and depth: `VectorizeElement`)
+That is the Mahjong coaster as imported from its 3MF (`docs/makerworld/examples/3mf-template.json`
+is the `makerworld` half, byte for byte).
 
-    Both `svg` and `vector` take `overlap: "occlude" | "stack"`, default `occlude`
-    (§5.2). `stack` is ScadBuddy's own option: overlapping colours print as thin
-    blended layers. An import always sets `occlude`.
-  - `hole` (`inside` | `boundary` | `back`, in MakerWorld's sizes and positions:
-    `BaseHoleElement`)
-
-  Appendix A gives each type's fields, ranges and defaults and its MakerWorld
-  counterpart.
-- **Coordinates:** the origin is the plate's centre, X right, Y up, in mm. Rotation is
-  degrees counter-clockwise. The importer converts Fabric pixels with the editor's own
-  scale (Appendix A.2).
-- **Heights,** as MakerWorld stores them: one thickness per element type
-  (`thickness`, MakerWorld's `backdropHeight`, `textHeight`, `shapeHeight`,
-  `svgHeight`, `holeHeight`; icons use `text`, the border uses `shape`). An element
-  may override its own with `depth` (MakerWorld's `data.depth`). Each element's z range
-  is derived when the sign is compiled, never stored, so changing a thickness moves
-  every element of that type.
-  - **Facedown** (`facedown: true`, MakerWorld's `flatMode`) sinks every element into
-    the plate: its top is flush with the plate's top and the sign prints face down.
-  - **No plate** (`plate.shape: "none"`, MakerWorld's `nonePlateMode`) leaves only the
-    elements.
-- **Colour:** any hex colour; no fixed palette (release notes 1.3.0). Elements with the
-  same colour print with the same filament. The colour list is derived from the
-  document, never stored separately.
-- **Exposing parameters:** an element field becomes a customizer parameter of the
-  generated template through `expose` (as in spec 2026-10-11 §3.2). The compiler
-  writes `name = value; // annotation` and uses it. "Save as template" exposes by
-  default:
-  - each straight text's string and colour;
-  - every colour;
-  - the plate's size, height and border;
-  - each element type's height.
-
-  A name must be unique and a valid identifier.
+- **`makerworld`** is the document as received or as the Sign Maker's canvas serialises
+  it: canvas px (5 px = 1 mm), Y down, Fabric.js 5.3.0 object JSON, element records in
+  z-order. ScadBuddy never rewrites a field it does not own. Values the editor
+  regenerates on load (a textbox's `width`/`height`, a path's bbox, a curved text's
+  `path`, an icon's outline; reference §3.2) are regenerated here too and never read as
+  truth.
+- **`scadbuddy.source`**: where the sign came from: `makerworld_make`,
+  `makerworld_3mf`, `makerworld_template` or `blank`, with the ids known.
+- **`scadbuddy.assets`**: the bytes the document names but does not hold. Keyed by the
+  record's `keyName` (an `SvgImageElement` or `VectorizeElement`), `CUSTOM_SVG_SHAPE`
+  (a custom plate) or `font:<postscriptName>` (a local font), each a pointer into the
+  asset store (`library/assets.py`): `{asset, sha256, media_type}`. Never inline bytes.
+- **`scadbuddy.elements`**: per-element settings the format has no slot for, keyed by
+  the record's index in `data` (records carry no id). Today one key: `overlap:
+  "occlude" | "stack"` for `SvgImageElement` and `VectorizeElement`, default `occlude`
+  (§5.2). An import sets `occlude`. The canvas re-keys this map when it reorders
+  `data`.
+- **`scadbuddy.expose`**: which values become customizer parameters of a generated
+  template (as spec 2026-10-11 §3.2 exposes scene values): a parameter name → a path
+  into `makerworld` (`backdrop.backdropColor`, `thickness.backdropHeight`,
+  `data[2].fabricObj.text`, `data[2].fabricObj.fill`) with optional `min`/`max`. "Save
+  as template" exposes by default: each straight text's string and colour, every
+  colour, the plate's size, height and border, and each type's thickness. A name must
+  be unique and a valid identifier.
+- **`scadbuddy.generated_sha256`**: the hand-edit check (§5.6).
+- **Coordinates and units** are MakerWorld's. The compiler, the normaliser and the
+  canvas all read px and Y down and convert at the boundary (reference §4). Nothing
+  stores mm.
+- **Colour:** any hex colour; no fixed palette. Elements with the same colour print
+  with the same filament. The colour list is derived from the document, never stored.
 - **Caps** (`signs/src/doc/caps.ts`, mirrored in Python):
-  - 200 elements;
-  - 64 layers per element;
-  - 2 MiB per layer SVG and 16 MiB of layers per sign;
+  - 200 element records;
+  - 64 colour layers per element;
+  - 2 MiB per asset SVG and 16 MiB of assets per sign;
   - 8 fonts;
   - text of 500 characters.
-
-  The JSON is validated against the schema on every write, in TypeScript and in Python
-  (the schema is generated from the TypeScript types into
-  `backend/scadbuddy/signs/sign.schema.json`; a freshness test compares the two).
+- **Validation:** `makerworld` is checked against a schema generated from the
+  reference's field tables (one TypeScript type per element record, `signs/src/doc/`),
+  strict about the fields that drive geometry and permissive about Fabric's cosmetic
+  ones, so a record from a newer MakerWorld build with an extra Fabric key still loads.
+  An unknown `type` is refused with its index (§10). The envelope is checked strictly.
+  Both are exported as JSON Schema to `backend/scadbuddy/signs/sign.schema.json` for the
+  Python side; a freshness test compares the two.
+- **Legacy content:** a bare array is read as `data`; missing `thickness` or
+  `globalStatus` keys take the defaults (reference §9). The stored `makerworld` is the
+  normalised form, so an export always writes the full shape.
 
 ## 5. The compiler
 
@@ -272,7 +277,7 @@ render, versions, Arrange and print paths see an ordinary template and need no c
 ```
 models/<slug>/
   model.json      # name, description, tags, "sign": {"version": 1}, plus the source's provenance and licence
-  sign.json       # source of truth (§4)
+  sign.json       # source of truth (§4): the MakerWorld document plus the envelope
   model.scad      # GENERATED from sign.json; committed
   layers/*.svg    # one closed, filled SVG per (element, colour), in mm, normalised
   fonts/*.ttf     # every font the sign's text uses
@@ -321,9 +326,9 @@ These rules keep every colour attributed and every volume single-coloured:
   as the mesh-models compiler does (spec 2026-10-11 §3.3), because a cutter outside
   every `color()` gives its faces the default material.
 - **Overlaps resolve by z-order.** Where two elements overlap, the upper one (later in
-  `elements`) owns the shared volume; the lower one is `difference()`d by the upper
+  `data`) owns the shared volume; the lower one is `difference()`d by the upper
   one's footprint over the shared height. No volume ever has two colours.
-- **Colours inside one SVG or vector element follow its `overlap` setting:**
+- **Colours inside one SVG or vector element follow its `scadbuddy.elements[i].overlap` setting:**
   - `occlude` (the default, as MakerWorld draws it): a later colour is cut out of the
     earlier ones, so each point of the element shows one colour.
   - `stack`: each colour keeps its whole outline, and the colours are stacked in paint
@@ -332,7 +337,7 @@ These rules keep every colour attributed and every volume single-coloured:
     still holds one colour, so no volume has two.
 - **Facedown inlays every element from the plate's top face down to its own depth,**
   clamped to the plate's height, as MakerWorld clamps it (`min(backdropHeight, h)`,
-  Appendix A.3).
+  reference §5.1).
   The plate is `difference()`d by the element footprints over that depth, so each
   element sits flush in its pocket. **This deliberately differs from MakerWorld:** its
   3MF leaves the plate whole and lets overlapping parts share volume, so the slicer's
@@ -342,7 +347,7 @@ These rules keep every colour attributed and every volume single-coloured:
   MakerWorld's build transform (§2.3), so the face prints on the bed with no slicer
   step. The border inlays the same way, to its own depth (§2.3 measured 0.4 mm).
 - **Without facedown, elements stand on the plate's top face** (z from
-  `thickness.plate` to `thickness.plate` plus the element's depth).
+  `backdropHeight` to `backdropHeight` plus the element's depth).
 
 ### 5.3 Text
 
@@ -351,7 +356,7 @@ These rules keep every colour attributed and every volume single-coloured:
   harfbuzzjs (the HarfBuzz WebAssembly build MakerWorld itself shapes with) from the
   same font file, mirroring Fabric's Textbox:
   - wrapping at the box width;
-  - `lineHeight × fontSize` between lines;
+  - `lineHeight × fontSize × 1.13` between lines (Fabric's `_fontSizeMult`);
   - `charSpacing / 1000` em of extra spacing;
   - left, centre or right alignment.
 
@@ -365,7 +370,7 @@ These rules keep every colour attributed and every volume single-coloured:
 - **Bold and italic** select the family's own face file, as MakerWorld does. A
   variable font (NotoSans, NotoSansSC) gets the weight on its variation axis: 600
   normal, 900 bold. MakerWorld offers bold and italic only for the families that have
-  those faces (Appendix A.3), and so does the Sign Maker, so nothing is synthesised.
+  those faces (reference §7), and so does the Sign Maker, so nothing is synthesised.
   OpenSCAD reaches a variable font's weight by its named instance
   (`font = "Noto Sans SC:style=Black"`). That a named instance renders at the weight
   MakerWorld uses is measured in the verify script (§12); a font with no matching
@@ -374,13 +379,13 @@ These rules keep every colour attributed and every volume single-coloured:
 - **Icons (emoji)** compile to `text("<emoji>", font = "Noto Emoji:style=Bold")`, with
   `NotoEmoji-Bold.ttf` shipped and `use`d, which is the glyph MakerWorld outlines.
   The emoji is then a live parameter too. The picker uses the same unicode-emoji-json
-  catalogue and groups (Appendix A.1).
+  catalogue and groups (reference §3.2).
 - **Fonts for imports** come from the same CDN files MakerWorld uses
   (`public-cdn.bblmw.com/content-generator/fonts/`, one of the two hosts on
   `signs_fetch_assets`' allowlist, §6.2), or from the project's `.font` assets for a
   local font.
   - Licences are decided per file, not per group. `signs/fonts/licences.json` lists
-    each catalogue file (Appendix A.3) with its licence and a link to where it was
+    each catalogue file (reference §7) with its licence and a link to where it was
     checked. Only a file listed there as redistributable (for example OFL-1.1 or
     Apache-2.0) is committed with a generated template, and each committed font's
     licence is recorded in the template's `model.json`.
@@ -407,7 +412,7 @@ or a CSS style.
 
 ### 5.5 Holes, border, plate
 
-- **Plate outlines** (Appendix A.1):
+- **Plate outlines** (reference §3.2, BackdropElement):
   - None;
   - Circle, an ellipse once scaled;
   - Rectangle, with a corner radius;
@@ -416,14 +421,14 @@ or a CSS style.
   - Custom, from an SVG.
 
   The eight outline shapes ship in `signs/src/shapes/` as path data. Their geometry is
-  reproduced from the editor's own outlines (Appendix A.1), so an imported plate
+  reproduced from the editor's own outlines, so an imported plate
   matches. The PR that adds them names this provenance for review.
 - **The border is a ring inside the plate,** as MakerWorld draws it: `offset(r =
   -o) outline` minus `offset(r = -(o + w)) outline`. Here `o` is `borderOffset` and
   `w` the weight: None 0, Light 1, Medium 2, Bold 4 mm. Clipper's round joins become
   OpenSCAD's `offset(r=)`. The ring stands `shapeHeight` on the plate, or is inlaid
   that deep in facedown (§2.3 measured 0.4 mm).
-- **Holes** (Appendix A.1):
+- **Holes** (reference §3.2, BaseHoleElement, and §5.6):
   - `inside`: Ø5 or Ø10 mm, cut through the plate and through every element above it.
   - `back`: a keyhole slot, 6×7.6 or 12×13.6 mm, cut 2 or 3 mm up from the underside.
     The editor warns when the plate is thinner than the cut + 1 mm.
@@ -435,7 +440,7 @@ or a CSS style.
 
 ### 5.6 Determinism and the hand-edit check
 
-`sign.json` records `generated_sha256`, the hash of the text the compiler last wrote, as
+`sign.json` records `scadbuddy.generated_sha256`, the hash of the text the compiler last wrote, as
 mesh models do (spec 2026-10-11 §5). An edit is refused with 409 "model.scad was edited
 by hand; eject the sign to keep editing it as source" when the hash differs. A newer
 compiler emitting different text never reads an existing sign as hand-edited: the
@@ -449,13 +454,14 @@ check compares the stored hash, never a fresh compile.
 are pure JS or WebAssembly, so it bundles for both Node and the browser:
 
 - `harfbuzzjs` (shaping and glyph metrics; WebAssembly, runs in Node and the browser)
-- `clipper2-js` (offsets, booleans, stroke-to-fill)
-- an SVG path parser
+- `clipper2-ts` (offsets, booleans, stroke-to-fill; `clipper2-js` was measured wrong on
+  offsets and point-in-polygon and replaced)
+- `@xmldom/xmldom` (the SVG normaliser's parser, external entities refused)
 - `@temporalio/*` (worker only, pinned to the agent's exact version)
 - `fabric@5.3.0` in the editor bundle only
 
-It has no native addons. Its modules are `doc/`, `import/`, `normalise/`, `compile/`, `editor/` (§7.1) and
-`worker.ts`. It builds two bundles:
+It has no native addons. Its modules are `doc/`, `import/`, `export/`, `geom/`, `shapes/`,
+`normalise/`, `text/`, `compile/`, `editor/` (§7.1) and `worker.ts`. It builds two bundles:
 
 - `dist/worker.js`, for the `signs` image target;
 - `models/sign-maker/ui/editor.js`, the template UI. It is committed, because a template's
@@ -472,7 +478,8 @@ unversioned worker:
 
 | Activity | In | Out |
 |---|---|---|
-| `signs_import` | `{kind: "makerworld_make" \| "makerworld_template", content, assets, plate_svg?}` (blob pointers for large bytes) | `{sign, files: {path: Blob}, warnings}` |
+| `signs_import` | `{kind: "makerworld_make" \| "makerworld_3mf" \| "makerworld_template", document, files}` (the make JSON, a 3MF's `template.json`, or a template's content; the SVGs and fonts as blob pointers) | `{sign, files, warnings}` (the envelope of §4, every `keyName` resolved) |
+| `signs_export` | `{sign, files}` | `{template_json, files: {"assets/<keyName>.svg" \| "assets/<psName>.font": Blob}}`, the `Auxiliaries/Templates/` half of a MakerWorld 3MF (§9.3) |
 | `signs_normalise` | `{sign, files}` (an edited sign whose new uploads are raw) | `{sign, files, warnings}` |
 | `signs_compile` | `{sign, files}` (raw uploads allowed: it runs `signs_normalise`'s step first) | `{sign, source, files, parameters, sha256, warnings}` (`sign` is the normalised document) |
 | `signs_fetch_assets` | `{urls}` (public MakerWorld asset URLs only: `makerworld.bblmw.com` for SVG assets and `public-cdn.bblmw.com/content-generator/fonts/` for fonts; capped size, no redirects off-host) | `{files: {name: Blob}}` |
@@ -524,7 +531,7 @@ standalone path is a one-function change (`backend/scadbuddy/signs/service.py`
 ### 7.1 The editor UI
 
 `ui/editor.js`, `{"ui": {"module": "ui/editor.js", "slot": "page", "api": 1}}`, is a
-full-page editor reproducing Make My Sign's layout (Appendix A.7):
+full-page editor reproducing Make My Sign's layout (reference §2 and the checklist in Appendix A):
 
 - **Top toolbar:** Text, Emoji, Shape, SVG, Hole, Plate, Thickness, plus Import (§9).
 - **Left rail:** select, pan, copy, paste, undo, redo, delete.
@@ -535,7 +542,9 @@ full-page editor reproducing Make My Sign's layout (Appendix A.7):
 
 Behaviour:
 
-- **The canvas** is Fabric.js 5.3.0 over the document. It shows a live 2D view of the
+- **The canvas** is Fabric.js 5.3.0 over the document: it loads `makerworld.data`
+  directly, record by record, with the same object shapes MakerWorld's editor uses
+  (reference §3.2), and serialises back the same way. It shows a live 2D view of the
   same normalised layers the server compiles, with no server round trip per drag.
 - **3D** is the existing `<sb-preview>` of the last render.
 - **Generate** is `<sb-generate>`.
@@ -607,7 +616,8 @@ Saves a sign as a new template. Its request is `{name, description?, tags?, sign
 `{…, source_output_id}`. The run:
 
 1. normalise and compile (§6.2);
-2. write `model.json`, `sign.json`, `model.scad`, `layers/` and `fonts/`;
+2. write `model.json`, `sign.json` (the envelope, with its `assets` copied into the
+   model directory and re-pointed), `model.scad`, `layers/` and `fonts/`;
 3. render a thumbnail;
 4. make one git commit.
 
@@ -642,14 +652,16 @@ All are local library writes, and none is `outward`. Flows reach them through
 `tool(name, args)`. The plugin's `authoring` skill gains a Sign Maker section citing
 this spec.
 
-## 9. Import (1:1)
+## 9. Import and export (1:1)
+
+### 9.1 Sources
 
 `sign_import` is an `OperationKind`; the Sign Maker's Import button and the agent call
 it. It accepts:
 
 - **A Make My Sign 3MF** (the primary path). This is what the editor's Download writes
-  with "Include customizable file" on (§2.3): `Auxiliaries/Templates/template.json`
-  plus its assets. It needs no MakerWorld access at all, and it is also how a 3MF
+  with "Include customizable file" on (§2.3, reference §6): `Auxiliaries/Templates/template.json`
+  plus its `assets/`. It needs no MakerWorld access at all, and it is also how a 3MF
   already in the Bambuddy library imports (`library_file_id`, read as Arrange reads
   library files). A published model's own 3MF, from a model created by Make My Sign,
   is expected to carry the same files; that is checked against the Mahjong model when
@@ -658,55 +670,67 @@ it. It accepts:
 - **The make JSON**, the body of `GET /api/v1/creation-service/my/make/<id>`. The user
   saves it from a browser logged in to MakerWorld; the import dialog shows how. The
   server cannot read a user's makes, since it holds no MakerWorld session and never
-  will.
-- **A MakerWorld template id** (the 12 gallery templates). `GET
-  /api/v1/creation-service/template/<id>` returns the full content. It was read logged in
-  (2026-10-14), and whether it answers without a session is unchecked. The 12 are test
-  fixtures only (§9's fidelity check), since they are other people's designs. The
-  Sign Maker's own starter gallery is signs authored for ScadBuddy, under
-  `models/sign-maker/starters/`. A user who wants a MakerWorld template imports its
-  JSON or its 3MF like a make's.
-- **A custom plate SVG**, when the content uses one (it is only in the user's browser,
-  §2.3).
+  will. Its `assets.svgAssets[]` are fetched by `signs_fetch_assets`.
+- **A MakerWorld template's content** (`GET /api/v1/creation-service/template/<id>`),
+  saved the same way. The 12 gallery templates are test fixtures only, since they are
+  other people's designs. The Sign Maker's own starter gallery is signs authored for
+  ScadBuddy, under `models/sign-maker/starters/`, in the same format.
+- **The files the document names but the source lacks:** a custom plate SVG, a locally
+  imported SVG or font that was never uploaded (§2.3). The import reports each missing
+  `keyName` and asks for the file; the sign opens with the element marked missing
+  until it is supplied.
 
-What happens:
+### 9.2 What happens
 
-1. **Assets.** From a 3MF they are its `Auxiliaries/Templates/assets/`. From make JSON,
-   `signs_fetch_assets` fetches every `assets.svgAssets[].url` (public, allowlisted
-   host, size-capped).
-2. `signs_import` maps every element type to `sign.json` (Appendix A gives the mapping
-   field by field):
-   - Fabric pixels become mm.
-   - Fabric transforms (scale, angle, flip, origin) are flattened.
-   - A `VectorizeElement`'s paths are grouped by `colorPathMap`, with `paletteMap`
-     entries marked deleted merged into their parent colour.
-   - Fonts resolve as §5.3 says: MakerWorld's catalogue file, a `.font` asset, or the
-     NotoSansSC fallback with a warning.
-   - Hole records 1.0 recompute their position from the plate; records 2.0 keep their
-     saved transform. `HookElement` is dropped with a warning, as MakerWorld drops it.
-   - Legacy content that is a bare array is read as `data`.
-3. The result opens in the Sign Maker as an unsaved sign, or becomes a template
-   directly (`sign_template_create` with the import as its source). `source` records
-   the make, instance and model URL. The template's `model.json` records the
-   MakerWorld licence when the content states one (the Mahjong model is a Standard
-   Digital File License: personal use only, which the README repeats).
+1. **The document is copied, not mapped.** `makerworld` is the `content` string parsed
+   (or `template.json`), with only the loader's normalisation applied: a bare array
+   becomes `data`, missing `thickness`/`globalStatus` keys take the defaults,
+   `HookElement` records are dropped with a warning, as MakerWorld drops them
+   (reference §9). Nothing else is touched: px stay px, Fabric fields stay as written.
+2. **Assets resolve.** Every `keyName`, `CUSTOM_SVG_SHAPE` and local font named in the
+   document is matched to a file from the source (a 3MF's `assets/`, a make's
+   `svgAssets`, or the user's upload), stored in the asset store and pointed at from
+   `scadbuddy.assets`. Catalogue fonts resolve as §5.3 says.
+3. **Validation** (§4) refuses an unknown record `type` by index; a record with a
+   known type and an unexpected extra field loads (§10).
+4. `scadbuddy.source` records the make, instance and model URL; `scadbuddy.elements`
+   gets `occlude` for each SVG and vector record; `expose` gets the defaults of §4.
+5. The result opens in the Sign Maker as an unsaved sign, or becomes a template
+   directly (`sign_template_create` with the import as its source). The template's
+   `model.json` records the MakerWorld licence when the content states one (the
+   Mahjong model is a Standard Digital File License: personal use only, which the
+   README repeats).
 
 **Fidelity check:** for a 1:1 import, the compiled sign's footprint per colour matches
 MakerWorld's own exported 3MF for the same project. Footprint means area and bounding
-box in XY, within 1 % of area and 0.2 mm of bounds. §2.3 and Appendix A.3 give MakerWorld's side.
-The Mahjong make's export (`mahjong.3mf`, 2.9 MB, collected 2026-10-14) and the 12
-gallery templates are fixtures: their JSON, their SVG assets and MakerWorld's 3MF for
-each go under `test-fixtures/makerworld/sign/` (Git
-LFS, `manifest.json` entries, `requires_fixtures`).
+box in XY, within 1 % of area and 0.2 mm of bounds. §2.3 and the reference §5 give
+MakerWorld's side. The Mahjong make's export (`mahjong.3mf`, 2.9 MB, collected
+2026-10-14) and the 12 gallery templates are fixtures: their JSON, their SVG assets and
+MakerWorld's 3MF for each go under `test-fixtures/makerworld/sign/` (Git LFS,
+`manifest.json` entries, `requires_fixtures`).
+
+**Round trip check:** importing any fixture and exporting it again (§9.3) gives a
+`template.json` byte-identical to the source, and the same `assets/` set.
+
+### 9.3 Export
+
+A sign leaves ScadBuddy as a MakerWorld-compatible project: `signs_export` writes
+`makerworld` as `Auxiliaries/Templates/template.json` and the `scadbuddy.assets` as
+`Auxiliaries/Templates/assets/<keyName>.svg` and `<postscriptName>.font`, which is
+exactly what MakerWorld's own headless exporter and editor read (reference §6). The
+output's `Download` gains "Download as Make My Sign project (3MF)", which packs those
+files into the rendered 3MF ScadBuddy already writes, beside the meshes. Opening that
+file's project in MakerWorld's editor is the parity test for the editor (§12).
 
 ## 10. Errors
 
 - **A sign that fails validation** is a 422 naming the JSON pointer of the bad field.
 - **A sign past a cap** (§4) is a 422 naming the cap.
-- **An import with an element type it does not know** (a future MakerWorld format)
-  imports everything else and reports each dropped element by type and index in the
+- **An import with an element `type` it does not know** (a future MakerWorld format)
+  imports everything else and reports each dropped record by type and index in the
   operation's `warnings`, shown in the import dialog before saving. It is never
-  silently dropped.
+  silently dropped. A known type with an unexpected Fabric field loads and keeps the
+  field (§4).
 - **A font that is neither in MakerWorld's catalogue nor among the project's assets**
   falls back to NotoSansSC, as MakerWorld does (§5.3), and the import's `warnings`
   name it.
@@ -741,7 +765,8 @@ Image to Keychain is the next maker: it reuses `vector` elements and adds one se
 
 - **`signs/` (vitest):**
   - schema validation;
-  - importer golden tests: each fixture's NamePlate JSON → `sign.json`, snapshot;
+  - importer tests: each fixture's content → `sign.json`, with `makerworld` equal to
+    the source after loader normalisation, and the §9.2 round trip byte-identical;
   - normaliser tests on strokes, transforms and fill rules;
   - the compiler's golden `.scad` per fixture;
   - text layout against Fabric's own measurement of the same font, run in jsdom with
@@ -764,475 +789,33 @@ Image to Keychain is the next maker: it reuses `vector` elements and adds one se
   - the editor module's unit tests;
   - a mocked e2e: open the Sign Maker, add a text, Generate, Save as template, open
     the new template's form;
+  - a manual parity check, recorded in the PR: a sign exported from the Sign Maker
+    (§9.3) opens in MakerWorld's editor and looks the same.
   - `e2e/real-backend.spec.ts` gains the same against a container.
 
 ## 13. Phases
 
-1. **`signs/` package:** schema, normaliser, compiler; golden tests; the `signs`
-   worker and Dockerfile target; the CI job.
+1. **`signs/` package:** the document types from the format reference, the loader,
+   normaliser, text layout and compiler reading the MakerWorld document; golden tests;
+   the `signs` worker and Dockerfile target; the CI job.
 2. **Backend:** `ctx.service`, `ctx.render(files=)`, the sign operations, the
    in-process dev child; the agent tools.
-3. **The Sign Maker template:** the editor with full parity (Appendix A's checklist),
+3. **The Sign Maker template:** the editor with full parity (Appendix A),
    preview and Generate, and Save as template.
-4. **Import:** make JSON, templates and fixtures (the Mahjong coaster first); the
-   fidelity measurement.
+4. **Import and export:** the 3MF and make JSON paths, the fixtures (the Mahjong
+   coaster first), the fidelity measurement, the round trip and the 3MF export.
 5. **Follow-ups filed as issues:** standalone activities once production Temporal
    supports them (§6.3); the clusters Deployment; Image to Keychain as the next maker
    (§11).
 
-## Appendix A. Make My Sign, reverse-engineered
+## Appendix A. Make My Sign parity checklist
 
-Read from the shipped bundle (MakerWorld build `arlj243Es7etS3BsJ5nsQ`, captured
-2026-10-14), and checked against the live editor, the 12 gallery templates
-(`GET /template/15..26`) and the Mahjong make's 3MF export (§2.3). Everything was read
-from code unless it is marked **INFERRED**. "B" is the editor chunk
-(`static/chunks/b0b707fb.05a1eeeeedd6a707.js`, one scope-hoisted module), and "E" is
-the edit page (`pages/makerlab/makeMySign/edit/[id]-f97cf818d5000b7d.js`). Line
-numbers are into the prettier-formatted chunks.
+The reverse-engineered format, geometry, 3MF and API that used to be here are now the
+format reference, `docs/makerworld/make-my-sign.md`, with the captured documents under
+`docs/makerworld/examples/`. This appendix keeps only the checklist the Sign Maker is
+measured against.
 
-The live captures confirmed these figures independently:
-- 5 px = 1 mm;
-- Mahjong facedown z ranges: plate 0–3, border 2.6–3.0, vector 2.0–3.0;
-- the 180° Y build transform;
-- the extruder order (plate, border, then elements);
-- holes stored as `{holeType: "out_single_top", holeSize: 20}`;
-- icons stored as `{content: "♿", …}`;
-- fonts named by family, such as `站酷快乐` (ZCOOL KuaiLe).
-
-The gallery templates use these element types: BaseShapeElement 63, IconElement 37,
-TextElement 32, Backdrop 12, BaseHoleElement 4.
-
-### A.1 Content schema ("NamePlate V1.1")
-
-The make's `content` field is a JSON string. It is built in `aO.changeSerializedData` (B:11032):
-
-```js
-this._serializeData = { data: n /* element records, canvas z-order (back→front) */,
-  thickness: this._thickness, globalStatus: this._globalStatus, date: Date.now(), version: nx /* "NamePlate V1.1" */ };
-```
-
-- `data`: the element records, sorted by their index in fabric's `canvas._objects`. The first record is the bottom-most, and the backdrop is always sent to the back.
-- `thickness` (`aw`, B:11015), in mm. The defaults are `{backdropHeight:1, textHeight:0.6, shapeHeight:0.4, svgHeight:0.4, holeHeight:1}`.
-- `globalStatus` (`ak`). The defaults are `{flatMode:false, nonePlateMode:false}`.
-  - `flatMode` is called "Facedown Mode" in the UI. Its description reads: "All the elements will be embedded into base plate to make a flat surface. The sign will face down to the print plate…" (B:34969).
-  - `nonePlateMode` is forced on when the backdrop shape is None (B:29519). While it is on, flatMode is disabled.
-- `date` is epoch ms. `version` is always `"NamePlate V1.1"`. No other top-level version string occurs in the code.
-
-The working copy is also mirrored to `localStorage["<uid>-<makeId>-content_gen.nameplate: saved data"]`.
-
-### Thickness keys (`ng`, B:4211)
-
-This maps a render type to its `thickness` key:
-
-| Render type | `thickness` key |
-| --- | --- |
-| text, icon | `textHeight` |
-| shape, border | `shapeHeight` |
-| backdrop | `backdropHeight` |
-| svg | `svgHeight` |
-| hole | `holeHeight` |
-
-Note that the border uses `shapeHeight`. `holeHeight` is stored but never drives any geometry; see §3.
-
-Per-element depth override: `fabricObj.data.depth` (or `props.data.depth`). The element's `preProcessBeforeSerialize` always writes `data:{depth}` (B:8890). When `depth > 0` it replaces the type's default thickness (`customDepth`).
-
-### Element records
-
-Every element is a fabric object in the canvas coordinate system (§2), plus wrapper fields. Element type ids live in `iE` (B:8708): None 0, Backdrop 1, Text 2, Icon 3, BaseShape 4, SvgShape 5, BoundaryHole 6, InsideHole 7, BackHole 8, SvgImage 9, Group 10, Vectorize 11.
-
-The deserializer table `o7` (B:16398) maps type strings to classes: `BackdropElement, BaseShapeElement, SvgShapeElement, IconElement, TextElement, BaseHoleElement, SvgImageElement, VectorizeElement`. `HookElement` is filtered out on load and never created, so it is legacy (§6).
-
-#### BackdropElement (`iI`, B:8936)
-
-```json
-{"version":"1.0","type":"BackdropElement","shape":<n7>,"group":{...}}
-```
-
-Plate shapes (`n7`, B:7780):
-
-| Value | Name |
-| --- | --- |
-| -1 | None |
-| 0 | Circle |
-| 1 | Rectangle |
-| 2 | Star |
-| 3 | Heart |
-| 4 | Cat |
-| 5 | NumberPlate |
-| 6 | Bone |
-| 7 | ClosedHanger |
-| 8 | OpenHanger |
-| 9 | Triangle |
-| 10 | Custom |
-
-The `group` object depends on the shape:
-
-- **Circle** (`iC`): `{outlineEnabled, borderOffset, borderWidth, borderColor, backdropColor, mainObj: <fabric Circle JSON>}`. A new circle has radius 250 px (Ø100 mm). The radius is `max(w,h)/2`, and `scaleX`/`scaleY` give an ellipse.
-- **Rectangle** (`im`): the same fields with `mainObj: <fabric Rect JSON>`. A new rectangle is 750×500 px (150×100 mm) with `rx=ry=50` (corner radius 10 mm). The corner radius is `mainObj.rx`, and the UI slider runs from 0 to 100 mm.
-- **SVG shapes 2–10** (`ig`): `{outlineEnabled, borderOffset, borderWidth, borderColor, backdropColor, shape, shapeUrl, width, height}`.
-  - `width` and `height` are fabric group px.
-  - The SVG is looked up again from `ic.get(shape)` on load. Shapes 2–9 are inline data URIs, extracted to the bundled backdrop outlines (viewBox 595.28×841.89, except Triangle which is 100×86.6).
-  - A new shape is 750 px wide, or 750 px tall when the SVG is taller than it is wide (`id`, B:8311).
-  - **Custom (10)** reads its SVG from the per-make svgStore under the key `"CUSTOM_SVG_SHAPE"`. This is "Import SVG as Base Plate".
-- **None** (`ip`): `{outlineEnabled:false, …, mainObj:<invisible fabric Object JSON>}`.
-
-Defaults from the `is` base class (B:7968): `_outlineEnabled=true, _borderOffset=10, _borderWidth=10, backdropColor="#FFFFFF", borderColor="#000000"`.
-
-Border weights (`dV`, B:30744). Widths are px; divide by 5 for mm:
-
-| Weight | px | mm |
-| --- | --- | --- |
-| None | 0 | 0 |
-| Light | 5 | 1 |
-| Medium | 10 | 2 |
-| Bold | 20 | 4 |
-
-Choosing None turns `borderEnabled` off. The border offset slider runs from 0 to 100 mm (stored ×5).
-
-Because the backdrop is centred on the origin (`left=-w/2, top=-h/2`), the canvas origin is the plate centre.
-
-A new project gets a Rectangle backdrop (`initBackdrop`, B:16649). If a backdrop fails to load, it is replaced by a Rectangle and `onBackdropError` fires.
-
-#### TextElement (`av`, B:10626)
-
-```json
-{"version":"1.0","type":"TextElement","fabricObj":{...}}
-```
-
-`fabricObj` is either a fabric **Textbox** (straight text) or a fabric **Text** with `path` (curved text). The saved JSON drops `path` and keeps `curvePoint {x,y}`; the arc is rebuilt on load (`an(curvePoint, textWidth)`).
-
-- Class defaults: `left:-100, top:-15, fontSize:36, width:200, fill:"#353535", fontFamily:"times new roman", textAlign:"left"`.
-- The "Add text" button calls `addText("Input Text", {fontFamily:"NotoSansSC", fontWeight:600})` (B:32158).
-- `",AdobeNotDef"` is appended to `fontFamily` as a tofu fallback. Only the first comma-separated family is used for geometry.
-- Variable fonts (NotoSans, NotoSansSC; `nI`) store a numeric weight: normal 600, bold 900. Other fonts use `"bold"` / `"italic"`.
-
-Curve presets (`nd`, B:4220): UpwardCurve 0, DownwardCurve 1, CircularCurve 2, None 3. `ai()` (B:10380) computes the initial `curvePoint`:
-- **Up:** `(-√2·r/2, -√2·r/2)` with `r = 2·w/π`.
-- **Down:** the same, with +y.
-- **Circular:** `(0, w/π - 22)`.
-
-`aA()` builds an SVG arc through the start point (B:10262). A draggable "curveController" changes `curvePoint`. Curved text cannot be resized from its side handles.
-
-#### IconElement — "Sticker" / emoji (`i0`, B:9975)
-
-```json
-{"version":"1.0","type":"IconElement","content":"<emoji string>","originScaleX","originScaleY","fabricObj":{... no path}}
-```
-
-The emoji glyph is rebuilt from the **NotoEmoji-Bold.ttf** outline at fontSize 50 via HarfBuzz (`n3(content,"NotoEmoji",50,1,1,0)`). It is single-colour, filled with `fabricObj.fill`, default `#353535`.
-
-The picker data `ey` is the unicode-emoji-json dataset (`{slug, group}` keyed by char). VS16 is rewritten to VS15 for text presentation. Some codepoints are excluded (`gT`). The tabs are recent, people, animals_and_nature, food_and_drink, activity, travel_and_places, objects, flags (B:22289), and the search keywords are `g_` (B:22849).
-
-#### BaseShapeElement (`iQ`, B:9075)
-
-```json
-{"version":"1.0","type":"BaseShapeElement","shape":0|1|2,"fabricObj":{...}}
-```
-
-`ib`: Circle 0 (fabric Circle radius 80), Triangle 1 (80×80), Rectangle 2 (80×80). All default to fill `#178F51` at `left/top -40`.
-
-#### SvgShapeElement (`i4`, B:10186)
-
-```json
-{"version":"1.0","type":"SvgShapeElement","shape":0,"fabricObj":{... no path}}
-```
-
-`i9`: Pentagram 0 is the only shape. Its 36×36 inline SVG (B:10249) is regrouped by `groupSVGElements`. The default fill is `#E03D19` at `left/top -18`.
-
-#### SvgImageElement (`i3`, B:10064)
-
-```json
-{"version":"1.0","type":"SvgImageElement","keyName":"<name>_<Date.now()>","props":{fabric props + optional fill + data.depth}}
-```
-
-- The SVG text itself is **not** in the content. It lives in the per-make IndexedDB store (§4) under `keyName`.
-- The SVG loads as a fabric Group of its paths. When the group is wider than 450 px it is scaled to `900/(2·width)`.
-- A `fill` in `props` recolours every child; with no `fill` the original colours are kept.
-- An SVG is rejected if it contains `<clipPath` (`oK.checkSvgCompatible`, B:16156).
-
-#### VectorizeElement (`ax extends i3`, B:10913)
-
-This is an "Image to Keychain" import. The record has the same shape as SvgImageElement, and `props.vectorizeContent` is a JSON string (§4).
-
-#### BaseHoleElement (`o3` / `iH` subclasses, B:9362–9975, 16318)
-
-```json
-{"version":"2.0","type":"BaseHoleElement","holeSize":<iP>,"holeType":<iw>,"fabricObj":{fabric JSON}}
-```
-
-Version `"1.0"` records have no saved geometry; positions are recomputed from the backdrop (§6).
-
-Hole types (`iw`, B:9248). Each style has three positions: `single_top`, `single_top_left` and `double_top`. `none` adds nothing.
-
-| Style (`iz`) | UI name | Types | Class |
-| --- | --- | --- | --- |
-| `"inside"` | Inside / "Inside Plate" | `in_single_top`, `in_single_top_left`, `in_double_top` | `i1` |
-| `"outside"` | "Boundary" / "On the boundary" | `out_single_top`, `out_single_top_left`, `out_double_top` | `iG` |
-| `"back"` | "On the back" | `back_single_top`, `back_single_top_left`, `back_double_top` | `iJ` |
-
-Sizes (`iP`) are in px; 5 px = 1 mm:
-
-| Size key | Value | Geometry |
-| --- | --- | --- |
-| `inSm` | 12.5 | fabric Circle, radius = holeSize px → Ø5 mm |
-| `inBm` | 25 | Ø10 mm |
-| `backSm` | 15 | the bundled hole outline (15 px), 30×38 px → 6×7.6 mm keyhole slot. Cut depth `aS[15]=2` mm |
-| `backBm` | 30 | the 30 px outline, 60×68 px → 12×13.6 mm. Cut depth `aS[30]=3` mm |
-| `outSm` | 20 | the 20 px outline, 40×45 px → 8×9 mm loop tab, filled with the backdrop colour |
-| `outBm` | 45 | the 45 px outline, 90×130 px → 18×26 mm |
-
-Positions are tables keyed by backdrop shape: `iW` single top, `iZ` double, `iV` top-left (inside and back); `i_`, `iN`, `iM` for outside.
-- Example: Rectangle inside double is `left = -w/2 + 20 + 0.2928·cornerRadius`, `top = -h/2 + 20 + 0.2928·cr`. Its mirror twin uses `originX:"right"` and `left = -left`.
-- Outside holes stick out of the plate edge by `height - 40` px. The top-left variant is rotated 315°.
-
-Holes can be moved freely (v1.3). Lock (`isHoleLock`) and Hide (`isHoleHidden`) live in View Options. A hole that is not fully inside the plate turns red (`#d26d5d`), gets `isHoleInPlate=false` (`iD`), and is **excluded from 3D** (`aj`). Holes cannot be copied.
-
-Back-hole warning: `aP()` sets `backHoleOverflow = max(aS[size]) >= backdropHeight`. The UI then prompts "Suggest {{thickness}}mm or above" and can set `backdropHeight = depth + 1`.
-
-### `preset` (user settings, not per make)
-
-The editor reads it from `GET /my/preset` (`{preset:"<json>"}`) and saves it with `POST /my/preset {preset}`. Captured value:
-
-```json
-{"date":…, "units":"mm", "version":"NamePlate V1.1", "unitsType":"metric", "showReference":true}
-```
-
-- `units` is `mm`, `cm` or `inch`. `unitsType` is `metric` or `imperial`.
-- `showReference` toggles the reference/size labels.
-- A copy is kept in `localStorage["<uid>-<id>-content_gen.nameplate: user setting"]`.
-
-### A.2 Units and coordinates
-
-- **5 canvas px = 1 mm.** `oz = {mm:5, cm:50, inch:127}` px per unit (B:14134). The size inputs use `cN(px,unit) = px/c_.get(unit)` (B:20929).
-- The canvas origin (0,0) is the **plate centre**; fabric uses y-down. The viewport pans so the origin sits at the canvas centre (`absolutePan(-w/2,-h/2)`).
-- In 3D, every SVG is exported as `<g transform="scale(1,-1)">` (`nM`, B:7079). Meshes are positioned at `(left, -top, z)` under a group scaled `(0.2, 0.2, 1)`, so XY is px→mm and Z is already mm (B:33418).
-- The printer bed only chooses the print profile and size hints. `eX`/`eF` (B:291):
-
-  | Key | UI label | Bed (mm) |
-  | --- | --- | --- |
-  | A1M | A1 Mini | 180×180 |
-  | X1 | X/P/A1 | 256×256 |
-  | H2D | H2D(Pro)/H2C | 300×320 |
-  | H2S | H2S | 340×320 |
-  | A2L | A2L | 330×320 |
-
-  The printer list with model codes is also at B:291 (A1 N2S, A1M N1, … H2C O1C2). In the 3MF, only A1 mini and X1C profiles are emitted (§3d).
-- Zoom: wheel factor `0.999^deltaY`, clamped 0.01–20 (B:16690). The view is saved under `localStorage "canvas-transform-state"` (`o8`).
-- Rotation snaps to 45° with a 5° threshold. Skew is locked.
-
-### A.3 Geometry pipeline
-
-#### A.3a 2D outlines
-
-- **Text** (`n5`, B:7689): HarfBuzz shapes each line (or each character, for curved text, using fabric `__charBounds` and its angle).
-  - `glyphToPath` produces the SVG path in font units. It is scaled by `fontSize/upem` and wrapped in `rotate(360-angle) scale(scaleX·1000, -scaleY·1000)`.
-  - The 3D step then applies `scaleX/Y = 0.001`. The ×1000 round trip keeps precision.
-  - Fonts load from `https://public-cdn.bblmw.<com|cn>/content-generator/fonts/<file>` (`nF`, B:7232). HarfBuzz itself is `https://makerworld.bblmw.<com|cn>/makerworld/makerlab/content-generator/hb2.wasm`.
-- **Font catalogue** (`nh` groups and `nX` files, B:4226/7190):
-
-  | Group | Family | Files |
-  | --- | --- | --- |
-  | sans_serif | NotoSansSC | `NotoSansSC-VariableFont_wght.ttf` |
-  | sans_serif | NotoSans | `NotoSans-VariableFont_wdth,wght.ttf`, italic `NotoSans-Italic-VariableFont_wdth,wght.ttf` |
-  | sans_serif | Roboto | `Roboto-{Regular,Bold,Italic,BoldItalic}.ttf` |
-  | sans_serif | SmileySans | `SmileySans-Oblique.ttf` |
-  | sans_serif | Bagnard Sans | `BagnardSans.otf` |
-  | serif | Merriweather | `Merriweather-{Regular,Bold,Italic,BoldItalic}.ttf` |
-  | serif | Wigners Friend | `WignersFriendRoman.ttf` |
-  | handwritten | Mali | `Mali-{SemiBold,Bold,SemiBoldItalic,BoldItalic}.ttf` |
-  | handwritten | Pacifico | `Pacifico-Regular.ttf` |
-  | handwritten | 站酷快乐 | `ZCOOLKuaiLe-Regular.ttf` |
-  | handwritten | 站酷小薇 | `ZCOOLXiaoWei-Regular.ttf` |
-  | stylized | Runy Tunes | `RunyTunesRevisitedNF.ttf` |
-  | stylized | Kalmansk | `Kalmansk-51WVB.otf` |
-  | stylized | Radio | `radio.ttf` |
-  | stylized | Bloom | `Bloom-Regular.otf` |
-  | stylized | LeFun | `LeFunFont-Regular.otf` |
-  | accessibility | CalHendersonBraille | `Braille.ttf` |
-  | accessibility | AliHealthFontBraille | `AlibabaHealthFont20BRAILLE-A-01.ttf` |
-  | accessibility | AliHealthFontPro | `AlibabaHealthFont20PRO-A-01.ttf` |
-  | (hidden) | AdobeNotDef | `AND-Regular.ttf` |
-  | (hidden) | NotoEmoji | `NotoEmoji-Bold.ttf` |
-  | (hidden) | times.ttf | `times.ttf` |
-
-  - Bold: NotoSansSC, NotoSans, Roboto, Merriweather, Mali. Italic: NotoSans, Roboto, Merriweather, Mali.
-  - Local fonts (v1.2, `.ttf/.otf/.woff/.woff2`) are stored in a per-user IndexedDB font store (`tR`) by PostScript name. They are used by name in `fontFamily`.
-- **Shapes, SVGs, Vectorize:** `nM(fabricObj)` is fabric `toSVG()` under `scale(1,-1)`.
-- **Backdrop:** `exportMainSvg()` of the plate shape.
-- **Border** (B:7935): the ring between two inward Clipper offsets of the plate outline:
-
-  ```js
-  let i = await ia(e, -t),          // inflate(plate, -borderOffset)        (Clipper2 InflatePathsD, JoinType.Round, EndType.Polygon, precision 2)
-      a = await ia(e, -t - A),      // inflate(plate, -(borderOffset+borderWidth))
-      r = i.exclude(a)              // paper.js boolean → ring
-  ```
-
-  So the border sits **inside** the plate, `borderOffset` px from the edge and `borderWidth` px wide. Curves are flattened at 0.01 before Clipper (`n8`). Clipper2's wasm is `…/makerworld/makerlab/content-generator/` (`locateFile`).
-
-#### A.3b 2D → 3D (`h_` renderer, B:33400–33830; `nN`, B:7090)
-
-Each item from `getThreeDeeRenderDataList()` (B:11372) is `{svg, height, offsetZ, left, top, scaleX?, scaleY?, useNaiveWay, renderType, elementType, customDepth, customDepthValue, pathResults?}`.
-
-Processing steps:
-1. A three.js `SVGLoader` copy (`oK`) parses each SVG path into shapes.
-2. Each shape is extruded with `nV`, a fork of ExtrudeGeometry: `depth=height`, `steps 1`, no bevel, `curveSegments` 12 (50 for `<circle>`).
-3. `useManifold:true` triangulates through manifold `CrossSection.ofPolygons(...,"NonZero")` + `triangulate`.
-4. Each mesh keeps the path's own fill colour (`MeshStandardMaterial`, roughness 0.5, metalness 0.2). `elementType` is stored in `userData`.
-
-Z placement (`getActualObjectPose` and `prepareModels`):
-
-- **Normal mode:** the backdrop sits at z 0–`backdropHeight`. The border, text, stickers, shapes, SVGs and vectorize parts all start at `offsetZ = backdropHeight` and stand `height` tall (element depth or type thickness).
-- **nonePlateMode:** `backdropHeight` becomes 0, so every element starts at z = 0.
-- **flatMode** (facedown), for non-backdrop, non-hole items: `height = min(backdropHeight, h)`, `offsetZ = backdropHeight - height`. Each element is **embedded flush with the plate's top face**.
-  - The backdrop is not cut. The overlapping volumes are separate parts, and the slicer's part ordering decides colour. **INFERRED:** later parts override earlier ones in Bambu Studio.
-  - The 3MF item is then rotated 180° about Y so the face prints on the bed (§3d).
-- **Vectorize:** `mergeSameColorDepthMesh` unions every path of the same colour and depth (paper `unite`, then one SVG per group). Per-path depth comes from `pathResults[i].depth`, else `defaultSetting.depth`. In flatMode everything uses the clamped `height`. "transparent" paths are skipped.
-- **Order:** items are sorted by canvas z-index, and the mesh `polygonOffsetUnits = -10·index` (display only).
-
-Holes (`classifyModels` + `cutHoles`):
-
-- **InsideHole and BackHole are cutters.** Every Backdrop, BoundaryHole and other model whose bbox meets a cutter has it subtracted with manifold `subtract`.
-- **Inside hole depth:** `backdropHeight + 1` in flatMode. Otherwise it is `maxElementHeight + backdropHeight + 1`, starting at z 0. It goes through everything, including text that overlaps it.
-- **Back hole:** an extrusion `aS[size]` (2 or 3 mm) tall from z 0, so it is a blind keyhole slot in the underside.
-- **BoundaryHole** is a solid tab, extruded to `backdropHeight` in the backdrop colour (it follows backdrop colour changes) and treated like the backdrop.
-- **Thickness change** (`changeThickness`): when `backdropHeight` changes, every non-hole element's `offsetZ` is set to the new value, and BoundaryHole `height` is set to `backdropHeight`.
-
-#### A.3c Colour → filament
-
-Colours come from fabric fills: element `fill`, SVG child fills, vectorize palette colours, `backdropColor` and `borderColor`. `usedColors` collects them upper-cased, and `getColorCount()` counts the distinct ones.
-
-#### A.3d 3MF writer (`hV.parse`, B:33006; `export3mf` B:33771)
-
-- **Mesh order:** top-level groups are sorted by `hL` order: Backdrop 0, Border 1, BaseShape 2, SVG 3, Sticker 4, Text 5.
-- **Filaments:** each mesh's material colour `#RRGGBB` maps to an extruder number, assigned in order of first appearance (`filamentColour`).
-  - `project_settings.filament_colour` is that list. Each `filament_*` array is padded to the colour count by repeating element 0.
-- **Profile:**
-  - Default `hT` is X1C: `printable_area 0x0..256x256`, `printable_height 250`, bed_exclude 18×28, `print_settings_id "0.20mm Standard @BBL X1C"`, `printer_settings_id "Bambu Lab X1 Carbon 0.4 nozzle"`, `printer_model "Bambu Lab X1 Carbon"`, `curr_bed_type "Textured PEI Plate"`, `filament_settings_id ["Bambu PLA Basic @BBL P1P"]`, `ironing_type "top"`, `wall_generator "arachne"`, `wall_loops 2`, `sparse_infill_density 15%`, `layer_height 0.2`, wipe tower (15, 220).
-  - `hW` is A1 mini (180×180×180, `@BBL A1M`, wipe tower (15, 142.333)). It is chosen when `bboxW ≤ 180 && bboxH + u ≤ 180`, where `u = 40` mm for multicolour (wipe-tower margin) and 0 otherwise.
-- **Placement:** `transform = "<rot> <c-x> <c-(y+u/2)> <z>"`, with `c = 128` for X1C and 90 otherwise.
-  - `rot` is identity, or `"-1 0 0 0 1 0 0 0 -1"` (180° about Y) when flatMode is on.
-  - `z` = model depth in flatMode, else 0.
-- **Files:**
-
-  | File | Contents |
-  | --- | --- |
-  | `3D/3dmodel.model` | Metadata: Application `BambuStudio-01.07.04.52`, `MakerWorld_M1`=title, `MakerLab`="Make My Sign", `MakerLabVersion`="NamePlate V1.1", `DesignRegion`/`MakerLabRegion`, `MakerLabFileId`, `DesignModelId`=`FMI_<id>`, Title, CreationDate. One object with `<components>` pointing at `/3D/Objects/object-<id>.model`, one per mesh. Build `item printable=1`. |
-  | `3D/Objects/object-<id>.model` | One `<object type="model"><mesh>` per three.js mesh, with vertices baked by parent position and scale. |
-  | `3D/_rels/3dmodel.model.rels` | Relationships. |
-  | `Metadata/model_settings.config` | Object `name=<title>.3mf`, `extruder 1`, `thumbnail_file Metadata/plate_1.png`. One `<part subtype="normal_part">` per mesh, named `<elementType>[-<groupId>]-<meshId>` with `extruder=<colour index>`. One plate (`plater_id 1`) and an assemble item. |
-  | `Metadata/project_settings.config` | JSON of the chosen profile. |
-  | `Metadata/plate_1.png` and `Auxiliaries/.thumbnails/thumbnail_3mf.png` | The **2D canvas screenshot** (`canvasUrl`). |
-  | `Auxiliaries/Templates/template.json` and `Auxiliaries/Templates/assets/*` | Only when exporting with `shareTemplate`: the full content JSON plus `<keyName>.svg`, `CUSTOM_SVG_SHAPE.svg` and `<postscriptName>.font`. **This is a self-contained project carrier, so a 1:1 import can read it.** |
-
-  The zip comment is "created by BambuLab".
-- **STL export:** three's STLExporter in binary. The 80-byte header is `ML <region> SIGN <mlFileId>` (`td`).
-- **Export bookkeeping:** every export first registers a file (`AT({generatorId:"SIGN", format, extra:{makeId, backdropShape, backdropBorder, textCount, iconCount, shapeCount, svgCount, holeCount, vectorizeCount}})` → `{region, mlFileId}`) and earns MakerLab credit. In China there is also a censorship check (`POST /my/make/securitycheck`).
-- **Headless exporter (B:35571 `up`/`uf`/`uv`):** takes `.json` + `.svg` + `.font` files and produces `nameplate.3mf` with a readonly renderer. That is the same input shape as `template.json` + assets.
-
-### A.4 Vectorize, Keychain Draft and SVG storage
-
-- **Per-make SVG store** (`nw`, B:4349):
-  - IndexedDB `"<uid>-<makeId>-content_gen.nameplate:SVG_DB"`, version 1, object store `svgs`, keyPath `keyName`, records `{keyName, content:<svg text>}`.
-  - Reference counts live in `localStorage "<uid>-<makeId>-content_gen.nameplate: cached svg"` as `{version:"V1.0", rc:{keyName:count}}`. `prune()` deletes zero-count entries.
-  - Duplicating a make copies both (E module 34254), and deleting clears them.
-- **Server assets:** `make.assets = {svgAssets:[{name, url, objectName}], imageAssets}`. On load, `nO` (B:4438) downloads every `*.svg` asset into the store under its name minus `.svg`, and every `*.font` asset into the font store.
-  - Captured example: `"Keychain Draft_1774223447148.svg"` at `https://makerworld.bblmw.com/makerworld/model/…svg`.
-  - **The editor never uploads locally imported SVGs or fonts**, so they exist only in that browser's IndexedDB. Import must fall back to `assets.svgAssets` or a 3MF's `Auxiliaries/Templates`. **INFERRED:** a make with a local-only SVG has no server copy of it.
-- **Importing from Image to Keychain:**
-  - The list comes from `GET /my/makes?category=<imageToKeychain>&limit=30`.
-  - The detail comes from `GET /vectorization/{id}/resource` → `{title, assets.svgAssets[0].url, additionalInfo|content}`.
-  - The SVG is then added with `addSvgImage(title, svg, {vectorizeContent})`. The URL parameter `?vectorizeID=<id>` does the same automatically.
-- **vectorizeContent** (class `to`, B:1832; `exportData`):
-
-  ```json
-  {"pathResults":[{"colorKey":"<key>","depth"?:mm}],          // index = SVG path order (paths with clipMask skipped)
-   "defaultSetting":{"depth":1},                               // base thickness, mm
-   "globalResult":{"left","top","scale","angle"},              // initial placement (scale→scaleX/Y)
-   "paletteMap":{ "<colorKey>":{colorKey, red,green,blue (0..1), alpha, fill, index, isOrigin, isPaletteHidden, deleted, parent?, customColor?{red,green,blue}, children[]} },
-   "colorPathMap":{ "<colorKey>":[pathIdx...] },
-   "secondaryEditColorReplaceMap":{ "rgb(r, g, b)":"<new css colour>" }}
-  ```
-
-  A path's colour is resolved in this order:
-  1. `pathResults[i].colorKey` → paletteMap entry. A `customColor` overrides it, and `deleted` entries are ignored.
-  2. Otherwise the path fill → paletteMap → `parent`.
-  3. The `rgb(...)` string is then passed through `secondaryEditColorReplaceMap`, which holds this editor's recolours (`ChangeVectorizeColor`).
-  4. `alpha 0` means transparent and is not built.
-
-  Palette indices are assigned by sorting visible entries by HSL. A hidden `"transparent"` entry is always added. `hasMixedDepth` is true when any path depth differs from `defaultSetting.depth`.
-
-### A.5 API endpoints
-
-The base is `https://makerworld.com/api/v1/creation-service` (confirmed from captured URLs). The `category` for Make My Sign is `1`.
-
-| Method | Path | Use |
-|---|---|---|
-| GET | `/my/make/{id}` | Load the make `{id,title,cover,coverUrl,content(str),assets{svgAssets,imageAssets},instanceId,productName,categoryName,keyChainTemplateId}`. The page does it server-side (`__N_SSP`) and also calls it to re-read the title. |
-| PUT | `/my/make/{id}` | Autosave `{content:"<json>"}`, rename `{title}`, set cover `{cover:<objectName>}`. |
-| POST | `/my/make` | "Create from Blank" `{category:1, cover:"", title, content:""}` → `{id}`. |
-| POST | `/my/makebytemplate/{templateId}` | "Use template" `{cover:"", title}` → `{id}`. |
-| POST | `/my/make/{id}/copy` | Duplicate → `{id}`. The IndexedDB SVGs are copied client-side. |
-| DELETE | `/my/make/{id}` | Delete `{id}`. Local storage and IndexedDB are cleared. |
-| GET | `/make/{id}/upload?fileName=…&bizType=…&category=1` | Presigned upload config `{presignedUrl,url,fileId,storageInfo.objectName}`. Covers use bizType `nameplateCover` and fileName `cover{id}`; screenshots use `nameplateScreenshot`. |
-| PUT | `<presignedUrl>` | S3 upload (`Dy`, bizType makerlab). |
-| POST | `/common/permanent_files` | `{makeId,fileIds,categoryId}`, generic save hook. Not used by sign. |
-| GET | `/template?offset=0&limit=20&category=1` | Template gallery `{total,hits[{id,title,cover,user,useCount,designId,content}]}`. |
-| GET | `/template/{id}` | Template content (`getTemplateData` → `.content`). |
-| GET | `/my/makes?offset&limit&category` | List makes (used for the Keychain import list). |
-| GET | `/vectorization/{id}/resource` | Keychain make detail for import. |
-| GET / POST | `/my/preset` | User settings. |
-| POST | `/my/make/securitycheck` | `{text:[…], image:[url]}` → `{isPass}`, China only. |
-| POST | `/my/make/statistics` | `{makeId, category:"SIGN"}`, print statistics. |
-| POST | `/my/createfromdesign/{designId}` | Exists in the client. **INFERRED** to be "Customize" from a model page, which creates a make from a published design's embedded template. It is not referenced in the sign chunks. |
-| — | `downloadByShare` | `d.FBP(instanceId, {type:"download"})`, a design-instance download counter (a different service module). |
-
-Autosave timing (E module 38314):
-- The content PUT is debounced 3 s after a change.
-- The cover upload happens on the first save, then at most every 30 s, and on unload. `beforeunload` flushes both.
-- Ctrl/Cmd+S saves immediately.
-
-### A.6 Versions and migrations
-
-- **Top level:** if the content is a bare array (pre-wrapper format), it is used as `data` (`deserializeData`: `n = e.data ? e.data : e || []`). Missing `thickness` or `globalStatus` keys fall back to the defaults by merging.
-- **Element records** are all `"version":"1.0"`, except holes.
-  - Holes `"1.0"`: the position is recomputed from `holeType`/`holeSize` against the current backdrop (`createHole` without data).
-  - Holes `"2.0"`: the saved fabric `left/top/angle/scale/origin` are applied.
-- **HookElement** and holes are filtered out of the main pass, and **HookElement is dropped entirely**. **INFERRED:** it is the old hanging hook, replaced by Boundary holes; the old UI images are `signHook.webp` and `signHolder*.webp` at B:17925.
-- **Missing font:** `onFontMissing` fires and the text is rewritten to `fontFamily:"NotoSansSC,AdobeNotDef"`.
-- **Variable-font weight** in old records with `"bold"`/`"normal"` is converted to 900/600 (`setupPreProcess`).
-- **Release notes in E:** 0.3.0 (multi-select, Braille, arrow keys, adaptive A1 mini profile, triangle plate, top-left hole); later per-element thickness, size inputs, remove plate, alignment, bold/italic; 1.0.0 facedown and curved text; 1.1.0 Keychain import; 1.2.0 local fonts; 1.3.0 base plate, drilling and colour upgrades (free holes, hole V2).
-
-### A.7 Editing features
-
-- **Undo/redo** (`o6`, B:16405): command stack. Commands `ag`: AddElement, ModifyElement, ChangeText, RemoveElement, ChangeHoles, ZoomCanvas, ChangeThickness, ChangePropertyWithTime (merges rapid changes), MultiChangeProperty, BatchRemoveElement, ChangeTextType, MoveElementLevelUp/Down, ChangeVectorizeColor. Every executed command re-serializes the content.
-- **Shortcuts** (B:21951; Mod is Cmd on Mac, Ctrl elsewhere):
-
-  | Keys | Action |
-  | --- | --- |
-  | Mod+Z | Undo |
-  | Mod+Y | Redo |
-  | Backspace, Del | Delete |
-  | Mod+C | Copy |
-  | Mod+V | Paste |
-  | Mod+S | Save |
-  | Mod+A | Select all |
-  | Arrow keys | Nudge 1 px (0.2 mm), as a ChangePropertyWithTime command |
-  | Shift+click | Multi-select |
-
-  Text editing registers the same keys so they act on the text instead.
-- **Copy/paste/duplicate:** `clone()` offsets the copy by `+width/2` in x. The backdrop and holes cannot be copied.
-- **Layers:** bring forward/back and front/back (`MoveElementLevelUp/Down`). Text and icons stay above shapes and SVGs (`moveTo(len - textCount)`), and holes are brought to the front.
-- **Snapping** (`oq`, B:14296): smart guides with a 4 px/zoom margin, line `#F68066` at 0.75 px. They snap to other objects' edges and centres while moving and scaling.
-- **Multi-element alignment** for groups (left/centre/right/top/middle/bottom; the exact set is **INFERRED** from the "align" tracking at B:21241) and text alignment.
-- **Lock:** holes only (Lock Holes, Hide Holes). The backdrop group cannot be moved; it only scales from the centre.
-- **Size inputs:** W/H in the chosen unit with optional ratio lock (`cX`). Thickness per type has a slider (0..? mm). Per-element thickness uses `data.depth`.
-- **Views:**
-  - The 2D fabric canvas with a "reference" size overlay (`showReference`).
-  - The 3D three.js view: OrbitControls, camera (0,-128,256), grid 256, background `#444444`.
-  - Export as 3MF or STL, or "Open in Bambu Studio" through the `wx.postMessage` bridge (`homepage_makerlab_open_3mf_binary`) when inside BBL-Slicer.
-- **Units:** mm, cm, inch (metric/imperial).
-
-### A.9 Parity checklist
+### A.1 Parity checklist
 
 - [ ] Content JSON `{data, thickness, globalStatus, date, version:"NamePlate V1.1"}`. Also accept a bare-array legacy format.
 - [ ] Coordinates: 5 px/mm, origin at plate centre, y-down. Export Y-flip.
@@ -1258,7 +841,7 @@ Autosave timing (E module 38314):
 - [ ] Holes:
   - [ ] Inside: Ø5/Ø10 through-cut
   - [ ] Back: keyhole slot 6×7.6 / 12×13.6 mm, 2/3 mm blind cut from the underside
-  - [ ] Boundary: tab 8×9 / 18×26 mm in plate colour
+  - [ ] Boundary: tab 8×16 / 18×26 mm in plate colour (the editor's Fabric extent; the SVG declares 45 px)
   - [ ] single / single-top-left / double placement tables per shape
   - [ ] Freely movable; out-of-plate holes excluded
   - [ ] Lock and hide
