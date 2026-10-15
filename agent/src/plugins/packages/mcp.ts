@@ -17,6 +17,7 @@ import {
 } from '../registry.js'
 import { hashTree, PackageContentError } from './hash.js'
 import type { LoadedPackage } from './install.js'
+import { packageLedgerId } from '../pluginSessions.js'
 
 // A plugin package's http MCP servers, reached the way a remote plugin is (#2320):
 // through the loopback forwarder (../forwarder.ts), never by the package's URL. Claude
@@ -124,7 +125,7 @@ export async function forwardPackageServers(
           toolTiers: {},
           disabledTools: [],
         }
-        const registration = forwarder.register(plugin, address, options)
+        const registration = forwarder.register(plugin, address, { ...options, ledgerId: packageLedgerId(name) })
         releases.push(registration.release)
         registrations.push(registration)
         if (header) secrets.push(...headerSecretVariants(header.value))
