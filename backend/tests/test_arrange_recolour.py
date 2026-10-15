@@ -89,8 +89,8 @@ def test_a_swap_pair_swaps_both_ways_at_once() -> None:
         record=_record([]),
         provenance={part.piece_key: entry},
     )
-    # Black now prints where green was, in green's material: the two disagree.
-    assert _materials(req) == {}
+    # Each colour prints in the other's place, in the other's material: no conflict.
+    assert _materials(req) == {BLACK: "PLA", GREEN: "PETG"}
     [manifest] = manifest_of(req)
     assert manifest.recolour == {GREEN: BLACK, BLACK: GREEN}
 

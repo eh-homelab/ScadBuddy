@@ -2,7 +2,7 @@ import { fixedCredentials } from './fixedCredentials.js'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Query, SDKMessage, SDKUserMessage, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { Inbox, userMessage } from '../../src/harness/inbox.js'
 import type { HarnessRun } from '../../src/harness/run.js'
 import { SessionManager, type SessionManagerDeps } from '../../src/sessions/manager.js'
@@ -52,6 +52,23 @@ export type FakeTurn =
       dies?: string
     }
   | { throws: string }
+
+/** A `cost-state` transcript entry as Claude Code writes one (every field its schema requires), carrying `totalCostUSD`. */
+export function costStateEntry(sessionId: string, totalCostUSD: number): SessionStoreEntry {
+  return {
+    type: 'cost-state',
+    sessionId,
+    totalCostUSD,
+    totalAPIDuration: 0,
+    totalAPIDurationWithoutRetries: 0,
+    totalToolDuration: 0,
+    totalLinesAdded: 0,
+    totalLinesRemoved: 0,
+    totalDuration: 0,
+    startTime: 0,
+    modelUsage: {},
+  }
+}
 
 /** What the scripted process's stream also offers, as the SDK's Query does (sessions/warm.ts WarmQuery). */
 export type ScriptedStream = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close'>
@@ -115,6 +132,14 @@ export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn
     const result = (fields: Record<string, unknown>) => ({ type: 'result', total_cost_usd: total, session_id, ...fields }) as unknown as SDKMessage
     async function* process(): AsyncGenerator<SDKMessage, void, undefined> {
       await Promise.resolve()
+      // A resume restores the running total from the transcript the SDK loads
+      // through the store before Claude Code starts: its last `cost-state` of
+      // this session (test/warmResumeCost.sdk.test.ts measures the real rule).
+      if (run.resume !== undefined && run.sessionStore) {
+        const loaded = (await run.sessionStore.load({ projectKey: '', sessionId: session_id })) ?? []
+        const state = loaded.findLast((e) => e.type === 'cost-state' && e.sessionId === session_id)
+        if (typeof state?.totalCostUSD === 'number') total = state.totalCostUSD
+      }
       const inbox = typeof run.prompt === 'string' ? [userMessage(run.prompt)] : run.prompt
       for await (const message of inbox) {
         if (closed) return
@@ -181,9 +206,9 @@ export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn
       }
       // What Claude Code writes as it exits on stdin EOF (measured, sessions/warm.ts
       // DRAIN_MS): the last prompt and its running total, for the session's next
-      // process to carry in (`costStateUsd`). Not after `close()`, as the real one's are lost.
+      // process to carry in (warm.ts `restoredCostUsd`). Not after `close()`, as the real one's are lost.
       if (!closed) {
-        await run.sessionStore?.append({ projectKey: '', sessionId: session_id }, [{ type: 'last-prompt' }, { type: 'cost-state', totalCostUSD: total }])
+        await run.sessionStore?.append({ projectKey: '', sessionId: session_id }, [{ type: 'last-prompt' }, costStateEntry(session_id, total)])
       }
     }
     const iterator = process()
