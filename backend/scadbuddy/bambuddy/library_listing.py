@@ -165,10 +165,20 @@ def search_library(
     paths: dict[int | None, list[str]] = {None: []}
 
     def path(folder_id: int | None) -> list[str]:
-        if folder_id not in paths:
-            folder = by_id.get(folder_id) if folder_id is not None else None
-            paths[folder_id] = [] if folder is None else [*path(folder.parent_id), folder.name]
-        return paths[folder_id]
+        """The folder's names from the top, walked up by ``parent_id``. A tree that loops
+        back on itself ends the walk where it repeats, never in a ``RecursionError``."""
+        if folder_id in paths:
+            return paths[folder_id]
+        chain: list[LibraryFolderView] = []
+        at = by_id.get(folder_id) if folder_id is not None else None
+        while at is not None and at not in chain and at.id not in paths:
+            chain.append(at)
+            at = by_id.get(at.parent_id) if at.parent_id is not None else None
+        names = paths.get(at.id, []) if at is not None else []
+        for folder in reversed(chain):
+            names = [*names, folder.name]
+            paths[folder.id] = names
+        return paths.get(folder_id, [])
 
     matched: list[tuple[int, LibraryListRow]] = []
     for row in rows:

@@ -195,6 +195,22 @@ def test_a_search_finds_files_in_every_folder_from_one_kept_read(client: TestCli
 
 
 @respx.mock
+def test_a_search_hit_scadbuddy_uploaded_names_its_output(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """As the listing does (#1864): Arrange reads a found file's objects through it."""
+    configure(client)
+    output_id = make_output(client, model)
+    listing_routes(recording("library-files-folder.json"))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(output_id, LibraryCopy(id=48, folder_id=4, target_key="k")))
+
+    hits = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()["files"]
+
+    assert {hit["id"]: hit["output_id"] for hit in hits} == {59: None, 52: None, 48: output_id}
+
+
+@respx.mock
 def test_a_search_answers_as_the_listing_does_when_bambuddy_is_unset_or_down(
     client: TestClient,
 ) -> None:

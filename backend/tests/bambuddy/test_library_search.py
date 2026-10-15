@@ -177,3 +177,58 @@ async def test_a_failed_read_raises_to_the_search_that_waits_for_it() -> None:
 
     with pytest.raises(DownError):
         await index.snapshot("bambuddy", connect)
+
+
+def test_a_folder_tree_that_loops_ends_the_path_where_it_repeats() -> None:
+    looped = [
+        LibraryFolderView(id=1, name="A", parent_id=2, depth=0),
+        LibraryFolderView(id=2, name="B", parent_id=1, depth=0),
+    ]
+
+    found = search_library(looped, [row(10, "part.3mf", 1)], "part", show_all=True)
+
+    assert [hit.folder_path for hit in found.files] == [["B", "A"]]
+
+
+async def test_fresh_requests_during_a_read_share_one_read_queued_behind_it() -> None:
+    """Review of #3666: a burst of fresh searches is one more read, not one each."""
+    gates: list[asyncio.Event] = []
+
+    class Client:
+        async def folders(self) -> list[object]:
+            return []
+
+        async def library_listing(
+            self, *, folder_id: int | None, every_folder: bool = False
+        ) -> list[LibraryListRow]:
+            gate = asyncio.Event()
+            gates.append(gate)
+            await gate.wait()
+            return []
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield Client()  # type: ignore[misc]
+
+    clock = Clock()
+    index = LibraryIndex(shared=0, clock=clock)
+    first = asyncio.ensure_future(index.snapshot("bambuddy", connect))
+    while not gates:
+        await asyncio.sleep(0)
+
+    clock.now += 1
+    burst = [
+        asyncio.ensure_future(index.snapshot("bambuddy", connect, fresh=True)) for _ in range(5)
+    ]
+    await asyncio.sleep(0.01)
+    assert len(gates) == 1  # the queued read waits for the one in flight
+
+    gates[0].set()
+    await first
+    while len(gates) < 2:
+        await asyncio.sleep(0)
+    gates[1].set()
+    answers = await asyncio.gather(*burst)
+
+    assert len(gates) == 2
+    assert all(answer is answers[0] for answer in answers)

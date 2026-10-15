@@ -59,6 +59,9 @@ class LibraryIndex:
         self._clock = clock
         self._kept: dict[str, LibrarySnapshot] = {}
         self._reading: dict[str, tuple[float, asyncio.Task[LibrarySnapshot]]] = {}
+        #: The one read waiting for the read in flight to end, per source: every request
+        #: too new for the read in flight joins it, so a burst is one more read, not many.
+        self._queued: dict[str, asyncio.Task[LibrarySnapshot]] = {}
 
     async def snapshot(
         self, source: str, connect: Connect, *, fresh: bool = False
@@ -83,10 +86,32 @@ class LibraryIndex:
     def _read(
         self, source: str, connect: Connect, *, since: float
     ) -> asyncio.Task[LibrarySnapshot]:
-        """The read in flight if it started at or after ``since``, else a new one."""
+        """The read in flight if it started at or after ``since``; else the one queued
+        behind it, which starts once it ends; else a new one."""
         reading = self._reading.get(source)
         if reading is not None and reading[0] >= since:
             return reading[1]
+        if reading is not None:
+            queued = self._queued.get(source)
+            if queued is None:
+                queued = asyncio.ensure_future(self._after(source, connect, reading[1]))
+                queued.add_done_callback(_log_failure)
+                self._queued[source] = queued
+            return queued
+        return self._start(source, connect)
+
+    async def _after(
+        self, source: str, connect: Connect, before: asyncio.Task[LibrarySnapshot]
+    ) -> LibrarySnapshot:
+        """A read that starts once ``before`` ends: after every request that joined it."""
+        try:
+            await asyncio.wait([before])
+        finally:
+            if self._queued.get(source) is asyncio.current_task():
+                del self._queued[source]
+        return await self._start(source, connect)
+
+    def _start(self, source: str, connect: Connect) -> asyncio.Task[LibrarySnapshot]:
         started = self._clock()
         task = asyncio.ensure_future(self._load(source, connect, started))
         task.add_done_callback(_log_failure)
@@ -113,7 +138,7 @@ class LibraryIndex:
 
     async def close(self) -> None:
         """Cancel the reads under way and wait for them, at shutdown."""
-        tasks = [task for _, task in self._reading.values()]
+        tasks = [task for _, task in self._reading.values()] + list(self._queued.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

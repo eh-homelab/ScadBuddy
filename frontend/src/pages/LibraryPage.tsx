@@ -197,7 +197,8 @@ export function LibraryPage() {
   }, [wantedKey, missing, advanced, reload])
 
   // #3630 — the search's results; the last ones stay on screen while the next are read.
-  // A search after a change made here reads the library afresh, not the copy kept.
+  // A search after a change made here reads the library afresh, not the copy kept: every
+  // search asks for it until one such answer has arrived, so typing on does not lose it.
   const searchedReload = useRef(0)
   useEffect(() => {
     if (!searching) {
@@ -207,11 +208,13 @@ export function LibraryPage() {
     }
     const controller = new AbortController()
     const fresh = searchedReload.current !== reload
-    searchedReload.current = reload
     setSearchError(null)
     api
       .searchLibrary({ q: query, all: advanced, fresh }, controller.signal)
-      .then(setResults)
+      .then((found) => {
+        if (fresh) searchedReload.current = reload
+        setResults(found)
+      })
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return
         // The last results stay under the error: what is known (#3633).

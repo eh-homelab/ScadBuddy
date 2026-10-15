@@ -365,6 +365,26 @@ describe('LibraryPage', () => {
     expect(screen.getByTestId('library-search-retry')).toBeInTheDocument()
   })
 
+  it('asks for a fresh search after a delete, until one has answered (#3630)', async () => {
+    const asked: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/print/library/search') asked.push(url.searchParams.get('fresh') ?? 'false')
+    }
+    server.events.on('request:start', listen)
+    onTestFinished(() => server.events.removeListener('request:start', listen))
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=bag%20clip' })
+    await user.click(await screen.findByTestId('library-delete-89'))
+    await user.click(await screen.findByTestId('library-delete-confirm'))
+
+    await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
+    expect(asked[0]).toBe('false')
+    expect(asked.at(-1)).toBe('true')
+    // Answered, the next search reads the kept copy again.
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), ' 3')
+    await waitFor(() => expect(asked.at(-1)).toBe('false'))
+  })
+
   it('prints a search result from its card (#3630)', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library?q=lamp' })
     await user.click(await screen.findByTestId('library-print-130'))
