@@ -991,9 +991,9 @@ function WhereHeader({
                 </Link>
               </Badge>
             ))}
-            {project.folders.length > 1 && (
+            {project.folders.length > 1 && project.folders[0] && (
               <span data-testid="library-project-shown">
-                Showing the files in {folderLabel(tree, project.folders[0]!.id)}.
+                Showing the files in {folderLabel(tree, project.folders[0].id)}.
               </span>
             )}
           </span>

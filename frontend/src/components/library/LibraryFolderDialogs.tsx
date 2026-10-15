@@ -81,8 +81,9 @@ export function FolderNameDialog({
   }, [key])
 
   const name = value.trim()
-  // The backend's folder `Name`: 1-255 characters, no `/` and no NUL.
-  const usable = name !== '' && name.length <= 255 && !/[/\0]/.test(name) && name !== renaming?.name
+  // The backend's folder `Name`: 1-255 characters (code points, as Pydantic counts), no
+  // `/` and no NUL.
+  const usable = name !== '' && [...name].length <= 255 && !/[/\0]/.test(name) && name !== renaming?.name
   const where = action?.kind === 'create' ? folderLabel(folders, action.folder?.id ?? null) : null
 
   function close() {
