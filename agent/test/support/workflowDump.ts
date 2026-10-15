@@ -52,11 +52,27 @@ function brief(e: JsonEvent): string {
   return bits.join(' ')
 }
 
-/** The workflow's state as text: status, pending activities and timers, the last `last` events of its current run. */
+/**
+ * The workflow's state as text: for each of its runs (oldest first: a session continues as new
+ * after each turn), its status, pending activities and timers, and its last `last` events.
+ */
 export async function dumpWorkflow(client: Client, workflowId: string, last = 30): Promise<string> {
-  const lines: string[] = [`--- workflow ${workflowId}`]
+  const runs: string[] = []
   try {
-    const handle = client.workflow.getHandle(workflowId)
+    for await (const run of client.workflow.list({ query: `WorkflowId = '${workflowId}'` })) runs.push(run.runId)
+  } catch {
+    // No visibility: the current run only.
+  }
+  if (!runs.length) return dumpRun(client, workflowId, undefined, last)
+  const parts: string[] = []
+  for (const runId of runs.reverse()) parts.push(await dumpRun(client, workflowId, runId, last))
+  return parts.join('\n')
+}
+
+async function dumpRun(client: Client, workflowId: string, runId: string | undefined, last: number): Promise<string> {
+  const lines: string[] = [`--- workflow ${workflowId}${runId ? ` run ${runId}` : ''}`]
+  try {
+    const handle = client.workflow.getHandle(workflowId, runId)
     const d = await handle.describe()
     lines.push(`status=${d.status.name} run=${d.runId} historyLength=${d.historyLength} start=${d.startTime.toISOString()} now=${new Date().toISOString()}`)
     for (const a of d.raw.pendingActivities ?? []) {

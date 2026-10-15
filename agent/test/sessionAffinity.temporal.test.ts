@@ -117,6 +117,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   let url: string
   let drop: () => Promise<void>
   const replicas: Replica[] = []
+  /** Every replica this test started, those it stopped too: the dump's. */
+  let everyReplica: Replica[] = []
   const pools: Database[] = []
   /** The stub tool's calls, and what a call waits on before it answers. */
   let slowCalls: number
@@ -131,6 +133,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   let tag: string
   /** The turns this test started, and how each `done` stands: what a failed test's dump shows (#3693). */
   let watched: { id: string; label: string; state: string }[]
+  /** What this test reached, and when (ms since it started, monotonic): the dump's timeline. */
+  let phases: { at: number; what: string }[]
+  let startedAt: number
+  const phase = (what: string) => phases.push({ at: Math.round(performance.now() - startedAt), what })
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -164,6 +170,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     script = () => ({ text: 'ok' })
     tag = randomUUID().slice(0, 8)
     watched = []
+    everyReplica = []
+    phases = []
+    startedAt = performance.now()
   })
   afterEach(async ({ task }) => {
     // A test that failed, its timeout included: where each session waits (#3693), before it is terminated.
@@ -188,13 +197,14 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   /** Every session of this test's schema: its workflow (dumpWorkflow), its row, and the test's own view (the replicas' counters, each turn's `done`). */
   async function dumpSessions(name: string): Promise<void> {
     const lines = [`=== ${name}: where it waits (#3693), at ${new Date().toISOString()}`]
-    for (const r of replicas) {
+    for (const r of everyReplica) {
       lines.push(
         `replica ${r.identity}: acquired=${r.acquired} referred=${r.referred} refused=${r.refused} spawned=${r.spawned} frozen=${r.frozen} placements=${r.turnHost.active} warm=${r.m.warm.size()}`,
       )
     }
     lines.push(`slow tool: called=${slowCalls} returned=${slowReturned}; model requests=${fake.messageCalls().length}`)
     for (const w of watched) lines.push(`turn ${w.label} (session ${w.id}): done ${w.state}`)
+    lines.push(`phases (ms since the test started): ${phases.map((p) => `${p.at} ${p.what}`).join('; ')}; now ${Math.round(performance.now() - startedAt)}`)
     for (const row of await db.sql<Record<string, unknown>[]>`
       SELECT id, status, durable_turn_id, turn_attempt, turn_mark, cost_usd, turns FROM ai_sessions ORDER BY created_at`) {
       lines.push(`row ${JSON.stringify(row)}`)
@@ -210,6 +220,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     watched.push(w)
     done.then(
       (end) => {
+        phase(`turn ${label} done`)
         w.state = `resolved ${JSON.stringify(end).slice(0, 300)}`
       },
       (err: unknown) => {
@@ -229,6 +240,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   /** The stub tool: counts its calls and answers once `slowGate` lets it. */
   const slow = tool('slow', 'Does something slowly', { q: z.string() }, async ({ q }) => {
     slowCalls++
+    phase(`slow called (${q})`)
     await (slowGates.get(q) ?? slowGate)
     slowReturned++
     return { content: [{ type: 'text', text: 'slow done' }] }
@@ -282,6 +294,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
           ...run,
           spawnClaudeCodeProcess: (o) => {
             r.spawned++
+            phase(`${name} spawned Claude Code`)
             if (options.dead) return spawn('sleep', ['3600'], { stdio: ['pipe', 'pipe', 'ignore'] })
             return spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
           },
@@ -316,9 +329,11 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
         const answer = await acquire(input)
         if (answer.elsewhere?.length) r.referred++
         else r.acquired++
+        phase(`${name} acquire_worker ${answer.elsewhere?.length ? 'referred' : 'acquired'}`)
         return answer
       } catch (err) {
         r.refused++
+        phase(`${name} acquire_worker refused`)
         throw err
       }
     }
@@ -363,6 +378,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     // Started sessions check these pollers (DurableTurns.unready): wait until Temporal lists them.
     await pollUntil(async () => (await polled(SESSION_QUEUE, 1)) && (await polled(TASK_QUEUE, 2)) && (await polled(hostQueue, 2)), true)
     replicas.push(r)
+    everyReplica.push(r)
+    phase(`replica ${name} up`)
     return r
   }
 
@@ -754,10 +771,12 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
     a.frozen = true
+    phase('a frozen')
     // The heartbeat times out and acquire runs again, with A excluded: A is the only replica
     // there is, so A is asked and takes it.
     await pollUntil(() => a.acquired, 2, 60_000)
     a.frozen = false
+    phase('a unfrozen')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(a.refused + a.referred).toBe(0)
     const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
@@ -836,10 +855,11 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(a.referred).toBe(1)
     expect(a.spawned).toBe(0)
     // The placement moves on: the last asks with no exclusion, and A takes it once the other
-    // session's hold lapses (or, refused past its retries, the turn fails unplaced).
-    const end = (await turn.done) as { subtype?: string }
-    if (end.subtype === 'success') expect({ acquired: a.acquired, spawned: a.spawned }).toEqual({ acquired: 1, spawned: 1 })
-    else expect(await said(a, id, 'could not be placed')).toBe(true)
+    // session's hold lapses (RESERVATION_HOLD_MS, 30 s, well inside the acquire's 60 s): a turn
+    // that failed unplaced would be a hold that never lapses.
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect({ acquired: a.acquired, spawned: a.spawned }).toEqual({ acquired: 1, spawned: 1 })
+    expect(await said(a, id, 'could not be placed')).toBe(false)
   })
 
   it('a lost home that cannot list the live replicas takes its turn back, as if alone, never failing the acquire', async () => {
