@@ -1120,7 +1120,7 @@ describe('CustomizePage', () => {
     await screen.findByText('Output changed by assistant (1)')
     expect(screen.getByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Output changed by assistant (1)' }))
-    await user.click(screen.getByRole('button', { name: /Saved it/ }))
+    await user.click(await screen.findByRole('option', { name: /Saved it/ }))
     expect(openSession).toHaveBeenCalledWith('sess-output')
   })
 

@@ -5,9 +5,22 @@ import { api, ApiError } from '../../api/client'
 import type { SessionResource } from '../../api/types'
 import { editPath, modelPath } from '../../lib/deeplink'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
+import { Undo2Icon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/Spinner'
+import { Tip } from './Tip'
 
 type Kind = SessionResource['type']
 
@@ -266,7 +279,7 @@ function UndoModel({ undo, working, onDone }: { undo: Undo; working: boolean; on
 
   if (done) {
     return (
-      <p role="status" className="text-muted">
+      <p role="status" className="text-muted-foreground">
         <span className="font-mono">{model}</span> is back to how it was before this chat.
       </p>
     )
@@ -277,57 +290,64 @@ function UndoModel({ undo, working, onDone }: { undo: Undo; working: boolean; on
   // a dialog already open, or a restore already sent, stays on screen.
   if (working && !open && !busy) {
     return (
-      <p className="text-faint">
+      <p className="text-muted-foreground">
         Undo changes to <span className="font-mono">{model}</span>: available when the assistant has
         finished.
       </p>
     )
   }
   return (
-    <>
-      <Button size="sm" onClick={() => setOpen(true)}>
-        Undo changes to <span className="ml-1 font-mono">{model}</span>
-      </Button>
-      <Dialog
-        open={open}
-        title={`Undo this chat's changes to ${model}?`}
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={busy}>
-              Cancel
-            </Button>
-            <Button onClick={() => void confirm()} disabled={busy} {...USER_ONLY}>
-              {busy ? <Spinner /> : 'Undo changes'}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">
-          The source and details of <span className="font-mono text-ink">{model}</span> go back to
-          how they were before this chat changed them. It is saved as a new version, so the
-          chat&apos;s changes stay in the model&apos;s history and can be brought back. Presets,
-          outputs and prints the chat made stay as they are.
-        </p>
-        {state.data?.movedOn && (
-          <p className="mt-3 text-[13px] text-warn">
-            It was also changed outside this chat after the chat started. Those changes are undone
-            too, and also stay in its history.
-          </p>
-        )}
-        {state.error && (
-          <p className="mt-3 text-[13px] text-muted">
-            Could not check whether it was changed outside this chat. If it was, those changes are
-            undone too.
-          </p>
-        )}
-        {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {error}
-          </p>
-        )}
-      </Dialog>
-    </>
+    <AlertDialog open={open} onOpenChange={(next) => (next ? setOpen(true) : close())}>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <Undo2Icon data-icon="inline-start" />
+          Undo changes to <span className="font-mono">{model}</span>
+        </Button>
+      </AlertDialogTrigger>
+        <AlertDialogContent data-modal="">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Undo this chat&apos;s changes to {model}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The source and details of <span className="font-mono text-foreground">{model}</span> go back to how
+              they were before this chat changed them. It is saved as a new version, so the chat&apos;s changes stay
+              in the model&apos;s history and can be brought back. Presets, outputs and prints the chat made stay as
+              they are.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {state.data?.movedOn && (
+            <p className="text-[13px] text-warn">
+              It was also changed outside this chat after the chat started. Those changes are undone too, and also
+              stay in its history.
+            </p>
+          )}
+          {state.error && (
+            <p className="text-[13px] text-muted-foreground">
+              Could not check whether it was changed outside this chat. If it was, those changes are undone too.
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="text-[13px] text-warn">
+              {error}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy}
+              aria-busy={busy}
+              onClick={(event) => {
+                // Open until the restore answers: a refusal is shown here.
+                event.preventDefault()
+                void confirm()
+              }}
+              {...USER_ONLY}
+            >
+              {busy && <Spinner />}
+              Undo changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -353,24 +373,32 @@ export function SessionTouched({ sessionId, refreshKey, working = false }: Props
 
   if (error) {
     return (
-      <p role="alert" className="px-3 py-2 text-[12px] text-warn">
+      <p role="alert" className="px-3 py-2 text-xs text-warn">
         {error instanceof ApiError ? error.detail : 'The assistant service did not answer; try again.'}
       </p>
     )
   }
-  if (!data) return <p className="px-3 py-2 text-[12px] text-faint">Loading…</p>
+  if (!data) {
+    return (
+      <div role="status" className="flex flex-col gap-1.5 px-3 py-2">
+        <span className="sr-only">Loading…</span>
+        <Skeleton className="h-4 w-3/4" />
+        <Skeleton className="h-4 w-1/2" />
+      </div>
+    )
+  }
 
   const all = entries(data.resources)
   const deletes = modelDeletes(data.resources)
   if (all.length === 0) {
-    return <p className="px-3 py-2 text-[12px] text-muted">Nothing changed by this session yet.</p>
+    return <p className="px-3 py-2 text-xs text-muted-foreground">Nothing changed by this session yet.</p>
   }
 
   const undo = undoable(data.resources)
 
   return (
-    <div className="max-h-56 space-y-2 overflow-y-auto px-3 py-2 text-[12px]">
-      <p className="text-ink">{summary(all)}</p>
+    <div className="max-h-56 space-y-2 overflow-y-auto px-3 py-2 text-xs">
+      <p className="text-foreground">{summary(all)}</p>
       {undo.length > 0 && (
         <ul className="space-y-0.5">
           {undo.map((u) => (
@@ -386,24 +414,26 @@ export function SessionTouched({ sessionId, refreshKey, working = false }: Props
         const headingId = `${idBase}-${type}`
         return (
           <div key={type} role="group" aria-labelledby={headingId}>
-            <h3 id={headingId} className="text-[11px] font-medium uppercase tracking-wide text-faint">
+            <h3 id={headingId} className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
               {label}
             </h3>
             <ul className="mt-0.5 space-y-0.5">
               {items.map((e, i) => {
                 const { name, to } = describe(e, deletes)
                 return (
-                  <li key={e.id ?? `${e.tools.join()}-${i}`} className="flex items-baseline gap-1.5" title={e.tools.join(', ')}>
-                    {to ? (
-                      <Link to={to} title={e.id ?? undefined} className="min-w-0 truncate font-mono text-accent underline">
-                        {name}
-                      </Link>
-                    ) : (
-                      <span title={e.id ?? undefined} className="min-w-0 truncate font-mono">
-                        {name}
-                      </span>
-                    )}
-                    <span className="shrink-0 text-faint">{e.actions.map((a) => ACTION_LABEL[a]).join(', ')}</span>
+                  <li key={e.id ?? `${e.tools.join()}-${i}`} className="flex items-baseline gap-1.5">
+                    <Tip content={e.id ?? undefined}>
+                      {to ? (
+                        <Link to={to} className="min-w-0 truncate font-mono text-primary underline underline-offset-2">
+                          {name}
+                        </Link>
+                      ) : (
+                        <span className="min-w-0 truncate font-mono">{name}</span>
+                      )}
+                    </Tip>
+                    <Tip content={`By ${e.tools.join(', ')}`}>
+                      <span className="shrink-0 text-muted-foreground">{e.actions.map((a) => ACTION_LABEL[a]).join(', ')}</span>
+                    </Tip>
                   </li>
                 )
               })}

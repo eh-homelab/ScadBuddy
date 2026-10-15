@@ -5,7 +5,21 @@ import { DownloadBlockedError, downloadBlob } from '../../lib/embed'
 import { formatBytes, timeAgo } from '../../lib/format'
 import { fileReference, sourceLabel, uploadPath } from '../../lib/workspaceFiles'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { DownloadIcon, EyeIcon, Trash2Icon, UploadIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Toggle } from '@/components/ui/toggle'
+import { Tip } from './Tip'
 
 /** Types the panel previews inline: the four the Messages API reads. SVG never (it can run script). */
 const PREVIEWABLE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -35,6 +49,9 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   const [uploading, setUploading] = useState(0)
   const [errors, setErrors] = useState<string[]>([])
   const [confirming, setConfirming] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  /** The Delete that asked for the confirm: focus goes back to it on Cancel. */
+  const deleteButton = useRef<HTMLElement | null>(null)
   const [preview, setPreview] = useState<{ path: string; url: string } | null>(null)
   const [announcement, setAnnouncement] = useState('')
 
@@ -106,7 +123,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   }
 
   async function remove(file: WorkspaceFile) {
-    setConfirming(null)
+    setDeleting(true)
     setErrors([])
     try {
       await api.deleteAiSessionFile(sessionId, file.path)
@@ -116,6 +133,9 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
       refresh()
     } catch (caught) {
       setErrors([`${file.path} was not deleted: ${why(caught)}`])
+    } finally {
+      setDeleting(false)
+      setConfirming(null)
     }
   }
 
@@ -123,16 +143,25 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
 
   if (error) {
     return (
-      <p role="alert" className="px-3 py-2 text-[12px] text-warn">
+      <p role="alert" className="px-3 py-2 text-xs text-warn">
         {error instanceof ApiError ? error.detail : 'The assistant service did not answer; try again.'}
       </p>
     )
   }
-  if (!data) return <p className="px-3 py-2 text-[12px] text-faint">Loading…</p>
+  if (!data) {
+    return (
+      <div role="status" className="flex flex-col gap-1.5 px-3 py-2">
+        <span className="sr-only">Loading…</span>
+        <Skeleton className="h-4 w-1/2" />
+        <Skeleton className="h-10 w-full" />
+      </div>
+    )
+  }
+  const confirmingFile = data.files.find((f) => f.path === confirming)
 
   return (
     <div
-      className={`max-h-72 space-y-2 overflow-y-auto px-3 py-2 text-[12px] ${dropping ? 'bg-accent/5 outline outline-1 outline-accent' : ''}`}
+      className={`max-h-72 space-y-2 overflow-y-auto px-3 py-2 text-xs ${dropping ? 'bg-primary/5 outline-1 outline-primary' : ''}`}
       onDragOver={(event) => {
         if (!canWrite || !carriesFiles(event)) return
         event.preventDefault()
@@ -148,7 +177,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
       data-testid="session-files"
     >
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 text-faint">
+        <span className="min-w-0 flex-1 text-muted-foreground">
           {data.usage.files} file{data.usage.files === 1 ? '' : 's'} · {formatBytes(data.usage.bytes)} of{' '}
           {formatBytes(data.limits.workspace_max_bytes)}
         </span>
@@ -166,15 +195,21 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
                 void upload(files)
               }}
             />
-            <Button
-              size="sm"
-              data-agent-user-only=""
-              disabled={uploading > 0}
-              title={`Add files for the assistant (up to ${formatBytes(data.limits.file_max_bytes)} each). You can also drop them here.`}
-              onClick={() => picker.current?.click()}
+            <Tip
+              wrap={uploading > 0}
+              content={`Add files for the assistant (up to ${formatBytes(data.limits.file_max_bytes)} each). You can also drop them here.`}
             >
-              {uploading > 0 ? 'Uploading…' : 'Upload'}
-            </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                data-agent-user-only=""
+                disabled={uploading > 0}
+                onClick={() => picker.current?.click()}
+              >
+                <UploadIcon data-icon="inline-start" />
+                {uploading > 0 ? 'Uploading…' : 'Upload'}
+              </Button>
+            </Tip>
           </>
         )}
       </div>
@@ -187,7 +222,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
         {announcement}
       </p>
       {data.files.length === 0 ? (
-        <p className="text-muted">
+        <p className="text-muted-foreground">
           No files yet.{canWrite ? ' Drop a file here or press Upload to give the assistant one.' : ''}
         </p>
       ) : (
@@ -195,58 +230,94 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
           {data.files.map((file) => {
             const source = sourceLabel(file.source)
             return (
-              <li key={file.path} className="rounded-[4px] border border-line bg-bg px-2 py-1">
+              <li key={file.path} className="rounded-lg border border-border bg-card px-2 py-1.5">
                 <div className="flex items-baseline gap-1.5">
-                  <span className="min-w-0 flex-1 truncate font-mono" title={`${file.path}\nsha256 ${file.sha256}`}>
-                    {file.path}
-                  </span>
-                  <span className="shrink-0 text-faint">{formatBytes(file.size)}</span>
+                  <Tip content={`${file.path}\nsha256 ${file.sha256}`}>
+                    <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
+                  </Tip>
+                  <span className="shrink-0 text-muted-foreground">{formatBytes(file.size)}</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-1.5 text-[11px] text-faint">
+                <div className="flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
                   <span>{file.media_type}</span>
                   {source && <span>· {source}</span>}
-                  <span title={file.updated_at}>· {timeAgo(file.updated_at)}</span>
-                  <span className="ml-auto flex items-center gap-1">
+                  <Tip content={file.updated_at}>
+                    <span>· {timeAgo(file.updated_at)}</span>
+                  </Tip>
+                  <span className="ml-auto flex items-center gap-0.5">
                     {PREVIEWABLE.has(file.media_type) && (
-                      <Button size="sm" variant="ghost" aria-pressed={preview?.path === file.path} onClick={() => void togglePreview(file)}>
-                        {preview?.path === file.path ? 'Hide' : 'Preview'}
-                      </Button>
-                    )}
-                    <Button size="sm" variant="ghost" aria-label={`Download ${file.path}`} onClick={() => void download(file)}>
-                      Download
-                    </Button>
-                    {canWrite && confirming !== file.path && (
-                      <Button
+                      <Toggle
                         size="sm"
-                        variant="ghost"
-                        data-agent-user-only=""
-                        aria-label={`Delete ${file.path}`}
-                        onClick={() => setConfirming(file.path)}
+                        className="h-6 min-w-6 px-1.5 text-xs"
+                        pressed={preview?.path === file.path}
+                        onPressedChange={() => void togglePreview(file)}
                       >
-                        Delete
+                        <EyeIcon />
+                        {preview?.path === file.path ? 'Hide' : 'Preview'}
+                      </Toggle>
+                    )}
+                    <Tip content="Download">
+                      <Button size="icon-xs" variant="ghost" aria-label={`Download ${file.path}`} onClick={() => void download(file)}>
+                        <DownloadIcon />
                       </Button>
+                    </Tip>
+                    {canWrite && (
+                      <Tip content="Delete">
+                        <Button
+                          size="icon-xs"
+                          variant="ghost"
+                          className="hover:text-destructive"
+                          data-agent-user-only=""
+                          aria-label={`Delete ${file.path}`}
+                          onClick={(event) => {
+                            deleteButton.current = event.currentTarget
+                            setConfirming(file.path)
+                          }}
+                        >
+                          <Trash2Icon />
+                        </Button>
+                      </Tip>
                     )}
                   </span>
                 </div>
-                {confirming === file.path && (
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5" role="group" aria-label={`Delete ${file.path}?`}>
-                    <span className="min-w-0 flex-1 text-muted">Delete {file.path}? The assistant loses it too.</span>
-                    <Button size="sm" variant="danger" data-agent-user-only="" onClick={() => void remove(file)}>
-                      Delete file
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                      Cancel
-                    </Button>
-                  </div>
-                )}
                 {preview?.path === file.path && (
-                  <img src={preview.url} alt={file.path} className="mt-1 max-h-48 max-w-full rounded-[4px] border border-line object-contain" />
+                  <img src={preview.url} alt={file.path} className="mt-1.5 max-h-48 max-w-full rounded-md border border-border object-contain" />
                 )}
               </li>
             )
           })}
         </ul>
       )}
+      <AlertDialog open={confirmingFile !== undefined} onOpenChange={(next) => !next && setConfirming(null)}>
+        <AlertDialogContent
+          data-modal=""
+          onCloseAutoFocus={(event) => {
+            // Back to its Delete, still there after a Cancel; once the file is gone, to the list.
+            event.preventDefault()
+            const back = deleteButton.current
+            if (back?.isConnected) back.focus()
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {confirmingFile?.path}?</AlertDialogTitle>
+            <AlertDialogDescription>The assistant loses it too.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              data-agent-user-only=""
+              disabled={deleting}
+              onClick={(event) => {
+                // Open until the delete is answered, as the credential and Undo dialogs are.
+                event.preventDefault()
+                if (confirmingFile) void remove(confirmingFile)
+              }}
+            >
+              Delete file
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

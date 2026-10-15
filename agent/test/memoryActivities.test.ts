@@ -56,6 +56,15 @@ describe('transcriptOf', () => {
     ])
   })
 
+  it("leaves out a refused credential's notice, which the panel shows but no assistant said (#3703)", () => {
+    const turn = log(
+      event({ type: 'user.turn', sessionId: SESSION, turnId: TURN, text: 'hi', author: BROWSER }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'durable-1', delta: "You've hit your weekly limit", notice: true }),
+      event({ type: 'assistant.text.done', sessionId: SESSION, messageId: 'durable-1' }),
+    )
+    expect(transcriptOf(turn)).toEqual([{ type: 'user', message: { content: 'hi' } }])
+  })
+
   it('puts text that follows a tool call after the call, in one message (#2419)', () => {
     const turn = log(
       event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Rendering.' }),

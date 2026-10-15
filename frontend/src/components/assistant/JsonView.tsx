@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
 import { highlightJson, prettyJson } from '../../agent/chat/json'
 import { copyText } from '../../lib/clipboard'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 /**
  * #782/#886 — a tool call's arguments or raw result: JSON pretty-printed with 2-space
@@ -16,24 +18,27 @@ export function JsonView({ label, value, testId }: { label: string; value: unkno
   return (
     <div data-testid={testId}>
       <div className="flex items-center gap-2">
-        <span className="text-[11.5px] text-muted">{label}</span>
-        <button
-          type="button"
-          className="ml-auto text-[11px] text-muted underline hover:text-ink"
+        <span className="text-[11.5px] text-muted-foreground">{label}</span>
+        <Button
+          variant="link"
+          size="xs"
+          className="ml-auto h-auto px-0 text-[11px] text-muted-foreground"
           aria-label={`Copy ${label.toLowerCase()}`}
           onClick={() => {
             void copyText(shown, pre.current).then(setCopied)
           }}
         >
           {copied ? 'Copied' : 'Copy'}
-        </button>
+        </Button>
       </div>
-      <pre
-        ref={pre}
-        className="mt-1 max-h-72 overflow-auto rounded-[4px] bg-bg px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted"
-      >
-        {pretty === undefined ? shown : highlightJson(pretty)}
-      </pre>
+      <ScrollArea className="mt-1 rounded-md bg-background [&>[data-slot=scroll-area-viewport]]:max-h-72">
+        <pre
+          ref={pre}
+          className="px-2 py-1.5 font-mono text-[11px] break-words whitespace-pre-wrap text-muted-foreground"
+        >
+          {pretty === undefined ? shown : highlightJson(pretty)}
+        </pre>
+      </ScrollArea>
     </div>
   )
 }
