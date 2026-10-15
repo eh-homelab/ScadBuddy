@@ -796,14 +796,33 @@ describe.skipIf(!TEMPORAL_CLI)(`the session gate as workflow code${TEMPORAL_SKIP
     })
   })
 
-  it('an entry timer is never longer than a day, the hop included', async () => {
+  // test_a_long_parent_hop_leaves_the_person_their_timeout (#2862): the parent's hop is
+  // cut, never the person's, so the person keeps the run's whole timeout.
+  it('an entry timer is never longer than a day, and a long parent hop leaves the person their timeout', async () => {
     const fake = new Fake()
     fake.verdict = escalating({ timeout_s: 3600, parent_hop: true, hop_s: 200_000, parent_session: PARENT, parent_principal: PRINCIPAL })
     await using(await session({ turn: flowTurn }, { fake }), async (s) => {
       await s.call()
       const [entry] = await s.parked()
       const opened = fake.opened[0]!
-      expect(Date.parse(opened.hopUntil!) - Date.parse(entry!.created_at)).toBe(86_399_000)
+      const hopUntil = Date.parse(opened.hopUntil!) - Date.parse(entry!.created_at)
+      const expiresAt = Date.parse(opened.expiresAt) - Date.parse(entry!.created_at)
+      expect(hopUntil).toBe((86_400 - 3600) * 1000)
+      expect(expiresAt).toBe(86_400_000)
+      expect(expiresAt - hopUntil).toBe(3600 * 1000)
+    })
+  })
+
+  // test_a_timeout_at_the_cap_still_gives_the_parent_a_one_second_hop: no room left for the
+  // parent, so its hop is the 1 s floor (the sweep moves it up), and the total stays at the cap.
+  it('a timeout at the cap still gives the parent a one-second hop', async () => {
+    const fake = new Fake()
+    fake.verdict = escalating({ timeout_s: 86_400, parent_hop: true, hop_s: 600, parent_session: PARENT, parent_principal: PRINCIPAL })
+    await using(await session({ turn: flowTurn }, { fake }), async (s) => {
+      await s.call()
+      const [entry] = await s.parked()
+      const opened = fake.opened[0]!
+      expect(Date.parse(opened.hopUntil!) - Date.parse(entry!.created_at)).toBe(1000)
       expect(Date.parse(opened.expiresAt) - Date.parse(entry!.created_at)).toBe(86_400_000)
     })
   })
