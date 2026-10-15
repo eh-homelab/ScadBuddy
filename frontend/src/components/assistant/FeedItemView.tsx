@@ -91,7 +91,8 @@ function BrowserApprovalButtons({
   // What was saved before the approval was sent: it stays saved even if the approval
   // then fails (a request already resolved), so the card says so (review of #3654).
   const [saved, setSaved] = useState<string | null>(null)
-  const host = new URL(nav.origin).host
+  // The name alone, without a port: `host` would keep a non-default one and look like a bare-host rule.
+  const host = new URL(nav.origin).hostname
   // The rule "Always allow" saves: a bare host means https on its default port, so any other origin is shown whole.
   const rule = nav.origin === `https://${host}` ? host : nav.origin
   async function remember(write: () => Promise<unknown>, done: string) {
