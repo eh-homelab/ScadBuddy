@@ -49,7 +49,9 @@ describe('SettingsPage activity settings', () => {
     await loaded()
     const follow = screen.getByLabelText('Notify me about activity from')
 
-    await user.type(follow, 'browser, token:t1')
+    // Pasted: each keystroke re-renders all of Settings (#1485).
+    await user.click(follow)
+    await user.paste('browser, token:t1')
     await user.click(save())
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ activity_follow: ['browser', 'token:t1'] })
@@ -58,7 +60,7 @@ describe('SettingsPage activity settings', () => {
     await landed(put, 0)
 
     await user.clear(follow)
-    await user.type(follow, 'none')
+    await user.paste('none')
     await user.click(save())
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toMatchObject({ activity_follow: [] })
@@ -78,6 +80,8 @@ describe('SettingsPage activity settings', () => {
     await loaded()
     const ttl = screen.getByLabelText('Keep activity for (seconds)')
     const repair = screen.getByLabelText('Repair activity rows from the last (seconds)')
+    // Folded until opened, as a user finds them; a refused value opens the fold itself.
+    await user.click(screen.getByRole('button', { name: 'Advanced: activity retention' }))
 
     await user.type(ttl, '3600')
     await user.type(repair, '5')

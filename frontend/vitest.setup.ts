@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
-import { configure, getConfig } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll } from 'vitest'
+import { cleanup, configure, getConfig } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
@@ -35,7 +35,15 @@ configure({
 getComputedStyle(document.documentElement)
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
-afterEach(() => {
+afterEach(async () => {
+  // Unmounted here, before the tick below, rather than in Testing Library's own hook,
+  // which runs after this one: a page left dirty (Settings, useLeaveGuard) takes its
+  // history sentinel off with `history.back()` as it unmounts, and jsdom's popstate for
+  // it comes a task later. Waited for here, it cannot reach the next test's page as a
+  // Back pressed there (#3671).
+  // Under fake timers jsdom's traversal waits on them too, so there is nothing to wait for.
+  cleanup()
+  if (!vi.isFakeTimers()) await new Promise((resolve) => setTimeout(resolve, 0))
   server.resetHandlers()
   resetMockState()
   resetDisplayUnit()

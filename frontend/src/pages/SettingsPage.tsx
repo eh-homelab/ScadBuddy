@@ -691,7 +691,11 @@ function SettingsSections() {
     return (
       <>
         {specs.filter((spec) => !spec.advanced).map(runtimeRow)}
-        {advanced.length > 0 && <Advanced label="Advanced">{advanced.map(runtimeRow)}</Advanced>}
+        {advanced.length > 0 && (
+          <Advanced label="Advanced" invalid={advanced.some((spec) => Boolean(errors[spec.name]))}>
+            {advanced.map(runtimeRow)}
+          </Advanced>
+        )}
       </>
     )
   }
@@ -1422,7 +1426,10 @@ function SettingsSections() {
                   onChange={(event) => setField('activity_follow', event.target.value)}
                 />
               </FieldRow>
-              <Advanced label="Advanced: activity retention">
+              <Advanced
+                label="Advanced: activity retention"
+                invalid={Boolean(errors.activity_ttl_seconds || errors.activity_repair_window_seconds)}
+              >
                 <FieldRow
                     id="activity-ttl"
                     label="Keep activity for (seconds)"
@@ -1541,9 +1548,17 @@ function SettingsSections() {
   )
 }
 
-/** A fold inside a section: its fields stay mounted while folded, so their edits are kept. */
-function Advanced({ label, children }: { label: string; children: ReactNode }) {
+/**
+ * A fold inside a section: its fields stay mounted while folded, so their edits are kept.
+ * A save that refuses a field in it opens it, so the field and its error are on screen.
+ */
+function Advanced({ label, invalid, children }: { label: string; invalid: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  const [wasInvalid, setWasInvalid] = useState(invalid)
+  if (invalid !== wasInvalid) {
+    setWasInvalid(invalid)
+    if (invalid) setOpen(true)
+  }
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg ring-1 ring-foreground/10">
       <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
