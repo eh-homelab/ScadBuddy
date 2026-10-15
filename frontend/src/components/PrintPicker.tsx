@@ -363,8 +363,12 @@ export function PrintPicker({
   // Simple mode shows no rack step, so a hand pick would be sent unseen (as
   // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
   const { advanced } = picker
+  // The same for the prime tower (#3648 review): Simple mode sends none.
   useEffect(() => {
-    if (!advanced) setRackPosition(null)
+    if (!advanced) {
+      setRackPosition(null)
+      setPrimeTower(null)
+    }
   }, [advanced])
   useEffect(() => {
     setRackPosition(null)

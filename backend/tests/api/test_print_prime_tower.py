@@ -79,15 +79,19 @@ def test_a_setting_the_preset_lacks_is_sent_and_named(client: TestClient, model:
     output_id = prepared(client, model)
     sliced = routes()
     preset_values({"enable_prime_tower": "1"})
-    tower = {"enabled": True, "no_sparse_layers": True}
+    request = {**body(), "prime_tower": {"enabled": True, "no_sparse_layers": True}}
 
-    response = run_print(client, output_id, json={**body(), "prime_tower": tower})
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
 
     assert response.status_code == 200, response.text
     assert overrides(sliced)["wipe_tower_no_sparse_layers"] == "1"
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-unconfirmed"]
-    assert "wipe_tower_no_sparse_layers" in warning["message"]
+    assert "wipe_tower_no_sparse_layers (the tower keeps its sparse layers)" in warning["message"]
     assert "enable_prime_tower" not in warning["message"]
+    # Checks says it before Print, as the run will (#3648 review).
+    assert check.status_code == 200, check.text
+    assert warning in check.json()["warnings"]
 
 
 @respx.mock

@@ -2009,6 +2009,21 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     expect(struck('No sparse layers on the prime tower')).toBe(true)
   })
 
+  it('drops the tower chosen in Advanced when switched back to Simple (#3648 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    expect(screen.getByText('(process default)')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('prime_tower')
+  })
+
   it('does not claim a library file’s No sparse layers under Default (#3648 review)', async () => {
     const { user } = renderPage(
       <PrintPicker

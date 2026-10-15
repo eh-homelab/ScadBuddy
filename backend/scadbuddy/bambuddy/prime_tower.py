@@ -76,13 +76,23 @@ async def prime_tower_warnings(
     missing = [key for key in wanted if key not in answer.values]
     if not missing:
         return []
+    effects = "; ".join(f"{key} ({_UNKNOWN_EFFECT[key][wanted[key] == '1']})" for key in missing)
     return [
         FilamentWarning(
             kind="prime-tower-unconfirmed",
             message=(
-                f"The process preset has no value for {', '.join(missing)}: it is sent "
-                "anyway, but a slicer that does not know it prints the tower as the preset "
-                "says."
+                "The process preset has no value for these, so they are sent anyway, and a "
+                f"slicer that does not know one prints as if it were not: {effects}."
             ),
         )
     ]
+
+
+#: What a slicer that does not know a key prints instead, by whether it was asked on.
+_UNKNOWN_EFFECT: dict[str, tuple[str, str]] = {
+    "enable_prime_tower": ("the tower may still be printed", "no tower may be printed"),
+    "wipe_tower_no_sparse_layers": (
+        "the tower may skip layers with no filament change",
+        "the tower keeps its sparse layers",
+    ),
+}
