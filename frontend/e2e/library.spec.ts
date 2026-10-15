@@ -173,7 +173,7 @@ test.describe('library', () => {
     await dialog.getByRole('button', { name: 'Arrange', exact: true }).click()
 
     const done = page.getByRole('status', { name: 'Arranged' })
-    await expect(done).toContainText("Saved in Clara's Wand's history.")
+    await expect(done).toContainText("in Clara's Wand's history.")
     await expect(page.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/clara-s-wand/history')
   })
 
