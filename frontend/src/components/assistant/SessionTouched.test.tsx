@@ -311,6 +311,65 @@ describe('SessionTouched', () => {
     expect(screen.queryByRole('button', { name: /Undo changes/ })).toBeNull()
   })
 
+  it('offers no undo when the session changed the model before its first new version', async () => {
+    setSessionResources('sess-details', [
+      row({ type: 'model', id: 'name-keychain', model: 'name-keychain', action: 'modified', tool: 'update_model_details' }),
+      row({ type: 'revision', id: 'f'.repeat(40), model: 'name-keychain', before: versionIds.raised, tool: 'apply_patch' }),
+      // A details change after the first new version is undone with it.
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+      row({ type: 'model', id: 'bin', model: 'bin', action: 'modified', tool: 'update_model_details' }),
+    ])
+    server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: null })))
+    renderPage(<SessionTouched sessionId="sess-details" />)
+    expect(await screen.findByRole('button', { name: 'Undo changes to bin' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Undo changes to name-keychain' })).toBeNull()
+  })
+
+  it('offers no undo once the model is already back to how it was', async () => {
+    const before = 'b'.repeat(40)
+    const restored = 'c'.repeat(40)
+    setSessionResources('sess-back', [
+      row({ type: 'revision', id: 'a'.repeat(40), after: 'a'.repeat(40), model: 'bin', before, tool: 'apply_patch' }),
+      row({ type: 'revision', id: 'd'.repeat(40), after: 'd'.repeat(40), model: 'gone-back', before, tool: 'apply_patch' }),
+    ])
+    server.use(
+      http.get('/api/v1/models/:slug', ({ params }) =>
+        HttpResponse.json({ slug: params.slug, version: params.slug === 'bin' ? before : restored }),
+      ),
+      // gone-back's newest version is a restore of `before`: nothing between them.
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '' })),
+    )
+    const reads = vi.spyOn(api, 'getVersionDiff')
+    renderPage(<SessionTouched sessionId="sess-back" />)
+    await screen.findByRole('group', { name: 'Revisions' })
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledWith('gone-back', restored, before))
+    await act(async () => {
+      await reads.mock.results[0]!.value
+    })
+    expect(screen.queryByRole('button', { name: /Undo changes/ })).toBeNull()
+    reads.mockRestore()
+  })
+
+  it('warns that an undo also takes back changes made after the session', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-moved', [
+      row({ type: 'revision', id: 'a'.repeat(40), after: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+    ])
+    server.use(
+      http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'e'.repeat(40) })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n' })),
+    )
+    renderPage(<SessionTouched sessionId="sess-moved" />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent('It has been changed since this chat.')
+  })
+
+  it('counts a new version of no known model in the summary', async () => {
+    setSessionResources('sess-anon', [row({ type: 'revision', id: 'a'.repeat(40), model: null, tool: 'update_source' })])
+    renderPage(<SessionTouched sessionId="sess-anon" />)
+    expect(await screen.findByText('1 other new version')).toBeInTheDocument()
+  })
+
   it('does not link a revision whose model is unknown', async () => {
     setSessionResources('sess-1', [row({ type: 'revision', id: 'abcdef0123456', model: null })])
     renderPage(<SessionTouched sessionId="sess-1" />)

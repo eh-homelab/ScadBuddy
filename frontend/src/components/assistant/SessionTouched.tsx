@@ -148,13 +148,18 @@ const BUCKETS: ReadonlyArray<{ one: string; many: string; holds: (e: Entry) => b
 function summary(all: readonly Entry[]): string {
   const parts: string[] = []
   const counted = new Set<Entry>()
-  const versions = new Map<string, number>()
+  // By model; a revision whose model is unknown is still a new version, of no named model.
+  const versions = new Map<string | null, number>()
   for (const e of all) {
-    if (e.type !== 'revision' || !e.model) continue
+    if (e.type !== 'revision') continue
     versions.set(e.model, (versions.get(e.model) ?? 0) + 1)
     counted.add(e)
   }
-  for (const [model, n] of versions) parts.push(`${count(n, 'new version', 'new versions')} of ${model}`)
+  for (const [model, n] of versions) {
+    if (model !== null) parts.push(`${count(n, 'new version', 'new versions')} of ${model}`)
+  }
+  const unnamed = versions.get(null)
+  if (unnamed) parts.push(count(unnamed, 'other new version', 'other new versions'))
   const runsOnly = !all.some((e) => e.type === 'print')
   for (const { one, many, holds } of BUCKETS) {
     const items = all.filter(
@@ -169,29 +174,61 @@ function summary(all: readonly Entry[]): string {
   return parts.join(', ')
 }
 
+interface Undo {
+  model: string
+  /** The version before the session's first change. */
+  before: string
+  /** The version the session's last change made, where it names one. */
+  last: string | null
+}
+
 /**
- * The models this session can put back: each one it made new versions of, where the
- * first of them names the version it came from, and that the session neither made nor
- * deleted. Restoring that version adds a new version, so nothing is lost.
+ * The models this session can put back: each one whose first change in the session was
+ * a new version naming the version it came from, and that the session neither made nor
+ * deleted. A `model` row before it (details edited, or a write whose new version was
+ * not known yet) is a change with no recorded parent, so that model is not offered:
+ * restoring the first revision's parent would keep that change while saying it undid
+ * the session. Restoring adds a new version, so nothing is lost.
  */
-function undoable(rows: readonly SessionResource[]): { model: string; before: string }[] {
+function undoable(rows: readonly SessionResource[]): Undo[] {
   const first = new Map<string, string | null>()
+  const last = new Map<string, string | null>()
   const skip = new Set<string>()
   for (const r of rows) {
-    if (r.type === 'model' && r.id !== null && r.action !== 'modified') skip.add(r.id)
-    if (r.type === 'revision' && r.model && !first.has(r.model)) first.set(r.model, r.before)
+    if (r.type === 'model' && r.id !== null && (r.action !== 'modified' || !first.has(r.id))) skip.add(r.id)
+    if (r.type === 'revision' && r.model) {
+      if (!first.has(r.model)) first.set(r.model, r.before)
+      last.set(r.model, r.after ?? r.id)
+    }
   }
-  const out: { model: string; before: string }[] = []
-  for (const [model, before] of first) if (before !== null && !skip.has(model)) out.push({ model, before })
+  const out: Undo[] = []
+  for (const [model, before] of first) {
+    if (before !== null && !skip.has(model)) out.push({ model, before, last: last.get(model) ?? null })
+  }
   return out
 }
 
+/**
+ * Where the model is now, against the session: `same` when it already matches the
+ * version before the session (undone already, here or elsewhere), `movedOn` when its
+ * newest version is not the session's last one, so an undo also takes back later edits.
+ */
+async function undoState(u: Undo): Promise<{ same: boolean; movedOn: boolean }> {
+  const current = (await api.getModel(u.model)).version ?? null
+  if (current === null) return { same: false, movedOn: false }
+  if (current === u.before) return { same: true, movedOn: false }
+  const diff = await api.getVersionDiff(u.model, current, u.before)
+  return { same: diff.patch.trim() === '', movedOn: u.last !== null && current !== u.last }
+}
+
 /** "Undo changes to <model>": restores the version before the session, after a confirm. */
-function UndoModel({ model, before, onDone }: { model: string; before: string; onDone: () => void }) {
+function UndoModel({ undo, onDone }: { undo: Undo; onDone: () => void }) {
+  const { model, before } = undo
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
+  const state = useAsync(() => undoState(undo), [model, before, undo.last])
 
   function close() {
     if (busy) return
@@ -221,6 +258,8 @@ function UndoModel({ model, before, onDone }: { model: string; before: string; o
       </p>
     )
   }
+  // Offered once the model's state is known; a failed read still offers it, without the warning.
+  if (state.loading || state.data?.same) return null
   return (
     <>
       <button type="button" onClick={() => setOpen(true)} className="text-accent underline">
@@ -246,6 +285,12 @@ function UndoModel({ model, before, onDone }: { model: string; before: string; o
           chat changed it. It is saved as a new version, so the chat&apos;s changes stay in the
           model&apos;s history and can be brought back.
         </p>
+        {state.data?.movedOn && (
+          <p className="mt-3 text-[13px] text-warn">
+            It has been changed since this chat. Those later changes are undone too, and also stay
+            in its history.
+          </p>
+        )}
         {error && (
           <p role="alert" className="mt-3 text-[13px] text-warn">
             {error}
@@ -298,7 +343,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
         <ul className="space-y-0.5">
           {undo.map((u) => (
             <li key={u.model}>
-              <UndoModel model={u.model} before={u.before} onDone={refresh} />
+              <UndoModel undo={u} onDone={refresh} />
             </li>
           ))}
         </ul>
