@@ -847,6 +847,11 @@ export class ApprovalService {
 
   /** `refreshStatus`'s UPDATE on `db` (the pool, or the transaction that settles an approval); the event to log. */
   private async statusRefresh(db: Sql | TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+    // Two settles of one session's approvals that overlap would each see the other's decision
+    // as pending and neither move the session back (review of #3685). The row lock makes the
+    // second wait for the first's commit; its UPDATE then reads both decisions. Approvals,
+    // then session: the order `create` locks in.
+    await db`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
     const [row] = await db<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
       SET status = CASE

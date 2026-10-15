@@ -520,6 +520,45 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'approval' AND action <> 'requested'`).toEqual([{ action: 'denied' }])
   })
 
+  // Review of #3685: two settles of one session's approvals that overlap each see the other's
+  // decision as pending under READ COMMITTED, so without a lock on the session row neither
+  // moves it back, and it stays `waiting_approval` with nothing pending. Both settles are
+  // held inside the refresh, their decisions written and not committed, before either runs it.
+  it('two overlapping decisions in one session move it back from waiting_approval (review of #3685)', async () => {
+    let hold!: () => void
+    const held = new Promise<void>((r) => (hold = r))
+    const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const gate = (toolUseId: string) =>
+          run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: toolUseId }, toolUseId, tier: 'outward', signal: run.signal! })
+        await Promise.all([gate('toolu_1'), gate('toolu_2')])
+        await held
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const p = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20 })
+    const { session, turn } = await p.start(agentA, { origin: 'mcp', prompt: 'print twice' })
+    let ids: string[] = []
+    await expect.poll(async () => (ids = (await p.approvals.list(browser, { sessionId: session.id, pending: true })).map((a) => a.id)).length).toBe(2)
+
+    const service = p.approvals as unknown as { statusRefresh: (db: unknown, sessionId: string) => Promise<ServerEvent[]> }
+    const refresh = service.statusRefresh.bind(service)
+    let arrived = 0
+    let both!: () => void
+    const together = new Promise<void>((r) => (both = r))
+    vi.spyOn(service, 'statusRefresh').mockImplementation(async (tx, sessionId) => {
+      if (++arrived === 2) both()
+      await together
+      return refresh(tx, sessionId)
+    })
+
+    await Promise.all(ids.map((id) => p.approvals.decide(browser, id, true)))
+    expect(arrived).toBe(2)
+    expect((await p.get(session.id, agentA)).status).toBe('running')
+    hold()
+    await turn!.done
+  })
+
   it('F3: a decision that lands while its turn is finishing is voided, and the session does not stay waiting', async () => {
     let hold!: () => void
     const held = new Promise<void>((r) => {
