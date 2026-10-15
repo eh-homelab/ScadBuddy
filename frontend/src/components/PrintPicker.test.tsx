@@ -17,6 +17,7 @@ import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
+import { chooseProject } from '../test/projectPicker'
 
 // #1723 — jsdom draws no WebGL: the preview's scene shows what it was asked to draw.
 vi.mock('./print/PlateScene', () => ({
@@ -2444,7 +2445,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await chooseProject(user, await screen.findByTestId('project-select'), 2)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -2469,7 +2470,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await chooseProject(user, await screen.findByTestId('project-select'), 2)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -2556,8 +2557,8 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    const picker = screen.getByTestId<HTMLSelectElement>('project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('/api/v1/print/projects')
@@ -2576,7 +2577,7 @@ describe('PrintPicker · Projects', () => {
 
     release()
     await waitFor(() => expect(picker).toBeEnabled())
-    expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+    expect(picker).toHaveTextContent(/Workshop Bins/)
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -2599,7 +2600,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(screen.getByTestId('project-select'), 'new')
+    await chooseProject(user, screen.getByTestId('project-select'), 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
     const release = hold('/api/v1/print/projects')
     await user.click(screen.getByTestId('create-project'))
