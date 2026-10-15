@@ -64,7 +64,8 @@ describe('judging a URL', () => {
   it('allows a listed host on https only, on its default port, and asks about the rest', () => {
     const l = lists(['makerworld.com'])
     expect(kind(l, 'https://makerworld.com/en/models/171292#profileId-188094')).toBe('allowed')
-    expect(kind(l, 'https://MAKERWORLD.com./x')).toBe('allowed')
+    expect(kind(l, 'https://makerworld.com./x')).toBe('allowed')
+    expect(kind(l, 'https://makerworld.com')).toBe('allowed') // a bare origin, as the browser writes it with "/"
     expect(kind(l, 'http://makerworld.com/')).toBe('ask')
     expect(kind(l, 'https://makerworld.com:8443/')).toBe('ask')
     expect(kind(l, 'https://www.makerworld.com/')).toBe('ask')
@@ -106,15 +107,14 @@ describe('judging a URL', () => {
 
   it('the default deny list refuses loopback, link-local, metadata and cluster names in any spelling', () => {
     const l = compile(DEFAULT_LISTS)
+    // As the browser writes them: denied by a rule.
     for (const url of [
       'http://localhost:8080/',
-      'http://LOCALHOST./',
+      'http://localhost./',
       'http://app.localhost/',
       'http://127.0.0.1/',
-      'http://2130706433/', // 127.0.0.1 as one number
-      'http://0x7f.1/',
       'http://[::1]/',
-      'http://[::ffff:127.0.0.1]/',
+      'http://[::ffff:7f00:1]/',
       'http://169.254.169.254/latest/meta-data/',
       'http://[::ffff:a9fe:a9fe]/',
       'http://[fe80::1]/',
@@ -124,10 +124,19 @@ describe('judging a URL', () => {
       'http://scadbuddy.bambuddy.svc/',
       'http://0.0.0.0:8080/',
       'http://[::]:8080/',
-      'http://127.000.000.001/',
-      'http://017700000001/',
     ]) {
       expect(kind(l, url), url).toBe('denied')
+    }
+    // Other spellings of the same addresses are refused before any rule is read.
+    for (const url of [
+      'http://LOCALHOST./',
+      'http://2130706433/', // 127.0.0.1 as one number
+      'http://0x7f.1/',
+      'http://127.000.000.001/',
+      'http://017700000001/',
+      'http://[::ffff:127.0.0.1]/',
+    ]) {
+      expect(kind(l, url), url).toBe('refused')
     }
     expect(kind(l, 'https://makerworld.com/')).toBe('allowed')
     expect(kind(l, 'https://example.org/')).toBe('ask')
@@ -152,6 +161,61 @@ describe('judging a URL', () => {
     expect(kind(l, 'https://b.example/x', approved)).toBe('ask')
     expect(kind(l, 'https://b.example/x', approved, 'read')).toBe('allowed')
     expect(kind(l, 'https://c.example/x', approved, 'read')).toBe('ask')
+  })
+})
+
+describe('one parse, as the browser writes it (security review: parser differential)', () => {
+  const l = lists(['makerworld.com'], ['evil.example'])
+  const refused = (url: string) => expect(kind(l, url), JSON.stringify(url)).toBe('refused')
+
+  it('refuses a URL another parser could read differently, saying how to write it', () => {
+    for (const url of [
+      'https://makerworld.com\\@evil.example/', // backslash: some parsers read a path, others userinfo
+      'https://evil.example\\.makerworld.com/',
+      'https:\\\\makerworld.com/',
+      'https://makerworld.com@evil.example/', // userinfo
+      'https://user:pw@makerworld.com/',
+      'https://makerworld%2ecom/', // an encoded dot in the host
+      'https://makerworld%2Ecom.evil.example/',
+      'https://MakerWorld.com/', // mixed case
+      'HTTPS://makerworld.com/',
+      'https://makerworld.com:443/', // the default port written out
+      ' https://makerworld.com/', // whitespace and control characters
+      'https://makerworld.com/\n',
+      'https://maker\tworld.com/',
+      'https://makerworld.com/\u0000',
+      'https://makerworld.com\u3002evil.example/', // an ideographic full stop
+      'http://2130706433/',
+      'http://0x7f000001/',
+      'javascript:alert(1)',
+      'data:text/html,<h1>hi</h1>',
+      'blob:https://makerworld.com/1f2e',
+      'file:///etc/passwd',
+      'makerworld.com/x', // no scheme
+      '//makerworld.com/x',
+      '',
+    ]) {
+      refused(url)
+    }
+    expect(judge(l, none, 'https://MakerWorld.com/a', 'navigate')).toMatchObject({
+      kind: 'refused',
+      reason: expect.stringContaining('send https://makerworld.com/a instead') as unknown,
+    })
+  })
+
+  it('accepts the canonical forms: IPv6, an IDN in punycode, a trailing dot, a bare origin', () => {
+    const idn = lists(['xn--mnchen-3ya.de', 'http://[2001:db8::1]:8080'])
+    expect(kind(idn, 'https://xn--mnchen-3ya.de/')).toBe('allowed')
+    expect(kind(idn, 'https://münchen.de/')).toBe('refused') // the browser writes it in punycode
+    expect(kind(idn, 'http://[2001:db8::1]:8080/x')).toBe('allowed')
+    expect(kind(idn, 'http://[2001:0db8::1]:8080/x')).toBe('refused')
+    expect(kind(l, 'https://makerworld.com./a')).toBe('allowed')
+    expect(kind(l, 'https://makerworld.com')).toBe('allowed')
+  })
+
+  it('reads a reported page the same way: one the browser did not write is withheld', () => {
+    expect(judge(l, none, 'https://MAKERWORLD.com/', 'read').kind).toBe('refused')
+    expect(judge(l, none, 'https://makerworld.com/x', 'read').kind).toBe('allowed')
   })
 })
 
@@ -278,6 +342,17 @@ describe('the guard fails closed (security review of #3654)', () => {
       expect(await guard.screen(`mcp__playwright__${tool}`, {}, 'document.title is "Login"'), tool).toMatch(/withheld.*does not say which page/)
     }
     expect(await guard.screen('mcp__playwright__browser_close', {}, 'No open tabs.')).toBeUndefined()
+  })
+
+  it('judges the page the browser reports, not the one it was asked for', async () => {
+    const { guard } = guardOf({ allow: ['makerworld.com'], deny: [] })
+    // Asked for an allowed URL; the browser ended up elsewhere (a redirect, or a parser that read it differently).
+    expect(await guard.check(nav, { url: 'https://makerworld.com/x' })).toMatchObject({ allow: expect.any(String) as unknown })
+    expect(await guard.screen(nav, { url: 'https://makerworld.com/x' }, page('https://evil.example/x'))).toMatch(/withheld.*evil\.example/)
+    // A reported page that is cut, or not as the browser writes it, is withheld too.
+    expect(await guard.screen(nav, { url: 'https://makerworld.com/x' }, page('https://makerworld.com\\@evil.example/'))).toMatch(/withheld/)
+    expect(await guard.screen(nav, { url: 'https://makerworld.com/x' }, '- Page URL: \n')).toMatch(/withheld/)
+    expect(await guard.screen(nav, { url: 'https://makerworld.com/x' }, page('blob:https://evil.example/1'))).toMatch(/withheld/)
   })
 
   it('a fake allowed Page URL in the page text does not hide the real one', async () => {

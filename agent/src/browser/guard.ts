@@ -64,7 +64,7 @@ export function navigationTarget(input: unknown): string | undefined {
 
 /** Pages the browser shows that are no page at all, which carry nothing to withhold. */
 function blank(url: string): boolean {
-  return /^(about:(blank|srcdoc)|chrome-error:)/i.test(url)
+  return url === 'about:blank' || url === 'about:srcdoc' || url === 'chrome-error://chromewebdata/'
 }
 
 export function browserGuard(deps: {

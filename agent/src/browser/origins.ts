@@ -232,13 +232,36 @@ export type Judgement =
  * approval stands in for the allow list, and `read` for a page it is already on, where
  * any approval does (it was opened with the user's consent).
  */
-export function judge(lists: CompiledLists, approved: ReadonlyMap<string, ApprovedScope>, url: string, use: 'navigate' | 'read'): Judgement {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return { kind: 'refused', reason: `"${url.slice(0, 200)}" is not an absolute URL` }
+/**
+ * `raw` parsed once with the WHATWG URL parser, accepted only when it is already that
+ * parser's own serialisation (`href`; a bare origin may leave off the final `/`). So
+ * what is judged is exactly the string the browser is given, or reports: a URL another
+ * parser could read differently (a backslash, whitespace or a control character, a
+ * percent-encoded or upper-case host, a number for an address, a scheme in capitals)
+ * is refused, with the form to send instead (security review of #3654:
+ * parser-differential). Undefined plus why, when it is not one.
+ */
+export function canonicalUrl(raw: string): { url: URL } | { problem: string } {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u0020\u007f\\]/.test(raw)) {
+    return { problem: `"${raw.slice(0, 200)}" contains whitespace, a control character or a backslash` }
   }
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return { problem: `"${raw.slice(0, 200)}" is not an absolute URL` }
+  }
+  if (url.href !== raw && !(url.pathname === '/' && !url.search && !url.hash && `${raw}/` === url.href)) {
+    return { problem: `"${raw.slice(0, 200)}" is not written as a browser writes it; send ${url.href.slice(0, 200)} instead` }
+  }
+  return { url }
+}
+
+export function judge(lists: CompiledLists, approved: ReadonlyMap<string, ApprovedScope>, url: string, use: 'navigate' | 'read'): Judgement {
+  const canonical = canonicalUrl(url)
+  if ('problem' in canonical) return { kind: 'refused', reason: canonical.problem }
+  const parsed = canonical.url
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     return { kind: 'refused', reason: `only http and https pages may be opened, not ${parsed.protocol}` }
   }
@@ -254,9 +277,14 @@ export function judge(lists: CompiledLists, approved: ReadonlyMap<string, Approv
   return { kind: 'ask', origin }
 }
 
-/** The `Page URL:` lines of a Playwright MCP result (raw text or JSON-escaped in the untrusted envelope). */
+/**
+ * The `Page URL:` lines of a Playwright MCP result (raw text or JSON-escaped in the
+ * untrusted envelope), up to the end of the line. Each is judged with `judge`, which
+ * refuses one that is not a URL as the browser writes it, so a line the extraction cut
+ * or a forged one never passes as an allowed page.
+ */
 export function pageUrls(text: string): string[] {
-  return [...text.matchAll(/Page URL:\s*([^\s"\\]+)/g)].map((m) => m[1]!)
+  return [...text.matchAll(/Page URL:[ \t]*((?:[^\r\n"\\]|\\(?![nrt"\\]))*)/g)].map((m) => m[1]!.trim())
 }
 
 /** What the model reads in place of a result from a page the lists do not let it read. */
