@@ -11,7 +11,7 @@ import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { WarmSessions } from '../src/sessions/warm.js'
 import { readStartSettings, wireRuntimeSync } from '../src/sessions/runtimeSync.js'
-import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
+import { RUNTIME_DEFAULTS, RUNTIME_PAYLOAD, SETTINGS_CHANNEL } from '../src/sessions/runtimeSettings.js'
 import { WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -357,5 +357,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
     credentials.candidates = () => Promise.resolve([{ ...first!, id: 'rotated', epoch: 1 }])
     await m.revalidateWarm()
     expect(m.warm.size()).toBe(0)
+  })
+
+  it('a runtime key written through `set` tells every replica, as one written through `setMany` does (#3598)', async () => {
+    const received: string[] = []
+    const listener = await db.sql.listen(SETTINGS_CHANNEL, (payload) => {
+      received.push(payload)
+    })
+    stops.push(() => listener.unlisten())
+    await new SettingsStore(db.sql).set('warm_idle_seconds', 120)
+    await expect.poll(() => received).toContain(RUNTIME_PAYLOAD)
   })
 })

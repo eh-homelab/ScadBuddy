@@ -1937,7 +1937,6 @@ export class SessionManager {
      * (#991), which no total holds, are neither counted again nor lost.
      */
     turnUsd: number,
-    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
     /**
      * What the turn spent that no result prices: the request it was cut off in (#991,
      * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
