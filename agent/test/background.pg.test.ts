@@ -196,10 +196,7 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
 
   it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
     // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
-    // Chosen by the message delivered: a warm process's `run.prompt` is its inbox, not the text.
-    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() =>
-      promptText(scripted.prompts.at(-1)!).includes('first') ? { hang: true } : { reply: 'done again' },
-    )
+    const scripted = scriptedRunner((_run, prompt) => (prompt.includes('first') ? { hang: true } : { reply: 'done again' }))
     const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
     const parent = (await mm.start(browser, { origin: 'chat' })).session.id
     const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
@@ -228,9 +225,8 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
   }, 60_000)
 
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
-    // The turn's message, as the warm process was sent it (scriptedRunner's `prompts`).
-    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() => {
-      const prompt = promptText(scripted.prompts.at(-1)!)
+    // The turn's message, as the warm process was sent it.
+    const scripted = scriptedRunner((_run, prompt) => {
       if (prompt.includes('give n')) return { reply: 'not json' }
       if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
       return { reply: 'hello from the agent' }

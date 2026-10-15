@@ -61,13 +61,14 @@ export type ScriptedStream = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt'
  * manager's own logic (claims, ownership, interrupt). One call is one
  * process (`runs`), as the warm cache spawns it (sessions/warm.ts): its
  * `prompt` is the process's inbox, and `next` is asked for each user message
- * pushed into it (`prompts` keeps them), so one process serves turn after
- * turn until the cache closes it. `interrupt()` ends the turn in progress as
+ * pushed into it (`prompts` keeps them), with that message's text, so one
+ * process serves turn after turn until the cache closes it. Choose a turn by
+ * that text, never by `run.prompt`: an inbox, not the text (#3667). `interrupt()` ends the turn in progress as
  * Claude Code's does; `close()` ends the stream. Wrapped in a plain generator
  * (`yield* scripted.runner(run)`), those are gone, and the manager's abort
  * signal stands in for them. The real SDK is covered by test/sessions.e2e.test.ts.
  */
-export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
+export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn) {
   const runs: HarnessRun[] = []
   const prompts: SDKUserMessage[] = []
   let n = 0
@@ -122,7 +123,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         // One for a turn that ended without asking for it is gone with that turn.
         if (pending !== undefined && pending < reads) pending = undefined
         prompts.push(message)
-        const turn = next(run)
+        const turn = next(run, promptText(message))
         const msgId = `msg_fake_${++n}`
         // The memory hooks, as Claude Code fires them: recall at the prompt, retain at Stop (memory/hindsight.ts).
         const hook = { session_id, transcript_path: '/nonexistent', cwd: '/' }
