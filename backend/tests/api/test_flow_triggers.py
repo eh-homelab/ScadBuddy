@@ -653,6 +653,43 @@ def test_an_event_trigger_fires_once_per_event(client: TestClient, bus: EventBus
     assert len(view(client, rendered["id"])["fires"]) == 1
 
 
+READS_EVENT = script(
+    "t = await trigger()",
+    "if t is None:",
+    "    return 'none'",
+    "if t['kind'] == 'model.changed':",
+    "    return [t['kind'], t['slug'], t['commit']]",
+    "return [t['kind'], t['slug'], t['job_id']]",
+)
+
+
+@pytest.mark.usefixtures("triggers")
+def test_a_run_reads_the_event_that_started_it(
+    client: TestClient, bus: EventBus, workflow_reaper: WorkflowReaper
+) -> None:
+    """#2666: an event's run reads it with `trigger()`; a scheduled run reads None."""
+    definition = register(client, READS_EVENT)
+    changed = create(
+        client, definition["id"], schedule=None, event={"kind": "model.changed", "slug": "box"}
+    )
+    rendered = create(client, definition["id"], schedule=None, event={"kind": "render.finished"})
+    scheduled = create(client, definition["id"])
+    bus.publish(VersionCommitted(slug="box", commit="c9"))
+    bus.publish(JobEvent(kind="job.done", job_id="j9", slug="lid"))
+    results = {}
+    for trigger, fired in (
+        (changed, decided(client, changed["id"], 1)),
+        (rendered, decided(client, rendered["id"], 1)),
+        (scheduled, fire(workflow_reaper, client, scheduled["id"])),
+    ):
+        assert fired["outcome"] == "started", fired
+        run = until(client, fired["run_id"], lambda v: v["status"] == "succeeded")
+        results[trigger["id"]] = run["run"]["result"]
+    assert results[changed["id"]] == "result: ['model.changed', 'box', 'c9']"
+    assert results[rendered["id"]] == "result: ['render.finished', 'lid', 'j9']"
+    assert results[scheduled["id"]] == "result: 'none'"
+
+
 @pytest.mark.usefixtures("triggers")
 def test_a_deleted_trigger_loses_its_schedule_and_its_grants(
     client: TestClient, workflow_reaper: WorkflowReaper
