@@ -337,6 +337,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const id = str(input.output_id)
     return id ? [{ type: 'output', id, action: 'modified', model: null }] : []
   },
+  rename_output: (input, result) => {
+    const id = str(input.output_id)
+    return id ? [{ type: 'output', id, action: 'modified', model: str(field(result, 'slug')) }] : []
+  },
   // The answer names the output's model (#1071), read before it was deleted.
   delete_output: (input, result) => {
     const id = str(input.output_id)

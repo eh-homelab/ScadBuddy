@@ -92,7 +92,8 @@ describe('LibraryPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
     const done = await screen.findByRole('status', { name: 'Arranged' })
     expect(done).toHaveTextContent('Arranged onto 2 plates.')
-    expect(done).toHaveTextContent("Saved in Name Keychain's history.")
+    // #2286 — unnamed, it is saved under a name made of what it holds.
+    expect(done).toHaveTextContent("Saved as Arrange of Name Keychain, Clara's Wand in Name Keychain's history.")
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
     // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
@@ -124,6 +125,21 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
     await user.click(screen.getAllByRole('checkbox', { name: /Select .*\.3mf$/ })[0] as HTMLElement)
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+  })
+
+  it('says a ticked sliced file is left out of Arrange (#2286)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(
+      within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }),
+    )
+    await user.click(within(await screen.findByTestId('library-file-104')).getByRole('checkbox'))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete selected (2)' })).toBeEnabled()
+    expect(screen.getByRole('note')).toHaveTextContent(
+      "1 selected file can't be arranged: only unsliced 3MF and STL files can.",
+    )
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
@@ -276,26 +292,149 @@ describe('LibraryPage', () => {
     expect(screen.queryByTestId('library-print-89')).toBeNull()
   })
 
-  it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
-    const filename = 'v1.2_shelf_bracket_with_cable_channel_and_a_long_tail.3mf'
+  it("shows a name whole on two lines, with ScadBuddy's suffixes and a slice as badges (#3634)", async () => {
+    const copy = 'tfic-creeper-keychain-long (ScadBuddy) (2).3mf'
+    const sliced = 'tfic-creeper-keychain-long (ScadBuddy).gcode.3mf'
     server.use(
       http.get('/api/v1/print/library', () =>
         HttpResponse.json({
           folder_id: null,
-          all: false,
+          all: true,
           folders: [],
-          files: [{ ...libraryFiles[0], id: 7001, filename, file_type: '3mf', folder_id: null }],
+          files: [
+            { ...libraryFiles[0], id: 7001, filename: copy, file_type: '3mf', folder_id: null },
+            { ...libraryFiles[0], id: 7002, filename: sliced, file_type: 'gcode.3mf', sliced: true, folder_id: null },
+          ],
           hidden: 0,
         }),
       ),
     )
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-7001')
-    const caption = card.querySelector(`p[title="${filename}"]`)
-    const parts = Array.from(caption?.querySelectorAll('span') ?? [], (span) => span.textContent)
-    expect(parts.join('')).toBe(filename)
-    expect(parts).toHaveLength(2)
-    expect(parts[1]).toBe('ong_tail.3mf')
+    expect(within(card).getByTestId('library-name-7001')).toHaveTextContent(/^tfic-creeper-keychain-long$/)
+    expect(within(card).getByText('ScadBuddy copy')).toBeInTheDocument()
+    expect(within(card).getByText('Copy 2')).toBeInTheDocument()
+    expect(card.querySelector(`[title="${copy}"]`)).not.toBeNull()
+    const slicedCard = screen.getByTestId('library-file-7002')
+    expect(within(slicedCard).getByText('Sliced')).toBeInTheDocument()
+    expect(within(slicedCard).queryByText(/Copy/)).toBeNull()
+  })
+
+  it('finds a file by name in every folder, and keeps the search in the URL (#3630)', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), 'headphone')
+
+    const result = await screen.findByTestId('library-file-121')
+    expect(screen.getByTestId('library-search-summary')).toHaveTextContent('1 file matches “headphone”.')
+    expect(screen.queryByTestId('library-file-89')).toBeNull()
+    expect(screen.getByTestId('where')).toHaveTextContent('/library?q=headphone')
+    const where = within(result).getByTestId('library-result-folder-121')
+    expect(where).toHaveTextContent('In Spec / MakerWorld / Work')
+
+    // Its folder opens on the file; Back returns to the results.
+    await user.click(where)
+    expect(screen.getByTestId('where')).toHaveTextContent('/library/Spec/MakerWorld/Work?file=121')
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: 'Search the library' })).toHaveValue('')
+  })
+
+  it('opens on the search the URL names, and says what only Advanced lists (#3630)', async () => {
+    renderPage(<LibraryPage />, { route: '/library?q=bag%20clip' })
+    const summary = await screen.findByTestId('library-search-summary')
+    expect(summary).toHaveTextContent('2 files match “bag clip”.')
+    expect(summary).toHaveTextContent('1 more under Advanced.')
+    expect(screen.getByRole('searchbox', { name: 'Search the library' })).toHaveValue('bag clip')
+  })
+
+  it('keeps the last results under an error, with Retry (#3630, #3633)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=headphone' })
+    await screen.findByTestId('library-file-121')
+    server.use(
+      http.get('/api/v1/print/library/search', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/bambuddy-unavailable', title: 'Bad Gateway', status: 502, detail: 'could not reach Bambuddy to list every library file: ConnectError' },
+          { status: 502 },
+        ),
+      ),
+    )
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), 's')
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not reach Bambuddy')
+    expect(screen.getByTestId('library-file-121')).toBeInTheDocument()
+    expect(screen.getByTestId('library-search-retry')).toBeInTheDocument()
+  })
+
+  it('asks for a fresh search after a delete, until one has answered (#3630)', async () => {
+    const asked: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/print/library/search') asked.push(url.searchParams.get('fresh') ?? 'false')
+    }
+    server.events.on('request:start', listen)
+    onTestFinished(() => server.events.removeListener('request:start', listen))
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=bag%20clip' })
+    await user.click(await screen.findByTestId('library-delete-89'))
+    await user.click(await screen.findByTestId('library-delete-confirm'))
+
+    await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
+    expect(asked[0]).toBe('false')
+    expect(asked.at(-1)).toBe('true')
+    // Answered, the next search reads the kept copy again.
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), ' 3')
+    await waitFor(() => expect(asked.at(-1)).toBe('false'))
+  })
+
+  it('prints a search result from its card (#3630)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=lamp' })
+    await user.click(await screen.findByTestId('library-print-130'))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('lists the subfolders of a folder that holds only folders, and opens one (#3631)', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/Spec' })
+    const folder = await screen.findByTestId('library-subfolder-11')
+    expect(folder).toHaveTextContent('MakerWorld')
+    expect(folder).toHaveTextContent('1 folder')
+    expect(screen.queryByText(/No files here/)).toBeNull()
+    // The open folder is expanded in the tree, so its subfolders show there too.
+    expect(screen.getByTestId('library-folder-10')).toHaveAttribute('aria-expanded', 'true')
+
+    await user.click(folder)
+    expect(screen.getByTestId('where')).toHaveTextContent('/library/Spec/MakerWorld')
+    expect(await screen.findByTestId('library-subfolder-12')).toHaveTextContent('3 files')
+  })
+
+  it('offers Retry when the library cannot be read, and reads it again (#3633)', async () => {
+    let failing = true
+    server.use(
+      http.get('/api/v1/print/library', () =>
+        failing
+          ? HttpResponse.json(
+              { type: 'https://scadbuddy.dev/problems/bambuddy-unavailable', title: 'Gateway Timeout', status: 504, detail: 'Bambuddy took too long to list the library files' },
+              { status: 504 },
+            )
+          : undefined,
+      ),
+    )
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByRole('alert')
+    failing = false
+    await user.click(screen.getByTestId('library-retry'))
+    expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows a folder opened before at once, while it is read again (#3633)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByTestId('library-folder-1'))
+    await screen.findByTestId('library-file-67')
+
+    server.use(http.get('/api/v1/print/library', () => delay('infinite')))
+    await user.click(screen.getByTestId('library-folder-root'))
+
+    expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
   })
 
   it('says when the library cannot be read', async () => {
@@ -321,7 +460,7 @@ describe('LibraryPage, item context (#975)', () => {
   it("names each card's Print after its file", async () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-89')
-    const filename = card.querySelector('p')?.textContent ?? ''
+    const filename = card.querySelector('[title]')?.getAttribute('title') ?? ''
     expect(filename).not.toBe('')
     expect(within(card).getByRole('button', { name: `Print ${filename}` })).toBeInTheDocument()
   })
@@ -329,7 +468,7 @@ describe('LibraryPage, item context (#975)', () => {
   it('links each printable file to its own print history (#1755)', async () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-89')
-    const filename = card.querySelector('p')?.textContent ?? ''
+    const filename = card.querySelector('[title]')?.getAttribute('title') ?? ''
     expect(within(card).getByRole('link', { name: `Prints of ${filename}` })).toHaveAttribute(
       'href',
       '/prints?file=89',

@@ -25,6 +25,8 @@ const PAGES = [
   '/workflows/runs/run-done',
   '/settings',
   '/activity',
+  // The component gallery (#3653): in the mocked build only, which this spec runs on.
+  '/ui-gallery',
 ]
 
 for (const path of PAGES) {

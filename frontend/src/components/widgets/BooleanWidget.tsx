@@ -1,4 +1,5 @@
 import type { Param } from '../../api/types'
+import { paramLabel } from '../../lib/params'
 
 export function BooleanWidget({
   param,
@@ -14,7 +15,7 @@ export function BooleanWidget({
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-2.5">
       <label htmlFor={id} className="text-[13px] text-ink">
-        {param.caption ?? param.name}
+        {paramLabel(param)}
       </label>
       <button
         id={id}

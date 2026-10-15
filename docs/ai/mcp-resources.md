@@ -101,7 +101,7 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
 
 | Event | Resources updated |
 |---|---|
-| `job.pending`, `job.running`, `job.superseded` | `jobs/{job_id}` |
+| `job.pending`, `job.running`, `job.superseded`, `job.cancelled` | `jobs/{job_id}` |
 | `job.done`, `job.failed` | `jobs/{job_id}`, `models/{slug}/diagnostics` |
 | `model.created`, `model.deleted` | `models`, `models/{slug}` and its source, schema, readme, thumbnail, versions; **list_changed** |
 | `model.updated` | `models`, `models/{slug}`, readme, thumbnail, upstream |

@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import { isLoopbackPeer } from '../http/origins.js'
+import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
@@ -531,6 +532,8 @@ export class PluginStore implements PluginRepo {
       RETURNING *`
     const row = rows[0]
     if (!row) throw new PluginError(`a plugin named "${name}" already exists`, 409)
+    // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
+    await notifyWarmEvict(this.sql, '*')
     return summary(row)
   }
 
@@ -595,13 +598,16 @@ export class PluginStore implements PluginRepo {
         WHERE name = ${name}
         RETURNING *`
       if (!row) throw new Error('UPDATE ... RETURNING returned no row')
+      await notifyWarmEvict(tx, '*')
       return summary(row)
     })
   }
 
   async delete(name: string): Promise<boolean> {
     const rows = await this.sql`DELETE FROM ai_plugins WHERE name = ${name}`
-    return rows.count > 0
+    if (rows.count === 0) return false
+    await notifyWarmEvict(this.sql, '*')
+    return true
   }
 
   async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {

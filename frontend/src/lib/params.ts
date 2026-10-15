@@ -6,6 +6,14 @@ export type ParamValues = Record<string, ParamValue>
 
 export const UNGROUPED = 'Parameters'
 
+/**
+ * What a parameter is called on screen and in every message (#3287): its caption, or
+ * its name when it has none or an empty one. One rule, so a label never differs by site.
+ */
+export function paramLabel(param: Pick<Param, 'name' | 'caption'>): string {
+  return param.caption || param.name
+}
+
 export function allParams(schema: CustomizerSchema): Param[] {
   return schema.parameters ?? []
 }
@@ -121,7 +129,7 @@ export function diffFromDefaults(schema: CustomizerSchema, values: ParamValues):
     })
     .map((param) => ({
       name: param.name,
-      caption: param.caption ?? param.name,
+      caption: paramLabel(param),
       value: values[param.name] as ParamValue,
       initial: (param.initial ?? '') as ParamValue,
     }))
@@ -178,14 +186,14 @@ export function rangeProblem(param: Param, value: ParamValue | undefined): strin
   // The model's own default is left to the model, as it always rendered.
   if (param.type === 'color') {
     if (value === undefined || value === param.initial || colourHex(String(value)) !== null) return null
-    return `${param.caption ?? param.name} must be a colour: a hex such as #FF8800, or a name such as red.`
+    return `${paramLabel(param)} must be a colour: a hex such as #FF8800, or a name such as red.`
   }
   if (param.type !== 'number' && param.type !== 'integer' && param.type !== 'slider') return null
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   const below = param.min != null && value < param.min
   const above = param.max != null && value > param.max
   if (!below && !above) return null
-  const label = param.caption || param.name
+  const label = paramLabel(param)
   if (param.min != null && param.max != null) return `${label} must be between ${param.min} and ${param.max}.`
   return below ? `${label} must be at least ${param.min}.` : `${label} must be at most ${param.max}.`
 }
