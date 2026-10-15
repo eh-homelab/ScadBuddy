@@ -273,8 +273,9 @@ function UndoModel({ undo, working, onDone }: { undo: Undo; working: boolean; on
   }
   // Offered once the model's state is known; a failed read still offers it, without the warning.
   if (state.loading || state.data?.same) return null
-  // While the assistant works it can save a new version on top of the undo, so wait for it.
-  if (working) {
+  // While the assistant works it can save a new version on top of the undo, so wait for it;
+  // a dialog already open, or a restore already sent, stays on screen.
+  if (working && !open && !busy) {
     return (
       <p className="text-faint">
         Undo changes to <span className="font-mono">{model}</span>: available when the assistant has
@@ -284,9 +285,9 @@ function UndoModel({ undo, working, onDone }: { undo: Undo; working: boolean; on
   }
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} className="text-accent underline">
-        Undo changes to <span className="font-mono">{model}</span>
-      </button>
+      <Button size="sm" onClick={() => setOpen(true)}>
+        Undo changes to <span className="ml-1 font-mono">{model}</span>
+      </Button>
       <Dialog
         open={open}
         title={`Undo this chat's changes to ${model}?`}

@@ -443,6 +443,19 @@ describe('SessionTouched', () => {
     expect(await screen.findByRole('button', { name: 'Undo changes to bin' })).toBeInTheDocument()
   })
 
+  it('keeps an open undo dialog when the assistant starts working', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-open', [
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+    ])
+    const view = renderPage(<SessionTouched sessionId="sess-open" />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
+    await screen.findByRole('dialog')
+    view.rerender(<SessionTouched sessionId="sess-open" working />)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText(/available when the assistant has finished/)).toBeNull()
+  })
+
   it('counts a model made and deleted in the session as deleted', async () => {
     setSessionResources('sess-made-gone', [
       row({ type: 'model', id: 'tmp', model: 'tmp', tool: 'create_model' }),
