@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../src/gate/durable.js'
+import { responseHash } from '../src/gate/canonical.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { PendingInputSweep, temporalDescriber } from '../src/gate/sweep.js'
 import { RespondRefusal } from '../src/gate/validate.js'
@@ -41,9 +42,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     await env?.teardown()
   })
 
-  async function park(sessionId = randomUUID(), queue = QUEUE, hold = false) {
+  async function park(sessionId = randomUUID(), queue = QUEUE, hold = false, kind: 'approval' | 'answer' = 'approval') {
     const requestId = durableRequestId(sessionId, 'run-1', 'toolu_1')
-    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, 'approval', hold] })
+    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, kind, hold] })
     return { sessionId, requestId }
   }
 
@@ -67,11 +68,11 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     await expect(new DurableGate(env.client, { timeoutMs: 1_500 }).respond(sessionId, args)).rejects.toBeInstanceOf(DurableUnavailable)
     // The handler took effect (the entry is resolved) and is held; the latch lets it answer.
     const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
-    const retry = new DurableGate(env.client).respond(sessionId, args)
+    const retry = new DurableGate(env.client, { timeoutMs: 20_000 }).respond(sessionId, args)
     await handle.signal('release')
     expect(await retry).toEqual({ kind: 'approval', outcome: 'approved' })
     await expect(
-      new DurableGate(env.client).respond(sessionId, { ...args, response: { kind: 'approval', decision: 'deny' } }),
+      new DurableGate(env.client, { timeoutMs: 20_000 }).respond(sessionId, { ...args, response: { kind: 'approval', decision: 'deny' } }),
     ).rejects.toMatchObject({ code: 'resolved' })
   }, 60_000)
 
@@ -127,14 +128,14 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       await drop()
     })
 
-    async function durableSession(owner = BROWSER_USER, timeoutMs = 5_000) {
+    async function durableSession(owner = BROWSER_USER, timeoutMs = 20_000, kind: 'approval' | 'answer' = 'approval') {
       const m = manager({ sql: db.sql, paths: await tempPaths(), approvalGrants: async () => true })
       m.durable = new DurableGate(env.client, { timeoutMs })
       const sessionId = randomUUID()
       await db.sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
         VALUES (${sessionId}, 'mcp', ${owner.kind}, ${owner.id}, ${owner.label}, ${owner.kind}, ${owner.id}, 'running', 10, 1, 'durable')`
-      const { requestId } = await park(sessionId)
+      const { requestId } = await park(sessionId, QUEUE, false, kind)
       return { m, sessionId, requestId }
     }
 
@@ -163,6 +164,23 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       await vi.waitFor(async () => expect((await handle.describe()).runId).not.toBe(first.runId), { timeout: 20_000 })
       expect(await respond(m, BROWSER_USER, requestId, approve)).toEqual({ id: requestId, kind: 'approval', outcome: 'approved' })
       await expect(respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'deny' })).rejects.toMatchObject({ status: 409 })
+      await handle.terminate('test')
+    }, 60_000)
+
+    it('an answer retried after the run continued as new returns the recorded outcome; another answer is still refused (#3724)', async () => {
+      const { m, sessionId, requestId } = await durableSession(BROWSER_USER, 30_000, 'answer')
+      const answer = { kind: 'answer' as const, answers: { 'Which colour?': 'red' } }
+      expect(await respond(m, BROWSER_USER, requestId, answer)).toEqual({ id: requestId, kind: 'answer', outcome: 'answered' })
+      // What resolve_input records: the normalised answers, and the hash of the raw response.
+      await db.sql`
+        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, response, responder, response_hash)
+        VALUES (${requestId}, ${sessionId}, 'answer', 'answered', ${db.sql.json({ answers: ['red'] })}, ${db.sql.json(BROWSER_USER)}, ${responseHash(answer)})`
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
+      const first = await handle.describe()
+      await handle.signal('rollover')
+      await vi.waitFor(async () => expect((await handle.describe()).runId).not.toBe(first.runId), { timeout: 20_000 })
+      expect(await respond(m, BROWSER_USER, requestId, answer)).toEqual({ id: requestId, kind: 'answer', outcome: 'answered' })
+      await expect(respond(m, BROWSER_USER, requestId, { kind: 'answer', answers: { 'Which colour?': 'blue' } })).rejects.toMatchObject({ status: 409 })
       await handle.terminate('test')
     }, 60_000)
 

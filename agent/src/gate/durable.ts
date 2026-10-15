@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto'
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
+import { responseHash } from './canonical.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
@@ -36,15 +36,6 @@ export type DurableGateOptions = {
   cancelTimeoutMs?: number
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    const o = value as Record<string, unknown>
-    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'null'
-}
-
 /**
  * The `respond` Update's ID (#3717): the same request, response, responder and role
  * always give the same ID, so a retry after a 503 joins the Update the workflow
@@ -53,8 +44,7 @@ function canonical(value: unknown): string {
  * whatever the request id or response holds.
  */
 export function respondUpdateId(args: RespondArgs): string {
-  const digest = createHash('sha256').update(canonical([args.request_id, args.response, args.responder, args.role])).digest('hex')
-  return `respond-${digest}`
+  return `respond-${responseHash([args.request_id, args.response, args.responder, args.role])}`
 }
 
 function refusalOf(err: unknown): RespondRefusal | undefined {

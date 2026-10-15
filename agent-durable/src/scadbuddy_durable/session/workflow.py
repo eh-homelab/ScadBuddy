@@ -824,6 +824,7 @@ class DurableSession:
         reason: str | None,
         *,
         timer: bool = False,
+        raw_response: Any | None = None,
     ) -> bool:
         # A response is written only after its entry's row: a call is parked (and so
         # answerable) before open_input has written it. One whose open failed was never
@@ -843,6 +844,7 @@ class DurableSession:
                     responder=responder,
                     response=response,
                     reason=reason,
+                    raw_response=raw_response,
                 ),
                 **(RESOLVE_ON_TIMER if timer else RESOLVE_ON_RESPOND),
             )
@@ -935,10 +937,24 @@ class DurableSession:
         }
         if parked.kind == "approval":
             outcome: Outcome = "approved" if valid.decision == "approve" else "denied"
-            await self._resolve(parked, outcome, who, {"decision": valid.decision}, None)
+            await self._resolve(
+                parked,
+                outcome,
+                who,
+                {"decision": valid.decision},
+                None,
+                raw_response=args.get("response"),
+            )
         else:
             outcome = "answered"
-            await self._resolve(parked, outcome, who, {"answers": list(valid.answers)}, None)
+            await self._resolve(
+                parked,
+                outcome,
+                who,
+                {"answers": list(valid.answers)},
+                None,
+                raw_response=args.get("response"),
+            )
         return {"kind": parked.kind, "outcome": outcome}
 
     @respond.validator

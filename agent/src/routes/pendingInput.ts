@@ -11,6 +11,7 @@ import { QuestionError } from '../questions/service.js'
 import type { SessionManager } from '../sessions/manager.js'
 import { canSee, type InputOutcome, type Owner, PROTOCOL_VERSION } from '../sessions/protocol.js'
 import { approvalEntry, questionEntry } from '../gate/classic.js'
+import { responseHash } from '../gate/canonical.js'
 import { DurableUnavailable } from '../gate/durable.js'
 import type { PendingInputEntry } from '../gate/projection.js'
 import { roleOf } from '../gate/role.js'
@@ -383,14 +384,20 @@ async function respondDurable(
   }
 }
 
-/** An approval already decided exactly as `body` says, by `principal`: its recorded outcome. */
+/**
+ * A request already decided exactly as `body` says, by `principal`: its recorded outcome. An
+ * approval is the same when its decision is; an answer when the hash of the response
+ * the person sent (`ai_input_responses.response_hash`, #3724) is.
+ */
 async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
   const done = await sessions.projection.recorded(requestId)
-  if (!done || done.kind !== 'approval' || body.kind !== 'approval') return undefined
-  const decision = (done.response as { decision?: string } | null)?.decision
-  if (decision === undefined || decision !== body.decision) return undefined
+  if (!done || done.kind !== body.kind) return undefined
   if (done.responder.kind !== principal.kind || done.responder.id !== principal.id) return undefined
-  return { id: requestId, kind: done.kind, outcome: done.outcome }
+  const same =
+    body.kind === 'approval'
+      ? (done.response as { decision?: string } | null)?.decision === body.decision
+      : done.responseHash !== null && done.responseHash === responseHash(body)
+  return same ? { id: requestId, kind: done.kind, outcome: done.outcome } : undefined
 }
 
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {

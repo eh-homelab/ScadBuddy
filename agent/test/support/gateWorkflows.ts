@@ -38,7 +38,7 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', 
       entry.state = 'resolved'
       // A held handler has taken effect but not answered: the slow `resolve_input` activity.
       if (hold) await condition(() => released)
-      return { kind: entry.kind, outcome: args.response.decision === 'approve' ? 'approved' : 'denied' }
+      return { kind: entry.kind, outcome: kind === 'answer' ? 'answered' : args.response.decision === 'approve' ? 'approved' : 'denied' }
     },
     {
       validator: (args) => {

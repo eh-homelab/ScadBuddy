@@ -55,6 +55,14 @@ export type ProjectionFilter = {
   allApprovals?: boolean
 }
 
+export type RecordedInput = {
+  kind: 'approval' | 'answer'
+  outcome: InputOutcome
+  response: unknown
+  responseHash: string | null
+  responder: { kind?: string; id?: string }
+}
+
 export class PendingProjection {
   readonly #sql: Sql
 
@@ -111,9 +119,9 @@ export class PendingProjection {
   }
 
   /** What the gate recorded for a resolved request (`ai_input_responses`), or undefined. */
-  async recorded(requestId: string): Promise<{ kind: 'approval' | 'answer'; outcome: InputOutcome; response: unknown; responder: { kind?: string; id?: string } } | undefined> {
-    const [row] = await this.#sql<{ kind: 'approval' | 'answer'; outcome: InputOutcome; response: unknown; responder: { kind?: string; id?: string } }[]>`
-      SELECT kind, outcome, response, responder FROM ai_input_responses WHERE request_id = ${requestId}`
+  async recorded(requestId: string): Promise<RecordedInput | undefined> {
+    const [row] = await this.#sql<RecordedInput[]>`
+      SELECT kind, outcome, response, response_hash AS "responseHash", responder FROM ai_input_responses WHERE request_id = ${requestId}`
     return row
   }
 
