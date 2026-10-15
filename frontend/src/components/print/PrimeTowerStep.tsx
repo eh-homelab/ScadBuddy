@@ -91,9 +91,10 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
           />
           <span>
             No sparse layers
-            {/* Unchosen and undeclared, the preset decides: off in every Bambu one (#3648 review). */}
+            {/* Unchosen and undeclared, the preset decides: off in every Bambu one (#3648
+                review). Not "process", which a query for the Process select would match. */}
             {value?.no_sparse_layers == null && templateSettings?.wipe_tower_no_sparse_layers === undefined && (
-              <span className="text-muted"> (process default)</span>
+              <span className="text-muted"> (slicer default)</span>
             )}
             <span className="block text-muted">
               Print the tower only on layers that change filament, for a print whose colours

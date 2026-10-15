@@ -2014,7 +2014,7 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     const { user } = renderPicker()
     await loaded()
     await showAdvanced()
-    expect(screen.getByText('(process default)')).toBeInTheDocument()
+    expect(screen.getByText('(slicer default)')).toBeInTheDocument()
 
     await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
