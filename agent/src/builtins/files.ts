@@ -246,19 +246,21 @@ export const GREP_BUDGET_MS = 2_000
 // Without multiline, ripgrep matches each line on its own, so no match crosses a newline
 // (not even \s or [^x]) and the empty "line" after a final newline never matches.
 const MATCH_SCRIPT = `
-  const at = (line, offset) => Array.from(line.matchAll(re), (m) => ({ index: offset + m.index, text: m[0] }))
+  const out = []
+  const at = (line, offset) => {
+    for (const m of line.matchAll(re)) out.push({ index: offset + m.index, text: m[0] })
+  }
   if (whole) at(text, 0)
   else {
     const lines = text.split('\\n')
     if (lines.at(-1) === '') lines.pop()
     let offset = 0
-    const out = []
     for (const line of lines) {
-      for (const m of at(line, offset)) out.push(m)
+      at(line, offset)
       offset += line.length + 1
     }
-    out
-  }`
+  }
+  out`
 
 function matchesOf(text: string, re: RegExp, whole: boolean, deadline: number): { index: number; text: string }[] {
   const timeout = Math.max(1, deadline - Date.now())

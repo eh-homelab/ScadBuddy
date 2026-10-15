@@ -34,6 +34,8 @@ describe('Grep matches line by line, as ripgrep does', () => {
     expect((await grep(ctx, { pattern: '^', output_mode: 'count' })).text).toBe('a.txt:3\n\nFound 3 total occurrences across 1 file.')
     const crlf = workspace({ 'w.txt': 'hello\r\nworld\r\n' })
     expect((await grep(crlf, { pattern: '^', output_mode: 'count' })).text).toBe('w.txt:2\n\nFound 2 total occurrences across 1 file.')
+    // As plain ripgrep (no --crlf): $ is the end of the line, after its \r.
+    expect((await grep(crlf, { pattern: 'hello$', output_mode: 'content' })).text).toBe('No matches found')
   })
 
   it('never crosses a newline unless multiline is set', async () => {
