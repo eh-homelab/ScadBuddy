@@ -210,7 +210,7 @@ describe('ActivityBell', () => {
     const { user } = mount()
     const bell = screen.getByRole('button', { name: /Activity, 0 finished/ })
     await user.click(bell)
-    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('div')!.id)
+    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('[data-slot="popover-content"]')!.id)
     await user.keyboard('{Escape}')
     expect(screen.queryByText('All activity')).toBeNull()
     expect(bell).toHaveFocus()
