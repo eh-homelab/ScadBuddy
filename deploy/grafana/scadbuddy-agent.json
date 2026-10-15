@@ -311,6 +311,33 @@
           "tableType": "spans"
         }
       ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Warm processes",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 47, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Warm process reuse by outcome and recycle reason",
+      "description": "Each turn's agent.turn.spawn span per second, by whether the session's warm Claude Code was reused (hit), started anew (miss) or replaced (recycle), and why (warm.reason: fingerprint, tail, budget, evicted). A turn with WebFetch spend or a request cut off mid-turn always recycles the next one for budget (#3597). A TraceQL metrics query: it needs Tempo's metrics-generator local-blocks processor (clusters#1596, spec 2026-10-01 §7). Without it this panel is empty, which means not configured, not zero turns.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 48, "w": 24, "h": 9 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn.spawn\"} | rate() by (span.warm.outcome, span.warm.reason)",
+          "limit": 20
+        }
+      ]
     }
   ]
 }

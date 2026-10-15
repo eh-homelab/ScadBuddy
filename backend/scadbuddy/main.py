@@ -53,7 +53,7 @@ from scadbuddy.api.limits import (
 )
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
@@ -116,6 +116,7 @@ from scadbuddy.workflows.housekeeping import (
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
@@ -519,6 +520,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_preview_slices() -> None:
         await _heartbeating(_sweep_preview_slices_logged(state))
 
+    @activity.defn(name=LOST_SLICES_SWEEP)
+    async def sweep_lost_slice_starts() -> None:
+        await _heartbeating(_sweep_lost_slices_logged(state))
+
     @activity.defn(name=GIT_SWEEP)
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
@@ -537,6 +542,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         reap_output_holds,
         sweep_flow_runs,
         sweep_preview_slices,
+        sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
     ]
@@ -618,32 +624,53 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
 
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
+    """#2169: the dialog's background slices no run queued. On `SWEEPS`' Schedule only,
+    so the sweeps' switch turns it off."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            removed = await sweep_preview_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the print dialog's background slices")
+            raise
+        if removed:
+            logger.info("removed unprinted background slices", extra={"count": removed})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _sweep_lost_slices_logged(state: AppState) -> None:
+    """#2715: what print runs' lost slice starts left. On the prune Schedule too: the
+    job that names the file is kept only 30 minutes."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            lost = await sweep_lost_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the files of lost slice starts")
+            raise
+        if lost:
+            logger.info("removed the files of lost slice starts", extra={"count": lost})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _with_bambuddy(
+    state: AppState, sweep: Callable[[BambuddyClient], Awaitable[None]]
+) -> None:
+    """Run ``sweep`` with a Bambuddy client; nothing to do when Bambuddy is not set up.
+    What ``sweep`` raises it has logged, and is raised as it is."""
     settings = await asyncio.to_thread(state.settings_store.load)
-    # Each its own, as the flow sweeps: one failing never skips the other or its log
-    # (#2912); the first failure is raised once both have run.
     failed: Exception | None = None
     try:
         async with client_for(settings) as client:
             try:
-                removed = await sweep_preview_slices(client, state.uploads)
+                await sweep(client)
             except Exception as err:
-                logger.exception("could not sweep the print dialog's background slices")
                 failed = err
-            else:
-                if removed:
-                    logger.info("removed unprinted background slices", extra={"count": removed})
-            try:
-                # #2715: and what print runs' lost slice starts left, on the same tick.
-                lost = await sweep_lost_slices(client, state.uploads)
-            except Exception as err:
-                logger.exception("could not sweep the files of lost slice starts")
-                failed = failed or err
-            else:
-                if lost:
-                    logger.info("removed the files of lost slice starts", extra={"count": lost})
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
-            logger.debug("no background-slice sweep: Bambuddy is not set up")
+            logger.debug("no slice sweep: Bambuddy is not set up")
             return
         logger.exception("could not reach Bambuddy to sweep slices")
         raise
