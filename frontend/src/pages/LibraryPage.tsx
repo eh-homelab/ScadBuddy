@@ -211,7 +211,13 @@ export function LibraryPage() {
     const ask: Wanted | null = wantedKey === null ? (missing ? null : { folderId: null }) : (wanted ?? null)
     if (ask === null) return
     const key = `${wantedKey ?? 'tree'}|${advanced}|${reload}`
-    if (loaded.current.has(key)) return
+    if (loaded.current.has(key)) {
+      // Already read, but another folder's listing may be on screen: Back, then Forward
+      // before Back's answer landed, comes back here with the folder left behind shown.
+      const kept = wantedKey === null ? undefined : listed.current.get(`${wantedKey}|${advanced}`)
+      if (kept) setListing(kept)
+      return
+    }
     if (listedReload.current !== reload) {
       listedReload.current = reload
       listed.current.clear()
