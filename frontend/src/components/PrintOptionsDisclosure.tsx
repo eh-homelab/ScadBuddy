@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { OptionScope, PrintOptions, PrintOptionsView } from '../api/types'
+import type { OptionScope, PrintOptions, PrintOptionsState, PrintOptionsView } from '../api/types'
 import {
   CALIBRATION_CHOICES,
   clampOption,
@@ -47,6 +47,8 @@ interface Props {
    * which shows no Options but still sends what was remembered.
    */
   heldOnly?: boolean
+  /** With `heldOnly`: the remembered options the caller already read, so none is read here. */
+  known?: PrintOptionsState | null
   /**
    * What Remember saves, when it is not `value`: a caller that seeds a value of its own
    * into what this send shows (Queue's manual start, #2288) passes the user's edits here,
@@ -89,6 +91,7 @@ export function PrintOptionsDisclosure({
   onChange,
   onEffective,
   heldOnly = false,
+  known,
   toRemember = value,
 }: Props) {
   const slug = subject?.key
@@ -97,8 +100,12 @@ export function PrintOptionsDisclosure({
   // the scope keys on is kept separately: only the GET resolves it, so reading it off
   // this object would make it vanish the moment a save lands — and `printer_id` being
   // optional in the generated types means TypeScript would not have said a word.
-  const [remembered, setRemembered] = useState<PrintOptionsView | null>(null)
-  const [serverPrinterId, setServerPrinterId] = useState<number | null>(null)
+  const [read, setRemembered] = useState<PrintOptionsView | null>(null)
+  const [readPrinterId, setServerPrinterId] = useState<number | null>(null)
+  // Simple mode's held list takes the dialog's own read rather than reading again
+  // (#2361: one read per open); a Stop remembering's answer then replaces it here.
+  const remembered = heldOnly ? (read ?? known ?? null) : read
+  const serverPrinterId = heldOnly ? (known?.printer_id ?? null) : readPrinterId
   const [loading, setLoading] = useState(true)
   const [scope, setScope] = useState<OptionScope>('printer')
   const [busy, setBusy] = useState(false)
@@ -106,6 +113,7 @@ export function PrintOptionsDisclosure({
   const [savedScope, setSavedScope] = useState<OptionScope | null>(null)
 
   useEffect(() => {
+    if (heldOnly) return
     let live = true
     api
       .getPrintOptions()
@@ -121,7 +129,7 @@ export function PrintOptionsDisclosure({
     return () => {
       live = false
     }
-  }, [slug])
+  }, [slug, heldOnly])
 
   // The per-printer scope only applies once the printer is known; with none chosen and
   // none in Settings, saving there would go nowhere — hence the disabled option and the note below.

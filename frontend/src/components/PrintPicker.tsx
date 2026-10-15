@@ -1147,6 +1147,7 @@ export function PrintPicker({
                   {!picker.advanced && (
                     <PrintOptionsDisclosure
                       heldOnly
+                      known={remembered}
                       subject={subject}
                       printerId={printerId}
                       value={sentOptions}

@@ -450,11 +450,18 @@ describe('PrintOptionsDisclosure', () => {
     })
 
     it('shows only the held job in Simple mode, which has no Options', async () => {
-      remembered()
-      render(<PrintOptionsDisclosure subject={MODEL} value={{}} onChange={() => {}} heldOnly />)
+      const reads: string[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.url.includes('/settings/print-options')) reads.push(request.method)
+      })
+      const known = { ...printOptionsFixture, global_options: { manual_start: true } }
+      render(<PrintOptionsDisclosure subject={MODEL} value={{}} onChange={() => {}} heldOnly known={known} />)
       expect(await screen.findByTestId('holding-manual_start')).toHaveTextContent('Waits for a manual start.')
       expect(screen.queryByText('Options')).not.toBeInTheDocument()
       expect(screen.queryByTestId('print-options-summary')).not.toBeInTheDocument()
+      // The dialog's own read is used: one read per open (#2361).
+      expect(reads).toEqual([])
+      server.events.removeAllListeners()
     })
 
     it("sets every changed option back to Bambuddy's default for this print", async () => {
