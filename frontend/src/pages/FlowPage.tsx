@@ -221,7 +221,14 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
   const [checkError, setCheckError] = useState<string>()
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
-  const help = useAsync(() => api.getFlowHostFunctions(), [])
+  // #2651: completion for the schema as last checked, so `inputs()` and `FlowInputs`
+  // follow the draft; a schema that is not JSON keeps what was completed before it.
+  const [helpSchema, setHelpSchema] = useState(savedSchema)
+  useEffect(() => {
+    const schemaPart = checked.split('\u0000')[0] ?? ''
+    if (parseSchemaText(schemaPart).error === undefined) setHelpSchema(schemaPart)
+  }, [checked])
+  const help = useAsync(() => api.getFlowHostFunctions(parseSchemaText(helpSchema).schema), [helpSchema])
   const dirty = draft !== flow.script || schemaDraft !== savedSchema
   const scriptProblems = problems?.filter((p) => p.file !== INPUTS_FILE) ?? NO_PROBLEMS
 
