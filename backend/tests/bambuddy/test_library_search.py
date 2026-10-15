@@ -336,7 +336,6 @@ async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
     it wakes, a search with nothing kept starts a read. The queued one joins that read
     rather than start a second whole-library read at once."""
     reads: list[asyncio.Event] = []
-    failing = True
 
     class Client:
         async def folders(self) -> list[object]:
@@ -348,7 +347,7 @@ async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
             gate = asyncio.Event()
             reads.append(gate)
             await gate.wait()
-            if failing and len(reads) == 1:
+            if len(reads) == 1:
                 raise RuntimeError("down")
             return []
 
@@ -362,7 +361,9 @@ async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
     while not reads:
         await asyncio.sleep(0)
     gap: list[asyncio.Future[LibrarySnapshot]] = []
-    # Runs as the first read ends, before the queued read wakes: the gap.
+    # Runs as the first read ends, before the queued read wakes: the gap. It must be
+    # registered before the queued read's `asyncio.wait` adds its own callback (done
+    # callbacks run in order), or this test would no longer recreate the gap.
     index._reading["bambuddy"][1].add_done_callback(
         lambda _: gap.append(asyncio.ensure_future(index.snapshot("bambuddy", connect)))
     )
@@ -404,4 +405,32 @@ async def test_a_late_read_of_an_old_source_never_drops_the_new_one() -> None:
     await old
 
     assert await index.snapshot("new", connect) is kept
+    assert len(client.gates) == 2
+
+
+async def test_a_request_answered_from_an_old_kept_source_keeps_the_new_read() -> None:
+    """Review of #3694: a request holding pre-change settings, answered from what is
+    kept without reading, must not make the new source's read in flight be dropped."""
+    client = GatedClient()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield client  # type: ignore[misc]
+
+    index = LibraryIndex()
+    old = asyncio.ensure_future(index.snapshot("old", connect))
+    while not client.gates:
+        await asyncio.sleep(0)
+    client.gates[0].set()
+    await old
+
+    new = asyncio.ensure_future(index.snapshot("new", connect))
+    while len(client.gates) < 2:
+        await asyncio.sleep(0)
+    await index.snapshot("old", connect)  # fresh, kept: no read
+    client.gates[1].set()
+    kept = await new
+
+    async with asyncio.timeout(5):  # a dropped read would start another that never ends
+        assert await index.snapshot("new", connect) is kept
     assert len(client.gates) == 2
