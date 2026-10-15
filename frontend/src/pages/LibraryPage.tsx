@@ -161,6 +161,9 @@ export function LibraryPage() {
       listed.current.clear()
     }
     setError(null)
+    // Only folders are kept: a bare `?file=` link (`file:<id>`) never matches, on purpose.
+    // Its folder is what the answer says, and the link then moves to that folder's path,
+    // whose key is kept from then on.
     if (wantedKey !== null) setListing(listed.current.get(`${wantedKey}|${advanced}`) ?? null)
     setSlow(false)
     const slowTimer = window.setTimeout(() => setSlow(true), SLOW_MS)

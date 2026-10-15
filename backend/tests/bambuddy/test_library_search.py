@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.library_listing import (
     search_library,
 )
 from scadbuddy.bambuddy.models import LibraryListRow
-from scadbuddy.library_search.index import LibraryIndex
+from scadbuddy.library_search.index import LibraryIndex, LibrarySnapshot
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -311,3 +311,77 @@ async def test_a_failed_background_read_holds_off_the_next_for_a_while() -> None
     for _ in range(20):
         await asyncio.sleep(0)
     assert reads == 3
+
+
+class GatedClient:
+    """A client whose every whole-library read waits for its own gate."""
+
+    def __init__(self) -> None:
+        self.gates: list[asyncio.Event] = []
+
+    async def folders(self) -> list[object]:
+        return []
+
+    async def library_listing(
+        self, *, folder_id: int | None, every_folder: bool = False
+    ) -> list[LibraryListRow]:
+        gate = asyncio.Event()
+        self.gates.append(gate)
+        await gate.wait()
+        return []
+
+
+async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
+    """Review of #3666: in the gap between a read ending and the queued one waking, a
+    request may start a read; the queued one joins it rather than read again at once."""
+    client = GatedClient()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield client  # type: ignore[misc]
+
+    clock = Clock()
+    index = LibraryIndex(clock=clock)
+    ended: asyncio.Future[LibrarySnapshot] = asyncio.get_running_loop().create_future()
+    ended.set_result(LibrarySnapshot(folders=[], files=[], read_at=0))
+    queued_at = clock.now
+    clock.now += 1
+    meanwhile = index._start("bambuddy", connect)  # started after the queued read was
+
+    joined = asyncio.ensure_future(
+        index._after("bambuddy", connect, asyncio.ensure_future(_done(ended)), queued_at=queued_at)
+    )
+    while not client.gates:
+        await asyncio.sleep(0)
+    client.gates[0].set()
+
+    assert await joined is await meanwhile
+    assert len(client.gates) == 1
+
+
+async def _done(future: asyncio.Future[LibrarySnapshot]) -> LibrarySnapshot:
+    return await future
+
+
+async def test_a_late_read_of_an_old_source_never_drops_the_new_one() -> None:
+    """Review of #3666: a URL or key changed while a read of the old one ran."""
+    client = GatedClient()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield client  # type: ignore[misc]
+
+    index = LibraryIndex()
+    old = asyncio.ensure_future(index.snapshot("old", connect))
+    while not client.gates:
+        await asyncio.sleep(0)
+    new = asyncio.ensure_future(index.snapshot("new", connect))
+    while len(client.gates) < 2:
+        await asyncio.sleep(0)
+    client.gates[1].set()
+    kept = await new
+    client.gates[0].set()
+    await old
+
+    assert await index.snapshot("new", connect) is kept
+    assert len(client.gates) == 2
