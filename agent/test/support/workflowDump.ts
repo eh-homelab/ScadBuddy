@@ -56,10 +56,12 @@ function brief(e: JsonEvent): string {
  * The workflow's state as text: for each of its runs (oldest first: a session continues as new
  * after each turn), its status, pending activities and timers, and its last `last` events.
  */
-export async function dumpWorkflow(client: Client, workflowId: string, last = 30): Promise<string> {
+export async function dumpWorkflow(client: Client, workflowId: string, last = 60): Promise<string> {
   const runs: string[] = []
   try {
-    for await (const run of client.workflow.list({ query: `WorkflowId = '${workflowId}'` })) runs.push(run.runId)
+    // A visibility query's string literal: its quotes and backslashes escaped.
+    const literal = workflowId.replace(/[\\']/g, (c) => `\\${c}`)
+    for await (const run of client.workflow.list({ query: `WorkflowId = '${literal}'` })) runs.push(run.runId)
   } catch {
     // No visibility: the current run only.
   }
@@ -101,4 +103,32 @@ async function dumpRun(client: Client, workflowId: string, runId: string | undef
     lines.push(`could not describe it: ${(err as Error).message}`)
   }
   return lines.join('\n')
+}
+
+/**
+ * A failed test's dump, then its cleanup, which runs whatever the dump does: a dump that throws
+ * (the system it describes is in a bad state) is logged and never skips the cleanup, so no
+ * session, worker, pool or schema outlives its test. The dump has `deadlineMs` at most.
+ */
+export async function dumpThenCleanUp(
+  dump: (() => Promise<void>) | undefined,
+  cleanUp: () => Promise<void>,
+  { deadlineMs = 20_000, log = (text: string) => void process.stderr.write(text) }: { deadlineMs?: number; log?: (text: string) => void } = {},
+): Promise<void> {
+  if (dump) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        dump(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`it ran past ${deadlineMs} ms`)), deadlineMs)
+        }),
+      ])
+    } catch (err) {
+      log(`the failure dump failed, cleaning up anyway: ${err instanceof Error ? err.message : String(err)}\n`)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  await cleanUp()
 }

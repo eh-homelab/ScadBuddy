@@ -9,6 +9,7 @@ import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { AuditLog } from '../src/audit/log.js'
 import { connectDatabase, type Database } from '../src/db.js'
@@ -40,7 +41,7 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
-import { dumpWorkflow } from './support/workflowDump.js'
+import { dumpThenCleanUp, dumpWorkflow } from './support/workflowDump.js'
 
 // Session affinity (unified runtime spec 2026-10-13 §5.2, plan Task 5.2) end to end: AgentSession
 // on a Temporal dev server, two replicas (A, B), each with its own manager, warm cache, shared
@@ -83,17 +84,20 @@ const HEARTBEAT_TIMEOUT_MS = 20_000
 /** One step of this host's wall clock, which the dev server's timers run on (measured 8.0-8.6 s). */
 const CLOCK_STEP_MS = 10_000
 /**
- * A stalled placement is given up on this long after it froze: the SDK sends a beat at once and
- * flushes the next, throttled, at 80 % of the heartbeat timeout, and the server's timeout runs
- * from that flush (measured: freeze to the second acquire 36.0-36.3 s), plus a clock step.
+ * A stalled placement is given up on this long after it froze. The 0.8 is measured, not
+ * documented: freeze to the second acquire took 35.0-35.6 s hosted and 35.7-36.3 s locally,
+ * which matches the SDK sending a beat at once, flushing the next (throttled) at 80 % of the
+ * heartbeat timeout, and the server's timeout running from that flush. Two clock steps, not one:
+ * the measured local worst case (38.6 s) is already 2.6 s past it, and a step can land on the
+ * server's timer as well.
  */
-const STALL_MS = 0.8 * HEARTBEAT_TIMEOUT_MS + HEARTBEAT_TIMEOUT_MS + CLOCK_STEP_MS
+const STALL_MS = 0.8 * HEARTBEAT_TIMEOUT_MS + HEARTBEAT_TIMEOUT_MS + 2 * CLOCK_STEP_MS
 /** A placement from its acquire to its first model answer: Claude Code's start and one request (measured 0.2-9 s). */
 const PLACEMENT_MS = 30_000
 /** How long a new placement waits for the one it replaced to end (TurnHost.run). */
 const REPLACED_WAIT_MS = 10_000
 /** The replica's start (`replica`'s own wait), the first placement to its held call, the stall, the second placement after the cut, and the closing checks. */
-const LONE_STALL_BUDGET_MS = 30_000 + PLACEMENT_MS + STALL_MS + REPLACED_WAIT_MS + PLACEMENT_MS + 10_000
+const LONE_STALL_BUDGET_MS = 30_000 + PLACEMENT_MS + STALL_MS + REPLACED_WAIT_MS + PLACEMENT_MS + 10_000 // 166 s
 
 function latch(): { promise: Promise<void>; release: () => void } {
   let release!: () => void
@@ -194,28 +198,34 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     phases = []
     startedAt = performance.now()
   })
+  // The hook's own timeout: the dump (at most 20 s, dumpThenCleanUp) and the cleanup, each replica's stop within its grace.
   afterEach(async ({ task }) => {
-    // A test that failed, its timeout included: where each session waits (#3693), before it is terminated.
-    if (task.result?.state === 'fail') await dumpSessions(task.name)
-    // Every test's timeline, passed or not: what its time was spent on.
-    // (process.stderr: vitest keeps a passed test's console output back.)
-    else process.stderr.write(`phases of "${task.name}" (ms): ${phases.map((p) => `${p.at} ${p.what}`).join('; ')}; end ${Math.round(performance.now() - startedAt)}\n`)
-    // This test's sessions end with it: an open one would go on asking for a home on the shared
-    // `agent-tools`, where the next test's replicas answer (its own queues are named apart, that
-    // one cannot be: the workflow names it).
-    for (const { id } of await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`) {
-      await env.client.workflow
-        .getHandle(sessionWorkflowId(id))
-        .terminate('the test ended')
-        .catch((err: unknown) => {
-          if (!(err instanceof WorkflowNotFoundError)) throw err
-        })
+    const failed = task.result?.state === 'fail'
+    if (!failed) {
+      // Every test's timeline, passed or not: what its time was spent on.
+      // (process.stderr: vitest keeps a passed test's console output back.)
+      process.stderr.write(`phases of "${task.name}" (ms): ${phases.map((p) => `${p.at} ${p.what}`).join('; ')}; end ${Math.round(performance.now() - startedAt)}\n`)
     }
-    for (const r of replicas.splice(0)) await stopReplica(r)
-    await fake.close()
-    for (const pool of pools.splice(0)) await pool.close()
-    await drop()
-  })
+    // A test that failed, its timeout included: where each session waits (#3693), before it is
+    // terminated; a dump that throws never skips the cleanup.
+    await dumpThenCleanUp(failed ? () => dumpSessions(task.name) : undefined, async () => {
+      // This test's sessions end with it: an open one would go on asking for a home on the shared
+      // `agent-tools`, where the next test's replicas answer (its own queues are named apart, that
+      // one cannot be: the workflow names it).
+      for (const { id } of await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`) {
+        await env.client.workflow
+          .getHandle(sessionWorkflowId(id))
+          .terminate('the test ended')
+          .catch((err: unknown) => {
+            if (!(err instanceof WorkflowNotFoundError)) throw err
+          })
+      }
+      for (const r of replicas.splice(0)) await stopReplica(r)
+      await fake.close()
+      for (const pool of pools.splice(0)) await pool.close()
+      await drop()
+    })
+  }, 60_000)
 
   /** Every session of this test's schema: its workflow (dumpWorkflow), its row, and the test's own view (the replicas' counters, each turn's `done`). */
   async function dumpSessions(name: string): Promise<void> {
@@ -231,8 +241,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     for (const row of await db.sql<Record<string, unknown>[]>`
       SELECT id, status, durable_turn_id, turn_attempt, turn_mark, cost_usd, turns FROM ai_sessions ORDER BY created_at`) {
       lines.push(`row ${JSON.stringify(row)}`)
-      lines.push(await dumpWorkflow(env.client, sessionWorkflowId(String(row.id)), 60))
-      const events = await replicas[0]?.m.events.read(String(row.id), 0, 10_000)
+      lines.push(await dumpWorkflow(env.client, sessionWorkflowId(String(row.id))))
+      const events = await everyReplica[0]?.m.events.read(String(row.id), 0, 10_000)
       if (events) lines.push(`session events: ${events.map((e) => e.event.type).join(', ')}`)
     }
     console.error(lines.join('\n'))
@@ -290,6 +300,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       reserved?: string[]
       /** In place of the listing of live session hosts acquire_worker reads (the real one, cut to this test's replicas). */
       liveHosts?: () => Promise<ReadonlySet<string>>
+      /** What its TurnHost writes through, in place of its pool (`latchedCostWrites`). */
+      turnHostSql?: (sql: Sql) => Sql
     } = {},
   ): Promise<Replica> {
     const paths = await tempPaths()
@@ -327,7 +339,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     r.m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: r.m.events, sessionHostQueue: hostQueue })
     r.turnHost = new TurnHost({
       core: r.m.turnCore,
-      sql: pool.sql,
+      sql: options.turnHostSql ? options.turnHostSql(pool.sql) : pool.sql,
       images: new SessionBlobs(pool.sql),
       hostQueue,
       ...(options.fenceMs ? { fenceMs: options.fenceMs } : {}),
@@ -414,6 +426,27 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const limits = { graceMs: r.drainMs, abortWaitMs: 1_000 }
     const hosted = r.turnHost.stop(limits)
     await Promise.all([r.tools.stop(), r.hosts.stop(), r.m.stopTurns({ ...limits, others: hosted })])
+  }
+
+  /**
+   * `sql`, with every spend write of the session row (`cost_usd = cost_usd + …`: TurnHost's
+   * running spend and its end) held until `gate` opens; `count.held` and `count.landed` say how
+   * many were asked for and how many have committed, `count.values` each one's parameters.
+   */
+  function latchedCostWrites(sql: Sql, gate: Promise<void>, count: { held: number; landed: number; values: unknown[][] }): Sql {
+    return new Proxy(sql, {
+      apply(target, self, args: unknown[]) {
+        const strings = args[0]
+        if (!Array.isArray(strings) || !strings.join('').includes('SET cost_usd = cost_usd +')) return Reflect.apply(target, self, args)
+        count.held++
+        count.values.push(args.slice(1))
+        return gate.then(async () => {
+          const rows = await (Reflect.apply(target, self, args) as Promise<unknown>)
+          count.landed++
+          return rows
+        })
+      },
+    })
   }
 
   /** The session's spend and turns as the row records them. */
@@ -785,6 +818,48 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
   })
 
+  it('a replica restarted in place: the cut placement`s spend, landing only after the restart wrote its own, still counts once (#3695)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    // Every spend write of the first placement waits until the restart's turn has ended. (So its
+    // end, which follows its writes, never fails ShuttingDown within the stop: its worker gives
+    // the activity up, and the turn is lost to its heartbeat instead, as a replica that died.)
+    const writes = latch()
+    const count = { held: 0, landed: 0, values: [] as unknown[][] }
+    const a = await replica('a', { turnHostSql: (sql) => latchedCostWrites(sql, writes.promise, count) })
+    const { id, turn } = await startOn(a, 'outlast the restart')
+    await pollUntil(() => slowCalls, 1)
+    // Its request has been flushed (message_stop), and is held.
+    await pollUntil(() => count.held > 0, true)
+    replicas.splice(replicas.indexOf(a), 1)
+    await stopReplica(a)
+    const again = await replica('a')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(again.acquired).toBe(1)
+    // The restart claimed the row, read its spend and wrote its own while none of A's had landed.
+    expect(count.landed).toBe(0)
+    const before = await recorded(id)
+    writes.release()
+    // A's two writes: its running spend (its one request, at message_stop), then its end, which
+    // waits for the first (Spend.settled) and so is asked for only now.
+    await pollUntil(() => count.landed, 2)
+    expect(count.held).toBe(2)
+    hold.release()
+    const row = await recorded(id)
+    // One request on A, one on the restart: each once, whichever landed first. Increments, so
+    // no write is lost to another's order.
+    expect({ before: before.costUsd, after: row.costUsd }).toEqual({ before: expect.closeTo(REPLY_COST_USD, 12), after: expect.closeTo(2 * REPLY_COST_USD, 12) })
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
+    // `turns` as classic reckons each placement's end (turnCore.ts tallyTurn): the restart's
+    // result, its one request; then A's, a stopped turn with a result, whose `num_turns` it adds.
+    // (Its end's parameters: the cost, the turns and the unpriced increments.)
+    const aTurns = Number(count.values[1]![1])
+    expect(before.turns).toBe(1)
+    expect(aTurns).toBeGreaterThan(0)
+    expect(row.turns).toBe(before.turns + aTurns)
+  })
+
   it('a lone replica whose heartbeat stalled takes its own turn back, its stalled placement cut first', async () => {
     const hold = latch()
     slowGate = hold.promise
@@ -878,8 +953,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(a.referred).toBe(1)
     expect(a.spawned).toBe(0)
     // The placement moves on: the last asks with no exclusion, and A takes it once the other
-    // session's hold lapses (RESERVATION_HOLD_MS, 30 s, well inside the acquire's 60 s): a turn
-    // that failed unplaced would be a hold that never lapses.
+    // session's hold lapses (RESERVATION_HOLD_MS, 30 s, inside the acquire's 60 s; measured:
+    // refusals until 26 s, acquired at 37 s, so about 23 s to spare, on wall-clock timers): a
+    // turn that failed unplaced would be a hold that never lapses.
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect({ acquired: a.acquired, spawned: a.spawned }).toEqual({ acquired: 1, spawned: 1 })
     expect(await said(a, id, 'could not be placed')).toBe(false)
