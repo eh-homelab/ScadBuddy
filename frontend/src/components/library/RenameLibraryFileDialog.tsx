@@ -2,10 +2,19 @@ import { useEffect, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { ApiError } from '../../api/client'
 import type { LibraryEntry } from '../../api/types'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
 import { splitExtension } from '../../lib/libraryTransfer'
 import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 interface Props {
   file: LibraryEntry | null
@@ -48,56 +57,52 @@ export function RenameLibraryFileDialog({ file, onClose, onConfirm }: Props) {
   }
 
   return (
-    <Dialog
-      open={file !== null}
-      title={file ? `Rename ${file.filename}` : 'Rename'}
-      onClose={close}
-      footer={
-        <>
-          <Button variant="ghost" onClick={close} disabled={busy}>
+    <Dialog open={file !== null} onOpenChange={(open) => !open && close()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="break-all leading-snug">{file ? `Rename ${file.filename}` : 'Rename'}</DialogTitle>
+          <DialogDescription>It keeps its id, so its print history and remembered choices stay with it.</DialogDescription>
+        </DialogHeader>
+        <form
+          id="library-rename-form"
+          className="grid gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void confirm()
+          }}
+        >
+          <Label htmlFor="library-rename-input">New name</Label>
+          <span className="flex items-center gap-2">
+            <Input
+              id="library-rename-input"
+              autoFocus
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              maxLength={255 - extension.length}
+            />
+            {extension && <span className="shrink-0 text-sm text-muted-foreground">{extension}</span>}
+          </span>
+        </form>
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={close} disabled={busy}>
             Cancel
           </Button>
           <Button
-            variant="primary"
+            type="submit"
+            form="library-rename-form"
             data-testid="library-rename-confirm"
-            onClick={() => void confirm()}
             disabled={busy || !usable}
             {...USER_ONLY}
           >
             {busy ? <Spinner /> : 'Rename'}
           </Button>
-        </>
-      }
-    >
-      <form
-        onSubmit={(event) => {
-          event.preventDefault()
-          void confirm()
-        }}
-      >
-        <label className="block text-[13px] text-ink">
-          New name
-          <span className="mt-1 flex items-center gap-1">
-            <input
-              autoFocus
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-              aria-label="New name"
-              maxLength={255 - extension.length}
-              className="h-8 min-w-0 flex-1 rounded-[6px] border border-line bg-bg px-2 py-1 text-[13px] text-ink"
-            />
-            {extension && <span className="shrink-0 text-muted">{extension}</span>}
-          </span>
-        </label>
-      </form>
-      <p className="mt-2 text-[12px] text-faint">
-        It keeps its id, so its print history and remembered choices stay with it.
-      </p>
-      {error && (
-        <p role="alert" className="mt-3 text-[13px] text-warn">
-          {error}
-        </p>
-      )}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

@@ -215,12 +215,12 @@ describe('MediaManager (#279)', () => {
     const { user } = await render()
 
     await user.click(within(item(0)).getByRole('button', { name: 'Delete' }))
-    await user.click(within(item(0)).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
     expect(shownIds()).toEqual(GALLERY)
 
     await user.click(within(item(0)).getByRole('button', { name: 'Delete' }))
-    expect(within(item(0)).getByText(/Delete this image\?/)).toBeInTheDocument()
-    await user.click(within(item(0)).getByRole('button', { name: 'Yes, delete' }))
+    const confirm = screen.getByRole('alertdialog', { name: 'Delete this image?' })
+    await user.click(within(confirm).getByRole('button', { name: 'Yes, delete' }))
 
     await waitFor(() => expect(shownIds()).toEqual(GALLERY.slice(1)))
     expect(await serverIds()).toEqual(GALLERY.slice(1))
@@ -295,7 +295,7 @@ describe('MediaManager (#279)', () => {
     await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb', 'aaaaaaaaaaaa']))
 
     await user.click(within(item(2)).getByRole('button', { name: 'Delete' }))
-    await user.click(within(item(2)).getByRole('button', { name: 'Yes, delete' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Yes, delete' }))
     await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb']))
     expect(await serverIds(BUILTIN_SLUG)).toEqual(['front', 'bbbbbbbbbbbb'])
   })
@@ -328,7 +328,7 @@ describe('MediaManager (#279)', () => {
 
       await user.click(within(item(0)).getByRole('button', { name: 'Delete' }))
 
-      expect(within(item(0)).getByText(/Delete this image\?/)).toBeInTheDocument()
+      expect(screen.getByRole('alertdialog', { name: 'Delete this image?' })).toBeInTheDocument()
     })
   })
 
