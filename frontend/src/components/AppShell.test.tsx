@@ -105,9 +105,7 @@ describe('the shell’s sidebar (#3653)', () => {
     </Routes>
   )
   const sidebarState = () => document.querySelector('[data-slot="sidebar"]')?.getAttribute('data-state')
-  const forget = () => {
-    document.cookie = 'sidebar_state=; max-age=0; path=/'
-  }
+  const forget = () => window.localStorage.removeItem('scadbuddy.sidebar.open')
 
   it('marks the page’s own link, and folds to its icons and back', async () => {
     forget()
@@ -125,6 +123,17 @@ describe('the shell’s sidebar (#3653)', () => {
     expect(within(nav).getByRole('link', { name: 'Settings' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Toggle navigation' }))
     expect(sidebarState()).toBe(before)
+    // Remembered in this browser, not in a cookie that every request would carry.
+    expect(window.localStorage.getItem('scadbuddy.sidebar.open')).toBe(String(before === 'expanded'))
+    expect(document.cookie).not.toContain('sidebar_state')
+  })
+
+  it('leaves Ctrl+B to the browser and to whatever has the focus', async () => {
+    forget()
+    const { user } = renderPage(shell(false))
+    const before = sidebarState()
+    await user.keyboard('{Control>}b{/Control}')
+    expect(sidebarState()).toBe(before)
   })
 
   it('starts as icons in Bambuddy’s frame, beside its own navigation', () => {
@@ -135,7 +144,7 @@ describe('the shell’s sidebar (#3653)', () => {
   })
 
   it('starts as the user left it', () => {
-    document.cookie = 'sidebar_state=true; path=/'
+    window.localStorage.setItem('scadbuddy.sidebar.open', 'true')
     onTestFinished(forget)
     renderPage(shell(true))
     expect(sidebarState()).toBe('expanded')

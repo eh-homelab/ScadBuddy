@@ -105,6 +105,13 @@ const PANEL_OVERLAYS_QUERY = '(max-width: 767.98px)'
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   const location = useLocation()
+  // #3653 — read once; kept per browser in localStorage, which a cookie inside Bambuddy's
+  // cross-origin frame would not be, and which no API request carries.
+  const [sidebarOpen, setSidebarOpen] = useState(() => sidebarOpenAtStart(embedded))
+  const changeSidebar = useCallback((value: boolean) => {
+    setSidebarOpen(value)
+    rememberSidebar(value)
+  }, [])
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
@@ -263,7 +270,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       <TooltipProvider>
         {/* #3653 — shadcn's sidebar: beside the page from `md` up, collapsing to its icons;
             below `md` a sheet the header's trigger opens. */}
-        <SidebarProvider defaultOpen={sidebarOpenAtStart(embedded)} className="h-full min-h-0 bg-background text-foreground">
+        <SidebarProvider open={sidebarOpen} onOpenChange={changeSidebar} className="h-full min-h-0 bg-background text-foreground">
           {/* #2454 — past the logo and the whole nav to the page, as the first Tab stop.
               Kept when embedded in Bambuddy's frame too: a keyboard user still tabs through
               the nav and the assistant's opener first. */}
@@ -424,15 +431,30 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   )
 }
 
+const SIDEBAR_KEY = 'scadbuddy.sidebar.open'
+
 /**
- * Whether the sidebar starts expanded: as the user last left it (shadcn's sidebar keeps
- * that in its `sidebar_state` cookie), else expanded on a wide window. Inside Bambuddy's
- * frame it starts as icons, beside Bambuddy's own navigation.
+ * Whether the sidebar starts expanded: as the user last left it in this browser, else
+ * expanded on a wide window. Inside Bambuddy's frame it starts as icons, beside
+ * Bambuddy's own navigation. Storage that throws (blocked site data) remembers nothing.
  */
 function sidebarOpenAtStart(embedded: boolean): boolean {
-  const saved = /(?:^|;\s*)sidebar_state=(true|false)/.exec(document.cookie)?.[1]
-  if (saved) return saved === 'true'
+  let saved: string | null = null
+  try {
+    saved = window.localStorage.getItem(SIDEBAR_KEY)
+  } catch {
+    // Nothing remembered.
+  }
+  if (saved === 'true' || saved === 'false') return saved === 'true'
   return !embedded && window.innerWidth >= WIDE_WINDOW
+}
+
+function rememberSidebar(open: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_KEY, String(open))
+  } catch {
+    // Nothing is remembered; the sidebar still works for this page.
+  }
 }
 
 /** From here up the sidebar starts expanded; a page keeps 1024 px beside it. */
