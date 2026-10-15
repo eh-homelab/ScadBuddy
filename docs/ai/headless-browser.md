@@ -71,7 +71,12 @@ Rules are one per line: a host (`makerworld.com`, https on its default port only
 allow list), `*.example.com` (its subdomains, never itself), an exact origin
 (`http://printer.lan:8080`), or an address range (`10.0.0.0/8`, for IP-literal URLs). A
 host or wildcard on the deny list matches every scheme and port. Hosts match whole
-labels, so `makerworld.com` never lets `makerworld.com.evil.example` through. The
+labels, so `makerworld.com` never lets `makerworld.com.evil.example` through. A URL is
+parsed once, with the WHATWG parser, and judged only when it is already written as that
+parser (and the browser) writes it: whitespace, control characters, backslashes, user
+names, upper-case or percent-encoded hosts, numeric addresses and other schemes are
+refused, with the form to send instead, so the guard and the browser never read one URL
+two ways. The
 defaults allow a few model sites and references (MakerWorld, Printables, Thingiverse,
 GitHub, OpenSCAD, the OpenSCAD wikibook) and deny loopback, link-local and cloud
 metadata addresses, and `*.internal`, `*.svc` and `*.cluster.local` names. A LAN address
