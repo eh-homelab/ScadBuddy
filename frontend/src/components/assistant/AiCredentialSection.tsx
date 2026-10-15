@@ -651,7 +651,8 @@ export function AiCredentialSection() {
           >
             {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
               <div key={option} className="flex items-center gap-1.5">
-                <RadioGroupItem id={`ai-credential-kind-${option}`} value={option} />
+                {/* 24 px each way: Settings' tap-target size (#1035, settings-tap-targets.spec.ts). */}
+                <RadioGroupItem id={`ai-credential-kind-${option}`} value={option} className="size-6" />
                 <Label htmlFor={`ai-credential-kind-${option}`} className="text-[13px] font-normal">
                   {KIND_OPTION[option]}
                 </Label>
