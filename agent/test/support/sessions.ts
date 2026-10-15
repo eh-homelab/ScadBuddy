@@ -7,6 +7,7 @@ import { userMessage } from '../../src/harness/inbox.js'
 import type { HarnessRun } from '../../src/harness/run.js'
 import { SessionManager, type SessionManagerDeps } from '../../src/sessions/manager.js'
 import type { Owner } from '../../src/sessions/protocol.js'
+import { testPayloadKeys } from './payloadKeys.js'
 
 export const browser: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const agentA: Owner = { kind: 'bearer', id: 'token:a', label: 'Agent A' }
@@ -204,6 +205,7 @@ export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerD
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
     pollMs: 50,
+    payloadKeys: testPayloadKeys(deps.sql),
     ...deps,
   })
 }

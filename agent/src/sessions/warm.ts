@@ -16,6 +16,7 @@ import type { Credential } from '../credentials.js'
 import { carries } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
+import type { PostgresSessionStore } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -81,6 +82,8 @@ export type WarmTurn = { entry: WarmEntry; outcome: WarmOutcome; reason?: Recycl
 
 export type WarmSessionsDeps = {
   sql: Sql
+  /** The transcript store: its last `cost-state` is the baseline a resume restores. */
+  store: Pick<PostgresSessionStore, 'lastOfType'>
   /** `warm_max_per_replica` (D3): past it the least recently used idle entry goes. */
   maxEntries: number
   /** `warm_idle_seconds`, in ms: an entry idle this long goes. */
@@ -468,16 +471,14 @@ export class WarmSessions {
   private async spawn(sessionId: string, turn: AssembledTurn, credential: Credential, remainingUsd: number, print: string): Promise<WarmEntry> {
     // The tail the process resumes from, whether there is a transcript to
     // resume at all, and the cost a resume restores (its last `cost-state`).
-    const [row] = await this.deps.sql<{ tail: string | null; resume: boolean; cost_state: string | null }[]>`
+    const [row] = await this.deps.sql<{ tail: string | null; resume: boolean }[]>`
       SELECT
         (SELECT uuid FROM ai_session_entries
           WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL
           ORDER BY id DESC LIMIT 1) AS tail,
-        EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume,
-        (SELECT entry FROM ai_session_entries
-          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NULL AND entry LIKE '%"cost-state"%'
-          ORDER BY id DESC LIMIT 1) AS cost_state`
-    const carriedUsd = row?.resume ? costStateUsd(row.cost_state, this.log) : 0
+        EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume`
+    const costState = row?.resume ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
+    const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const mirror = turn.run.sessionStore
       ? new MirroredTranscript(turn.run.sessionStore, row?.tail ?? null, () => this.tail(sessionId))
       : undefined

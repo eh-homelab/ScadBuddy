@@ -3,7 +3,9 @@ import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
+import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // One session's turns alternating between two replicas, each with a warm
@@ -80,9 +82,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the budget across alternating replicas${TES
       // The transcript's cost-states are each recycled process's own total, which is
       // stale against the row; fine, since the baseline warm.ts reads (`costStateUsd`)
       // is the same entry the CLI restores from, and a turn's cost is the difference.
-      const states = await db.sql<{ entry: string }[]>`
-        SELECT entry FROM ai_session_entries WHERE session_id = ${id} AND entry LIKE '%cost-state%' ORDER BY id`
-      expect(states.map((r) => (JSON.parse(r.entry) as { totalCostUSD: number }).totalCostUSD)).toEqual([0.03, 0.03])
+      const entries = await new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) }).load({ projectKey: '', sessionId: id })
+      expect((entries ?? []).filter((e) => e.type === 'cost-state').map((e) => e.totalCostUSD)).toEqual([0.03, 0.03])
     } finally {
       await A.warm.close()
       await B.warm.close()

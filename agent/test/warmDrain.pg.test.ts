@@ -9,6 +9,7 @@ import { WarmSessions } from '../src/sessions/warm.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { scriptedRunner, tempPaths } from './support/sessions.js'
 import { nextResult } from './support/warm.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 
 // How the cache closes a process (sessions/warm.ts `drop`): a live one is let
 // end on its own, so what Claude Code writes as it exits (`last-prompt`,
@@ -29,9 +30,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new PostgresSessionStore(db.sql)
+    store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
-    warm = new WarmSessions({ sql: db.sql, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
+    warm = new WarmSessions({ sql: db.sql, store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
   })
   afterEach(async () => {
     await warm?.close()
@@ -75,8 +76,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
   }
 
   const types = async (id: string) =>
-    (await db.sql<{ entry: string }[]>`SELECT entry FROM ai_session_entries WHERE session_id = ${id} ORDER BY id`).map(
-      (r) => (JSON.parse(r.entry) as { type: string }).type,
+    (await db.sql<{ entry_type: string }[]>`SELECT entry_type FROM ai_session_entries WHERE session_id = ${id} ORDER BY id`).map(
+      (r) => r.entry_type,
     )
 
   /** One turn: acquire, push, read to the result, settle. */

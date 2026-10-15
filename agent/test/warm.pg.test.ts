@@ -200,8 +200,11 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
     // A streaming process writes its `cost-state` as it ends; the resume restores it.
     h.warm.evict(id, 'test')
     await expect
-      .poll(async () => (await db.db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${id} AND entry LIKE '%"cost-state"%'`).length)
+      .poll(async () => (await db.db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${id} AND entry_type = 'cost-state'`).length)
       .toBeGreaterThan(0)
+    const [state] = await db.db.sql<{ sealed: boolean }[]>`
+      SELECT entry IS NULL AND sealed IS NOT NULL AS sealed FROM ai_session_entries WHERE session_id = ${id} AND entry_type = 'cost-state'`
+    expect(state?.sealed).toBe(true)
     const two = await h.turn(id, h.assembled(), 1 - c)
     expect(two.outcome).toBe('miss')
     // The resumed process's total holds the first process's spend too (§2.2).

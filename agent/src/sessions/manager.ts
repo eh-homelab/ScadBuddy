@@ -15,6 +15,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -775,6 +776,8 @@ export type SessionManagerDeps = {
    * these (`resumeApproved`).
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
+  payloadKeys?: PayloadKeys
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
   /**
@@ -1038,7 +1041,7 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql)
+    this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
@@ -1067,6 +1070,7 @@ export class SessionManager {
     this.projection = new PendingProjection(deps.sql)
     this.warm = new WarmSessions({
       sql: deps.sql,
+      store: this.store,
       maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
       idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
