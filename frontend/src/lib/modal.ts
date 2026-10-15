@@ -18,9 +18,9 @@ export function focusables(root: HTMLElement): HTMLElement[] {
   )
 }
 
-/** The topmost open dialog: one opened from inside another comes later in the document. */
+/** The topmost open dialog (or alert dialog, as agent/dom `activeDialog` counts them): one opened from inside another comes later in the document. */
 export function topmostDialog(): HTMLElement | null {
-  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]')
+  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]')
   return dialogs[dialogs.length - 1] ?? null
 }
 

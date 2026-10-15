@@ -107,7 +107,8 @@ function useCompanionReserve(companion: HTMLElement | null): number | null {
  * A modal dialog over the page, or beside the assistant panel when it is open (#798):
  * then it stops short of the panel, is not `aria-modal`, and leaves the panel's focus
  * and Escape alone. `data-modal` keeps it modal to the agent bridge (agent/dom
- * `activeDialog`) either way. Escape closes only the topmost dialog; Tab stays inside;
+ * `activeDialog`) either way. Escape closes only the topmost dialog; Tab stays inside
+ * (Radix's FocusScope `loop`, which a non-modal dialog keeps; it is not `trapped`);
  * on closing, focus goes back to what had it as the dialog opened, unless the dialog's
  * own action put it somewhere else (#351). `placement="right"` is a full-height drawer
  * along the right edge.

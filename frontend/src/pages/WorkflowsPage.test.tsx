@@ -78,6 +78,8 @@ describe('WorkflowsPage', () => {
     await user.click(within(swap()!).getByRole('button', { name: 'Archive' }))
     const dialog = await screen.findByRole('alertdialog', { name: 'Archive swap?' })
     expect(dialog).toHaveTextContent('Runs in progress keep running')
+    // The agent may confirm an archive, as before #3653; a delete stays the user's own.
+    expect(within(dialog).getByRole('button', { name: 'Archive' })).not.toHaveAttribute('data-agent-user-only')
     await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(swap()).toBeNull())
     expect(within(flows).getAllByRole('listitem')).toHaveLength(2)

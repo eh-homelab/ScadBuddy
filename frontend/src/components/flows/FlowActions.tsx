@@ -104,6 +104,7 @@ export function FlowActions({
             title={`Archive ${flow.name}?`}
             action="Archive"
             destructive={false}
+            userOnly={false}
             busy={busy}
             error={error}
             onAction={() => void act(() => api.archiveFlow(flow.name), onChanged)}
