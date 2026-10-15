@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { defineConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { alias } from './aliases'
 
 const backend = process.env.SCADBUDDY_BACKEND_URL ?? 'http://127.0.0.1:8080'
 const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
@@ -42,21 +42,6 @@ const proxy: Record<string, ProxyOptions> = {
   '/api': { target: backend, changeOrigin: true, ws: true },
   '^/telemetry(?:/|$)': { target: backend, changeOrigin: true },
 }
-
-const ui = (file: string) => fileURLToPath(new URL(`./src/components/ui/${file}`, import.meta.url))
-
-/**
- * `@/` is src/, the shadcn/ui import style (components.json, tsconfig.app.json). Except
- * shadcn's button and dialog, which live in shadcn-button.tsx and shadcn-dialog.tsx while
- * the legacy ui/Button and ui/Dialog exist (#3653): on a case-insensitive file system
- * `./ui/Button` would otherwise find button.tsx before Button/index.tsx. When the last
- * legacy import goes, rename them back and drop these two entries (and tsconfig's).
- */
-export const alias = [
-  { find: /^@\/components\/ui\/button$/, replacement: ui('shadcn-button.tsx') },
-  { find: /^@\/components\/ui\/dialog$/, replacement: ui('shadcn-dialog.tsx') },
-  { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) },
-]
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
