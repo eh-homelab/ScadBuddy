@@ -553,8 +553,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
-        // it with the reason (turnToolActivity). It is answered as not outward, with
-        // `refused` saying why, so `write` is never read as the tier it ran at.
+        // it with the reason (turnToolActivity). It is answered as not outward; `refused`
+        // says why, for diagnostics only (the durable workflow reads `tier`, and the
+        // transcript shows the call's own refusal).
         if (verdict && 'deny' in verdict) return { tier: 'write', refused: verdict.deny, ...queue }
         return { tier: tierAfter(server.tierOf(harnessName, input), verdict), ...queue }
       })

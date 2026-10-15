@@ -117,12 +117,16 @@ function BrowserApprovalButtons({
             size="sm"
             data-agent-user-only=""
             disabled={busy}
-            onClick={() => void remember(() => api.approveBrowserOrigin(sessionId, nav.origin), `Saved: ${host} is allowed for this chat.`)}
+            onClick={() => void remember(() => api.approveBrowserOrigin(sessionId, nav.origin), `Saved: ${nav.origin} is allowed for this chat.`)}
           >
             Allow for this chat
           </Button>
         )}
-        <Button size="sm" data-agent-user-only="" disabled={busy} onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${host} is on the allow list (Settings → Assistant).`)}
+        <Button
+          size="sm"
+          data-agent-user-only=""
+          disabled={busy}
+          onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${nav.origin} is on the allow list (Settings → Assistant).`)}
         >
           Always allow {host}
         </Button>

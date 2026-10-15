@@ -69,7 +69,7 @@ describe("a headless-browser navigation's approval card (#982)", () => {
     await userEvent.click(screen.getByRole('button', { name: 'Allow for this chat' }))
     await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
     // Saved before the approval is sent, so the card says so whatever the approval does.
-    expect(screen.getByRole('status')).toHaveTextContent('Saved: cults3d.com is allowed for this chat.')
+    expect(screen.getByRole('status')).toHaveTextContent('Saved: https://cults3d.com is allowed for this chat.')
     const listed = await api.getBrowserOrigins()
     expect(listed.approved).toContainEqual(expect.objectContaining({ session_id: 'session-9', origin: 'https://cults3d.com', scope: 'session' }))
   })
