@@ -347,11 +347,15 @@ lack them (§2.3).
     referral: itself as home, and `elsewhere`, the other live replicas that could take the
     turn (the session host queues whose replica's `agent-tools` worker and own
     `agent-sessions.<hostname>` worker both polled within 70 s: `liveHostQueues`, from
-    DescribeTaskQueue; each worker polls as `<pid>@<hostname>`). The workflow asks each of
-    those first, `acquire_worker` on that replica's own session host queue (5 s to start,
-    one attempt), and the first to reserve a place is home; when none answers, or none was
-    named, the lost home is the home again. The last of the three placements names no
-    exclusion at all. A refusal in place of the referral would need its retry to reach
+    DescribeTaskQueue, in a random order each time; each worker polls as
+    `<pid>@<hostname>`). The workflow asks each of those first, `acquire_worker` on that
+    replica's own session host queue (5 s to start, one attempt), and the first to reserve a
+    place is home. When none answers, the lost home is asked the same way on its own queue,
+    with no exclusion, so it reserves a place as any home does, or refuses `NoCapacity` when
+    full, which costs the cycle. When none was named (no other live replica, or a listing
+    that failed: Temporal did not answer, or the role may not describe a queue), the lost
+    home reserves at once, as a lone replica would. The last of the three placements names
+    no exclusion at all. A refusal in place of the referral would need its retry to reach
     another replica, which the shared queue does not promise (a retry goes to whichever
     poller is next, and that can be the same replica ten times over); and a ban would never
     lift where the lost home is the only one there is: a container restarted in place keeps

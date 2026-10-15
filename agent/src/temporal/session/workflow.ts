@@ -210,17 +210,21 @@ export async function AgentSession(start: SessionStart): Promise<void> {
             hostQueue: string
             elsewhere?: string[]
           }
-          home = acquired.hostQueue
-          // A home the turn was lost on answered, naming the replicas that could take it instead:
-          // the first to reserve a place (acquire_worker on its own queue) is home; else it is.
-          for (const queue of acquired.elsewhere ?? []) {
-            const there = proxyActivities<Activities>({ taskQueue: queue, scheduleToStartTimeout: '5s', startToCloseTimeout: SHORT, retry: { maximumAttempts: 1 } })
-            try {
-              home = ((await there[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId } satisfies AcquireInput)) as { hostQueue: string }).hostQueue
-              break
-            } catch (err) {
-              if (isCancellation(err)) throw err
+          if (!acquired.elsewhere) home = acquired.hostQueue
+          else {
+            // A home the turn was lost on answered, naming the replicas that could take it instead:
+            // the first to reserve a place there (acquire_worker on its own queue) is home.
+            for (const queue of acquired.elsewhere) {
+              try {
+                home = await reserveOn(queue, input.sessionId)
+                break
+              } catch (err) {
+                if (isCancellation(err)) throw err
+              }
             }
+            // None did: the lost home is asked on its own queue, with no exclusion, so it reserves
+            // a place as any home does, or refuses NoCapacity (full), which costs this placement.
+            home ??= await reserveOn(acquired.hostQueue, input.sessionId)
           }
         }
         const onHome = proxyActivities<Activities>({
@@ -244,6 +248,12 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       }
     }
     return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${failureText(last)}` }
+  }
+
+  /** acquire_worker on one replica's own session host queue, with no exclusion: its place there, or its refusal. */
+  async function reserveOn(queue: string, sessionId: string): Promise<string> {
+    const there = proxyActivities<Activities>({ taskQueue: queue, scheduleToStartTimeout: '5s', startToCloseTimeout: SHORT, retry: { maximumAttempts: 1 } })
+    return ((await there[ACQUIRE_WORKER_ACTIVITY]!({ sessionId } satisfies AcquireInput)) as { hostQueue: string }).hostQueue
   }
 
   /** `release_worker` on home (§5.2 "CompleteSession"): best-effort, a home that has gone took its place with it. */

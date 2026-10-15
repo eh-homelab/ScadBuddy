@@ -139,11 +139,30 @@ describe('WarmSessions.reserve and release', () => {
     await expect(acquire([])({ sessionId: 'c', exclude: ['agent-sessions.r'] })).resolves.toEqual(here)
     await expect(acquire(['agent-sessions.r', 'agent-sessions.other'])({ sessionId: 'd', exclude: ['agent-sessions.r', 'agent-sessions.other'] })).resolves.toEqual(here)
     expect(reserved).toEqual(['a', 'b', 'c', 'd'])
-    // Who polls is unknown (Temporal did not answer): the attempt fails and is retried, where another replica may answer.
-    const unknown = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: () => Promise.reject(new Error('describe failed')) })[ACQUIRE_WORKER_ACTIVITY]
-    await expect(unknown({ sessionId: 'e', exclude: ['agent-sessions.r'] })).rejects.toThrow('describe failed')
+    // Who polls is unknown (Temporal did not answer, or the role may not describe a queue): no
+    // list, so this one takes the turn as if it were alone, never failing the attempt.
+    const unknown = acquireActivities({ warm: reserving, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: () => Promise.reject(new Error('describe failed')) })[ACQUIRE_WORKER_ACTIVITY]
+    await expect(unknown({ sessionId: 'e', exclude: ['agent-sessions.r'] })).resolves.toEqual(here)
+    expect(reserved).toEqual(['a', 'b', 'c', 'd', 'e'])
     // Not excluded: nobody is asked who polls.
-    await expect(unknown({ sessionId: 'e' })).resolves.toEqual(here)
+    await expect(unknown({ sessionId: 'f' })).resolves.toEqual(here)
+  })
+
+  it('a referral lists the other replicas in an order of its own each time, so referred turns spread', async () => {
+    const { warm } = cache(8)
+    const live = ['agent-sessions.r', 'agent-sessions.x', 'agent-sessions.y', 'agent-sessions.z']
+    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: () => Promise.resolve(new Set(live)) })[ACQUIRE_WORKER_ACTIVITY]
+    const random = vi.spyOn(Math, 'random')
+    try {
+      // Fisher-Yates with every draw 0: the listing [x, y, z] comes out [y, z, x].
+      random.mockReturnValue(0)
+      await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.r'] })).resolves.toMatchObject({ elsewhere: ['agent-sessions.y', 'agent-sessions.z', 'agent-sessions.x'] })
+      // Every draw just under 1: each item stays where it is.
+      random.mockReturnValue(0.999)
+      await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.r'] })).resolves.toMatchObject({ elsewhere: ['agent-sessions.x', 'agent-sessions.y', 'agent-sessions.z'] })
+    } finally {
+      random.mockRestore()
+    }
   })
 
   it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {

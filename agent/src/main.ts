@@ -599,7 +599,17 @@ const temporalClient = temporal
 // the session host queue for a turn another replica (one it was lost on) refers here.
 const sessionAcquire =
   sessionHosting && temporalClient
-    ? acquireActivities({ warm: sessionHosting.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity(), liveHosts: () => liveHostQueues(temporalClient) })
+    ? acquireActivities({
+        warm: sessionHosting.warm,
+        hostQueue: SESSION_HOST_QUEUE,
+        identity: replicaIdentity(),
+        liveHosts: () =>
+          liveHostQueues(temporalClient).catch((err: unknown) => {
+            // acquire_worker takes the turn here instead (affinity.ts): said, so a role that may not describe queues is seen.
+            console.warn('acquire_worker: could not list the live session hosts:', (err as Error).message)
+            throw err
+          }),
+      })
     : undefined
 
 const temporalWorker =

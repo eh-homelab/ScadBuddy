@@ -22,7 +22,8 @@ import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY, sessionH
 // A replica the turn was lost on (`exclude`) is a preference, not a ban. Asked, it answers a
 // referral: itself as home, and `elsewhere`, the other live replicas that could take the turn
 // (`liveHosts`), which the workflow asks first, each on its own session host queue, where the
-// same activity reserves a place; only when none answers is the lost home the home again. A
+// same activity reserves a place; only when none answers is the lost home asked again, on its
+// own queue and with no exclusion, so it too reserves a place (or refuses NoCapacity). A
 // refusal would do instead only if its retry were sure to reach another replica, and it is
 // not: the shared queue hands a retry to whichever poller is next, which can be the same
 // replica ten times over. A ban would never lift where the lost home is the only one there is:
@@ -51,8 +52,12 @@ export function acquireActivities(deps: AcquireDeps) {
     [ACQUIRE_WORKER_ACTIVITY]: async ({ sessionId, exclude }: AcquireInput): Promise<Acquired> => {
       if (exclude?.includes(deps.hostQueue)) {
         // The turn was lost here already (a stalled heartbeat, a shutdown): the replicas that
-        // could take it instead, asked first; no place is reserved here for a turn that is leaving.
-        const elsewhere = [...(await deps.liveHosts())].filter((queue) => queue !== deps.hostQueue && !exclude.includes(queue))
+        // could take it instead, asked first, in an order of their own each time so referred
+        // turns spread; no place is reserved here for a turn that is leaving. A listing that
+        // fails (Temporal did not answer, or the role may not describe a queue) is no list: a
+        // preference unread, so this replica takes the turn as if it were alone.
+        const live = await deps.liveHosts().catch(() => new Set<string>())
+        const elsewhere = shuffled([...live].filter((queue) => queue !== deps.hostQueue && !exclude.includes(queue)))
         if (elsewhere.length > 0) return { hostQueue: deps.hostQueue, identity: deps.identity, elsewhere }
       }
       if (deps.warm.reserve(sessionId) === 'full') {
@@ -61,6 +66,14 @@ export function acquireActivities(deps: AcquireDeps) {
       return { hostQueue: deps.hostQueue, identity: deps.identity }
     },
   }
+}
+
+function shuffled<T>(items: T[]): T[] {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[items[i], items[j]] = [items[j]!, items[i]!]
+  }
+  return items
 }
 
 /** `release_worker`, for the replica's session host worker only: frees the session's place and process here. */

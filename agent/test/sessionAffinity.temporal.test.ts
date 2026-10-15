@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@temporalio/activity'
 import { defaultPayloadConverter } from '@temporalio/common'
+import { WorkflowNotFoundError } from '@temporalio/client'
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
@@ -85,6 +86,8 @@ const conversation = (r: RecordedRequest) => JSON.stringify(r.body?.messages ?? 
 
 type Replica = {
   name: string
+  /** Its identity, so its queues' names: `<name>-<this test's tag>`, so no other test's turn or acquire reaches it. */
+  identity: string
   m: SessionManager
   /** acquire_worker answers on this replica: places taken, referrals to other replicas (the turn was lost here), NoCapacity refusals. */
   acquired: number
@@ -123,6 +126,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   let slowGates: Map<string, Promise<void>>
   /** What `session_settings` answers each turn (the runtime settings, §5.2). */
   let runtimeSettings: typeof RUNTIME_DEFAULTS
+  /** This test's own, in each replica's identity: its session host and pinned queues are its alone. */
+  let tag: string
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -154,8 +159,20 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     slowGates = new Map()
     runtimeSettings = RUNTIME_DEFAULTS
     script = () => ({ text: 'ok' })
+    tag = randomUUID().slice(0, 8)
   })
   afterEach(async () => {
+    // This test's sessions end with it: an open one would go on asking for a home on the shared
+    // `agent-tools`, where the next test's replicas answer (its own queues are named apart, that
+    // one cannot be: the workflow names it).
+    for (const { id } of await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions`) {
+      await env.client.workflow
+        .getHandle(sessionWorkflowId(id))
+        .terminate('the test ended')
+        .catch((err: unknown) => {
+          if (!(err instanceof WorkflowNotFoundError)) throw err
+        })
+    }
     for (const r of replicas.splice(0)) await stopReplica(r)
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
@@ -194,14 +211,19 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       deaf?: boolean
       /** How often its placements read the row (TurnHost FENCE_MS by default). */
       fenceMs?: number
+      /** Sessions given a place here before its workers start (`warm.reserve`): fresh, so held (RESERVATION_HOLD_MS). */
+      reserved?: string[]
+      /** In place of the listing of live session hosts acquire_worker reads (the real one, cut to this test's replicas). */
+      liveHosts?: () => Promise<ReadonlySet<string>>
     } = {},
   ): Promise<Replica> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
-    const hostQueue = sessionHostQueue(name)
-    const r = { name, acquired: 0, referred: 0, refused: 0, spawned: 0, frozen: false, drainMs: options.drainMs ?? 1_000 } as Replica
+    const identity = `${name}-${tag}`
+    const hostQueue = sessionHostQueue(identity)
+    const r = { name, identity, acquired: 0, referred: 0, refused: 0, spawned: 0, frozen: false, drainMs: options.drainMs ?? 1_000 } as Replica
     r.m = manager({
       sql: pool.sql,
       paths,
@@ -234,16 +256,19 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       hostQueue,
       ...(options.fenceMs ? { fenceMs: options.fenceMs } : {}),
     })
+    for (const id of options.reserved ?? []) expect(r.m.warm.reserve(id)).toBe('reserved')
     const acquire = acquireActivities({
       warm: r.m.warm,
       hostQueue,
-      identity: name,
+      identity,
       // The real listing (the pollers' identities), cut to this test's replicas: the dev server
       // still lists the earlier tests' pollers as fresh for a minute after their workers stopped.
-      liveHosts: async () => {
-        const live = await liveHostQueues(env.client)
-        return new Set([...live].filter((queue) => replicas.some((other) => sessionHostQueue(other.name) === queue)))
-      },
+      liveHosts:
+        options.liveHosts ??
+        (async () => {
+          const live = await liveHostQueues(env.client)
+          return new Set([...live].filter((queue) => replicas.some((other) => sessionHostQueue(other.identity) === queue)))
+        }),
     })[ACQUIRE_WORKER_ACTIVITY]
     /** acquire_worker here, counted: a place taken, a referral to other replicas, or a refusal. */
     const counted = async (input: AcquireInput) => {
@@ -261,7 +286,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       address: env.address,
       namespace: 'default',
       taskQueue: TASK_QUEUE,
-      identity: workerIdentity(name),
+      identity: workerIdentity(identity),
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: counted,
         ...sessionFinishActivities(pool.sql, r.m.events),
@@ -272,7 +297,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     r.hosts = startHostWorkers({
       address: env.address,
       namespace: 'default',
-      identity: name,
+      identity,
       pinned: { pinned_probe: async () => `pinned on ${name}` },
       sessions: {
         activities: {
@@ -707,6 +732,87 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
   })
 
+  it('a lost home asked alone refers the turn to the other live replica, which reserves on its own queue and takes it', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    await pollUntil(() => slowCalls, 1)
+    const b = await replica('b')
+    await pollUntil(async () => (await liveHostQueues(env.client)).has(sessionHostQueue(b.identity)), true)
+    // Only A can answer the shared acquire: B's agent-tools worker stops (its poller stays listed,
+    // fresh, for a minute), and B's session host worker still runs.
+    await b.tools.stop()
+    a.frozen = true
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // A, excluded, referred the turn to B; B, asked on its own queue, reserved a place and ran it.
+    expect({ acquired: a.acquired, referred: a.referred, refused: a.refused }).toEqual({ acquired: 1, referred: 1, refused: 0 })
+    expect({ acquired: b.acquired, refused: b.refused, spawned: b.spawned }).toEqual({ acquired: 1, refused: 0, spawned: 1 })
+    expect(conversation(fake.messageCalls().at(-1)!)).toContain(RESTARTED_PROMPT)
+    expect(await said(b, id, 'carried on')).toBe(true)
+    await pollUntil(() => a.turnHost.active, 0)
+    hold.release()
+  })
+
+  /**
+   * A's turn lost to a restart in place while B is listed live but stopped (its pollers stay
+   * listed, fresh, for a minute after its workers stop): the restarted A, the only replica to
+   * answer the shared acquire, refers the turn to B, whose queue never starts it (5 s), and is
+   * then asked again on its own queue.
+   */
+  async function restartWhileBStopped(again: Parameters<typeof replica>[1]) {
+    slowGate = latch().promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'outlast the restart')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    const b = await replica('b')
+    await pollUntil(async () => (await liveHostQueues(env.client)).has(sessionHostQueue(b.identity)), true)
+    await Promise.all([b.tools.stop(), b.hosts.stop()])
+    replicas.splice(replicas.indexOf(a), 1)
+    await stopReplica(a)
+    return { id, turn, run, a: await replica('a', again), b }
+  }
+
+  it('a lost home every referral failed for reserves its place again: not full, it takes the turn', async () => {
+    const { id, turn, run, a } = await restartWhileBStopped({})
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // Referred to B, which never started it; then asked on its own queue, where it reserved.
+    expect({ acquired: a.acquired, referred: a.referred, refused: a.refused, spawned: a.spawned }).toEqual({ acquired: 1, referred: 1, refused: 0, spawned: 1 })
+    const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+    expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_SCHEDULE_TO_START'])
+    expect(conversation(fake.messageCalls().at(-1)!)).toContain(RESTARTED_PROMPT)
+  })
+
+  it('a lost home every referral failed for reserves its place again: full, it refuses NoCapacity and never goes over its cap', async () => {
+    // The restarted A's one place is another session's, freshly promised (held RESERVATION_HOLD_MS).
+    const { id, turn, a } = await restartWhileBStopped({ maxEntries: 1, reserved: ['someone else'] })
+    await pollUntil(() => a.refused > 0, true, 60_000)
+    expect(a.referred).toBe(1)
+    expect(a.spawned).toBe(0)
+    // The placement moves on: the last asks with no exclusion, and A takes it once the other
+    // session's hold lapses (or, refused past its retries, the turn fails unplaced).
+    const end = (await turn.done) as { subtype?: string }
+    if (end.subtype === 'success') expect({ acquired: a.acquired, spawned: a.spawned }).toEqual({ acquired: 1, spawned: 1 })
+    else expect(await said(a, id, 'could not be placed')).toBe(true)
+  })
+
+  it('a lost home that cannot list the live replicas takes its turn back, as if alone, never failing the acquire', async () => {
+    slowGate = latch().promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { turn } = await startOn(a, 'outlast the restart')
+    await pollUntil(() => slowCalls, 1)
+    replicas.splice(replicas.indexOf(a), 1)
+    await stopReplica(a)
+    // DescribeTaskQueue refused (a role that may not describe a queue).
+    const again = await replica('a', { liveHosts: () => Promise.reject(new Error('PERMISSION_DENIED: describe task queue')) })
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect({ acquired: again.acquired, referred: again.referred, refused: again.refused }).toEqual({ acquired: 1, referred: 0, refused: 0 })
+  })
+
   it('a stale placement of a turn that ended cannot write while the next turn runs under the same attempt id (the fence checks the turn)', async () => {
     const one = latch()
     const two = latch()
@@ -901,7 +1007,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const pinned = await env.client.workflow.execute('pinnedCall', {
       taskQueue: PINNED_TEST_QUEUE,
       workflowId: `pinned-${Date.now()}`,
-      args: [`${TASK_QUEUE}.a`],
+      args: [`${TASK_QUEUE}.${a.identity}`],
     })
     expect(pinned).toBe('pinned on a')
     hold.release()
