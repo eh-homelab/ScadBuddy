@@ -40,9 +40,14 @@ for (const [width, height] of [
     await expect(page.getByRole('table', { name: 'Deployment values' })).toBeAttached()
     await expect(page.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeAttached()
     // Open every fold, a plugin package's files (#1029) included, so what is inside one is
-    // measured too. Each click takes one out of the closed set, so it is always the first.
-    const closed = page.locator('main [data-slot="collapsible-trigger"][aria-expanded="false"]')
-    while ((await closed.count()) > 0) await closed.first().click()
+    // measured too: each in document order, once, so a fold that opens more (nested ones
+    // follow it) is counted again, and one that closes another (a credential's Replace
+    // key, one at a time) does not loop.
+    const folds = page.locator('main [data-slot="collapsible-trigger"]')
+    for (let i = 0; i < (await folds.count()); i++) {
+      const fold = folds.nth(i)
+      if ((await fold.getAttribute('aria-expanded')) === 'false') await fold.click()
+    }
     await expect(page.getByRole('list', { name: 'Files to read in scadbuddy' })).toBeVisible()
     expect(await smallTargets(page)).toEqual([])
   })
