@@ -89,7 +89,7 @@ describe('the session budget in the assistant panel', () => {
     await user.click(within(card).getByRole('button', { name: 'Continue in a new chat' }))
     await waitFor(() => expect(sentOf('session.attach')).toHaveLength(1))
     expect(sentOf('session.attach')[0]?.sessionId).not.toBe('chat-1')
-    expect(await screen.findByTitle('Make it bigger (fork)')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('active-session-title')).toHaveTextContent('Make it bigger (fork)'))
     // The transcript came with it, and a fresh budget.
     expect(screen.getByText('Make it bigger', { selector: 'p' })).toBeInTheDocument()
     expect(screen.getByTestId('session-budget')).toHaveTextContent('$0.00 of $0.02')

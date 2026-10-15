@@ -156,11 +156,11 @@ describe('SessionFiles', () => {
     const user = userEvent.setup()
     render()
     await user.click(await screen.findByRole('button', { name: 'Delete notes.txt' }))
-    const confirm = screen.getByRole('group', { name: 'Delete notes.txt?' })
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })
     await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
     expect(screen.getByText('notes.txt')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Delete notes.txt' }))
-    await user.click(within(screen.getByRole('group', { name: 'Delete notes.txt?' })).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })).getByRole('button', { name: 'Delete file' }))
     expect(await screen.findByText(/No files yet/)).toBeInTheDocument()
   })
 

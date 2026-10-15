@@ -307,7 +307,7 @@ describe('SettingsPage field checks and descriptions (#2347, #2348, #2456)', () 
     await seeded()
     const assistant = document.getElementById('assistant')!
     expect(assistant).toHaveAccessibleName('Assistant')
-    const status = document.getElementById('ai-status-heading')!.closest('section')!
+    const status = document.getElementById('ai-status-heading')!.closest('[role="region"]')!
     expect(status).toHaveAccessibleName('Assistant status')
   })
 })

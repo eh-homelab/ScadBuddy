@@ -40,8 +40,8 @@ afterEach(async () => {
   // which runs after this one: a page left dirty (Settings, useLeaveGuard) takes its
   // history sentinel off with `history.back()` as it unmounts, and jsdom's popstate for
   // it comes a task later. Waited for here, it cannot reach the next test's page as a
-  // Back pressed there (#3671).
-  // Under fake timers jsdom's traversal waits on them too, so there is nothing to wait for.
+  // Back pressed there (#3671). Under fake timers jsdom's traversal waits on them too,
+  // so there is nothing to wait for.
   cleanup()
   if (!vi.isFakeTimers()) await new Promise((resolve) => setTimeout(resolve, 0))
   server.resetHandlers()
@@ -91,8 +91,8 @@ if (!globalThis.IntersectionObserver) {
     FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }
 
-// Radix's Select captures the pointer and scrolls its chosen item into view, and cmdk
-// scrolls its active item: jsdom has neither (#3671).
+// Radix's Select captures the pointer on open and scrolls its options into view (#3653),
+// and cmdk scrolls its active item; jsdom has neither.
 if (!Element.prototype.hasPointerCapture) {
   Element.prototype.hasPointerCapture = () => false
   Element.prototype.setPointerCapture = () => {}

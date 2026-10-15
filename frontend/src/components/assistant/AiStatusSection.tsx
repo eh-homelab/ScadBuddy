@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { recheckAiAvailability, useAiAvailability, type AiState } from '../../agent/chat/availability'
-import { Button } from '../ui/Button'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Spinner } from '../ui/Spinner'
 
 const LABEL: Record<AiState, string> = {
@@ -30,28 +32,33 @@ export function AiStatusSection() {
     }
   }
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="ai-status-heading">
+    <Card role="region" className="mt-4" aria-labelledby="ai-status-heading">
       {/* #2456 — not "Assistant": it sits inside the Assistant section, and two landmarks
           of one name cannot be told apart. */}
-      <h2 id="ai-status-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        Assistant status
-      </h2>
-      <div className="space-y-2 p-4 text-[13px]">
-        <p aria-live="polite" data-testid="ai-status" data-state={state}>
-          <span className={state === 'configured' ? 'text-ok' : state === 'checking' ? 'text-muted' : 'text-warn'}>
+      <CardHeader className="border-b">
+        <h2 id="ai-status-heading" className="font-heading text-sm font-medium">
+          Assistant status
+        </h2>
+      </CardHeader>
+      <CardContent className="space-y-2 text-[13px]">
+        <p aria-live="polite" data-testid="ai-status" data-state={state} className="flex flex-wrap items-center gap-1.5">
+          <Badge
+            variant="outline"
+            className={state === 'configured' ? 'border-ok/50 text-ok' : state === 'checking' ? 'text-muted-foreground' : 'border-warn/50 text-warn'}
+          >
             {LABEL[state]}
-          </span>
-          {ai.reason && <span className="text-muted"> — {ai.reason}</span>}
+          </Badge>
+          {ai.reason && <span className="text-muted-foreground"> — {ai.reason}</span>}
         </p>
-        <p className="text-[12px] text-muted">
+        <p className="text-xs text-muted-foreground">
           The assistant runs in ScadBuddy&rsquo;s agent service, which holds the Claude
           credential; your browser never reads it back.
         </p>
-        <Button onClick={() => void again()} disabled={checking} aria-busy={checking}>
+        <Button variant="outline" onClick={() => void again()} disabled={checking} aria-busy={checking}>
           {checking && <Spinner />}
           Check again
         </Button>
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   )
 }

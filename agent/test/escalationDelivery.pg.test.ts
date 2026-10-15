@@ -256,10 +256,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const id = await park()
     let release!: (err: Error) => void
     const stuck = new Promise<never>((_, reject) => (release = reject))
-    const hanging = new Escalations({ sql: db.sql, durable: () => undefined, send: async () => stuck, claimHoldMs: 200 })
+    let sending!: () => void
+    const claimed = new Promise<void>((resolve) => (sending = resolve))
+    // The hold is long enough for the other replica's check below to run inside it on a
+    // loaded host: at 200 ms it could run after the hold had ended, and take the row.
+    const hanging = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send: async () => {
+        sending()
+        return stuck
+      },
+      claimHoldMs: 1000,
+    })
     // A slow start, not a crash: the tick ends without a failure to report.
     const running = hanging.deliver()
-    // Another replica skips the held row at first, and takes it once the hold ends.
+    // Another replica skips the held row at first, and takes it once the hold ends. The
+    // row is held once the send has started: `deliver` reads before it claims.
+    await claimed
     expect(await escalations.deliver()).toBe(0)
     await vi.waitFor(async () => expect(await escalations.deliver()).toBe(1), { timeout: 5000, interval: 100 })
     expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
