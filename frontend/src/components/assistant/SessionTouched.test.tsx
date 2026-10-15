@@ -337,7 +337,7 @@ describe('SessionTouched', () => {
         HttpResponse.json({ slug: params.slug, version: params.slug === 'bin' ? before : restored }),
       ),
       // gone-back's newest version is a restore of `before`: nothing between them.
-      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '' })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '', files: [] })),
     )
     const reads = vi.spyOn(api, 'getVersionDiff')
     renderPage(<SessionTouched sessionId="sess-back" />)
@@ -358,7 +358,7 @@ describe('SessionTouched', () => {
     ])
     server.use(
       http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'e'.repeat(40) })),
-      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n' })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n', files: [{ status: 'M', path: 'model.scad' }] })),
     )
     renderPage(<SessionTouched sessionId="sess-moved" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
@@ -374,11 +374,62 @@ describe('SessionTouched', () => {
     ])
     server.use(
       http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'c'.repeat(40) })),
-      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n' })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n', files: [{ status: 'M', path: 'model.scad' }] })),
     )
     renderPage(<SessionTouched sessionId="sess-between" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
     expect(await screen.findByRole('dialog')).toHaveTextContent('It was also changed outside this chat')
+  })
+
+  it('does not warn when a later version names its parent by a short id', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-short', [
+      row({ type: 'revision', id: 'a'.repeat(40), after: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+      // `before` is the call's `base`, which may be the short form of the previous version.
+      row({ type: 'revision', id: 'c'.repeat(40), after: 'c'.repeat(40), model: 'bin', before: 'a'.repeat(7), tool: 'apply_patch' }),
+    ])
+    server.use(
+      http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'c'.repeat(40) })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () =>
+        HttpResponse.json({ patch: '-a\n+b\n', files: [{ status: 'M', path: 'model.scad' }] }),
+      ),
+    )
+    renderPage(<SessionTouched sessionId="sess-short" />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
+    expect(await screen.findByRole('dialog')).not.toHaveTextContent('It was also changed outside this chat')
+  })
+
+  it('offers the undo when only a file with no text diff changed, such as a thumbnail', async () => {
+    setSessionResources('sess-binary', [
+      row({ type: 'revision', id: 'a'.repeat(40), after: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'set_thumbnail' }),
+    ])
+    server.use(
+      http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'a'.repeat(40) })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () =>
+        HttpResponse.json({ patch: '', files: [{ status: 'M', path: 'thumbnail.png' }] }),
+      ),
+    )
+    renderPage(<SessionTouched sessionId="sess-binary" />)
+    expect(await screen.findByRole('button', { name: 'Undo changes to bin' })).toBeInTheDocument()
+  })
+
+  it('offers the undo again when the session changes the model after an undo', async () => {
+    const user = userEvent.setup()
+    const first = [
+      row({ type: 'revision', id: versionIds.raised, after: versionIds.raised, model: 'name-keychain', before: versionIds.edited, tool: 'apply_patch' }),
+    ]
+    setSessionResources('sess-again', first)
+    const view = renderPage(<SessionTouched sessionId="sess-again" refreshKey={1} />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Undo changes' }))
+    await screen.findByRole('status')
+
+    setSessionResources('sess-again', [
+      ...first,
+      row({ type: 'revision', id: 'f'.repeat(40), after: 'f'.repeat(40), model: 'name-keychain', before: 'e'.repeat(40), tool: 'apply_patch' }),
+    ])
+    view.rerender(<SessionTouched sessionId="sess-again" refreshKey={2} />)
+    expect(await screen.findByRole('button', { name: 'Undo changes to name-keychain' })).toBeInTheDocument()
   })
 
   it('still offers the undo when the model cannot be read, saying it could not check', async () => {

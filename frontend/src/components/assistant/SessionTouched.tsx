@@ -204,7 +204,7 @@ function undoable(rows: readonly SessionResource[]): Undo[] {
     if (r.type === 'model' && r.id !== null && (r.action !== 'modified' || !first.has(r.id))) skip.add(r.id)
     if (r.type === 'revision' && r.model) {
       if (!first.has(r.model)) first.set(r.model, r.before)
-      else if (r.before !== null && r.before !== last.get(r.model)) interleaved.add(r.model)
+      else if (r.before !== null && !(last.get(r.model) ?? '').startsWith(r.before)) interleaved.add(r.model)
       last.set(r.model, r.after ?? r.id)
     }
   }
@@ -226,7 +226,7 @@ async function undoState(u: Undo): Promise<{ same: boolean; movedOn: boolean }> 
   if (current === null) return { same: false, movedOn: u.interleaved }
   if (current === u.before) return { same: true, movedOn: false }
   const diff = await api.getVersionDiff(u.model, current, u.before)
-  return { same: diff.patch.trim() === '', movedOn: u.interleaved || (u.last !== null && current !== u.last) }
+  return { same: (diff.files ?? []).length === 0, movedOn: u.interleaved || (u.last !== null && !current.startsWith(u.last)) }
 }
 
 /** "Undo changes to <model>": restores the version before the session, after a confirm. */
@@ -356,7 +356,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
       {undo.length > 0 && (
         <ul className="space-y-0.5">
           {undo.map((u) => (
-            <li key={u.model}>
+            <li key={`${u.model}:${u.last ?? ''}`}>
               <UndoModel undo={u} onDone={refresh} />
             </li>
           ))}
