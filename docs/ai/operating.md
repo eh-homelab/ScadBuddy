@@ -953,6 +953,9 @@ unknown name fails the call with the list there is; `isolation: 'worktree'` fail
 the call as `EnterWorktree` does, the workspace being no git repository. Each result is
 journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
 activity after its worker died, and `resumeFromRunId`, answer the calls already made.
+Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
+(interrupts and marks done) the ones an earlier attempt left open and no journal row names,
+since a worker that died never ran its agents' cleanup (#3395).
 The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
 which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.

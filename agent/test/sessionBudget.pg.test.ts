@@ -183,9 +183,12 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
 
   /** Sends `text`, waits until the reply has started streaming, and stops it. */
   async function stopMidReply(id: string, text: string) {
+    // This turn's own delta, not an earlier turn's: the stop must land once the
+    // prompt is in and the reply streaming, as a user's does (sessions/warmTurn.ts).
+    const before = (await m.events.read(id)).at(-1)?.seq ?? 0
     const turn = await m.send(id, browser, text)
     for (let i = 0; i < 200; i++) {
-      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > 4)) break
+      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > before)) break
       await new Promise((r) => setTimeout(r, 10))
     }
     expect(await m.interrupt(id, browser)).toBe(true)
@@ -208,9 +211,11 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
       await expectPanelAccepts(events)
 
-      // The next turn resumes, and its total restores the transcript's, which
-      // never held the cut-off request: 0.4 before + 0.05 now.
-      next = { reply: 'OK', costUsd: 0.45 }
+      // The next turn resumes on a fresh process. The one that died mid-reply
+      // wrote no `cost-state` (Claude Code writes it as it exits; warm.ts
+      // DRAIN_MS), so the resumed total starts from 0: the turn's own 0.05, and
+      // never the cut-off request.
+      next = { reply: 'OK', costUsd: 0.05 }
       const after = await (await m.send(session.id, browser, 'reply OK')).done
       // Its SDK budget is what is left after the cut-off turn.
       expect(runs.at(-1)!.maxBudgetUsd).toBeCloseTo(1 - 0.4 - CUT, 10)

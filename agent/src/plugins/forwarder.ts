@@ -8,7 +8,7 @@ import {
   type ServerResponse,
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
+import { pinnedFetch, pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrustedContent, wrapUntrustedText } from '../safety/untrusted.js'
 import {
   type CheckedPlugin,
@@ -69,13 +69,45 @@ import {
 export type ForwardOptions = {
   /** Filter `tools/list` results (disabled and colliding tools). Off for the connection test, which shows them all. */
   filterTools?: boolean
+  /**
+   * Record the route's upstream sessions in the ledger. Only for a registration whose sessions will be
+   * ended: by `terminate` (a warm process's), or by its client's own DELETE through the route (a kept
+   * client's). One that only ever `release`s would leave a row nothing removes.
+   */
+  record?: boolean
+  /** The id its sessions are recorded under: the plugin's name (a registry plugin's) unless given (pluginSessions.ts `packageLedgerId`). */
+  ledgerId?: string
 }
 
-export type Registration = { url: string; release(): void }
+export type Registration = {
+  url: string
+  release(): void
+  /**
+   * Ends the upstream MCP sessions this route saw (Claude Code sends no `DELETE` when its process
+   * ends, spec 2026-10-13 §5.3 E7): each gets one, with the plugin's header, at the checked
+   * address, within SESSION_DELETE_MS and with its errors logged, then the route is released.
+   */
+  terminate(): Promise<void>
+}
+
+/** Where upstream MCP sessions are recorded while they live (plugins/pluginSessions.ts); its errors are the forwarder's to log. */
+export type SessionLedger = {
+  seen(plugin: string, id: string): Promise<void>
+  ended(plugin: string, id: string): Promise<void>
+}
+
+/** How long one session `DELETE` may take. */
+export const SESSION_DELETE_MS = 5_000
 
 type Route = {
   plugin: RemotePlugin
   address: string
+  /** The upstream `mcp-session-id`s this route's responses carried, until a `DELETE` of one answered. */
+  sessions: Set<string>
+  /** Whether its sessions are in the ledger (`ForwardOptions.record`). */
+  record: boolean
+  /** The id they are recorded under (`ForwardOptions.ledgerId`). */
+  ledgerId: string
   filterTools: boolean
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
@@ -275,25 +307,62 @@ export function rewriteSseEvent(block: string, ids: Rewrites, route: Pick<Route,
   return [...lines.filter((l) => !l.startsWith('data:')), `data: ${data_}`].join('\n')
 }
 
+/**
+ * One `DELETE` of an upstream MCP session at the address the egress check passed, with the
+ * plugin's header, within SESSION_DELETE_MS. True when the server no longer holds the session
+ * (2xx, 404, or 405 for a server with no explicit end); a failure is logged and is false.
+ */
+export async function deleteUpstreamSession(
+  plugin: Pick<RemotePlugin, 'name' | 'url' | 'header'>,
+  address: string,
+  id: string,
+  log: (message: string) => void = () => {},
+): Promise<boolean> {
+  try {
+    const { status } = await pinnedFetch(plugin.url, address, {
+      method: 'DELETE',
+      headers: { 'mcp-session-id': id, ...(plugin.header ? { [plugin.header.name]: plugin.header.value } : {}) },
+      signal: AbortSignal.timeout(SESSION_DELETE_MS),
+    })
+    return status < 300 || status === 404 || status === 405
+  } catch (err) {
+    const secrets = plugin.header ? headerSecretVariants(plugin.header.value) : []
+    let message = err instanceof Error ? err.message : String(err)
+    for (const s of secrets) message = message.split(s).join('[redacted]')
+    log(`plugins: ending ${plugin.name}'s MCP session failed: ${message}`)
+    return false
+  }
+}
+
 /** The JSON-RPC error a call gets when its reply was withheld. */
 function withheldError(id: unknown, why: string): string {
   return JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32603, message: `ScadBuddy: ${why}` } })
 }
 
+export type ForwarderOptions = {
+  /** Records each upstream session a route sees, and forgets it once a `DELETE` ended it. */
+  sessions?: SessionLedger
+  log?: (message: string) => void
+}
+
 export class PluginForwarder {
   private readonly server: Server
   private readonly routes = new Map<string, Route>()
+  private readonly ledger: SessionLedger | undefined
+  private readonly log: (message: string) => void
   private port = 0
 
-  private constructor() {
+  private constructor(options: ForwarderOptions) {
+    this.ledger = options.sessions
+    this.log = options.log ?? (() => {})
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((err: unknown) => fail(res, 502, `forwarder error: ${(err as Error).message}`))
     })
   }
 
   /** Listens on 127.0.0.1, on a port the OS picks. */
-  static async start(): Promise<PluginForwarder> {
-    const forwarder = new PluginForwarder()
+  static async start(options: ForwarderOptions = {}): Promise<PluginForwarder> {
+    const forwarder = new PluginForwarder(options)
     await new Promise<void>((resolve, reject) => {
       forwarder.server.once('error', reject)
       forwarder.server.listen(0, '127.0.0.1', () => resolve())
@@ -305,19 +374,50 @@ export class PluginForwarder {
   /** Registers a plugin whose endpoint passed the egress check at `address`. */
   register(plugin: RemotePlugin, address: string, options: ForwardOptions = {}): Registration {
     const token = randomBytes(18).toString('base64url')
-    this.routes.set(token, {
+    const route: Route = {
       plugin,
       address,
+      sessions: new Set(),
+      record: options.record ?? false,
+      ledgerId: options.ledgerId ?? plugin.name,
       filterTools: options.filterTools ?? true,
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
-    })
+    }
+    this.routes.set(token, route)
     return {
       url: `http://127.0.0.1:${this.port}/p/${token}`,
       release: () => {
         this.routes.delete(token)
       },
+      terminate: async () => {
+        const ids = [...route.sessions]
+        route.sessions.clear()
+        try {
+          await Promise.all(
+            ids.map(async (id) => {
+              await deleteUpstreamSession(route.plugin, route.address, id, this.log)
+              this.forget(route, id)
+            }),
+          )
+        } finally {
+          this.routes.delete(token)
+        }
+      },
     }
+  }
+
+  private note(route: Route, id: string): void {
+    if (route.sessions.has(id)) return
+    route.sessions.add(id)
+    if (!route.record) return
+    this.ledger?.seen(route.ledgerId, id).catch((err: unknown) => this.log(`plugins: recording an MCP session failed: ${String(err)}`))
+  }
+
+  private forget(route: Route, id: string): void {
+    route.sessions.delete(id)
+    if (!route.record) return
+    this.ledger?.ended(route.ledgerId, id).catch((err: unknown) => this.log(`plugins: forgetting an MCP session failed: ${String(err)}`))
   }
 
   get size(): number {
@@ -395,6 +495,11 @@ export class PluginForwarder {
     })
     upstream.on('response', (up) => {
       const status = up.statusCode ?? 502
+      const sessionId = up.headers['mcp-session-id']
+      if (method === 'DELETE') {
+        const ended = req.headers['mcp-session-id']
+        if (typeof ended === 'string' && (status < 300 || status === 404 || status === 405)) this.forget(route, ended)
+      } else if (typeof sessionId === 'string' && status < 300) this.note(route, sessionId)
       if (status >= 300 && status < 400) {
         up.resume()
         return fail(res, 502, `plugin endpoint answered HTTP ${status} (a redirect); redirects are not followed`)
@@ -541,6 +646,8 @@ export type PluginsForRun = {
    * checked, tool settings), so a holder knows when its route no longer matches the plugin.
    */
   keep?(name: string): { fingerprint: string; register(): Registration } | undefined
+  /** `Registration.terminate` of each plugin's route: ends their upstream MCP sessions, then releases them. */
+  terminate(): Promise<void>
   release(): void
 }
 
@@ -553,10 +660,10 @@ export function pluginFingerprint({ plugin, address }: CheckedPlugin): string {
 }
 
 /** Registers the loaded plugins for one run; `release()` when the run ends. */
-export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder): PluginsForRun {
+export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder, options: Pick<ForwardOptions, 'record'> = {}): PluginsForRun {
   const registrations = loaded.plugins.map(({ plugin, address }) => ({
     plugin,
-    registration: forwarder.register(plugin, address),
+    registration: forwarder.register(plugin, address, options),
   }))
   const hindsight = loaded.plugins.find(({ plugin }) => plugin.name === HINDSIGHT_PLUGIN)
   return {
@@ -573,8 +680,11 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     keep: (name) => {
       const checked = loaded.plugins.find(({ plugin }) => plugin.name === name)
       return checked
-        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address) }
+        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address, { record: true }) }
         : undefined
+    },
+    terminate: async () => {
+      await Promise.all(registrations.map(({ registration }) => registration.terminate()))
     },
     release: () => {
       for (const { registration } of registrations) registration.release()
