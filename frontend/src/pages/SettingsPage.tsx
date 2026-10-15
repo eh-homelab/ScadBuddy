@@ -18,6 +18,7 @@ import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { SessionRuntimeSetting } from '../components/SessionRuntimeSetting'
 import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
 import { DurableSubagentsSetting } from '../components/DurableSubagentsSetting'
@@ -1316,6 +1317,8 @@ function SettingsSections() {
               <ModelSetting />
               {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
               <SessionLimitsSetting />
+              {/* Saves on its own; the warm cache applies it live, hidden without the agent's database. */}
+              <SessionRuntimeSetting />
               {/* Saves on its own; read live by the agent, hidden without its database. */}
               <RenderLimitsSetting />
               {/* Saves on its own; hidden without the agent's database, like the limits above. */}

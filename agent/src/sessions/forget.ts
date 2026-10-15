@@ -3,6 +3,7 @@ import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
 import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
+import { notifyWarmEvict } from './warmEvict.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
@@ -105,6 +106,8 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     const entries = await deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
     const sessions = await deps.sql`DELETE FROM ai_sessions WHERE id = ${id}`
     rows = entries.count + sessions.count
+    // A classic session's warm process, on whichever replica holds it (spec 2026-10-13 §5.3, warmEvict.ts).
+    await notifyWarmEvict(deps.sql, id)
   }
   return { key: keys.count > 0, workflow, rows }
 }

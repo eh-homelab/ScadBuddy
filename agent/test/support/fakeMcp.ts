@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -19,6 +20,10 @@ export type FakeMcp = {
   url: string
   requests: { method: string; path: string; headers: IncomingHttpHeaders }[]
   calls: string[]
+  /** Each session `DELETE` the server received (with `sessions`), by the session id it named. */
+  deletes: { sessionId: string | undefined; headers: IncomingHttpHeaders }[]
+  /** The MCP session ids the server issued (with `sessions`). */
+  issued: string[]
   close(): Promise<void>
 }
 
@@ -34,6 +39,8 @@ export type FakeMcpOptions = {
    * `redirects` lands on its value instead, as a server redirect would.
    */
   browser?: { redirects?: Record<string, string> }
+  /** Stateful: `initialize` issues an `mcp-session-id` (sessionIdGenerator: randomUUID) and a `DELETE` ends it. */
+  sessions?: boolean
 }
 
 /** What the fake browser shows of a page. */
@@ -96,11 +103,48 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
   const requests: FakeMcp['requests'] = []
   const calls: string[] = []
   const browser = options.browser ? { ...options.browser, page: { url: 'about:blank' } } : undefined
+  const deletes: FakeMcp['deletes'] = []
+  const issued: string[] = []
+  const live = new Map<string, StreamableHTTPServerTransport>()
   const http: Server = createServer((req, res) => {
     requests.push({ method: req.method ?? 'GET', path: req.url ?? '', headers: req.headers })
     if (options.intercept?.(req, res)) return
     if ((req.url ?? '').split('?')[0] !== path) {
       res.writeHead(404).end()
+      return
+    }
+    if (options.sessions) {
+      const header = req.headers['mcp-session-id']
+      const sessionId = typeof header === 'string' ? header : undefined
+      if (req.method === 'DELETE') deletes.push({ sessionId, headers: req.headers })
+      const held = sessionId === undefined ? undefined : live.get(sessionId)
+      if (held) {
+        held.handleRequest(req, res).catch(() => {
+          if (!res.headersSent) res.writeHead(500).end()
+        })
+        return
+      }
+      if (req.method !== 'POST' || sessionId !== undefined) {
+        res.writeHead(sessionId === undefined ? 400 : 404).end()
+        return
+      }
+      const server = buildServer(calls, options.extraTools ?? [], browser)
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: randomUUID,
+        onsessioninitialized: (id) => {
+          live.set(id, transport)
+          issued.push(id)
+        },
+        onsessionclosed: (id) => {
+          live.delete(id)
+        },
+      })
+      server
+        .connect(transport)
+        .then(() => transport.handleRequest(req, res))
+        .catch(() => {
+          if (!res.headersSent) res.writeHead(500).end()
+        })
       return
     }
     if (req.method !== 'POST') {
@@ -127,6 +171,8 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
     url: `http://127.0.0.1:${port}${path}`,
     requests,
     calls,
+    deletes,
+    issued,
     close: () =>
       new Promise<void>((resolve) => {
         http.closeAllConnections()

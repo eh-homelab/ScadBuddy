@@ -41,6 +41,7 @@ import type {
   AiSessionView,
   RenderLimits,
   SessionLimits,
+  SessionRuntime,
   BlankTemplate,
   SessionModeSetting,
   DurableSubagentsSetting,
@@ -1297,13 +1298,29 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
-  arrangeOutputs: (body: ArrangeRequest) =>
-    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
+   * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
+   */
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
+    )
+  },
 
-  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
-  backfillOutput: (outputId: string) =>
-    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+  /**
+   * #902 — re-render an output saved before Arrange; poll the job, then the output's
+   * `backfill`. #2280 — its render is started like any other, so it is sent again with
+   * the same key while the server is still accepting it, until `signal` aborts.
+   */
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
+  },
 
   /**
    * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
@@ -1342,6 +1359,10 @@ export const api = {
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
+
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
@@ -2157,6 +2178,15 @@ export const api = {
     request<SessionLimits>('/ai/settings/session-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
+    }),
+
+  /** The park hold, warm process cache and turn limit, served by the agent service. */
+  getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
+
+  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+    request<SessionRuntime>('/ai/settings/session-runtime', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
     }),
 
   /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */

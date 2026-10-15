@@ -224,9 +224,10 @@ function runJob(jobId: string): void {
         job.status = 'cancelled'
         job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
-        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
-        announce('job.superseded')
+        // Withdrawn with no replacement: `render/projection.py`'s `_settled_kind`
+        // announces `job.cancelled`, keeping `job.superseded` for a job a newer render
+        // replaced (#607).
+        announce('job.cancelled')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
@@ -2927,6 +2928,14 @@ export const handlers = [
       source: 'record',
       arranged_from: output.arranged_from ?? [],
     })
+  }),
+
+  http.patch(`${base}/outputs/:id`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const { name } = (await request.json()) as { name?: string | null }
+    output.name = name?.trim() || null
+    return HttpResponse.json(output)
   }),
 
   http.delete(`${base}/outputs/:id`, ({ params }) => {

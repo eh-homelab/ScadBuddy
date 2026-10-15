@@ -17,7 +17,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
-from typing import TypeVar, cast
+from typing import NamedTuple, TypeVar, cast
 
 from fastapi import status
 
@@ -47,6 +47,14 @@ MAX_ENTRIES = 4096
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
+
+
+class Primed(NamedTuple):
+    """What :meth:`ArchiveCache.prime` did: how many of the archives it was given were
+    not already kept, and how many of those the list read held."""
+
+    missing: int
+    listed: int
 
 
 class ArchiveCache:
@@ -84,7 +92,7 @@ class ArchiveCache:
         date_from: date | None,
         date_to: date | None,
         limit: int,
-    ) -> int:
+    ) -> Primed:
         """Keep as many of ``archive_ids`` as one list read holds, ahead of `archive`
         (#2359). Bambuddy's list answers the same ``ArchiveResponse`` as a single read,
         but filters only by the day it created the archive, not by id: it is read over
@@ -93,9 +101,10 @@ class ArchiveCache:
         key's user) is left to `archive` to read on its own. Nothing is read when at most
         one of them is missing: the list is then no cheaper.
 
-        Returns how many of the missing archives the list held. Only an optimisation, so
-        a failed list read, or a row of it that does not parse (one ScadBuddy may never
-        have linked), is logged and leaves them all to `archive` (#2818)."""
+        Returns how many were missing and how many of them the list held. Only an
+        optimisation, so a failed list read is logged and leaves them all to `archive`
+        (#2818), and a row that does not parse (one ScadBuddy may never have linked) is
+        left out, keeping the rows that do."""
         now = self._clock()
         missing = {
             archive_id
@@ -104,16 +113,18 @@ class ArchiveCache:
             or hit[0] <= now
         }
         if len(missing) < 2:
-            return 0
+            return Primed(len(missing), 0)
         try:
-            rows = await client.archive_outcomes(date_from=date_from, date_to=date_to, limit=limit)
+            rows = await client.archive_outcomes(
+                date_from=date_from, date_to=date_to, limit=limit, skip_invalid=True
+            )
         except (ApiError, ValueError) as error:
             logger.info("could not list the archives", extra={"error": type(error).__name__})
-            return 0
+            return Primed(len(missing), 0)
         held = [row for row in rows if row.id in missing]
         for row in held:
             self._put(self._key(client, "archive", row.id), row, self._ttl)
-        return len(held)
+        return Primed(len(missing), len(held))
 
     async def printers(self, client: BambuddyClient) -> list[Printer]:
         """Bambuddy's printers: what the prints name a printer by (#2363)."""

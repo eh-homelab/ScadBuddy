@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
-import { readSavedResponse, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { type HttpRequestContext, readSavedResponse, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { originPolicy } from '../src/http/origins.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -100,13 +100,13 @@ describe.skipIf(skip !== undefined)(`saved http bodies${skip ? ` (skipped: ${ski
     servers.push(server)
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/long`
-    const context = {
+    const context: HttpRequestContext = {
       saved: new PgHttpBodies(db.sql, session.id),
       secrets: () => [],
       actor: { kind: 'browser' as const, id: 'user', label: 'User' },
       limits: { inlineMaxBytes: 1000 },
     }
-    const result = await runHttpRequest(withDefaults({ url }), context as never)
+    const result = await runHttpRequest(withDefaults({ url }), context)
     const saved = (JSON.parse((result.content[0] as { text: string }).text) as { saved: { id: string } }).saved.id
 
     const page = await readSavedResponse({ id: saved, offset: 2000, length: 2000 }, { saved: new PgHttpBodies(db.sql, session.id) })

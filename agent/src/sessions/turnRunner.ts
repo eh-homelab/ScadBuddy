@@ -2,9 +2,11 @@
 // plan Task 1.2): what `SessionManager.runTurn` used to build inline. Every
 // option here is fixed at spawn, so none of its callbacks holds the turn: the
 // gates, the hooks, the in-process servers' turn context and tab wait, and the
-// http tool's turn id and signal all read the current turn from a TurnSlot
-// (turnSlot.ts) and fail closed without one. `runTurn` sets the slot, adds the
-// prompt and the abort signal, and runs the query; for now still one per turn.
+// http tool's turn id and signal all read the current turn from the assembly's
+// own TurnSlot (turnSlot.ts, `AssembledTurn.slot`) and fail closed without one.
+// The warm cache (warm.ts) spawns a process from an assembly and keeps the
+// assembly with it; each turn that process serves sets that assembly's slot
+// before it pushes its prompt (sessions/warmTurn.ts) and clears it when it ends.
 
 import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
@@ -43,7 +45,7 @@ import {
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
-import { NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
+import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
@@ -111,12 +113,21 @@ export type FingerprintParts = {
    * read at assembly; null when the run has no memory hooks.
    */
   recallMaxQueryChars: number | null
+  /**
+   * `maxRetries` (CLAUDE_CODE_MAX_RETRIES, in the process's env): what the
+   * fallback bounds Claude Code's retries to on a credential that has another
+   * behind it (harness/fallback.ts), set per attempt by sessions/warmTurn.ts;
+   * null when unbounded. `assemble` leaves it null.
+   */
+  transientRetries: number | null
 }
 
 export type AssembledTurn = {
   run: Omit<HarnessRun, 'prompt' | 'credential' | 'signal'>
   candidates: PooledCredential[]
   fingerprintParts: FingerprintParts
+  /** What the run's callbacks read as the current turn: set by each turn the assembly's process serves. */
+  slot: TurnSlot
   /**
    * Redacted from everything the turn writes to the durable event log: every
    * candidate's secret, since the turn may fall back to any of them, and the
@@ -131,6 +142,12 @@ export type AssembledTurn = {
   observe(message: SDKMessage): Promise<void>
   /** The turn's automatic memory hooks, recalled against `userText`; only when a Hindsight plugin is loaded. */
   memory?: (userText: string, turnId: string) => MemoryHooks
+  /**
+   * Ends the upstream MCP sessions the plugins' routes saw, then releases the routes: Claude
+   * Code sends no session DELETE when its process ends (spec 2026-10-13 §5.3 E7), so the
+   * owner of a process that has ended calls this before `release`. Bounded (5 s); never rejects.
+   */
+  terminate(): Promise<void>
   /** Releases the plugins' forwarder routes and the packages' directories: when the turn has ended. */
   release(): void
 }
@@ -158,6 +175,7 @@ export class TurnRunner {
     'includePartialMessages',
     'maxTurns',
     'maxBudgetUsd',
+    'maxRetries',
     'tierOf',
     'browser',
     'builtInPolicy',
@@ -180,14 +198,51 @@ export class TurnRunner {
     'stderr',
   ]
 
+  /**
+   * What decides each `FIXED_AT_SPAWN` key for the warm cache (warm.ts): the
+   * `FingerprintParts` field that moves with it, `slot` for a callback that
+   * reads the TurnSlot (so a turn's own state never needs a respawn), or `spawn`
+   * for a value the cache sets per spawn and checks by its own rule (§5.3
+   * "Reuse rule": fingerprint, transcript tail, budget).
+   */
+  static readonly FINGERPRINTED_BY: Readonly<Record<string, keyof FingerprintParts | 'slot' | 'spawn'>> = {
+    paths: 'spawn', // fixed config of the service: the same for every process it spawns (fingerprint rule)
+    cwd: 'spawn', // the session's own directory: a warm process is per session (fingerprint rule)
+    sessionStore: 'spawn', // the service's one transcript mirror (transcript tail rule)
+    includePartialMessages: 'spawn', // a constant (fingerprint rule)
+    maxTurns: 'spawn', // the session row's cap, fixed for the session (fingerprint rule)
+    maxBudgetUsd: 'spawn', // what is left of the budget at spawn: its own reuse check (budget rule)
+    maxRetries: 'transientRetries', // the fallback's bound on Claude Code's retries, set per attempt (warmTurn.ts)
+    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers`
+    builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
+    approvalGate: 'slot',
+    questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
+    systemPromptAppend: 'systemAppend',
+    resume: 'spawn', // resume or new id: the transcript tail rule
+    sessionId: 'spawn', // as `resume` (transcript tail rule)
+    model: 'model',
+    effort: 'effort', // a Workflow agent's chat (background/workflowAgents.ts)
+    agent: 'agentType', // its subagent definition, by name: the plugin's agents/<name>.md, fixed per image
+    mcpServers: 'tiers', // the in-process servers depend on the principal's tiers (and `owner`, `httpRequest`)
+    pluginPaths: 'packageHashes',
+    allowedPluginPaths: 'allowedPackageHashes',
+    builtinTools: 'builtinTools',
+    ownPlugin: 'ownPlugin',
+    remotePlugins: 'plugins',
+    memoryHooks: 'slot',
+    traceHooks: 'slot',
+    stderr: 'spawn', // a constant sink (fingerprint rule)
+  }
+
   private readonly deps: TurnRunnerDeps
 
   constructor(deps: TurnRunnerDeps) {
     this.deps = deps
   }
 
-  async assemble(session: ClaimedSession, principal: TurnPrincipal, slot: TurnSlot): Promise<AssembledTurn> {
+  async assemble(session: ClaimedSession, principal: TurnPrincipal, options: { includeCooling?: boolean } = {}): Promise<AssembledTurn> {
     const id = session.id
+    const slot = createTurnSlot()
     const registryTierOf = this.deps.tierOf ?? (() => undefined)
     // The http tools' tier depends on the method in their input (#827).
     const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
@@ -216,7 +271,7 @@ export class TurnRunner {
       // The credentials first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
-      const candidates = await this.deps.credentials.candidates()
+      const candidates = await this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined)
       secrets = candidates.map((c) => c.credential.secret)
       builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
       forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
@@ -504,16 +559,21 @@ export class TurnRunner {
         servedBuiltins: served,
         backgroundTasks: this.deps.background !== undefined,
         recallMaxQueryChars: memory?.recallMaxQueryChars ?? null,
+        transientRetries: null,
       }
       return {
         run,
         candidates,
         fingerprintParts,
+        slot,
         secrets,
         eventTierOf: (name, input) => eventTierOf(name, input),
         shownTierOf,
         observe: pluginCheck,
         ...(memory ? { memory: memory.hooks } : {}),
+        terminate: async () => {
+          await Promise.all([forwarded?.terminate(), packageServers?.terminate()])
+        },
         release,
       }
     } catch (err) {
