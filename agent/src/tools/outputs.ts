@@ -91,6 +91,24 @@ export const outputTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'rename_output',
+    description: "Give an output a name (History and downloads show it), or clear it with an empty name.",
+    input: z.object({
+      output_id: outputId,
+      name: z.string().max(200).describe('The new name; empty clears it'),
+    }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/outputs/{output_id}'],
+    title: ({ output_id }) => `Rename output ${output_id}`,
+    handler: async ({ output_id, name }, ctx) => {
+      const answer = await command(ctx, `rename output ${output_id}`, (headers) =>
+        ctx.backend.PATCH('/api/v1/outputs/{output_id}', { params: { path: { output_id } }, body: { name }, headers }),
+      )
+      return json(answer)
+    },
+  }),
+
+  defineTool({
     name: 'download_3mf',
     description:
       "An output's multi-colour 3MF (model/3mf), or a Bambuddy library file as the library holds it " +

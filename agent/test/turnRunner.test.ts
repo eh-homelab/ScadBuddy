@@ -29,9 +29,10 @@ const turnContext = (turnId: string): TurnContext => ({
 
 describe('TurnRunner', () => {
   it('assembles callbacks that read the current turn, and deny between turns', async () => {
-    const slot = createTurnSlot()
     const { runner, session, principal, gateCalls } = await turnRunnerForTest()
-    const turn = await runner.assemble(session, principal, slot)
+    const turn = await runner.assemble(session, principal)
+    // The assembly's own slot: what every turn its process serves sets (sessions/warmTurn.ts).
+    const { slot } = turn
     const decide = turn.run.approvalGate!
     expect(await decide(request('t1'))).toMatchObject({ approved: false, message: 'no turn is running' })
     const ask = turn.run.questionGate!
@@ -47,9 +48,9 @@ describe('TurnRunner', () => {
 
   it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
     const { runner, session, principal } = await turnRunnerForTest()
-    const plain = await runner.assemble(session, principal, createTurnSlot())
+    const plain = await runner.assemble(session, principal)
     const agent = { ...session, agentModel: 'claude-haiku-test', agentEffort: 'low' as const, agentType: 'model-author' }
-    const turn = await runner.assemble(agent, principal, createTurnSlot())
+    const turn = await runner.assemble(agent, principal)
     expect(turn.run).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agent: { name: 'model-author' } })
     expect(turn.run.agent?.definition.prompt).toContain('You author ScadBuddy templates')
     expect(turn.fingerprintParts).toMatchObject({ model: 'claude-haiku-test', effort: 'low', agentType: 'model-author' })
@@ -58,8 +59,8 @@ describe('TurnRunner', () => {
 
   it('fingerprints an unchanged configuration the same on every assembly, and a moved plugin URL differently', async () => {
     const { runner, session, principal } = await turnRunnerForTest()
-    const first = await runner.assemble(session, principal, createTurnSlot())
-    const second = await runner.assemble(session, principal, createTurnSlot())
+    const first = await runner.assemble(session, principal)
+    const second = await runner.assemble(session, principal)
     // Each assembly registers its own loopback route, which the fingerprint never names.
     expect(second.run.remotePlugins![0]!.url).not.toBe(first.run.remotePlugins![0]!.url)
     expect(second.fingerprintParts).toEqual(first.fingerprintParts)
@@ -74,7 +75,7 @@ describe('TurnRunner', () => {
     ])
 
     const moved = await turnRunnerForTest({ pluginUrl: 'https://hindsight.example/mcp/other/' })
-    const elsewhere = await moved.runner.assemble(session, principal, createTurnSlot())
+    const elsewhere = await moved.runner.assemble(session, principal)
     expect(elsewhere.fingerprintParts).not.toEqual(first.fingerprintParts)
     expect(elsewhere.fingerprintParts.plugins[0]!.url).toBe('https://hindsight.example/mcp/other/')
   })
@@ -90,11 +91,11 @@ describe('TurnRunner', () => {
     ['the Hindsight recall query cap', { recallMaxQueryChars: 12 }, 'recallMaxQueryChars'],
   ])('fingerprints %s', async (_what, changed, field) => {
     const base = await turnRunnerForTest()
-    const before = await base.runner.assemble(base.session, base.principal, createTurnSlot())
-    const again = await base.runner.assemble(base.session, base.principal, createTurnSlot())
+    const before = await base.runner.assemble(base.session, base.principal)
+    const again = await base.runner.assemble(base.session, base.principal)
     expect(again.fingerprintParts).toEqual(before.fingerprintParts)
     const other = await turnRunnerForTest(changed)
-    const after = await other.runner.assemble(base.session, base.principal, createTurnSlot())
+    const after = await other.runner.assemble(base.session, base.principal)
     expect(after.fingerprintParts[field]).not.toEqual(before.fingerprintParts[field])
     const { [field]: _a, ...restAfter } = after.fingerprintParts
     const { [field]: _b, ...restBefore } = before.fingerprintParts
@@ -127,10 +128,12 @@ describe('TurnRunner', () => {
       const { runner, session, principal } = await turnRunnerForTest({ resume })
       // And a Workflow agent's chat, the only one given `effort` and `agent`.
       for (const s of [session, { ...session, agentEffort: 'low' as const, agentType: 'model-author' }]) {
-        const turn = await runner.assemble(s, principal, createTurnSlot())
+        const turn = await runner.assemble(s, principal)
         for (const key of Object.keys(turn.run)) keys.add(key)
       }
     }
+    // `maxRetries` is the one key set after assembly, per attempt (sessions/warmTurn.ts).
+    keys.add('maxRetries')
     expect([...keys].sort()).toEqual(TurnRunner.FIXED_AT_SPAWN.slice().sort())
   })
 })

@@ -1,4 +1,5 @@
 import { listNames, type OutputRef } from '../lib/arrange'
+import { shortId } from '../lib/format'
 import { Button } from './ui/Button'
 
 /** #902 — the question asked before outputs saved before Arrange are re-rendered. */
@@ -38,7 +39,7 @@ export function BackfillProgress({ outputs, progress }: { outputs: OutputRef[]; 
     <ul aria-label="Re-render progress" aria-live="polite" className="flex flex-col gap-0.5 text-[12px] text-faint">
       {shown.map((o) => (
         <li key={o.id}>
-          {o.name ?? o.id}: {progress[o.id]}
+          {o.name ?? shortId(o.id)}: {progress[o.id]}
         </li>
       ))}
     </ul>
