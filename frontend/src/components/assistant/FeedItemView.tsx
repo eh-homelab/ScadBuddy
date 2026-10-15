@@ -92,6 +92,8 @@ function BrowserApprovalButtons({
   // then fails (a request already resolved), so the card says so (review of #3654).
   const [saved, setSaved] = useState<string | null>(null)
   const host = new URL(nav.origin).host
+  // The rule "Always allow" saves: a bare host means https on its default port, so any other origin is shown whole.
+  const rule = nav.origin === `https://${host}` ? host : nav.origin
   async function remember(write: () => Promise<unknown>, done: string) {
     setBusy(true)
     setError(null)
@@ -128,7 +130,7 @@ function BrowserApprovalButtons({
           disabled={busy}
           onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${nav.origin} is on the allow list (Settings → Assistant).`)}
         >
-          Always allow {host}
+          Always allow {rule}
         </Button>
         <Button variant="danger" size="sm" data-agent-user-only="" disabled={busy} onClick={() => onDecide(false)}>
           Deny
