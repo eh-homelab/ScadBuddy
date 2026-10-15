@@ -5,7 +5,7 @@ import importlib
 import logging
 import pkgutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -942,7 +942,8 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
     # timeout on a slow Temporal.
     handoff = asyncio.create_task(_hand_off_watches(state, client))
     try:
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+        where = {name: kind.where for name, kind in ops.kinds.items()}
+        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
     finally:
         # A row whose follow did not start stays for the next boot.
         handoff.cancel()
@@ -1081,11 +1082,15 @@ async def _serve_until(
 
 
 async def _end_lost_runs_until(
-    client: Client, store: PrintRunStore, operations: OperationStore, stop: asyncio.Event
+    client: Client,
+    store: PrintRunStore,
+    operations: OperationStore,
+    stop: asyncio.Event,
+    where: Mapping[str, str] | None = None,
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
-    terminated in the Temporal UI."""
+    terminated in the Temporal UI. ``where``: each operation kind's what-to-check."""
     while not stop.is_set():
         try:
             ended = await reconcile_lost_runs(client, store)
@@ -1094,7 +1099,7 @@ async def _end_lost_runs_until(
         except Exception:
             logger.exception("could not check print runs for lost executions")
         try:
-            ended = await reconcile_lost_operations(client, operations)
+            ended = await reconcile_lost_operations(client, operations, where=where)
             if ended:
                 logger.warning("ended operations whose execution was gone", extra={"count": ended})
         except Exception:
