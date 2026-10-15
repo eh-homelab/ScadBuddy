@@ -232,3 +232,82 @@ async def test_fresh_requests_during_a_read_share_one_read_queued_behind_it() ->
 
     assert len(gates) == 2
     assert all(answer is answers[0] for answer in answers)
+
+
+async def test_concurrent_cold_searches_share_one_read() -> None:
+    """Review of #3666: typing on while a cold read runs waits for that read, not another."""
+    gates: list[asyncio.Event] = []
+
+    class Client:
+        async def folders(self) -> list[object]:
+            return []
+
+        async def library_listing(
+            self, *, folder_id: int | None, every_folder: bool = False
+        ) -> list[LibraryListRow]:
+            gate = asyncio.Event()
+            gates.append(gate)
+            await gate.wait()
+            return []
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield Client()  # type: ignore[misc]
+
+    clock = Clock()
+    index = LibraryIndex(clock=clock)
+    first = asyncio.ensure_future(index.snapshot("bambuddy", connect))
+    while not gates:
+        await asyncio.sleep(0)
+    clock.now += 1
+    second = asyncio.ensure_future(index.snapshot("bambuddy", connect))
+    await asyncio.sleep(0.01)
+    gates[0].set()
+
+    assert await first is await second
+    assert len(gates) == 1
+
+
+async def test_a_failed_background_read_holds_off_the_next_for_a_while() -> None:
+    """Review of #3666: a struggling Bambuddy is not asked again on every stale search."""
+    reads = 0
+    failing = False
+
+    class Client:
+        async def folders(self) -> list[object]:
+            return []
+
+        async def library_listing(
+            self, *, folder_id: int | None, every_folder: bool = False
+        ) -> list[LibraryListRow]:
+            nonlocal reads
+            reads += 1
+            if failing:
+                raise RuntimeError("down")
+            return []
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BambuddyClient]:
+        yield Client()  # type: ignore[misc]
+
+    clock = Clock()
+    index = LibraryIndex(fresh=30, stale=600, backoff=30, clock=clock)
+    kept = await index.snapshot("bambuddy", connect)
+    failing = True
+
+    clock.now += 60
+    assert await index.snapshot("bambuddy", connect) is kept
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert reads == 2
+
+    clock.now += 10
+    assert await index.snapshot("bambuddy", connect) is kept
+    await asyncio.sleep(0)
+    assert reads == 2  # held off
+
+    clock.now += 30
+    assert await index.snapshot("bambuddy", connect) is kept
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert reads == 3

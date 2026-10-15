@@ -50,7 +50,7 @@ from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plai
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import BambuddyConfig, client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
@@ -166,7 +166,7 @@ async def get_library_search(
     show_all: Annotated[bool, Query(alias="all")] = False,
     fresh: bool = False,
 ) -> LibrarySearch:
-    """The files whose name, or the path of their folder, holds every word of ``q``,
+    """The files whose name, or the path of their folder, holds every word of ``q`` as a substring,
     whatever the case or a separator ``_ - . ( ) [ ]`` (#3630); each names its
     ``folder_path``. Without ``all`` only unsliced 3MFs, as the listing; ``hidden``
     counts the matches only ``all`` lists. At most 100 files, ``total`` how many
@@ -175,11 +175,12 @@ async def get_library_search(
     Bambuddy has no search, so its whole library is read at once and kept in this
     process: answered from it for 30 s, and for 10 minutes after while one read
     replaces it in the background. ``fresh`` waits for a read that started after the
-    request did (or within 2 s before it), as the page asks after its own changes."""
-    settings = store.load()
-    config = BambuddyConfig.from_settings(settings)
+    request did or at most 2 s before it (a kept read that started then counts too), as
+    the page asks after its own changes."""
+    config = BambuddyConfig.from_settings(store.load())
     source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
-    snapshot = await index.snapshot(source, partial(client_for, settings), fresh=fresh)
+    # One config for the key and the client, so the two cannot drift apart.
+    snapshot = await index.snapshot(source, partial(BambuddyClient, config), fresh=fresh)
     found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all)
     made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
     for entry in found.files:

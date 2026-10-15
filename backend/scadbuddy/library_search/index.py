@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -29,6 +30,9 @@ FRESH = 30.0
 STALE = 600.0
 #: How long before a ``fresh`` request a read may have started and still answer it.
 SHARED = 2.0
+#: How long after a background read failed a stale search starts no other: a Bambuddy
+#: that is struggling is not asked for the whole library on every search.
+BACKOFF = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +55,18 @@ class LibraryIndex:
         fresh: float = FRESH,
         stale: float = STALE,
         shared: float = SHARED,
+        backoff: float = BACKOFF,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fresh = fresh
         self._stale = stale
         self._shared = shared
+        self._backoff = backoff
         self._clock = clock
         self._kept: dict[str, LibrarySnapshot] = {}
+        #: When a read of the source last failed, for :data:`BACKOFF`.
+        self._failed: dict[str, float] = {}
+        #: Every live read is here or in ``_queued``, which is what :meth:`close` cancels.
         self._reading: dict[str, tuple[float, asyncio.Task[LibrarySnapshot]]] = {}
         #: The one read waiting for the read in flight to end, per source: every request
         #: too new for the read in flight joins it, so a burst is one more read, not many.
@@ -75,11 +84,17 @@ class LibraryIndex:
             if age < self._fresh:
                 return kept
             if age < self._stale:
-                self._read(source, connect, since=kept.read_at)
+                failed = self._failed.get(source)
+                if failed is None or now - failed >= self._backoff:
+                    self._read(source, connect, since=kept.read_at)
                 return kept
-        since = now - self._shared if fresh else now
-        if kept is not None and kept.read_at >= since:
-            return kept
+        if fresh:
+            since = now - self._shared
+            if kept is not None and kept.read_at >= since:
+                return kept
+        else:
+            # Nothing usable is kept: any read in flight is newer than that, and is shared.
+            since = -math.inf
         # Shielded: one caller going away does not cancel the read the others wait on.
         return await asyncio.shield(self._read(source, connect, since=since))
 
@@ -124,6 +139,9 @@ class LibraryIndex:
                 tree, files = await asyncio.gather(
                     client.folders(), client.library_listing(folder_id=None, every_folder=True)
                 )
+        except Exception:
+            self._failed[source] = self._clock()
+            raise
         finally:
             reading = self._reading.get(source)
             if reading is not None and reading[0] == started:
@@ -134,6 +152,7 @@ class LibraryIndex:
         if kept is None or kept.read_at <= started:
             # One Bambuddy at a time: a changed URL or key drops what the old one had.
             self._kept = {source: snapshot}
+        self._failed.pop(source, None)
         return snapshot
 
     async def close(self) -> None:
@@ -145,6 +164,7 @@ class LibraryIndex:
 
 
 def _log_failure(task: asyncio.Task[LibrarySnapshot]) -> None:
-    """A background read's failure is logged; a waiting search raises it itself."""
+    """A background read's failure is logged; a waiting search raises it itself. A
+    stale index that cannot refresh is worth seeing, so it is a warning."""
     if not task.cancelled() and (error := task.exception()) is not None:
-        logger.info("could not read the library index", extra={"error": type(error).__name__})
+        logger.warning("could not read the library index", extra={"error": type(error).__name__})

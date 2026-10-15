@@ -449,7 +449,8 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'search_library',
     description:
-      "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear in " +
+      "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear (as " +
+      'a substring) in ' +
       "the file's name or its folder path, whatever the case or separator. Each file names its `folder_path`. " +
       'Without `all` only unsliced 3MFs (`hidden` counts the other matches); with it every file. At most 100 ' +
       'files; `total` says how many matched. The library is read whole and kept for 30 s: after changing it ' +

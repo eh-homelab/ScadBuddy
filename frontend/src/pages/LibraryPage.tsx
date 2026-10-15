@@ -212,6 +212,7 @@ export function LibraryPage() {
     api
       .searchLibrary({ q: query, all: advanced, fresh }, controller.signal)
       .then((found) => {
+        if (controller.signal.aborted) return
         if (fresh) searchedReload.current = reload
         setResults(found)
       })

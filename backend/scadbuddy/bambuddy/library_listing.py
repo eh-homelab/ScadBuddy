@@ -154,7 +154,8 @@ def search_library(
     limit: int = SEARCH_LIMIT,
 ) -> LibrarySearch:
     """The files whose name, or the path of the folder they are in, holds every word of
-    ``query``, whatever the case or separator (:data:`_SEPARATORS`; #3630): ``dino keychain`` finds
+    ``query`` as a substring (``key`` finds ``monkey`` too: forgiving, as a search box
+    should be), whatever the case or separator (:data:`_SEPARATORS`; #3630): ``dino keychain`` finds
     ``Dinosaur_Keychain (ScadBuddy).3mf`` and every file under ``3D Name Keychains``.
     Files whose own name holds more of the words come first, then by name."""
     terms = _words(query).split()
