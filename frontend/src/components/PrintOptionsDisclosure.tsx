@@ -42,9 +42,31 @@ interface Props {
    * disclosure — the send bar's Copies box is the effective `quantity`.
    */
   onEffective?: (effective: PrintOptions) => void
+  /**
+   * #3635 — only the options that change what happens after Print, for Simple mode,
+   * which shows no Options but still sends what was remembered.
+   */
+  heldOnly?: boolean
 }
 
 const UNSET = ''
+
+/**
+ * #3635 — options that change what happens after Print. Whenever one is on, it is
+ * shown outside the collapsed disclosure, with where it was remembered.
+ */
+const HOLDING: readonly { name: OptionName; title: string; effect: string }[] = [
+  {
+    name: 'manual_start',
+    title: 'Waits for a manual start.',
+    effect: 'The printer holds this job until someone starts it there.',
+  },
+  {
+    name: 'auto_off_after',
+    title: 'Powers off afterwards.',
+    effect: 'The printer switches off when this job ends.',
+  },
+]
 
 /**
  * Issue #88 — the "Options" disclosure, collapsed by default.
@@ -60,6 +82,7 @@ export function PrintOptionsDisclosure({
   value,
   onChange,
   onEffective,
+  heldOnly = false,
 }: Props) {
   const slug = subject?.key
   const noun = subject?.noun ?? 'model'
@@ -160,96 +183,199 @@ export function PrintOptionsDisclosure({
     }
   }
 
-  const changed = PRINT_OPTIONS.filter((spec) => isNonDefault(spec.name, effective, defaults)).length
+  /** Drops one option from the scope that remembered it, keeping the rest there (#3635). */
+  async function stopRemembering(name: OptionName, target: OptionScope) {
+    setBusy(true)
+    setError(null)
+    setSavedScope(null)
+    try {
+      const kept: Record<string, OptionValue> = { ...storedFor(target) }
+      delete kept[name]
+      const view = await api.putPrintOptions({
+        scope: target,
+        key: target === 'global' ? null : target === 'printer' ? printerKey : (slug ?? null),
+        options: kept as PrintOptions,
+      })
+      setRemembered(view)
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.detail : 'Could not save the options.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const changedSpecs = PRINT_OPTIONS.filter((spec) => isNonDefault(spec.name, effective, defaults))
+  // #3635 — named, and marked when an earlier print remembered them, so "2 changes"
+  // never hides a Manual start nobody chose for this print.
+  const summary = changedSpecs
+    .map((spec) => {
+      const shown = optionValue(effective, spec.name)
+      const text = shown === true ? spec.label : `${spec.label}: ${formatOption(spec.kind, shown)}`
+      return effectiveScope(layers, spec.name) === 'request' ? text : `${text} (remembered)`
+    })
+    .join(', ')
+  // What one click sets back to Bambuddy's defaults for this print: not Quantity, which
+  // is the Copies box's, nor an option with no known default to go back to.
+  const resettable = changedSpecs.filter(
+    (spec) => spec.name !== 'quantity' && isSet(optionValue(defaults, spec.name)),
+  )
+  const holding = HOLDING.filter((hold) => optionValue(effective, hold.name) === true)
+
+  const held = holding.length > 0 && (
+    <ul className="mt-4 space-y-1.5" aria-label="Options that change this print">
+      {holding.map((hold) => {
+        const source = effectiveScope(layers, hold.name)
+        const stored = source !== null && source !== 'request' ? source : null
+        return (
+          <li
+            key={hold.name}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 text-[12.5px] text-warn"
+            data-testid={`holding-${hold.name}`}
+          >
+            <span className="min-w-0 flex-[1_1_16rem]">
+              <span className="font-medium">{hold.title}</span> {hold.effect}
+              {stored &&
+                ` Remembered for ${stored === 'global' ? 'every print' : scopeLabel(stored, noun)}.`}
+            </span>
+            <Button
+              size="sm"
+              onClick={() => set(hold.name, optionValue(defaults, hold.name) ?? false)}
+              disabled={busy}
+            >
+              Not this time
+            </Button>
+            {stored && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void stopRemembering(hold.name, stored)}
+                disabled={busy}
+              >
+                Stop remembering
+              </Button>
+            )}
+          </li>
+        )
+      })}
+    </ul>
+  )
+
+  if (heldOnly) {
+    return (
+      <>
+        {held}
+        {held && error && (
+          <p role="alert" className="mt-2 text-[12px] text-warn">
+            {error}
+          </p>
+        )}
+      </>
+    )
+  }
 
   return (
-    <details className="mt-4 rounded-[6px] border border-line bg-surface-2">
-      <summary className="cursor-pointer px-3 py-2 text-[13px] text-ink">
-        Options
-        <span className="ml-2 text-[12px] text-muted">
-          {changed === 0
-            ? "Bambuddy's defaults"
-            : `${changed} ${changed === 1 ? 'change' : 'changes'}`}
-        </span>
-      </summary>
+    <>
+      {held}
+      <details className="mt-4 rounded-[6px] border border-line bg-surface-2">
+        <summary className="cursor-pointer px-3 py-2 text-[13px] text-ink">
+          Options
+          <span className="ml-2 text-[12px] text-muted" data-testid="print-options-summary">
+            {changedSpecs.length === 0 ? "Bambuddy's defaults" : summary}
+          </span>
+        </summary>
 
-      <div className="border-t border-line px-3 py-2">
-        {loading ? (
-          <p className="flex items-center gap-2 py-2 text-[13px] text-muted">
-            <Spinner /> Loading the remembered options
-          </p>
-        ) : (
-          <>
-            <ul className="divide-y divide-line">
-              {PRINT_OPTIONS.map((spec) => (
-                <OptionRow
-                  key={spec.name}
-                  spec={spec}
-                  effective={optionValue(effective, spec.name)}
-                  fallback={optionValue(defaults, spec.name)}
-                  source={effectiveScope(layers, spec.name)}
-                  noun={noun}
-                  nonDefault={isNonDefault(spec.name, effective, defaults)}
-                  onChange={(next) => set(spec.name, next)}
-                />
-              ))}
-            </ul>
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <label htmlFor="option-scope" className="text-[12px] text-muted">
-                Remember for
-              </label>
-              <select
-                id="option-scope"
-                value={activeScope}
-                onChange={(event) => setScope(event.target.value as OptionScope)}
-                className="sb-field"
-              >
-                <option value="printer" disabled={!printerKey}>
-                  This printer
-                </option>
-                {slug && <option value="model">This {noun}</option>}
-                <option value="global">Every print</option>
-              </select>
-              <Button onClick={() => void remember(false)} disabled={busy || !remembered}>
-                {busy && <Spinner />}
-                Remember
-              </Button>
-              <Button onClick={() => void remember(true)} disabled={busy}>
-                Forget
-              </Button>
-              {savedScope && !error && (
-                <span role="status" className="text-[12px] text-ok">
-                  Remembered for {scopeLabel(savedScope, noun)}.
-                </span>
-              )}
-            </div>
-
-            <p className="mt-1 text-[12px] text-faint">
-              Remember merges these into what that scope already holds; Forget clears the
-              whole scope.
+        <div className="border-t border-line px-3 py-2">
+          {loading ? (
+            <p className="flex items-center gap-2 py-2 text-[13px] text-muted">
+              <Spinner /> Loading the remembered options
             </p>
-            {!remembered && (
-              <p className="mt-2 text-[12px] text-warn">
-                What is already remembered could not be read, so Remember is unavailable —
-                it would replace that scope with only these edits. Forget still works.
+          ) : (
+            <>
+              <ul className="divide-y divide-line">
+                {PRINT_OPTIONS.map((spec) => (
+                  <OptionRow
+                    key={spec.name}
+                    spec={spec}
+                    effective={optionValue(effective, spec.name)}
+                    fallback={optionValue(defaults, spec.name)}
+                    source={effectiveScope(layers, spec.name)}
+                    noun={noun}
+                    nonDefault={isNonDefault(spec.name, effective, defaults)}
+                    onChange={(next) => set(spec.name, next)}
+                  />
+                ))}
+              </ul>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label htmlFor="option-scope" className="text-[12px] text-muted">
+                  Remember for
+                </label>
+                <select
+                  id="option-scope"
+                  value={activeScope}
+                  onChange={(event) => setScope(event.target.value as OptionScope)}
+                  className="sb-field"
+                >
+                  <option value="printer" disabled={!printerKey}>
+                    This printer
+                  </option>
+                  {slug && <option value="model">This {noun}</option>}
+                  <option value="global">Every print</option>
+                </select>
+                <Button onClick={() => void remember(false)} disabled={busy || !remembered}>
+                  {busy && <Spinner />}
+                  Remember
+                </Button>
+                <Button onClick={() => void remember(true)} disabled={busy}>
+                  Forget
+                </Button>
+                {savedScope && !error && (
+                  <span role="status" className="text-[12px] text-ok">
+                    Remembered for {scopeLabel(savedScope, noun)}.
+                  </span>
+                )}
+              </div>
+
+              <p className="mt-1 text-[12px] text-faint">
+                Remember merges these into what that scope already holds; Forget clears the
+                whole scope.
               </p>
-            )}
-            {!printerKey && (
-              <p className="mt-2 text-[12px] text-faint">
-                No printer is picked yet, so options can only be remembered{' '}
-                {slug ? `for this ${noun} or every print` : 'for every print'}.
-              </p>
-            )}
-            {error && (
-              <p role="alert" className="mt-2 text-[12px] text-warn">
-                {error}
-              </p>
-            )}
-          </>
-        )}
-      </div>
-    </details>
+              {resettable.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="mt-2"
+                  onClick={() => {
+                    const draft: Record<string, OptionValue> = { ...value }
+                    for (const spec of resettable) draft[spec.name] = optionValue(defaults, spec.name)
+                    onChange(draft as PrintOptions)
+                  }}
+                >
+                  Use Bambuddy's defaults for this print
+                </Button>
+              )}
+              {!remembered && (
+                <p className="mt-2 text-[12px] text-warn">
+                  What is already remembered could not be read, so Remember is unavailable —
+                  it would replace that scope with only these edits. Forget still works.
+                </p>
+              )}
+              {!printerKey && (
+                <p className="mt-2 text-[12px] text-faint">
+                  No printer is picked yet, so options can only be remembered{' '}
+                  {slug ? `for this ${noun} or every print` : 'for every print'}.
+                </p>
+              )}
+              {error && (
+                <p role="alert" className="mt-2 text-[12px] text-warn">
+                  {error}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      </details>
+    </>
   )
 }
 

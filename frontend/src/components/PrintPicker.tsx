@@ -76,6 +76,7 @@ import { SlicedSettings } from './print/SlicedSettings'
 import { slicedEstimate } from '../lib/slicedEstimate'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
+import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
@@ -903,6 +904,7 @@ export function PrintPicker({
                       </select>
                     </div>
                   )}
+                  {printerId !== null && <PlateClearNotice printerId={printerId} />}
 
                   {filamentError && (
                     <div className="flex items-center gap-3" data-testid="filaments-unavailable">
@@ -1102,6 +1104,17 @@ export function PrintPicker({
                     </p>
                   )}
 
+                  {/* #3635 — Simple mode shows no Options, but never hides a remembered
+                      one that holds the job. */}
+                  {!picker.advanced && (
+                    <PrintOptionsDisclosure
+                      heldOnly
+                      subject={subject}
+                      printerId={printerId}
+                      value={options}
+                      onChange={setOptions}
+                    />
+                  )}
                   {/* #768 — Simple mode sends these steps' defaults without showing them. */}
                   {picker.advanced && (
                     <>
