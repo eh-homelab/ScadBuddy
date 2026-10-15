@@ -84,11 +84,40 @@ export type GuardVerdict =
 /** Judges a call by its INPUT (see the header). */
 export type InputGuard = (toolName: string, input: unknown) => GuardVerdict | undefined | Promise<GuardVerdict | undefined>
 
-/** The guard's verdict; a guard that fails denies the call (fail closed). */
-export async function judgeInput(guard: InputGuard | undefined, toolName: string, input: unknown): Promise<GuardVerdict | undefined> {
+/**
+ * How long a guard or a result screen may take. Past it the call is denied, or its
+ * result withheld: a slow database must never let a call or a page through. Below
+ * SCREEN_HOOK_TIMEOUT_S, so ours decides before Claude Code's hook deadline would.
+ */
+export const GUARD_DEADLINE_MS = 20_000
+/** The screen hook's own timeout, in seconds (HookCallbackMatcher `timeout`). */
+export const SCREEN_HOOK_TIMEOUT_S = 60
+
+/** `work`, or a rejection once `ms` have passed. */
+export async function within<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The guard's verdict; a guard that fails or does not answer in time denies the call (fail closed). */
+export async function judgeInput(
+  guard: InputGuard | undefined,
+  toolName: string,
+  input: unknown,
+  deadlineMs = GUARD_DEADLINE_MS,
+): Promise<GuardVerdict | undefined> {
   if (!guard) return undefined
   try {
-    return await guard(toolName, input)
+    return await within(Promise.resolve(guard(toolName, input)), deadlineMs)
   } catch (err) {
     return { deny: `${toolName} was not run: its input could not be checked (${describeError(err)}).` }
   }
@@ -254,18 +283,25 @@ export function makePreToolUseHook(
  */
 export type ResultScreen = (toolName: string, input: unknown, text: string) => Promise<string | undefined>
 
-export function makeResultScreenHook(screen: ResultScreen, covers: (toolName: string) => boolean): HookCallbackMatcher {
+export function makeResultScreenHook(
+  screen: ResultScreen,
+  covers: (toolName: string) => boolean,
+  deadlineMs = GUARD_DEADLINE_MS,
+): HookCallbackMatcher {
   return {
+    // Longer than our own deadline, so a slow screen withholds rather than Claude Code
+    // giving up on the hook and passing the result on.
+    timeout: SCREEN_HOOK_TIMEOUT_S,
     hooks: [
       async (input) => {
         if (input.hook_event_name !== 'PostToolUse' || !covers(input.tool_name)) return {}
-        const blocks = Array.isArray(input.tool_response) ? (input.tool_response as unknown[]) : [input.tool_response]
-        const text = blocks
-          .map((b) => (typeof b === 'string' ? b : typeof b === 'object' && b !== null && typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : ''))
-          .join('\n')
+        // The whole response, whatever its shape (blocks, `{ content }`, a string): a
+        // page named anywhere in it is read.
+        const response: unknown = input.tool_response
+        const text = typeof response === 'string' ? response : (JSON.stringify(response) ?? '')
         let replaced: string | undefined
         try {
-          replaced = await screen(input.tool_name, input.tool_input, text)
+          replaced = await within(screen(input.tool_name, input.tool_input, text), deadlineMs)
         } catch (err) {
           replaced = `ScadBuddy withheld this result: the page it came from could not be checked (${describeError(err)}).`
         }

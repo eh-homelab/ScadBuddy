@@ -50,6 +50,7 @@ export const DEFAULT_DENY: readonly string[] = [
   '*.localhost',
   '127.0.0.0/8',
   '::1/128',
+  '::/128',
   '0.0.0.0/8',
   '169.254.0.0/16',
   'fe80::/10',
@@ -156,28 +157,39 @@ export function checkRules(rules: readonly string[], list: 'allow' | 'deny'): st
   return out
 }
 
-/** The stored lists, or the defaults when none (or something unreadable) is stored. */
+/**
+ * The stored lists, or the defaults when none is stored. A stored value that cannot be
+ * read fails closed: no allow list (every page asks), and the default deny list.
+ */
 export function listsOf(stored: unknown): BrowserLists {
-  if (typeof stored !== 'object' || stored === null) return { allow: [...DEFAULT_ALLOW], deny: [...DEFAULT_DENY] }
-  const { allow, deny } = stored as { allow?: unknown; deny?: unknown }
-  const strings = (v: unknown, fallback: readonly string[]) =>
-    Array.isArray(v) && v.every((s) => typeof s === 'string') ? (v as string[]) : [...fallback]
-  return { allow: strings(allow, DEFAULT_ALLOW), deny: strings(deny, DEFAULT_DENY) }
+  if (stored === undefined || stored === null) return { allow: [...DEFAULT_ALLOW], deny: [...DEFAULT_DENY] }
+  const { allow, deny } = (typeof stored === 'object' ? stored : {}) as { allow?: unknown; deny?: unknown }
+  const strings = (v: unknown) => (Array.isArray(v) && v.every((s) => typeof s === 'string') ? (v as string[]) : undefined)
+  const readAllow = strings(allow)
+  const readDeny = strings(deny)
+  return { allow: readAllow ?? [], deny: readDeny ? [...new Set([...readDeny])] : [...DEFAULT_DENY] }
 }
 
-/** Compiled lists. A rule that no longer parses (stored before a check changed) is skipped. */
-export type CompiledLists = { allow: Rule[]; deny: Rule[] }
+/**
+ * Compiled lists. An allow rule that no longer parses (stored before a check changed)
+ * is skipped, which only asks more; a deny rule that does not is kept as `broken`, and
+ * then every page is refused (fail closed: the rule meant to refuse something).
+ */
+export type CompiledLists = { allow: Rule[]; deny: Rule[]; broken?: string[] }
 
 export function compile(lists: BrowserLists): CompiledLists {
-  const each = (rules: readonly string[]) =>
+  const broken: string[] = []
+  const each = (rules: readonly string[], bad?: string[]) =>
     rules.flatMap((r) => {
       try {
         return [parseRule(r)]
       } catch {
+        bad?.push(r)
         return []
       }
     })
-  return { allow: each(lists.allow), deny: each(lists.deny) }
+  const compiled: CompiledLists = { allow: each(lists.allow), deny: each(lists.deny, broken) }
+  return broken.length ? { ...compiled, broken } : compiled
 }
 
 function ipMatches(net: BlockList, host: string): boolean {
@@ -232,6 +244,7 @@ export function judge(lists: CompiledLists, approved: ReadonlyMap<string, Approv
   }
   if (parsed.username || parsed.password) return { kind: 'refused', reason: 'a URL with a user name or password is not opened' }
   const origin = originOf(parsed)
+  if (lists.broken?.length) return { kind: 'denied', origin, rule: lists.broken[0]! }
   const deny = lists.deny.find((r) => matches(r, parsed, 'deny'))
   if (deny) return { kind: 'denied', origin, rule: deny.text }
   const allow = lists.allow.find((r) => matches(r, parsed, 'allow'))
@@ -261,6 +274,14 @@ export function withheldText(judgement: Exclude<Judgement, { kind: 'allowed' }>)
     `ScadBuddy withheld this result: the browser is now on ${judgement.origin} (a redirect, a link or a new tab), which is ` +
     'not on the allow list and was not approved in this session. Nothing the page said is shown. To read it, call ' +
     'browser_navigate with that address: the user is asked first.'
+  )
+}
+
+/** What the model reads in place of a browser result that does not say which page it is from. */
+export function unplacedText(tool: string): string {
+  return (
+    `ScadBuddy withheld this result of ${tool}: it does not say which page the browser is on, so it cannot be checked ` +
+    'against the headless browser\'s lists. Call browser_snapshot to see the page, which names it.'
   )
 }
 

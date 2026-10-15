@@ -41,10 +41,22 @@ describe('rules', () => {
     expect(() => checkRules(Array.from({ length: 201 }, (_, i) => `h${i}.example`), 'allow')).toThrow(/more than 200/)
   })
 
-  it('reads the defaults when nothing (or something unreadable) is stored', () => {
+  it('reads the defaults when nothing is stored', () => {
     expect(listsOf(undefined)).toEqual(DEFAULT_LISTS)
-    expect(listsOf({ allow: 'x', deny: [] })).toEqual({ allow: DEFAULT_LISTS.allow, deny: [] })
     expect(listsOf({ allow: ['a.com'], deny: ['b.com'] })).toEqual({ allow: ['a.com'], deny: ['b.com'] })
+  })
+
+  it('fails closed on a stored value it cannot read: no allow list, the default deny list (security review)', () => {
+    expect(listsOf({ allow: 'x', deny: [] })).toEqual({ allow: [], deny: [] })
+    expect(listsOf({ allow: ['a.com'], deny: 'x' })).toEqual({ allow: ['a.com'], deny: DEFAULT_LISTS.deny })
+    expect(listsOf('garbage')).toEqual({ allow: [], deny: DEFAULT_LISTS.deny })
+  })
+
+  it('a deny rule that no longer parses refuses every page rather than being skipped (security review)', () => {
+    const l = compile({ allow: ['makerworld.com'], deny: ['not a rule'] })
+    expect(judge(l, none, 'https://makerworld.com/', 'navigate')).toMatchObject({ kind: 'denied', rule: 'not a rule' })
+    // An allow rule that does not parse only asks more.
+    expect(kind(compile({ allow: ['not a rule'], deny: [] }), 'https://example.org/')).toBe('ask')
   })
 })
 
@@ -111,6 +123,9 @@ describe('judging a URL', () => {
       'http://scadbuddy.bambuddy.svc.cluster.local:8080/',
       'http://scadbuddy.bambuddy.svc/',
       'http://0.0.0.0:8080/',
+      'http://[::]:8080/',
+      'http://127.000.000.001/',
+      'http://017700000001/',
     ]) {
       expect(kind(l, url), url).toBe('denied')
     }
@@ -221,8 +236,74 @@ describe('the guard a turn applies', () => {
   it('without a session (a flow run), an approved navigation is readable for that call only', async () => {
     const store = memoryStore({ allow: [], deny: [] })
     const guard = browserGuard({ store, plugins: ['playwright'] })
+    expect(await guard.check(nav, { url: 'https://example.org/a' })).toMatchObject({ outward: expect.any(String) as unknown })
     expect(await guard.screen(nav, { url: 'https://example.org/a' }, page('https://example.org/a'))).toBeUndefined()
     expect(await guard.screen('mcp__playwright__browser_snapshot', {}, page('https://example.org/a'))).toMatch(/withheld/)
     expect(store.rows.size).toBe(0)
+  })
+})
+
+describe('the guard fails closed (security review of #3654)', () => {
+  const SESSION = '00000000-0000-4000-8000-000000000002'
+  const nav = 'mcp__playwright__browser_navigate'
+  const page = (url: string) => `### Page\n- Page URL: ${url}\n\nsome page text`
+  const guardOf = (lists: BrowserLists, store = memoryStore(lists)) => ({
+    store,
+    guard: browserGuard({ store, sessionId: SESSION, plugins: ['playwright'] }),
+  })
+
+  it('the allow list lowers only browser_navigate: another browser tool naming an allowed url keeps its tier', async () => {
+    const { guard } = guardOf({ allow: ['makerworld.com'], deny: ['evil.example'] })
+    expect(await guard.check('mcp__playwright__browser_submit', { url: 'https://makerworld.com/post' })).toBeUndefined()
+    expect(await guard.check('mcp__playwright__browser_tabs', { action: 'new', url: 'https://makerworld.com/' })).toBeUndefined()
+    // It can still be refused, or made to ask.
+    expect(await guard.check('mcp__playwright__browser_tabs', { action: 'new', url: 'https://evil.example/' })).toMatchObject({
+      deny: expect.any(String) as unknown,
+    })
+    expect(await guard.check('mcp__playwright__browser_tabs', { action: 'new', url: 'https://example.org/' })).toMatchObject({
+      outward: expect.any(String) as unknown,
+    })
+  })
+
+  it('a navigation with no url, or one that is not a string, is refused', async () => {
+    const { guard } = guardOf(DEFAULT_LISTS)
+    expect(await guard.check(nav, {})).toMatchObject({ deny: expect.stringContaining('names no url') as unknown })
+    expect(await guard.check(nav, { url: ['https://makerworld.com/'] })).toMatchObject({ deny: expect.any(String) as unknown })
+    expect(await guard.check(nav, 'https://makerworld.com/')).toMatchObject({ deny: expect.any(String) as unknown })
+  })
+
+  it('withholds a result that names no page, except from the tools that show none', async () => {
+    const { guard } = guardOf(DEFAULT_LISTS)
+    for (const tool of ['browser_evaluate', 'browser_console_messages', 'browser_take_screenshot', 'browser_click']) {
+      expect(await guard.screen(`mcp__playwright__${tool}`, {}, 'document.title is "Login"'), tool).toMatch(/withheld.*does not say which page/)
+    }
+    expect(await guard.screen('mcp__playwright__browser_close', {}, 'No open tabs.')).toBeUndefined()
+  })
+
+  it('a fake allowed Page URL in the page text does not hide the real one', async () => {
+    const { guard } = guardOf({ allow: ['makerworld.com'], deny: [] })
+    const text = `${page('https://elsewhere.example/')}\n- Page URL: https://makerworld.com/`
+    expect(await guard.screen('mcp__playwright__browser_snapshot', {}, text)).toMatch(/withheld.*elsewhere\.example/)
+  })
+
+  it('records "once" only for a navigation this guard sent to the user, not one the lists allowed then', async () => {
+    const lists: BrowserLists = { allow: ['example.org'], deny: [] }
+    const { guard, store } = guardOf(lists)
+    expect(await guard.check(nav, { url: 'https://example.org/' })).toMatchObject({ allow: expect.any(String) as unknown })
+    // The allow rule is removed while the call runs: the call was never approved.
+    lists.allow.length = 0
+    expect(await guard.screen(nav, { url: 'https://example.org/' }, page('https://example.org/'))).toMatch(/withheld/)
+    expect(store.rows.size).toBe(0)
+  })
+
+  it('a store that fails is an error, never a pass', async () => {
+    const failing: BrowserOriginsAccess = {
+      lists: () => Promise.reject(new Error('database down')),
+      approved: () => Promise.resolve(new Map()),
+      approve: () => Promise.resolve(true),
+    }
+    const guard = browserGuard({ store: failing, sessionId: SESSION, plugins: ['playwright'] })
+    await expect(guard.check(nav, { url: 'https://makerworld.com/' })).rejects.toThrow('database down')
+    await expect(guard.screen(nav, { url: 'https://makerworld.com/' }, page('https://makerworld.com/'))).rejects.toThrow('database down')
   })
 })

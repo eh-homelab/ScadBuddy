@@ -7,6 +7,7 @@ import {
   type Judgement,
   pageUrls,
   refusalText,
+  unplacedText,
   withheldText,
 } from './origins.js'
 
@@ -15,15 +16,21 @@ import {
 // hook) and a durable one (temporal/turnServers.ts: the turn tools' guard and screen).
 //
 // The browser is any remote plugin's `browser_*` tools (Playwright MCP's names).
-//   - check: a call that names a `url` (browser_navigate) is judged before it runs:
-//     denied → refused at every tier, even with an approval; allowed → runs without
-//     asking, whatever the tool's tier; on neither list → outward, so it parks for the
-//     user, whatever the tool's tier.
+//   - check: browser_navigate is judged by its `url` before it runs: denied (or no
+//     URL at all) → refused at every tier, even with an approval; allowed → runs
+//     without asking, whatever the tool's tier; on neither list → outward, so it parks
+//     for the user. Any other browser tool that names a `url` can be refused or made
+//     outward by it, never allowed: the allow list lowers only navigation's tier
+//     (security review of #3654: a plugin's `browser_submit {url}` must not run
+//     unasked because its URL is on the allow list).
 //   - screen: a result is read for the page the browser is on afterwards (Playwright
 //     MCP's `Page URL:` lines). A page the browser reached on its own (a redirect, a
 //     link it followed, a new tab) that is denied, or on neither list and not approved
 //     in the session, is withheld from the model: it reads a note saying where the
-//     browser is instead. A navigation that ran after the user approved it once is
+//     browser is instead. A result that names no page is withheld too, except from the
+//     tools that show none (NO_PAGE_TOOLS): a page can move by itself at any time, so a
+//     result the guard cannot place is never assumed to be from an allowed one. A
+//     navigation this guard sent to the user, which then ran, was approved: it is
 //     recorded (`once`), so the pages of that origin may be read in the session.
 
 /** What the guard needs of the store (store.ts BrowserOrigins). */
@@ -43,6 +50,10 @@ export type BrowserGuard = {
 }
 
 const BROWSER_TOOL = /^browser_/
+/** The one tool whose tier the allow list may lower. */
+const NAVIGATE = 'browser_navigate'
+/** Playwright MCP tools whose result carries no page content, so they need not name a page. */
+const NO_PAGE_TOOLS: ReadonlySet<string> = new Set(['browser_close', 'browser_resize', 'browser_install'])
 
 /** The page a browser call would open, when its input names one. */
 export function navigationTarget(input: unknown): string | undefined {
@@ -64,11 +75,16 @@ export function browserGuard(deps: {
   plugins: readonly string[]
 }): BrowserGuard {
   // Read as each call is judged: a durable turn adds its packages' servers after building it.
-  const covers = (harnessName: string) =>
-    deps.plugins.some((name) => {
+  const toolOf = (harnessName: string): string | undefined => {
+    for (const name of deps.plugins) {
       const prefix = `mcp__${name}__`
-      return harnessName.startsWith(prefix) && BROWSER_TOOL.test(harnessName.slice(prefix.length))
-    })
+      if (harnessName.startsWith(prefix) && BROWSER_TOOL.test(harnessName.slice(prefix.length))) return harnessName.slice(prefix.length)
+    }
+    return undefined
+  }
+  const covers = (harnessName: string) => toolOf(harnessName) !== undefined
+  /** The origins this guard sent to the user: only a navigation to one of them that ran was approved. */
+  const asked = new Set<string>()
   const state = async () => {
     const [lists, approved] = await Promise.all([
       deps.store.lists(),
@@ -79,9 +95,13 @@ export function browserGuard(deps: {
   return {
     covers,
     async check(harnessName, input) {
-      if (!covers(harnessName)) return undefined
+      const tool = toolOf(harnessName)
+      if (tool === undefined) return undefined
       const url = navigationTarget(input)
-      if (url === undefined) return undefined
+      if (url === undefined) {
+        // A navigation that names no URL is judged by nothing: refuse it rather than let it run at its tier.
+        return tool === NAVIGATE ? { deny: `${harnessName} was not run: it names no url to judge.` } : undefined
+      }
       const { lists, approved } = await state()
       const j = judge(lists, approved, url, 'navigate')
       switch (j.kind) {
@@ -89,24 +109,28 @@ export function browserGuard(deps: {
         case 'denied':
           return { deny: refusalText(j) }
         case 'allowed':
+          if (tool !== NAVIGATE) return undefined
           return { allow: j.rule === undefined ? `${j.origin} was approved for this chat` : `${j.origin} is allowed by "${j.rule}"` }
         case 'ask':
+          asked.add(j.origin)
           return {
             outward: `${harnessName} would open ${j.origin}, which is not on the headless browser's allow list, so it needs the user's approval in the ScadBuddy UI.`,
           }
       }
     },
     async screen(harnessName, input, text) {
-      if (!covers(harnessName)) return undefined
-      const pages = pageUrls(text).filter((u) => !blank(u))
-      if (pages.length === 0) return undefined
+      const tool = toolOf(harnessName)
+      if (tool === undefined) return undefined
+      const named = pageUrls(text)
+      if (named.length === 0) return NO_PAGE_TOOLS.has(tool) ? undefined : unplacedText(harnessName)
+      const pages = named.filter((u) => !blank(u))
       const { lists, approved } = await state()
-      // The call's own navigation ran, so if it needed the user, the user approved it.
+      // The call's own navigation ran: if this guard sent it to the user, the user approved it.
       const target = navigationTarget(input)
-      const asked = target === undefined ? undefined : judge(lists, approved, target, 'navigate')
-      if (asked?.kind === 'ask') {
-        approved.set(asked.origin, approved.get(asked.origin) ?? 'once')
-        if (deps.sessionId !== undefined) await deps.store.approve(deps.sessionId, asked.origin, 'once')
+      const judged = target === undefined ? undefined : judge(lists, approved, target, 'navigate')
+      if (judged?.kind === 'ask' && asked.has(judged.origin)) {
+        approved.set(judged.origin, approved.get(judged.origin) ?? 'once')
+        if (deps.sessionId !== undefined) await deps.store.approve(deps.sessionId, judged.origin, 'once')
       }
       for (const page of pages) {
         const j: Judgement = judge(lists, approved, page, 'read')

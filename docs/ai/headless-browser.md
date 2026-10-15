@@ -82,7 +82,14 @@ can take the browser somewhere no navigation named. Playwright MCP reports the p
 on in each result (`- Page URL: …`); a result whose page is denied, or on neither list
 and not approved in the session, is replaced before the model reads it (and in the
 transcript) by a note saying where the browser is, so the page's content never reaches
-the model. A classic turn does that with a `PostToolUse` hook's `updatedMCPToolOutput`
+the model. A result that names no page at all is withheld too (except from
+`browser_close`, `browser_resize` and `browser_install`, which show none): a page can move
+by itself at any time, so a result that cannot be placed is never assumed to come from an
+allowed one. A check or screen that fails or takes longer than 20 s refuses the call or
+withholds the result; a deny rule that no longer parses refuses every page; a stored list
+that cannot be read leaves no allow list (everything asks) and the default deny list. The
+allow list lowers only `browser_navigate`'s tier: another browser tool that names a `url`
+can be refused or made to ask by it, never allowed. A classic turn does that with a `PostToolUse` hook's `updatedMCPToolOutput`
 (measured on Claude Code 2.1.296, `agent/test/browserOrigins.e2e.test.ts`), a durable
 turn in its call activity (`agent/src/temporal/turnTools.ts`). To read such a page the
 agent navigates to it, which asks. A navigation approved once is recorded as `once`, so
@@ -95,7 +102,8 @@ arrives as untrusted data: the forwarder wraps every plugin result in the envelo
 (`agent/src/plugins/forwarder.ts`).
 
 The lists judge names, not addresses: a permitted name that resolves to a private
-address is not caught by them. The boundary for that stays the network the server runs
+address is not caught by them. Nor do they judge a page's subresources and frames: an
+allowed page's iframe from elsewhere shows in its snapshot. The boundary for that stays the network the server runs
 in (next section).
 
 ## What the server can reach

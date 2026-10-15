@@ -6,6 +6,8 @@ import {
   type InputGuard,
   makeCanUseTool,
   makePreToolUseHook,
+  GUARD_DEADLINE_MS,
+  judgeInput,
   makeResultScreenHook,
   RISK_TIERS,
   type RiskTier,
@@ -152,6 +154,13 @@ describe('an input guard (#982)', () => {
     ])
   })
 
+  it('a guard that does not answer in time denies (security review)', async () => {
+    const never: InputGuard = () => new Promise(() => {})
+    expect(await judgeInput(never, nav, { url: 'https://allowed.example/' }, 20)).toEqual({
+      deny: expect.stringMatching(/could not be checked \(no answer in 20 ms\)/) as unknown,
+    })
+  })
+
   it('a denied input is refused even with a gate that would approve, and a failing guard denies', async () => {
     const canUseTool = makeCanUseTool(tierOf, undefined, gate, guard)
     expect(await canUseTool(nav, { url: 'https://denied.example/' }, opts('c'))).toEqual({
@@ -197,7 +206,28 @@ describe('the result screen hook (#982)', () => {
     })
     expect(await run('mcp__playwright__browser_snapshot', [{ type: 'text', text: 'Page URL: https://a.example/' }])).toEqual({})
     expect(await run('mcp__other__browser_click', [{ type: 'text', text: 'Page URL: https://evil.example/' }])).toEqual({})
-    expect(texts).toEqual(['Page URL: https://evil.example/', 'Page URL: https://a.example/'])
+    expect(texts).toHaveLength(2)
+    expect(texts[0]).toContain('Page URL: https://evil.example/')
+  })
+
+  it('reads a page named anywhere in the response, whatever its shape (security review)', async () => {
+    const hook = makeResultScreenHook((_n, _i, text) => Promise.resolve(text.includes('evil') ? 'withheld' : undefined), covers)
+    const run = (response: unknown) => hook.hooks[0]!(postToolUse('mcp__playwright__browser_click', response), 'toolu_1', { signal })
+    for (const response of [
+      { content: [{ type: 'text', text: 'Page URL: https://evil.example/' }] },
+      'Page URL: https://evil.example/',
+      [{ type: 'resource', resource: { uri: 'x', text: 'Page URL: https://evil.example/' } }],
+    ]) {
+      expect(await run(response)).toMatchObject({ hookSpecificOutput: { updatedMCPToolOutput: [{ text: 'withheld' }] } })
+    }
+  })
+
+  it('withholds the result when the screen does not answer in time, and outlasts it with its own hook timeout', async () => {
+    const hook = makeResultScreenHook(() => new Promise<undefined>(() => {}), covers, 20)
+    expect(hook.timeout).toBeGreaterThan(GUARD_DEADLINE_MS / 1000)
+    expect(await hook.hooks[0]!(postToolUse('mcp__playwright__browser_snapshot', []), 'toolu_1', { signal })).toMatchObject({
+      hookSpecificOutput: { updatedMCPToolOutput: [{ type: 'text', text: expect.stringMatching(/withheld.*no answer in 20 ms/) as unknown }] },
+    })
   })
 
   it('withholds the result when the screen fails', async () => {

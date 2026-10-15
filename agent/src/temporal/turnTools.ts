@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { AuditLog } from '../audit/log.js'
 import type { Tier } from '../auth/principal.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
-import { type GuardVerdict, judgeInput, type RiskTier, tierAfter } from '../harness/permissions.js'
+import { GUARD_DEADLINE_MS, type GuardVerdict, judgeInput, type RiskTier, tierAfter, within as withinMs } from '../harness/permissions.js'
 import { harnessToolName } from '../plugins/registry.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -471,7 +471,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
 /** `server.screen`'s replacement text; a screen that fails withholds the result (fail closed). */
 async function screened(server: TurnServer, harnessName: string, input: unknown, text: string): Promise<string | undefined> {
   try {
-    return await server.screen!(harnessName, input, text)
+    return await withinMs(server.screen!(harnessName, input, text), GUARD_DEADLINE_MS)
   } catch (err) {
     return `ScadBuddy withheld this result: the page it came from could not be checked (${(err as Error).message}).`
   }
