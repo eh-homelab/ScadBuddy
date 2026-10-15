@@ -445,6 +445,30 @@ export const printTools: Tool[] = [
     },
   }),
 
+  // #3630 — a file found by name, without walking the folders one at a time.
+  defineTool({
+    name: 'search_library',
+    description:
+      "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear (as " +
+      'a substring) in ' +
+      "the file's name or its folder path, whatever the case or separator. Each file names its `folder_path`. " +
+      'Without `all` only unsliced 3MFs (`hidden` counts the other matches); with it every file. At most 100 ' +
+      'files; `total` says how many matched. The library is read whole and kept for 30 s: after changing it ' +
+      '(delete_library_files, a move, copy or rename) pass `fresh: true` so the search sees the change.',
+    input: z.object({ query: z.string().min(1).max(200), all: z.boolean().optional(), fresh: z.boolean().optional() }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library/search'],
+    handler: async ({ query, all, fresh }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/library/search', { params: { query: { q: query, all, fresh } } }),
+          'search the library',
+        ),
+      ),
+  }),
+
   // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
   defineTool({
     name: 'delete_library_files',
