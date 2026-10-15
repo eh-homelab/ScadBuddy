@@ -366,6 +366,10 @@ class TurnSettings:
     long_edge: int
     model: str | None
     own_plugin: bool
+    # A Workflow agent's chat (agent/src/background/workflowAgents.ts): its own effort and
+    # the subagent definition its turns run as; its own model is `model`.
+    effort: str | None = None
+    agent_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -553,8 +557,9 @@ class ScadBuddyRunner:
     def __repr__(self) -> str:
         return f"ScadBuddyRunner(kek={self._kek.id})"
 
-    async def _settings(self) -> TurnSettings:
-        """What Settings says about this segment, read as it starts, as a classic turn reads it."""
+    async def _settings(self, session: str) -> TurnSettings:
+        """What Settings says about this segment, read as it starts, as a classic turn reads it,
+        and what the chat itself says over it (a Workflow agent's, ai_sessions.agent_*)."""
         async with self._connect() as conn:
             cur = await conn.execute(
                 "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
@@ -562,14 +567,21 @@ class ScadBuddyRunner:
             )
             # psycopg hands jsonb back decoded: a stored string is already a str.
             values = dict(await cur.fetchall())
+            cur = await conn.execute(
+                "SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = %s",
+                (session,),
+            )
+            own = await cur.fetchone() or (None, None, None)
         edge = values.get(LONG_EDGE_KEY)
         if isinstance(edge, bool) or not isinstance(edge, int):
             edge = DEFAULT_LONG_EDGE
-        model = values.get(MODEL_KEY)
+        model = own[0] or values.get(MODEL_KEY)
         return TurnSettings(
             long_edge=min(max(edge, MIN_LONG_EDGE), MAX_LONG_EDGE),
             model=model if isinstance(model, str) and model else None,
             own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
+            effort=own[1],
+            agent_type=own[2],
         )
 
     async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
@@ -800,7 +812,7 @@ class ScadBuddyRunner:
             # Settings → Plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)
             inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
-        settings = await self._settings()
+        settings = await self._settings(session)
         images = await self._images(session, context)
         problem = image_problem(images, settings.long_edge) if images else None
         if problem is not None:
@@ -813,6 +825,11 @@ class ScadBuddyRunner:
         if self._plugin_dir and settings.own_plugin:
             # The own plugin's subagents, as a classic turn has them only with the plugin.
             await self._subagent_tools(session, extra)
+        if settings.effort:
+            extra["effort"] = settings.effort
+        if settings.agent_type and settings.agent_type in (self._agents or {}):
+            # The chat's turns run as that subagent (Claude Code's --agent), as a classic turn's do.
+            extra["extra_args"] = {"agent": settings.agent_type}
         plugins = (
             [{"type": "local", "path": self._plugin_dir}]
             if (self._plugin_dir and settings.own_plugin)

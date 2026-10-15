@@ -78,6 +78,13 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.prime_tower import (
+    PrimeTowerChoice,
+    not_resliced,
+    prime_tower_overrides,
+    prime_tower_warnings,
+    template_keys_dropped,
+)
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
     LibrarySource,
@@ -193,6 +200,10 @@ class PrintRunRequest(BaseModel):
     #: Support structures for this print (#1899), over the template's
     #: ``print_settings``. Omitted means whatever those and the process say.
     supports: SupportsChoice | None = None
+    #: The prime tower for this print (#3628), over the template's ``print_settings``.
+    #: Omitted means whatever those and the process say (on, unless the plate prints
+    #: one filament).
+    prime_tower: PrimeTowerChoice | None = None
 
     @field_validator("filament_profiles")
     @classmethod
@@ -678,7 +689,7 @@ async def check_print(
     if source.is_sliced:
         # Queued as it is, never refused (#2671): what to set right first is a warning,
         # and there is no nozzle plan, slots or rack side to judge before it.
-        return PrintCheck(warnings=prepared.warnings)
+        return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(client)
     nozzle_plan = (
         await plan_for(
@@ -742,7 +753,7 @@ async def check_print(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, PRINTER_MODEL, prepared.printer_name
+                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
             ),
             # #717: what the run will say of a profile it cannot apply.
@@ -756,6 +767,8 @@ async def check_print(
                     read=read,
                 )
             )[1],
+            # #3628: and of a prime tower setting the preset has no value for.
+            *(await prime_tower_warnings(client, process, request.prime_tower, read=read)),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -779,7 +792,9 @@ async def _sequence_clearance(
     sequence = request.print_sequence or source.print_settings.get("print_sequence")
     if sequence != "by object":
         return None, []
-    clearance = clearance_for(PRINTER_MODEL)
+    # The resolved printer's, as the plate warnings are (#3024 review); a run accepted
+    # before the model was kept is judged as before.
+    clearance = clearance_for(prepared.printer_model or PRINTER_MODEL)
     try:
         # The source's own read, which the nozzle check made already (#2976).
         payload = await source.fetched_3mf(client)
@@ -988,6 +1003,8 @@ class PreparedRun:
     printer_name: str | None = None
     #: What a sliced file's run carries back instead of refusing (#2671).
     warnings: list[FilamentWarning] = field(default_factory=list)
+    #: The resolved printer's model, which the plate warnings are judged against (#2858).
+    printer_model: str | None = None
 
 
 async def prepare_run(
@@ -1064,6 +1081,7 @@ async def prepare_run(
             catalogue=None,
             printer_status=printer_status,
             printer_name=printer.name,
+            printer_model=printer.model,
             warnings=plate_warnings
             + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
         )
@@ -1093,6 +1111,7 @@ async def prepare_run(
         catalogue=catalogue,
         printer_status=printer_status,
         printer_name=printer.name,
+        printer_model=printer.model,
     )
 
 
@@ -1108,6 +1127,9 @@ class PreparedPlates(BaseModel):
     printer_status: PrinterStatus | None = None
     #: A sliced file's warnings (#2671), carried to the run's own.
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: As :attr:`PreparedRun.printer_model`. ``None`` in a run accepted before it was
+    #: carried, which then says nothing of an unlisted plate.
+    printer_model: str | None = None
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1124,6 +1146,7 @@ class PreparedPlates(BaseModel):
             printer_id=prepared.printer_id,
             printer_status=prepared.printer_status,
             warnings=prepared.warnings,
+            printer_model=prepared.printer_model,
         )
 
 
@@ -1284,6 +1307,10 @@ async def plan_run(
     supports, support_warnings = await support_overrides(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
+    # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
+    # No second round trip: `read` (read_once) answers again what supports just read.
+    tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
+    tower_dropped = template_keys_dropped(request.prime_tower)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1350,8 +1377,13 @@ async def plan_run(
             bed_type=resolved.bed_type,
             process_overrides={
                 **from_profiles,
-                **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
+                **{
+                    k: v
+                    for k, v in source.print_settings.items()
+                    if k not in SUPPORT_KEYS and k not in tower_dropped
+                },
                 **supports,
+                **prime_tower_overrides(request.prime_tower),
                 **(
                     {}
                     if request.print_sequence is None
@@ -1381,7 +1413,12 @@ async def plan_run(
     planned = [(*plate, sliced) for plate, sliced in zip(ready, reused, strict=True)]
 
     hardware = await _hardware_warnings(
-        client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
+        client,
+        printer_id,
+        choices,
+        printer_status,
+        printer_name=planned[0][1].printer_name,
+        printer_model=prepared.printer_model,
     )
     hardware += high_flow_warnings(
         printer_status,
@@ -1412,7 +1449,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware + support_warnings + _reused_notes(planned),
+        warnings=warnings + hardware + support_warnings + tower_warnings + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no
@@ -1520,7 +1557,8 @@ async def _plan_sliced(
         warnings=prepared.warnings
         + _filament_warnings(
             [(options, []) for options in per_plate], request.filament_plan, copies
-        ),
+        )
+        + not_resliced(request.prime_tower),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
     )
@@ -1677,6 +1715,7 @@ async def _hardware_warnings(
     printer_status: PrinterStatus | None,
     *,
     printer_name: str | None,
+    printer_model: str | None,
 ) -> list[FilamentWarning]:
     """The chosen nozzles and plate against what the printer reports (spec §4.4-4.5).
 
@@ -1694,8 +1733,7 @@ async def _hardware_warnings(
         for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
     ]
     found.append(plate_warning(choices.bed_type, last, printer_name))
-    # The run is only ever for a PRINTER_MODEL printer (_require_resolvable_printer).
-    found.append(plate_unlisted_warning(choices.bed_type, PRINTER_MODEL, printer_name))
+    found.append(plate_unlisted_warning(choices.bed_type, printer_model, printer_name))
     return [warning for warning in found if warning is not None]
 
 

@@ -6,6 +6,7 @@ import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { McpSdkServerConfigWithInstance, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
@@ -18,9 +19,11 @@ import { originPolicy } from '../src/http/origins.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
+import { SessionFiles } from '../src/workspace/store.js'
+import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -28,7 +31,7 @@ import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/s
 // that drives the activities is test/background.temporal.test.ts.
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
-const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
+const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const NOW = new Date('2026-10-13T08:00:30Z')
@@ -61,7 +64,9 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
     const context = () =>
-      ({ background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a' } }) as unknown as BuiltinContext
+      ({
+        background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a', workspace: new SessionFiles(db.sql) },
+      }) as unknown as BuiltinContext
     client = await connectInProcess(() => builtinServer(NAMES, context))
   }, 60_000)
   afterEach(async () => {
@@ -164,6 +169,120 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await tasks.endSession(sessionId, 'gone', { terminate: true })).toBe(1)
     expect(terminated).toEqual([b.id])
     expect(await tasks.endSession(sessionId, 'again')).toBe(0)
+  })
+
+  it("starts a Workflow in Claude Code's words, keeping its script in the workspace to edit and resume", async () => {
+    const script = "export const meta = { name: 'Find Bugs', description: 'find them' }\nreturn await agent('look')"
+    const started_ = await call('Workflow', { script, args: { dir: 'src' } })
+    const id = /Task ID: ([0-9a-f]{8})/.exec(started_.text)![1]!
+    const scriptPath = `/workspace/_claude/workflows/find-bugs-wf_${id}.js`
+    expect(started_.text).toMatch(new RegExp(`^Workflow launched in background\\. Task ID: ${id}\\nSummary: find them\\nScript file: ${scriptPath}\\n`))
+    expect(started_.text).toContain(`Run ID: wf_${id}`)
+    expect(await store.get(id)).toMatchObject({
+      kind: 'workflow',
+      description: 'find them',
+      spec: { name: 'Find Bugs', body: "\nreturn await agent('look')", args: { dir: 'src' }, scriptPath },
+    })
+    const kept = await new SessionFiles(db.sql).read({ kind: 'session', sessionId }, scriptPath.slice('/workspace/'.length))
+    expect(kept?.bytes.toString('utf8')).toBe(script)
+    // Still running: no resume until it is stopped; then one from the kept script.
+    expect(await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })).toMatchObject({ isError: true, text: expect.stringContaining('still running') })
+    await call('TaskStop', { task_id: id })
+    const resumed = await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })
+    expect(resumed.isError).toBe(false)
+    expect(await store.get(/Task ID: ([0-9a-f]{8})/.exec(resumed.text)![1]!)).toMatchObject({ spec: { resumeFrom: id } })
+    // What it refuses, as Claude Code would.
+    expect(await call('Workflow', { script: 'return 1' })).toMatchObject({ isError: true, text: expect.stringContaining('export const meta') })
+    expect(await call('Workflow', { script: "export const meta = { name: N, description: 'd' }\n" })).toMatchObject({ isError: true, text: expect.stringContaining('N is a variable') })
+    expect(await call('Workflow', { name: 'saved' })).toMatchObject({ isError: true, text: expect.stringContaining('No saved workflow named "saved"') })
+    expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
+  })
+
+  it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
+    // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
+    const scripted = scriptedRunner((_run, prompt) => (prompt.includes('first') ? { hang: true } : { reply: 'done again' }))
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
+    const t = (await store.create({
+      sessionId: parent,
+      kind: 'workflow',
+      description: 'retry',
+      spec: { name: 'retry', description: 'retry', body: `return await agent('first')`, scriptPath: '/workspace/_claude/workflows/retry-wf_x.js' },
+      createdBy: browser,
+    }))!
+    const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${parent}-${t.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
+    const first = new MockActivityEnvironment({ ...info, attempt: 1 })
+    const abandoned = first.run(acts.wf_run!, { taskId: t.id }).catch(() => undefined)
+    await expect.poll(() => scripted.prompts.length).toBe(1)
+    const [orphan] = await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions WHERE parent_id = ${parent}`
+    await expect.poll(async () => (await mm.get(orphan!.id, browser)).status).toBe('running')
+
+    // The retry: its script differs only so its own agent can answer.
+    await db.sql`UPDATE ai_background_tasks SET spec = spec || ${db.sql.json({ body: `return await agent('second')` } as never)} WHERE id = ${t.id}`
+    const out = await new MockActivityEnvironment({ ...info, attempt: 2 }).run(acts.wf_run!, { taskId: t.id })
+    expect(out).toMatchObject({ status: 'completed', result: 'done again' })
+    expect((await mm.get(orphan!.id, browser)).status).toBe('done')
+    first.cancel()
+    await abandoned
+    mm.abortAll()
+  }, 60_000)
+
+  it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
+    // The turn's message, as the warm process was sent it.
+    const scripted = scriptedRunner((_run, prompt) => {
+      if (prompt.includes('give n')) return { reply: 'not json' }
+      if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
+      return { reply: 'hello from the agent' }
+    })
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const agents = managerAgents(mm)
+    const signal = new AbortController().signal
+    const text = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'say hi', opts: { label: 'hi' }, signal })
+    expect(text).toMatchObject({ ok: true, result: 'hello from the agent' })
+    const child = await mm.get(text.childId!, browser)
+    expect(child).toMatchObject({ parentId: parent, title: 'probe · hi', tags: ['workflow'], status: 'done' })
+    const [row] = await db.sql<{ root: string }[]>`SELECT budget_root_id AS root FROM ai_sessions WHERE id = ${child.id}`
+    expect(row!.root).toBe(parent)
+    // Claude Code's frame and instructions reach the child's turn.
+    expect(promptText(scripted.prompts[0]!)).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
+    const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
+    const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
+    expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
+    expect(promptText(scripted.prompts.at(-1)!)).toMatch(/^Your reply did not match the schema:/)
+
+    // Its options act as Claude Code's: the chat's own model, effort and subagent definition.
+    const typed = managerAgents(mm, { agentTypes: async () => ['model-author', 'print-analyst'] })
+    const tuned = await typed.run({
+      sessionId: parent,
+      owner: browser,
+      workflow: 'probe',
+      prompt: 'say hi',
+      opts: { model: 'claude-haiku-test', effort: 'low', agentType: 'scadbuddy:model-author' },
+      signal,
+    })
+    expect(tuned.ok).toBe(true)
+    const [own] = await db.sql<{ agent_model: string; agent_effort: string; agent_type: string }[]>`
+      SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${tuned.childId!}`
+    expect(own).toEqual({ agent_model: 'claude-haiku-test', agent_effort: 'low', agent_type: 'model-author' })
+    expect(scripted.runs.at(-1)).toMatchObject({ model: 'claude-haiku-test', effort: 'low' })
+    // A stopped run starts no chat.
+    const before = (await db.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_sessions`)[0]!.n
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: {}, signal: AbortSignal.abort() })).toMatchObject({
+      ok: false,
+      error: 'stopped',
+    })
+    expect((await db.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_sessions`)[0]!.n).toBe(before)
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: { agentType: 'nope' }, signal })).toMatchObject({
+      ok: false,
+      error: "Agent type 'nope' not found. Available agents: general-purpose, model-author, print-analyst",
+    })
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: { isolation: 'worktree' }, signal })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('Cannot create a worktree: not in a git repository'),
+    })
+    mm.abortAll()
   })
 
   it('stops any task by its ID with TaskStop', async () => {
@@ -404,6 +523,38 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
       SELECT cost_usd, unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
     expect(Number(row!.cost_usd)).toBeCloseTo(0.06)
     expect(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
+    classic.abortAll()
+  })
+
+  it("recycles the next turn's warm process for its budget after WebFetch spend, and logs why (#3597)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let spend: ((cost: number) => Promise<void>) | undefined
+    let fetches = 1
+    const logs: string[] = []
+    const scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.01 }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // Only the first turn's WebFetch makes a nested query; the warm process's cap never saw it.
+      run: (run) =>
+        (async function* () {
+          if (fetches-- > 0) await spend!(0.05)
+          yield* scripted.runner(run)
+        })(),
+      nestedQueries: (deps) => {
+        spend = deps.spent
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      warm: { log: (m) => logs.push(m) },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    expect(await (await classic.send(session.id, browser, 'fetch it')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await (await classic.send(session.id, browser, 'again')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(logs).toContainEqual(expect.stringMatching(/closed session .*'s process: recycled: budget/))
     classic.abortAll()
   })
 

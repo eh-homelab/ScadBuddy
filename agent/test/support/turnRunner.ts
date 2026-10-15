@@ -74,6 +74,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     updatedAt: now,
     archivedAt: null,
     unpricedCostUsd: 0,
+    agentModel: null,
+    agentEffort: null,
+    agentType: null,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}

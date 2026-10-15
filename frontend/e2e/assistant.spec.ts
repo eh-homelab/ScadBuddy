@@ -214,7 +214,24 @@ test.describe('assistant panel (#256)', () => {
     const touched = panel.getByRole('region', { name: 'What this session touched' })
     await expect(touched.getByRole('group', { name: 'Presets' })).toContainText('preset-tall')
     await touched.getByRole('group', { name: 'Revisions' }).getByRole('link', { name: /3f9c2a1/ }).click()
-    await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e$/)
+    await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e3f9c2a1b7d4e3f9c2a1b7d4e3f9c$/)
+  })
+
+  // #931: the one-line summary, and putting a model back to before the session.
+  test('Touched sums up a session and undoes its changes to a model', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Touched' }).click()
+    const touched = panel.getByRole('region', { name: 'What this session touched' })
+    await expect(touched.getByText('1 new version of gridfinity-bin, 1 preset saved')).toBeVisible()
+
+    await touched.getByRole('button', { name: 'Undo changes to gridfinity-bin' }).click()
+    const dialog = page.getByRole('dialog', { name: "Undo this chat's changes to gridfinity-bin?" })
+    await dialog.getByRole('button', { name: 'Undo changes' }).click()
+    await expect(touched.getByRole('status')).toHaveText('gridfinity-bin is back to how it was before this chat.')
   })
 
   // #792: fork from a reply by keyboard, the parent link, the fork nested under its

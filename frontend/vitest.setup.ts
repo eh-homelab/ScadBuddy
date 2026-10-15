@@ -6,7 +6,7 @@ import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
-import { FakeIntersectionObserver } from './src/test/intersection'
+import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -41,6 +41,7 @@ afterEach(() => {
   resetDisplayUnit()
   resetRealtime()
   resetAiAvailability()
+  resetIntersections()
   // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
   window.sessionStorage.clear()
 })

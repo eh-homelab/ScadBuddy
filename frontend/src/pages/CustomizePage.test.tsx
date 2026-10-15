@@ -2251,6 +2251,47 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
   })
 
+  it("dismisses a preset's unmigrated inputs on Reset to defaults (#3074)", async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Old',
+        description: '',
+        tags: [],
+        origin: 'mine',
+        params: { name: 'Old' },
+        inputs: { params: { name: 'Old' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render('/m/name-keychain')
+    const name = await screen.findByRole('textbox', { name: 'Name on the tag' })
+    // Off the defaults, or Reset is disabled.
+    await user.clear(name)
+    await user.type(name, 'Edited')
+    const select = screen.getByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Old' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Old')
+    await user.click(await screen.findByRole('button', { name: 'Replace my changes' }))
+    expect(await screen.findByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    // A preset that cannot be migrated keeps the values on screen.
+    expect(name).toHaveValue('Edited')
+
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }))
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+    expect(name).toHaveValue('Reagan')
+  })
+
   it('migrates a preset from its stored inputs before cutting them to the schema', async () => {
     const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
     setMockPresets('name-keychain', [

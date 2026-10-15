@@ -59,6 +59,7 @@ from scadbuddy.store import BlobStore
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content_models import BlobScope
+from scadbuddy.store.download_cache import DownloadCache
 
 #: A library piece's key prefix; the number moves when the reader changes what a file's
 #: objects are, so an older reading is never taken for the new one. It prefixes a kept
@@ -157,6 +158,7 @@ async def read_library_objects(
     blobs: BlobStore,
     cache: Path,
     budget: ReadBudget | None = None,
+    downloads: DownloadCache | None = None,
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
     hash, else downloaded and read within ``budget`` (the defaults when None). A file
@@ -192,7 +194,9 @@ async def read_library_objects(
         file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
     try:
-        async with spooled_3mf(client, source, cache, spend) as payload:
+        async with spooled_3mf(
+            client, source, cache, spend, downloads=downloads, file_hash=file.file_hash
+        ) as payload:
             if payload is None:
                 reason = "it holds no mesh ScadBuddy can read"
                 # No budget decides this one, so no larger budget would read it: kept as

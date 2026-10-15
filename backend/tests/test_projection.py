@@ -176,11 +176,13 @@ def test_every_state_change_is_published_on_the_bus(pg_conninfo: str) -> None:
         "job.running",
         "job.failed",
         "job.pending",
-        "job.superseded",
+        "job.cancelled",
     ]
 
 
-def test_finishing_as_cancelled_announces_superseded(pg_conninfo: str) -> None:
+def test_finishing_as_cancelled_announces_cancelled_or_superseded(pg_conninfo: str) -> None:
+    """#607: ``job.superseded`` says a newer render replaced the job; one cancelled
+    with no replacement is ``job.cancelled``."""
     bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
     store = JobProjection(pg_conninfo, pool_size=2, events=bus)
     store.open()
@@ -189,9 +191,19 @@ def test_finishing_as_cancelled_announces_superseded(pg_conninfo: str) -> None:
         store.mark_started(job.id)
         job.state, job.error, job.finished_at = "cancelled", "withdrawn", datetime.now(UTC)
         assert store.finish(job)
+        replaced = _row(store, _job(width=24))
+        replaced.state, replaced.error = "cancelled", SUPERSEDED_ERROR
+        replaced.finished_at = datetime.now(UTC)
+        assert store.finish(replaced)
     finally:
         store.close()
-    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
+    assert _kinds(pg_conninfo) == [
+        "job.pending",
+        "job.running",
+        "job.cancelled",
+        "job.pending",
+        "job.superseded",
+    ]
 
 
 def test_a_cancelled_projection_keeps_the_reason_the_api_stored(
@@ -278,7 +290,7 @@ def test_the_cancellation_handler_writes_the_final_projection_once_announced(
     stored = announcing.read(job.id)
     assert stored.state == "cancelled" and stored.error == CANCELLED_ERROR
     assert stored.steps == job.steps and stored.log_tail == job.log_tail
-    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
+    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.cancelled"]
 
 
 def _as_legacy(conninfo: str, *job_ids: str) -> None:

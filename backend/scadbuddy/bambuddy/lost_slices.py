@@ -6,10 +6,10 @@ its job then slices to a ``.gcode.3mf`` that nothing queues, and the run never l
 its id. Every slice job ScadBuddy starts is recorded (a run's in
 ``print_slice_starts``, a background slice's in ``print_preview_slices``), and so is
 every lost start. Bambuddy numbers its jobs in sequence and keeps a finished one for 30
-minutes, so the housekeeping sweep (``housekeeping_sweep_preview_slices``, every
-``PRUNE_INTERVAL``) looks at the jobs numbered beside the first one recorded after a
-lost start: one that slices the same copy, was created then, and that nobody recorded
-is the lost start's, and the file it sliced to is removed.
+minutes, so the housekeeping sweep (``housekeeping_sweep_lost_slices``, every
+``PRUNE_INTERVAL`` whatever the sweeps' switch) looks at the jobs numbered beside the
+first one recorded after a lost start: one that slices the same copy, was created then,
+and that nobody recorded is the lost start's, and the file it sliced to is removed.
 
 A slice someone starts by hand in Bambuddy's UI on the same ScadBuddy copy, within
 that window, matches the rule too and its file is removed with the lost start's

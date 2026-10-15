@@ -324,3 +324,61 @@ async def test_the_bundled_claude_code_gives_the_server_to_the_subagent_only(
         fake.close()
         stand_in.close()
         await asyncio.sleep(0)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_workflow_agents_chat_runs_as_its_subagent_type(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2393: a chat whose agent_type names a definition (a Workflow agent's, the agent's
+    workflowAgents.ts) runs its segment as that subagent: the bundled Claude Code's main
+    thread gets the definition's prompt, and its own effort."""
+    subagent_prompt = "You author ScadBuddy templates"
+    fake = FakeAnthropic(lambda body: {"text": "ok"}).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    plugin = tmp_path / "scadbuddy"
+    plugin.mkdir()
+    (plugin / "skills").symlink_to(REPO / "plugins" / "scadbuddy" / "skills")
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(plugin),
+            subagent_url="http://127.0.0.1:1/x",
+            agents_dir=str(AGENTS),
+            make_runner=ClaudeAgentSdkRunner,
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db)
+            await agent_db.execute(
+                "UPDATE ai_sessions SET durable_turn_id = %s, agent_model = %s,"
+                " agent_effort = %s, agent_type = %s WHERE id = %s",
+                (str(uuid.uuid4()), "claude-opus-5-5", "low", "model-author", sid),
+            )
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "make a box")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        main = [b for b in fake.messages() if b.get("tools")]
+        assert main
+        for body in main:
+            assert subagent_prompt in json.dumps(body.get("system"))
+            assert body.get("model") == "claude-opus-5-5"
+            assert body.get("output_config", {}).get("effort") == "low"
+    finally:
+        fake.close()
+        await asyncio.sleep(0)

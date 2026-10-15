@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { nestedQueries } from '../src/builtins/nested.js'
+import type { CredentialSource } from '../src/harness/fallback.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { BUILTINS } from '../src/builtins/server.js'
 import SCHEMAS from '../src/builtins/schemas.json' with { type: 'json' }
@@ -33,7 +34,10 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
     await ensureStateDirs(p)
     return p
   }
-  const credential = () => Promise.resolve({ kind: 'gateway' as const, baseUrl: fake.url, secret: TOKEN })
+  const credentials: CredentialSource = {
+    candidates: async () => [{ id: 'gw', epoch: 0, label: 'gateway', credential: { kind: 'gateway', baseUrl: fake.url, secret: TOKEN } }],
+    reporter: () => async () => {},
+  }
 
   it("takes Claude Code's own input schemas", async () => {
     reply = () => ({ text: 'ok' })
@@ -70,7 +74,7 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
   it("asks the small model with no tools, and counts what it cost", async () => {
     reply = () => ({ text: 'the title is Title' })
     const spent: number[] = []
-    const nested = nestedQueries({ paths: await paths(), credential, spent: async (c) => void spent.push(c) })
+    const nested = nestedQueries({ paths: await paths(), credentials, spent: async (c) => void spent.push(c) })
     const from = fake.messageCalls().length
     expect(await nested.ask('What is the title?', new AbortController().signal)).toBe('the title is Title')
     const calls = fake.messageCalls().slice(from)
@@ -88,7 +92,7 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
       }
       return { text: 'Found OpenSCAD.' }
     }
-    const nested = nestedQueries({ paths: await paths(), credential })
+    const nested = nestedQueries({ paths: await paths(), credentials })
     const result = await nested.search({ query: 'openscad' }, new AbortController().signal)
     expect(result.isError).toBeUndefined()
     expect(result.text).toContain('Web search results for query: "openscad"')

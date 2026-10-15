@@ -4,7 +4,7 @@ import io
 import json
 import math
 import os
-import time
+import re
 import tracemalloc
 import zipfile
 from collections.abc import Callable
@@ -1540,10 +1540,8 @@ def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
     )
     assert [plate.name for plate in plates_of(two)] == ["Bins (plate 1)", "Bins (plate 2)"]
     with zipfile.ZipFile(one) as archive:
-        assert (
-            '<metadata key="plater_name" value=""/>'
-            in archive.read("Metadata/model_settings.config").decode()
-        )
+        [plate] = plate_settings(ET.fromstring(archive.read("Metadata/model_settings.config")))
+    assert plate.metadata["plater_name"] == ""  # a one-object plate is left unnamed
 
 
 def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:
@@ -1744,8 +1742,9 @@ def test_a_processing_instruction_is_left_to_the_parse() -> None:
 def test_a_paint_code_off_a_triangle_paints_nothing() -> None:
     """The parse reads ``paint_color`` only on a ``<triangle>``; the pattern agrees."""
     data = _object_bytes(_THREE, head=b"<metadata " + PAINT_ATTRIBUTE.encode() + b'="8"/>')
-    read = bambu3mf._written_extents(data)
-    assert read is None or read[1] == frozenset()
+    # The two paint counts differ, so the file is left to the parse (#3254 review): not
+    # read here as unpainted.
+    assert bambu3mf._written_extents(data) is None
 
 
 def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
@@ -1773,13 +1772,72 @@ def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
 )
 def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
     """Security review of #3254: an unbounded run inside the paint pattern rescanned to
-    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
-    the scan is linear, and a code it cannot find leaves the file to the parse."""
-    data = junk * 40_000
-    began = time.perf_counter()
-    for _ in bambu3mf._PAINT_CODE.finditer(data):
-        pass
-    assert time.perf_counter() - began < 2
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Every run
+    in it is bounded, so no match reads further than a tag's worth of bytes; checked on
+    the pattern itself, not by a clock a loaded shard can skew (#3476 review)."""
+    assert not re.search(rb"(?<!\\)[*+]", bambu3mf._PAINT_CODE.pattern)
+    # A crafted file is read, whatever it then answers, without hanging on it.
+    bambu3mf._written_extents(_object_bytes(_THREE, junk * 40_000))
+
+
+def test_reading_a_box_makes_no_copy_of_the_file() -> None:
+    """#3254 review: skipping the XML declaration by slicing copied the whole object
+    file (86 MB on #2942's) just to look past it."""
+    padding = b'<metadata name="note">' + b"x" * 4_000_000 + b"</metadata>"
+    data = _object_bytes(_THREE, head=padding)
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is not None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+@pytest.mark.parametrize(
+    "root",
+    [b'<model xmlns="urn:not-3mf">', b'<model xmlns="%s"><x xmlns="urn:other">' % CORE_NS.encode()],
+    ids=["another root namespace", "a default redeclared inside"],
+)
+def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) -> None:
+    """#3254 review: a bare ``<vertex>`` is the 3MF's only under the core namespace,
+    which the parse requires; the pattern now asks the same of the root."""
+    data = _object_bytes(_THREE).replace(b'<model xmlns="' + CORE_NS.encode() + b'">', root, 1)
+    assert data != _object_bytes(_THREE)
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security review of #3434's fix: a search for the root re-ran its bounded run
+    from every ``<model`` in a file made of them. The pattern is tried once, where the
+    root starts; checked by what it is asked, not by a clock (#3476 review)."""
+    declaration = b'<?xml version="1.0"?>'
+    data = declaration + b"\n" + b"<model " * 400_000
+    asked: list[int] = []
+    real = bambu3mf._CORE_ROOT
+
+    class Once:
+        def match(self, text: bytes, pos: int = 0) -> re.Match[bytes] | None:
+            asked.append(pos)
+            return real.match(text, pos)
+
+        def search(self, *_: object) -> None:
+            raise AssertionError("the root is matched where it starts, never searched for")
+
+    monkeypatch.setattr(bambu3mf, "_CORE_ROOT", Once())
+    assert bambu3mf._written_extents(data) is None
+    assert asked == [len(declaration) + 1]
+
+
+def test_a_core_model_inside_another_root_is_left_to_the_parse() -> None:
+    """#3476 review: the root is the first element, so a ``<model>`` nested in another
+    is not taken for the 3MF's."""
+    core = _object_bytes(_THREE)
+    head, body = core.split(b"?>", 1)
+    assert bambu3mf._written_extents(head + b"?><foo>" + body + b"</foo>") is None
+    assert bambu3mf._written_extents(core) is not None
 
 
 def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:

@@ -309,6 +309,11 @@ def root_model(
     *,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """The package's root model: each plate's objects and their build items.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     items: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -362,6 +367,12 @@ def model_settings(
     covers: bool,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
+    """``Metadata/model_settings.config``: each object's parts and extruders, and each
+    plate.
+
+    ``assemblies_by_plate`` is for :func:`write_plates_3mf` alone, which
+    passes the one list it gives both files so they number the objects alike; any other
+    caller leaves it out and the objects are numbered from ``plates``."""
     objects: list[str] = []
     plate_entries: list[str] = []
     each_plate = _assemblies(plates) if assemblies_by_plate is None else assemblies_by_plate
@@ -605,7 +616,10 @@ class PlateEntry:
     index: int
     thumbnail: str | None
     #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
-    #: the objects on it joined with " + ", else ``None``.
+    #: the objects on it joined with " + ", else ``None``. A plate ScadBuddy wrote with
+    #: several objects carries the model's name (with " (plate N)" when the file has
+    #: several plates) as its ``plater_name``; a one-object plate has none, so it is
+    #: named by its object.
     name: str | None = None
 
 
@@ -853,6 +867,12 @@ _ONE_EACH = tuple(
 )
 #: Vertices turned into numbers at a time, so the copy never costs more than a batch.
 _VERTEX_BATCH = 65536
+#: The writer's root, in the core namespace that makes its bare ``<vertex>`` tags the
+#: 3MF's own; and any default namespace declared, the two counted against each other,
+#: so a file that puts its vertices in another namespace is left to the parse.
+_CORE_ROOT = re.compile(rb'<model\b[^>]{0,1024}?\sxmlns="%s"' % re.escape(CORE_NS.encode()))
+_ANY_DEFAULT_NAMESPACE = re.compile(rb"\sxmlns\s*=")
+_LEADING_SPACE = re.compile(rb"\s*")
 
 
 def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
@@ -863,15 +883,33 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
     entity, a processing instruction, no vertex at all, other than one object, mesh,
     ``<vertices>`` and ``<triangles>``, a paint code off a triangle or past its cap),
-    which :func:`_plate_geometry` then parses as it always has.
+    which :func:`_plate_geometry` then parses as it always has. Its root must declare
+    the core namespace as its one default, as the parse requires of every vertex.
+
+    Triangles are not read, so a vertex index out of range is not refused here as the
+    parse refuses it: the box does not need them, and a re-placed object file is copied
+    as it was written, never rebuilt from its triangles.
 
     Every value is bounded before it is copied: no entity is expanded (none is
     accepted), coordinates are read a batch at a time into rows of at most
     :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
     # The writer's one processing instruction is its XML declaration; any other, like a
     # comment, CDATA or an entity, is something the pattern does not read as XML does.
-    body = data[data.index(b"?>") + 2 :] if data.startswith(b"<?xml ") and b"?>" in data else data
-    if any(marker in body for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+    # Searched from an offset, never sliced: a slice is a copy of the whole file.
+    start = data.find(b"?>") + 2 if data.startswith(b"<?xml ") else 0
+    if start == 1:
+        return None
+    if any(data.find(marker, start) != -1 for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+        return None
+    # Matched where the root element starts, the first thing after the declaration:
+    # a ``<model>`` inside some other root is not the 3MF's. Searched for instead, the
+    # bounded run would be retried from every ``<model`` in a file of them, 1 KB a time.
+    root = _LEADING_SPACE.match(data, start)
+    if (
+        root is None
+        or _CORE_ROOT.match(data, root.end()) is None
+        or sum(1 for _ in _ANY_DEFAULT_NAMESPACE.finditer(data)) != 1
+    ):
         return None
     if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
         return None

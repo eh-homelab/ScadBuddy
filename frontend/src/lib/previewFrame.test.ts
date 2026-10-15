@@ -60,6 +60,16 @@ describe('cameraReach (#2381)', () => {
   it('stands back as far as a portrait view is narrow', () => {
     expect(cameraReach([80, 40, 20], 0.5).distance).toBeCloseTo(cameraFraming([80, 40, 20]).distance * 2)
   })
+
+  it('stands back at most 10 times as far, however narrow the view (#2867)', () => {
+    const square = cameraFraming([80, 40, 20]).distance
+    expect(cameraReach([80, 40, 20], 0.1).distance).toBeCloseTo(square * 10)
+    // Narrower than 0.1 is clamped there, not backed off without end.
+    expect(cameraReach([80, 40, 20], 0.01).distance).toBeCloseTo(square * 10)
+    expect(cameraReach([80, 40, 20], 0).distance).toBeCloseTo(square * 10)
+    // The orbit's reach follows the clamped distance too (#3026 review).
+    expect(cameraReach([80, 40, 20], 0).maxDistance).toBeCloseTo(Math.max(MIN_REACH, square * 20))
+  })
 })
 
 describe('modelBox (#2364)', () => {

@@ -153,6 +153,37 @@ describe('Preview scene (#364)', () => {
     // Framed for its 80 mm, not left where the default camera looks.
     expect(scene.controls.target.y).toBeCloseTo(5)
     expect(scene.camera.position.length()).toBeCloseTo(80 * 1.9 + 40)
+    // And its measured size is shown, as a rendered model's is (#2866).
+    expect(screen.getByTestId('bbox-readout')).toHaveTextContent(/80.*40.*10/)
+  })
+
+  it("measures a plate shown alone in model space, whatever offset the drawn clone's parent still holds (#3026 review)", () => {
+    // The plate picked alone after a framed multi-plate render: its drawn clone is mounted
+    // under the offset group, whose world matrix still holds the last render's offset
+    // (-300 mm) until the next demand frame. Measured there, the plate came out off-centre.
+    const placed = new THREE.Group()
+    const part = new THREE.Mesh(new THREE.BoxGeometry(80, 10, 40))
+    part.position.set(128, 5, 128)
+    placed.add(part)
+    const clone = placed.clone.bind(placed)
+    placed.clone = (recursive?: boolean) => {
+      const drawn = clone(recursive)
+      // Stands in for the not-yet-updated matrixWorld: the R3F mock renders <primitive>
+      // as DOM, so the clone stays under this group, where real R3F would re-parent it on
+      // mount. Without it the test measures nothing stale and passes on the old code too.
+      const stale = new THREE.Group()
+      stale.position.set(-300, 0, 0)
+      stale.updateMatrixWorld(true)
+      stale.add(drawn)
+      return drawn
+    }
+    const url = '/api/v1/jobs/a/preview.glb?plate=2'
+    scene.meshes.set(url, placed)
+
+    render(<Preview job={job('a', box([0, 0, 0], [1, 1, 1]), { preview_url: url, bbox_mm: null })} rendering={false} />)
+
+    expect(modelPosition()).toBe('-128,0,-128')
+    expect(scene.controls.target.x).toBeCloseTo(0)
   })
 
   it('frames every plate of a long multi-plate row and outlines each by number (#2381)', () => {
