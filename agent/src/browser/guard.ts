@@ -122,6 +122,10 @@ export function browserGuard(deps: {
         // A navigation that names no URL is judged by nothing: refuse it rather than let it run at its tier.
         return tool === NAVIGATE ? { deny: `${harnessName} was not run: it names no url to judge.` } : undefined
       }
+      // Exactly `{url}`: the approval card shows the one URL the call opens (frontend browserApproval.ts).
+      if (tool === NAVIGATE && Object.keys(input as object).some((k) => k !== 'url')) {
+        return { deny: `${harnessName} was not run: its input must be exactly {"url": "<the page>"}.` }
+      }
       const { lists, approved } = await state()
       const j = judge(lists, approved, url, 'navigate')
       switch (j.kind) {

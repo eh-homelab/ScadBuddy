@@ -542,7 +542,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const session = sessionOf(Context.current().info.workflowExecution?.workflowId)
       if (session !== undefined) await deps.clients?.closeSession(session)
     },
-    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string }> => {
+    [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string; refused?: string }> => {
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (typeof tool !== 'string') throw ApplicationFailure.nonRetryable('turn_tool_tier takes {tool: string, input}', TOOL_ERROR)
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
@@ -553,8 +553,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
-        // it with the reason (turnToolActivity), so it is answered as not outward here.
-        if (verdict && 'deny' in verdict) return { tier: 'write', ...queue }
+        // it with the reason (turnToolActivity). It is answered as not outward, with
+        // `refused` saying why, so `write` is never read as the tier it ran at.
+        if (verdict && 'deny' in verdict) return { tier: 'write', refused: verdict.deny, ...queue }
         return { tier: tierAfter(server.tierOf(harnessName, input), verdict), ...queue }
       })
     },

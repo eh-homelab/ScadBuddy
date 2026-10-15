@@ -58,8 +58,11 @@ export const DEFAULT_DENY: readonly string[] = [
   'fd00:ec2::254/128',
   'metadata',
   'metadata.goog',
+  'internal',
   '*.internal',
+  'svc',
   '*.svc',
+  'cluster.local',
   '*.cluster.local',
 ]
 

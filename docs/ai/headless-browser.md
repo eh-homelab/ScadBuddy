@@ -79,7 +79,7 @@ refused, with the form to send instead, so the guard and the browser never read 
 two ways. The
 defaults allow a few model sites and references (MakerWorld, Printables, Thingiverse,
 GitHub, OpenSCAD, the OpenSCAD wikibook) and deny loopback, link-local and cloud
-metadata addresses, and `*.internal`, `*.svc` and `*.cluster.local` names. A LAN address
+metadata addresses, and the `internal`, `svc` and `cluster.local` names and their subdomains. A LAN address
 is not denied by default: it asks.
 
 **Pages the browser reaches on its own.** A redirect, a link it clicks, or a new tab

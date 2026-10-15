@@ -119,7 +119,13 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
     expect(revoked.status).toBe(204)
     expect(await store.approved(id)).toEqual(new Map())
     expect((await send('DELETE', `/api/v1/ai/sessions/${id}/browser-origins?origin=https%3A%2F%2Fexample.org`)).status).toBe(404)
+    // Normalised as an approval is: the same text revokes what it approved.
+    await send('POST', `/api/v1/ai/sessions/${id}/browser-origins`, { origin: 'https://Example.org/' })
+    expect((await send('DELETE', `/api/v1/ai/sessions/${id}/browser-origins?origin=${encodeURIComponent('https://Example.org/')}`)).status).toBe(204)
+    expect((await send('DELETE', `/api/v1/ai/sessions/${id}/browser-origins?origin=not-an-origin`)).status).toBe(400)
     expect(audited.filter((e) => e.action === 'browser_session_origin').map((e) => e.detail)).toEqual([
+      'https://example.org approved for the session',
+      'https://example.org revoked for the session',
       'https://example.org approved for the session',
       'https://example.org revoked for the session',
     ])

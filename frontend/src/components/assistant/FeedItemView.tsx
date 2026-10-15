@@ -88,12 +88,16 @@ function BrowserApprovalButtons({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // What was saved before the approval was sent: it stays saved even if the approval
+  // then fails (a request already resolved), so the card says so (review of #3654).
+  const [saved, setSaved] = useState<string | null>(null)
   const host = new URL(nav.origin).host
-  async function remember(write: () => Promise<unknown>) {
+  async function remember(write: () => Promise<unknown>, done: string) {
     setBusy(true)
     setError(null)
     try {
       await write()
+      setSaved(done)
       onDecide(true)
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : 'Could not save that choice')
@@ -113,18 +117,24 @@ function BrowserApprovalButtons({
             size="sm"
             data-agent-user-only=""
             disabled={busy}
-            onClick={() => void remember(() => api.approveBrowserOrigin(sessionId, nav.origin))}
+            onClick={() => void remember(() => api.approveBrowserOrigin(sessionId, nav.origin), `Saved: ${host} is allowed for this chat.`)}
           >
             Allow for this chat
           </Button>
         )}
-        <Button size="sm" data-agent-user-only="" disabled={busy} onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin))}>
+        <Button size="sm" data-agent-user-only="" disabled={busy} onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${host} is on the allow list (Settings → Assistant).`)}
+        >
           Always allow {host}
         </Button>
         <Button variant="danger" size="sm" data-agent-user-only="" disabled={busy} onClick={() => onDecide(false)}>
           Deny
         </Button>
       </div>
+      {saved && (
+        <p role="status" className="mt-1.5 text-[12px] text-muted">
+          {saved}
+        </p>
+      )}
       {error && (
         <p role="alert" className="mt-1.5 text-[12px] text-warn">
           {error}

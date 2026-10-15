@@ -11,14 +11,28 @@
 export type BrowserNavigation = { url: string; origin: string }
 
 export function browserNavigation(summary: string): BrowserNavigation | undefined {
-  const tool = summary.split(' ', 1)[0] ?? ''
+  const space = summary.indexOf(' ')
+  if (space < 0) return undefined
+  const tool = summary.slice(0, space)
   if (!/(?:^|__)browser_navigate$/.test(tool) || /(?:^|__)scadbuddy__browser_navigate$/.test(tool)) return undefined
-  const match = /"url"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(summary)
-  if (!match) return undefined
+  // The whole input, parsed, and exactly `{url}`: the top-level `url` is what the agent's
+  // guard judged and the browser is sent to, so a nested one, an extra key, or a summary
+  // the agent cut short (APPROVAL_SUMMARY_MAX) leaves the plain card showing the summary.
+  let input: unknown
   try {
-    const url = new URL(JSON.parse(match[1]!) as string)
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined
-    return { url: url.href, origin: `${url.protocol}//${url.hostname.replace(/\.$/, '')}${url.port ? `:${url.port}` : ''}` }
+    input = JSON.parse(summary.slice(space + 1))
+  } catch {
+    return undefined
+  }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined
+  const keys = Object.keys(input)
+  const raw = (input as { url?: unknown }).url
+  if (keys.length !== 1 || keys[0] !== 'url' || typeof raw !== 'string') return undefined
+  try {
+    const url = new URL(raw)
+    // The guard asks only about a URL written as the browser writes it; any other never parks.
+    if (url.href !== raw || (url.protocol !== 'https:' && url.protocol !== 'http:')) return undefined
+    return { url: url.href, origin: url.origin }
   } catch {
     return undefined
   }

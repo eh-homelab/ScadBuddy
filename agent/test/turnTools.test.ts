@@ -580,7 +580,7 @@ describe("the headless browser's lists in a durable turn (#982)", () => {
     expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward' })
     expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward' })
     // No approval could run it, so the user is not asked: its call refuses it.
-    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write' })
+    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write', refused: expect.stringContaining('deny rule "evil.example"') as unknown })
   })
 
   it('runs an allowed navigation, refuses a denied one even approved, and an unlisted one until approved', async () => {

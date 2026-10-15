@@ -187,11 +187,13 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
     if (problem) return c.json({ detail: problem }, 403)
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
-    const origin = c.req.query('origin') ?? ''
+    const asked = c.req.query('origin') ?? ''
+    const origin = asOrigin(asked)
+    if (!origin) return c.json({ detail: `origin: "${asked}" is not an http or https origin (scheme://host[:port])` }, 400)
     const refused = await refusedSession(c, c.req.param('id'))
     if (refused) return refused
     const ok = await s.revoke(c.req.param('id'), origin)
-    if (!ok) return c.json({ detail: `${origin || 'that origin'} is not approved in session ${c.req.param('id')}` }, 404)
+    if (!ok) return c.json({ detail: `${origin} is not approved in session ${c.req.param('id')}` }, 404)
     await audited(c, 'browser_session_origin', `${origin} revoked for the session`, true)
     return c.body(null, 204)
   })

@@ -123,6 +123,9 @@ describe('judging a URL', () => {
       'http://metadata/',
       'http://scadbuddy.bambuddy.svc.cluster.local:8080/',
       'http://scadbuddy.bambuddy.svc/',
+      'http://internal/',
+      'http://svc/',
+      'http://cluster.local/',
       'http://0.0.0.0:8080/',
       'http://[::]:8080/',
     ]) {
@@ -335,6 +338,17 @@ describe('the guard fails closed (security review of #3654)', () => {
     expect(await guard.check(nav, {})).toMatchObject({ deny: expect.stringContaining('names no url') as unknown })
     expect(await guard.check(nav, { url: ['https://makerworld.com/'] })).toMatchObject({ deny: expect.any(String) as unknown })
     expect(await guard.check(nav, 'https://makerworld.com/')).toMatchObject({ deny: expect.any(String) as unknown })
+  })
+
+  it('a navigation whose input is more than {url} is refused, so the card and the guard read one URL', async () => {
+    const { guard } = guardOf(DEFAULT_LISTS)
+    for (const input of [
+      { opts: { url: 'https://makerworld.com/' }, url: 'https://evil.example/' },
+      { url: 'https://makerworld.com/', other: 1 },
+    ]) {
+      expect(await guard.check(nav, input)).toMatchObject({ deny: expect.stringContaining('exactly {"url"') as unknown })
+    }
+    expect(await guard.check(nav, { url: 'https://makerworld.com/' })).toMatchObject({ allow: expect.any(String) as unknown })
   })
 
   it('withholds a result that names no page, except from the tools that show none', async () => {

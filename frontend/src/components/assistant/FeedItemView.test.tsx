@@ -42,13 +42,13 @@ describe('the approval card', () => {
 })
 
 describe("a headless-browser navigation's approval card (#982)", () => {
-  const nav = (tool = 'mcp__playwright__browser_navigate') => {
+  const nav = (tool = 'mcp__playwright__browser_navigate', input = '{"url":"https://cults3d.com/en/3d-model/spool"}') => {
     const onDecide = vi.fn()
     const item: FeedItem = {
       kind: 'approval',
       id: 'a2',
       tool: 'toolu_9',
-      summary: `${tool} {"url":"https://cults3d.com/en/3d-model/spool"}`,
+      summary: `${tool} ${input}`,
       state: 'pending',
     }
     const view = render(<FeedItemView item={item} sessionId="session-9" onDecide={onDecide} onAnswer={vi.fn()} />)
@@ -68,6 +68,8 @@ describe("a headless-browser navigation's approval card (#982)", () => {
     const { onDecide } = nav()
     await userEvent.click(screen.getByRole('button', { name: 'Allow for this chat' }))
     await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
+    // Saved before the approval is sent, so the card says so whatever the approval does.
+    expect(screen.getByRole('status')).toHaveTextContent('Saved: cults3d.com is allowed for this chat.')
     const listed = await api.getBrowserOrigins()
     expect(listed.approved).toContainEqual(expect.objectContaining({ session_id: 'session-9', origin: 'https://cults3d.com', scope: 'session' }))
   })
@@ -84,6 +86,13 @@ describe("a headless-browser navigation's approval card (#982)", () => {
     await userEvent.click(screen.getByRole('button', { name: 'Always allow cults3d.com' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('must come from the ScadBuddy UI')
     expect(again.onDecide).not.toHaveBeenCalled()
+  })
+
+  it('is the ordinary card, showing the whole summary, when the input is not exactly {url}', () => {
+    nav(undefined, '{"opts":{"url":"https://makerworld.com/"},"url":"https://evil.example/"}')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Always allow/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/evil\.example/)).toBeInTheDocument()
   })
 
   it("is the ordinary card for the bridge's own browser_navigate, which drives the user's tab", () => {
