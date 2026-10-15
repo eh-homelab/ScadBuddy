@@ -1,4 +1,4 @@
-import { isUuid } from '../harness/stateDirs.js'
+import { isUuid } from '../harness/uuid.js'
 
 // The request ids of the tool-call gate (durable-agents spec §6.6, "Reads"). Opaque to
 // clients; the prefix names the store. Only the respond route's prefix dispatch and the
