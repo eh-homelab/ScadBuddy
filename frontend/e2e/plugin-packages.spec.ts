@@ -113,6 +113,12 @@ test.describe('assistant plugins in Settings (#297)', () => {
     expect(tick).toMatchObject({ ok: false, error: { code: 'refused' } })
     const approve = await bridgeCall(page, 'click', { role: 'button', name: 'Approve this pin' })
     expect(approve).toMatchObject({ ok: false, error: { code: 'refused' } })
+    // The approval is still open, and closing it leaves the pin unapproved. (The dialog is
+    // modal: the page behind it is out of the accessibility tree until it closes.)
+    const dialog = page.getByRole('dialog', { name: 'Approve greeter' })
+    await expect(dialog).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
     await expect(section.getByText('Awaiting approval')).toBeVisible()
   })
 
