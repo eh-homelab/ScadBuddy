@@ -164,6 +164,26 @@ describe('SessionFiles', () => {
     expect(await screen.findByText(/No files yet/)).toBeInTheDocument()
   })
 
+  it('keeps the confirm open until the delete is answered, and shows a refusal after it (review of #3727)', async () => {
+    seedSessionFile('sess-f', 'notes.txt', text('hello'), 'text/plain')
+    let refuse: (reason: unknown) => void = () => {}
+    const remove = vi
+      .spyOn(api, 'deleteAiSessionFile')
+      .mockImplementation(() => new Promise((_, reject) => (refuse = reject)))
+    const user = userEvent.setup()
+    render()
+    await user.click(await screen.findByRole('button', { name: 'Delete notes.txt' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete notes.txt?' })
+    await user.click(within(confirm).getByRole('button', { name: 'Delete file' }))
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('alertdialog', { name: 'Delete notes.txt?' })).toBeInTheDocument()
+    expect(within(confirm).getByRole('button', { name: 'Delete file' })).toBeDisabled()
+    await act(async () => refuse(new ApiError(409, 'busy')))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(await screen.findByText(/notes\.txt was not deleted/)).toBeInTheDocument()
+    expect(screen.getByText('notes.txt')).toBeInTheDocument()
+  })
+
   it('offers no upload or delete on a session the user cannot write', async () => {
     seedSessionFile('sess-f', 'notes.txt', text('hello'), 'text/plain')
     render({ canWrite: false })
