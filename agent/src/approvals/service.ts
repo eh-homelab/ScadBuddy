@@ -736,11 +736,15 @@ export class ApprovalService {
     by: Owner | undefined,
     reason: string | null,
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+    refresh = true,
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    // The decision and its `approval.resolved` commit together: a parked gate
-    // polling the row must not see the decision (and log the session's
-    // `running`) before the event that reports it is in the log.
+    // The decision, its `approval.resolved` and the session's status commit
+    // together (#3583, as #3256 for questions): a parked gate polling the row
+    // resumes on the decision's commit alone, so a status written in a later
+    // transaction could land after its turn had finished, and `running` was
+    // never logged. A status write that fails rolls the decision back.
+    // `refresh: false`: the caller (a finishing turn) sets the status itself.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     // Started only once the UPDATE has won, so a lost race leaves no span.
     const traced: { span?: Span; committed?: boolean } = {}
@@ -777,6 +781,7 @@ export class ApprovalService {
           const events = [
             scrubForLog(resolved, []),
             inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+            ...(refresh ? await this.statusRefresh(tx, settled.sessionId) : []),
           ]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
@@ -837,11 +842,16 @@ export class ApprovalService {
    * is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {
-    const [row] = await this.deps.sql<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
+    await this.append(sessionId, await this.statusRefresh(this.deps.sql, sessionId))
+  }
+
+  /** `refreshStatus`'s UPDATE on `db` (the pool, or the transaction that settles an approval); the event to log. */
+  private async statusRefresh(db: Sql | TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+    const [row] = await db<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                         AND ${isNotDoneSummary(this.deps.sql)})
+                         AND ${isNotDoneSummary(db)})
               THEN 'waiting_input'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
             ELSE 'idle'
@@ -850,7 +860,7 @@ export class ApprovalService {
       WHERE id = ${sessionId} AND status = 'waiting_approval'
         AND NOT EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
       RETURNING status`
-    if (row) await this.append(sessionId, [event({ type: 'session.status', sessionId, status: row.status })])
+    return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
   }
 
   private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
@@ -917,7 +927,6 @@ export class ApprovalService {
       const session = await this.session(settled.sessionId)
       const parked = session?.turnActive === true && session.turnId === settled.turnId && settled.turnId !== null
       if (!parked) {
-        await this.refreshStatus(settled.sessionId)
         // The resumed turn is the decision's child (spec 2026-10-01 §5.4).
         if (approve) {
           await otelContext.with(contextFrom(settled.decisionTraceparent, otelContext.active()), () =>
@@ -941,7 +950,6 @@ export class ApprovalService {
     }
     if (result.resumed) return
     await this.revoke(approval.id, `the session could not resume: ${result.reason}`)
-    await this.refreshStatus(sessionId)
   }
 
   /** The panel's `approval.decision` client message; the seam #266's socket calls. */
@@ -957,9 +965,7 @@ export class ApprovalService {
   }
 
   private async expire(id: string): Promise<ApprovalRecord | undefined> {
-    const approval = await this.settle(id, 'expired', undefined, 'no decision before it expired')
-    if (approval?.sessionId) await this.refreshStatus(approval.sessionId)
-    return approval
+    return this.settle(id, 'expired', undefined, 'no decision before it expired')
   }
 
   /** Expires every pending approval past its time; returns how many. */
@@ -1040,10 +1046,9 @@ export class ApprovalService {
     const pending = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL ORDER BY created_at`
     let n = 0
-    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason)) n += 1
-    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     // `refresh: false`: the caller (a finishing turn) sets the status itself.
-    if (n > 0 && options.refresh !== false) await this.refreshStatus(sessionId)
+    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason, {}, options.refresh !== false)) n += 1
+    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     return n
   }
 
@@ -1275,8 +1280,8 @@ export class ApprovalService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it or, on shutdown, keeps it
       // (sessions/manager.ts finish). The SDK has dropped the request by then.
+      // The status moved back with the decision's own commit (settle).
       const decided = await this.waitFor(approval.id, AbortSignal.any([context.signal, request.signal]))
-      await this.refreshStatus(context.sessionId)
       const source = { approvalId: decided.id, decision: decided.decision ?? undefined }
       if (decided.decision === 'approved') {
         if (await this.consumeById(decided.id)) {
