@@ -59,14 +59,17 @@ async def start_execution(
     inputs: dict[str, Any] | None,
     approval_timeout_s: int,
     tool_tiers: dict[str, str],
+    event: dict[str, Any] | None = None,
 ) -> None:
-    """Start run `run_id` of `definition` with its checked `inputs`, as `started_by`."""
+    """Start run `run_id` of `definition` with its checked `inputs`, as `started_by`;
+    `event` is the trigger's event it fired on, if any (#2666)."""
     await AgentClient(client, f"flow-{run_id}").start_and_submit_message(
         "execute",
         RunFlow(
             script=definition.script,
             inputs_schema=definition.inputs_schema,
             inputs=inputs if definition.inputs_schema is not None else None,
+            event=event,
         ).model_dump(exclude_none=True),
         workflow_name=PROJECT_WORKFLOW,
         task_queue=flows.queue,

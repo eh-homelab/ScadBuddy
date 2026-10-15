@@ -4,6 +4,7 @@ from the pieces' own solids, placed as the layout says, plus the extra files."""
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import shutil
@@ -29,9 +30,9 @@ from scadbuddy.render.jobs import (
     result_plates,
 )
 from scadbuddy.render.plate import plate_for
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.store.content import BlobScope, template_title
-from scadbuddy.template import Blob
+from scadbuddy.template import Blob, Part
 from scadbuddy.workflows.activities import PIECE_NAME, WorkerDeps, _heartbeating, _read_piece
 from scadbuddy.workflows.models import OutputRequest
 
@@ -143,36 +144,61 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
 
 def manifest_of(req: OutputRequest) -> list[ManifestObject]:
     """The output's objects, from the layout it is written from (spec §7)."""
+    # One entry per piece and its colours (#3637): a copy recoloured is arranged again
+    # in its own colours, so it is an entry of its own.
+    counts: Counter[tuple[str, str]] = Counter()
+    swaps: dict[tuple[str, str], dict[str, str]] = {}
     if req.layout.own is not None:
-        counts = Counter([req.layout.own])
-    else:
-        counts = Counter(p.piece_key for plate in req.layout.plates for p in plate.items)
+        counts[(req.layout.own, "{}")] += 1
+        swaps[(req.layout.own, "{}")] = {}
+    for plate in req.layout.plates:
+        for p in plate.items:
+            swap = {k.upper(): v.upper() for k, v in p.recolour.items() if k.upper() != v.upper()}
+            key = (p.piece_key, json.dumps(swap, sort_keys=True))
+            counts[key] += 1
+            swaps.setdefault(key, swap)
     named = {entry.part: entry.piece for entry in req.bom if entry.part}
+    conflicting = _stated_materials(req)[1] if any(swaps.values()) else set()
+    by_piece: dict[str, list[tuple[str, str]]] = {}
+    for key in counts:
+        by_piece.setdefault(key[0], []).append(key)
     objects: list[ManifestObject] = []
     for part in req.parts:
-        if not counts[part.piece_key]:
-            continue
-        earlier = req.provenance.get(part.piece_key)
-        objects.append(
-            ManifestObject(
-                part=part.piece_key,
-                file=part.file,
-                slug=earlier.slug if earlier else req.slug,
-                revision=earlier.revision if earlier else req.record.revision,
-                bbox=part.bbox,
-                footprint=(part.bbox.size[0], part.bbox.size[1]),
-                colours=list(part.colours),
-                # Kept, so arranging this output again still states them.
-                materials=dict(earlier.materials) if earlier else {},
-                count=counts[part.piece_key],
-                plates=part.plates,
-                bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
-                source_output=earlier.source_output if earlier else None,
-                library_file_id=earlier.library_file_id if earlier else None,
-                notes=list(part.notes),
-            )
-        )
+        for key in by_piece.get(part.piece_key, []):
+            entry = _manifest_entry(req, part, counts[key], swaps[key], named)
+            unknown = sorted({c for c in swaps[key].values() if c in conflicting})
+            if unknown:
+                # Said where the copies are, so the person knows why the slicer asks (#3637).
+                entry.notes.append(
+                    f"{', '.join(unknown)}: the colours swapped to it are different materials,"
+                    " so the file states no material for it"
+                )
+            objects.append(entry)
     return objects
+
+
+def _manifest_entry(
+    req: OutputRequest, part: Part, count: int, recolour: dict[str, str], named: dict[str, str]
+) -> ManifestObject:
+    earlier = req.provenance.get(part.piece_key)
+    return ManifestObject(
+        part=part.piece_key,
+        file=part.file,
+        slug=earlier.slug if earlier else req.slug,
+        revision=earlier.revision if earlier else req.record.revision,
+        bbox=part.bbox,
+        footprint=(part.bbox.size[0], part.bbox.size[1]),
+        colours=list(part.colours),
+        # Kept, so arranging this output again still states them.
+        materials=dict(earlier.materials) if earlier else {},
+        count=count,
+        plates=part.plates,
+        bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
+        source_output=earlier.source_output if earlier else None,
+        library_file_id=earlier.library_file_id if earlier else None,
+        notes=list(part.notes),
+        recolour=recolour,
+    )
 
 
 def _joined(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
@@ -199,7 +225,13 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
 
 
 def _materials(req: OutputRequest) -> dict[str, str]:
-    """Each colour's material as the arranged objects' sources state it. Only a library
+    """Each colour's material as `_stated_materials` finds it, the conflicting left out."""
+    return _stated_materials(req)[0]
+
+
+def _stated_materials(req: OutputRequest) -> tuple[dict[str, str], set[str]]:
+    """Each colour's material, and the colours whose sources disagree. Each colour's
+    material is as the arranged objects' sources state it. Only a library
     file states any. A render's colour has a material only when a library object
     shares its slot, since one slot is one filament. A colour two sources
     give different materials is unknown too: one slot prints both parts, and picking
@@ -207,12 +239,26 @@ def _materials(req: OutputRequest) -> dict[str, str]:
     (`project_settings`)."""
     materials: dict[str, str] = {}
     conflicting: set[str] = set()
-    for obj in req.provenance.values():
-        for colour, material in obj.materials.items():
-            key = colour.upper()
-            if materials.setdefault(key, material) != material:
-                conflicting.add(key)
-    return {c: m for c, m in materials.items() if c not in conflicting}
+
+    def state(colour: str, material: str) -> None:
+        if materials.setdefault(colour.upper(), material) != material:
+            conflicting.add(colour.upper())
+
+    # Each copy states the colours it prints in: a recoloured copy's new colour is the
+    # material of the one it replaces, and a colour it swapped away is not stated (#3637).
+    placed = [p for plate in req.layout.plates for p in plate.items]
+    for copy in placed:
+        source = req.provenance.get(copy.piece_key)
+        swap = {k.upper(): v.upper() for k, v in copy.recolour.items()}
+        for colour, material in (source.materials if source else {}).items():
+            state(swap.get(colour.upper(), colour.upper()), material)
+    # A source no copy places still states its own (a layout read without its plates).
+    shown = {copy.piece_key for copy in placed}
+    for key, obj in req.provenance.items():
+        if key not in shown:
+            for colour, material in obj.materials.items():
+                state(colour, material)
+    return {c: m for c, m in materials.items() if c not in conflicting}, conflicting
 
 
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
@@ -248,6 +294,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 )
             matrix = placement_matrix(parts[placed.piece_key].bbox, placed.x, placed.y, placed.rot)
             source = layouts[placed.piece_key].plates[0]
+            # This copy's colours swapped (#3637): its painting's too.
+            swap = {k.upper(): v.upper() for k, v in placed.recolour.items()}
             for owner in dict.fromkeys(source.objects):
                 by_colour: dict[str, list[trimesh.Trimesh]] = {}
                 names: dict[str, str] = {}
@@ -264,13 +312,19 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                         # Named no filament: it prints nothing.
                         negatives.append(replace(part, mesh=mesh))
                         continue
-                    colour = part.colour.upper()
-                    for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
+                    colour = swap.get(part.colour.upper(), part.colour.upper())
+                    paint = part.paint
+                    if paint is not None and swap:
+                        paint = Paint(
+                            paint.codes,
+                            tuple(swap.get(c.upper(), c.upper()) for c in paint.colours),
+                        )
+                    for used in [colour, *(paint.used() if paint is not None else [])]:
                         if used.upper() not in colours:
                             colours.append(used.upper())
-                    if part.paint is not None:
+                    if paint is not None:
                         painted.append(
-                            ColourPart(colours.index(colour), part.name, colour, mesh, part.paint)
+                            ColourPart(colours.index(colour), part.name, colour, mesh, paint)
                         )
                         continue
                     by_colour.setdefault(colour, []).append(mesh)
