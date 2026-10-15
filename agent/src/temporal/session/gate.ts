@@ -43,8 +43,10 @@ import { FLOW_GRANT_CHECK_ACTIVITY, SESSION_GATE_ACTIVITIES } from './names.js'
 //   - a parked call ends by `respond`, by its timer (approval -> expired, ask_user ->
 //     cancelled, any other -> timed out), by `cancel_input` or by the turn's end, each
 //     through `resolve_input` before the host is told.
-// The workflow patches (`workflow.patched`) of the Python one are not carried: this is a
-// new workflow type, and no older history takes the paths they guard.
+// The workflow patches (`workflow.patched`) of the Python one are not carried as patches:
+// this is a new workflow type, and no older history takes the paths they guard. Each
+// patch's new side is the one ported (PERSON_KEEPS_TIMEOUT, SETTLE_PARKED,
+// SESSION_FLOW_GRANT, SESSION_FLOW_ESCALATION), so a reader can check each against it.
 
 /** An entry's timer at most (ai_pending_input's CHECK). */
 export const ENTRY_MAX_S = 86_400
@@ -350,8 +352,10 @@ export class SessionGate {
         const principal = outside?.parent_principal
         if (outside?.parent_hop && hopS > 0 && typeof parent === 'string' && isUuid(parent) && typeof principal === 'string' && principal) {
           // The starter session first, for its hop; then the person. One timer covers
-          // both (spec §4.6): the agent's sweep moves it up.
-          hopS = Math.min(hopS, ENTRY_MAX_S - 1)
+          // both (spec §4.6): the agent's sweep moves it up. Each hop has the run's
+          // timeout: a long parent hop is cut so the person keeps theirs, rather than the
+          // whole being cut to ENTRY_MAX_S and the person left a second (#2862).
+          hopS = Math.max(1, Math.min(hopS, ENTRY_MAX_S - timeout))
           hop = { ...hop, hop: 'parent', hopUntil: iso(Date.now() + hopS * 1000), parentSession: parent, parentPrincipal: principal }
           timeout = Math.min(hopS + timeout, ENTRY_MAX_S)
         }
