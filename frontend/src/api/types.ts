@@ -239,6 +239,8 @@ export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */
 export type LibraryListing = Schemas['LibraryListing']
+/** #2349 — one library file's name by id (`GET /print/library/names`). */
+export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
