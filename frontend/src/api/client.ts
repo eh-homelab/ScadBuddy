@@ -29,6 +29,7 @@ import type {
   FontFamily,
   GlyphCoverage,
   HttpRequestSetting,
+  BrowserOriginsSetting,
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
@@ -2042,6 +2043,29 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+
+  /**
+   * #982 — the headless browser's allow and deny lists, and the origins approved in each
+   * chat, served by the agent service. Fails (404 or 503) without the agent or its database.
+   */
+  getBrowserOrigins: () => request<BrowserOriginsSetting>('/ai/settings/browser-origins'),
+
+  putBrowserOrigins: (lists: { allow: string[]; deny: string[] }) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins', { method: 'PUT', body: JSON.stringify(lists) }),
+
+  /** #982 — "Always allow" on a browser approval card: one origin added to the allow list. */
+  allowBrowserOrigin: (rule: string) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins/allow', { method: 'POST', body: JSON.stringify({ rule }) }),
+
+  /** #982 — "Allow for this chat": the origin opens without asking for the rest of the session. */
+  approveBrowserOrigin: (sessionId: string, origin: string) =>
+    request<{ origin: string; scope: 'session' }>(`/ai/sessions/${seg(sessionId)}/browser-origins`, {
+      method: 'POST',
+      body: JSON.stringify({ origin }),
+    }),
+
+  revokeBrowserOrigin: (sessionId: string, origin: string) =>
+    request<void>(`/ai/sessions/${seg(sessionId)}/browser-origins?origin=${encodeURIComponent(origin)}`, { method: 'DELETE' }),
 
   /**
    * #1941 — uploads an image the user attached in the assistant panel; its message then

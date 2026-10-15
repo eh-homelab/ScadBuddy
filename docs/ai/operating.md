@@ -633,7 +633,11 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `printer_camera_enabled`, on unless stored
+  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  through `PUT /api/v1/ai/settings/browser-origins`
+  ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
+  `printer_camera_enabled`, on unless stored
   `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
   session) is refused before the backend is asked, which Settings → Printer camera writes
   through `PUT /api/v1/ai/settings/printer-camera`
