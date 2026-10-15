@@ -949,7 +949,10 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
         found_here = _PAINT_CODE.findall(data, low_at, high_at)
         found += len(found_here)
         codes.update(found_here)
-        paints += len(_ANY_PAINT.findall(data, low_at, high_at))
+        # Counted, never collected: the attribute needs no ``<``, so a window holds as
+        # many as a run of them fits, and a list of them would cost several times the
+        # file (security review of #3711).
+        paints += sum(1 for _ in _ANY_PAINT.finditer(data, low_at, high_at))
     if any(tags[tag] != 1 for tag in _ONE_EACH):
         return None
     if not written or written != tags[b"vertex"] or found != paints:

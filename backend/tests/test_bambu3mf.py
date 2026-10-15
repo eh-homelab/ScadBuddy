@@ -1868,6 +1868,21 @@ def test_written_extents_are_read_a_window_at_a_time() -> None:
     assert painted == frozenset()
 
 
+def test_a_run_of_paint_attributes_is_counted_without_being_held() -> None:
+    """Security review of #3711: the bare attribute needs no ``<``, so a window can hold
+    any number of them; collecting them cost four times the file, which at the archive's
+    cap is gigabytes."""
+    junk = b' paint_color="' * 400_000
+    data = _object_bytes(_THREE, tail=b'<metadata name="' + junk + b'"/>')
+    tracemalloc.start()
+    try:
+        bambu3mf._written_extents(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
 def test_windows_cover_the_file_and_end_before_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     """#3678: the windows run end to end from where they start, and each but the last
     ends just before a ``<``, so no tag starts in one window and ends in the next."""
