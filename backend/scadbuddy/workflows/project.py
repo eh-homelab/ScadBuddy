@@ -67,6 +67,12 @@ class FlowStart(BaseModel):
     approval_timeout_s: int = 0
     #: Where the agent serves the tools `tool(...)` calls.
     tools_queue: str = "agent-tools"
+    #: Seconds a turn tool's call waits for a worker on one agent replica's own queue
+    #: before it fails as that replica gone (#2937). Tests shorten it.
+    host_queue_start_s: int = 60
+    #: The same wait for a call a person already approved: longer, since failing it asks
+    #: them to approve it again (#3420). Tests shorten it.
+    approved_queue_start_s: int = 600
     #: The agent's tools and their tiers as the agent resolved them when the run started
     #: (#2704, `flows/agent_tools.py`); each call asks the agent again, whose answer only
     #: raises them. A run from before #2704 took them from a file and asks nothing.
@@ -110,6 +116,14 @@ class ProjectWorkflow:
     @property
     def tools_queue(self) -> str:
         return self._start.tools_queue
+
+    @property
+    def host_queue_start_s(self) -> int:
+        return self._start.host_queue_start_s
+
+    @property
+    def approved_queue_start_s(self) -> int:
+        return self._start.approved_queue_start_s
 
     def tool_tier(self, name: str) -> str | None:
         return self._start.tool_tiers.get(name)
