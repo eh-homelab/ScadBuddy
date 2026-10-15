@@ -132,7 +132,12 @@ const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : 
 /** The summary's buckets, in the order the line names them; anything else is an "other change". */
 // `runsOnly` is true when the session recorded no queue item, so its print runs are its prints.
 const BUCKETS: ReadonlyArray<{ one: string; many: string; holds: (e: Entry, runsOnly: boolean) => boolean }> = [
-  { one: 'new model', many: 'new models', holds: (e) => e.type === 'model' && e.actions[0] === 'created' },
+  // A model made and then deleted in the session is counted as deleted.
+  {
+    one: 'new model',
+    many: 'new models',
+    holds: (e) => e.type === 'model' && e.actions[0] === 'created' && e.actions.at(-1) !== 'deleted',
+  },
   { one: 'model deleted', many: 'models deleted', holds: (e) => e.type === 'model' && e.actions.at(-1) === 'deleted' },
   { one: 'preset saved', many: 'presets saved', holds: (e) => e.type === 'preset' && e.actions.at(-1) !== 'deleted' },
   { one: 'render', many: 'renders', holds: (e) => e.type === 'render_job' },
@@ -230,7 +235,7 @@ async function undoState(u: Undo): Promise<{ same: boolean; movedOn: boolean }> 
 }
 
 /** "Undo changes to <model>": restores the version before the session, after a confirm. */
-function UndoModel({ undo, onDone }: { undo: Undo; onDone: () => void }) {
+function UndoModel({ undo, working, onDone }: { undo: Undo; working: boolean; onDone: () => void }) {
   const { model, before } = undo
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -268,6 +273,15 @@ function UndoModel({ undo, onDone }: { undo: Undo; onDone: () => void }) {
   }
   // Offered once the model's state is known; a failed read still offers it, without the warning.
   if (state.loading || state.data?.same) return null
+  // While the assistant works it can save a new version on top of the undo, so wait for it.
+  if (working) {
+    return (
+      <p className="text-faint">
+        Undo changes to <span className="font-mono">{model}</span>: available when the assistant has
+        finished.
+      </p>
+    )
+  }
   return (
     <>
       <button type="button" onClick={() => setOpen(true)} className="text-accent underline">
@@ -289,9 +303,10 @@ function UndoModel({ undo, onDone }: { undo: Undo; onDone: () => void }) {
         }
       >
         <p className="text-[13px] text-muted">
-          <span className="font-mono text-ink">{model}</span> goes back to how it was before this
-          chat changed it. It is saved as a new version, so the chat&apos;s changes stay in the
-          model&apos;s history and can be brought back.
+          The source and details of <span className="font-mono text-ink">{model}</span> go back to
+          how they were before this chat changed them. It is saved as a new version, so the
+          chat&apos;s changes stay in the model&apos;s history and can be brought back. Presets,
+          outputs and prints the chat made stay as they are.
         </p>
         {state.data?.movedOn && (
           <p className="mt-3 text-[13px] text-warn">
@@ -319,10 +334,12 @@ interface Props {
   sessionId: string
   /** Changes when the session may have touched more (its status moved or a tool call finished), so the list reads again. */
   refreshKey?: unknown
+  /** The assistant is mid-turn (or parked in one): the undo waits until it has finished. */
+  working?: boolean
 }
 
 /** #931 — the session view's "Touched" panel: what this session's tool calls changed. */
-export function SessionTouched({ sessionId, refreshKey }: Props) {
+export function SessionTouched({ sessionId, refreshKey, working = false }: Props) {
   const idBase = useId()
   const { data, error, refresh } = useAsync(() => api.listAiSessionResources(sessionId), [sessionId])
   // A background re-read: the list stays on screen, and a failed read keeps it.
@@ -357,7 +374,7 @@ export function SessionTouched({ sessionId, refreshKey }: Props) {
         <ul className="space-y-0.5">
           {undo.map((u) => (
             <li key={`${u.model}:${u.last ?? ''}`}>
-              <UndoModel undo={u} onDone={refresh} />
+              <UndoModel undo={u} working={working} onDone={refresh} />
             </li>
           ))}
         </ul>

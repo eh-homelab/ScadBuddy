@@ -432,6 +432,26 @@ describe('SessionTouched', () => {
     expect(await screen.findByRole('button', { name: 'Undo changes to name-keychain' })).toBeInTheDocument()
   })
 
+  it('holds the undo back while the assistant is working', async () => {
+    setSessionResources('sess-working', [
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+    ])
+    const view = renderPage(<SessionTouched sessionId="sess-working" working />)
+    expect(await screen.findByText(/available when the assistant has finished/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Undo changes/ })).toBeNull()
+    view.rerender(<SessionTouched sessionId="sess-working" />)
+    expect(await screen.findByRole('button', { name: 'Undo changes to bin' })).toBeInTheDocument()
+  })
+
+  it('counts a model made and deleted in the session as deleted', async () => {
+    setSessionResources('sess-made-gone', [
+      row({ type: 'model', id: 'tmp', model: 'tmp', tool: 'create_model' }),
+      row({ type: 'model', id: 'tmp', model: 'tmp', action: 'deleted', tool: 'delete_model' }),
+    ])
+    renderPage(<SessionTouched sessionId="sess-made-gone" />)
+    expect(await screen.findByText('1 model deleted')).toBeInTheDocument()
+  })
+
   it('still offers the undo when the model cannot be read, saying it could not check', async () => {
     const user = userEvent.setup()
     setSessionResources('sess-unread', [
