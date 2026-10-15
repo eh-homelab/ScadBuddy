@@ -4,27 +4,31 @@ import * as React from "react"
 import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import { Dialog as DialogPrimitive } from "radix-ui"
-import { ModalCompanionContext, besideNow, leaveToCompanion, roomFor } from "@/lib/modal"
+import { ModalCompanionContext, besideNow, keepOpenOnCompanionToggle, leaveToCompanion, roomFor } from "@/lib/modal"
 
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
 /**
- * #3653 — always Radix's non-modal dialog, made modal here (DialogContent): the
- * assistant panel stays usable beside an open dialog (#798), so the dialog cannot hide
- * the rest of the page from assistive tech or the pointer the way Radix's modal does,
- * and switching Radix's `modal` while open would remount everything in it.
+ * #3653 — Radix's non-modal dialog, made modal here (DialogContent): the assistant
+ * panel stays usable beside an open dialog (#798), so the dialog cannot hide the rest
+ * of the page from assistive tech or the pointer the way Radix's modal does, and
+ * switching Radix's `modal` while open would remount everything in it. `modal` asks for
+ * Radix's own modal instead, covering the panel too: for a dialog that is the panel's
+ * own (the assistant's image lightbox).
  */
 function Dialog({
   open: openProp,
   defaultOpen = false,
   onOpenChange,
+  modal = false,
   ...props
-}: Omit<React.ComponentProps<typeof DialogPrimitive.Root>, "modal">) {
+}: React.ComponentProps<typeof DialogPrimitive.Root>) {
   const [uncontrolled, setUncontrolled] = React.useState(defaultOpen)
   const open = openProp ?? uncontrolled
+  const mode = React.useMemo(() => ({ open, modal }), [open, modal])
   return (
-    <DialogOpenContext.Provider value={open}>
+    <DialogModeContext.Provider value={mode}>
       <DialogPrimitive.Root
         data-slot="dialog"
         {...props}
@@ -33,18 +37,18 @@ function Dialog({
           if (openProp === undefined) setUncontrolled(next)
           onOpenChange?.(next)
         }}
-        modal={false}
+        modal={modal}
       />
-    </DialogOpenContext.Provider>
+    </DialogModeContext.Provider>
   )
 }
 
 /**
- * Whether the dialog is open, for DialogContent: it portals itself in the same commit
- * that opens it, as Radix's portal does not (that mounts a render later), so a caller's
- * effect on opening finds what is in it (#350: a field to select).
+ * Whether the dialog is open, and Radix-modal, for DialogContent: it portals itself in
+ * the same commit that opens it, as Radix's portal does not (that mounts a render
+ * later), so a caller's effect on opening finds what is in it (#350: a field to select).
  */
-const DialogOpenContext = React.createContext(false)
+const DialogModeContext = React.createContext({ open: false, modal: false })
 
 function DialogTrigger({
   ...props
@@ -194,6 +198,8 @@ function DialogLayer({
           if (besideNow(companion) && companion.contains(event.target as Node)) leaveToCompanion(event)
         }}
         onInteractOutside={(event) => {
+          // A press on the shell's Assistant button opens the panel beside it (#1897).
+          keepOpenOnCompanionToggle(event)
           onInteractOutside?.(event)
           if (event.defaultPrevented) return
           // Only a press on its own overlay closes it: not focus or a press in the
@@ -223,10 +229,55 @@ function DialogLayer({
   )
 }
 
-/** See {@link DialogLayer}; mounted only while open, so it measures and remembers then. */
-function DialogContent(props: React.ComponentProps<typeof DialogLayer>) {
-  const open = React.useContext(DialogOpenContext)
-  return open ? createPortal(<DialogLayer {...props} />, document.body) : null
+/** Radix's modal dialog (`<Dialog modal>`): over everything, the assistant panel included. */
+function ModalDialogContent({
+  className,
+  children,
+  showCloseButton = true,
+  onInteractOutside,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showCloseButton?: boolean
+}) {
+  return (
+    <DialogPortal>
+      <DialogOverlay />
+      <DialogPrimitive.Content
+        data-slot="dialog-content"
+        // Modal to the agent bridge (agent/dom activeDialog), as every dialog is.
+        data-modal=""
+        className={cn(
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          className
+        )}
+        onInteractOutside={(event) => {
+          keepOpenOnCompanionToggle(event)
+          onInteractOutside?.(event)
+        }}
+        {...props}
+      >
+        {children}
+        {showCloseButton && (
+          <DialogPrimitive.Close data-slot="dialog-close" asChild>
+            <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm">
+              <XIcon />
+              <span className="sr-only">Close</span>
+            </Button>
+          </DialogPrimitive.Close>
+        )}
+      </DialogPrimitive.Content>
+    </DialogPortal>
+  )
+}
+
+/**
+ * See {@link DialogLayer}; mounted only while open, so it measures and remembers then.
+ * In a `<Dialog modal>`, Radix's modal content ({@link ModalDialogContent}).
+ */
+function DialogContent({ placement, overlayClassName, ...props }: React.ComponentProps<typeof DialogLayer>) {
+  const { open, modal } = React.useContext(DialogModeContext)
+  if (modal) return <ModalDialogContent {...props} />
+  return open ? createPortal(<DialogLayer placement={placement} overlayClassName={overlayClassName} {...props} />, document.body) : null
 }
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {

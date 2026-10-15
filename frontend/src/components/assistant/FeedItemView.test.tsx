@@ -88,9 +88,14 @@ describe("a headless-browser navigation's approval card (#982)", () => {
     expect(again.onDecide).not.toHaveBeenCalled()
   })
 
-  it('names the whole origin "Always allow" saves when it is not https on its default port', () => {
-    nav(undefined, '{"url":"http://printer.lan:8080/status"}')
-    expect(screen.getByRole('button', { name: 'Always allow http://printer.lan:8080' })).toBeInTheDocument()
+  it.each([
+    ['http on another port', 'http://printer.lan:8080/status', 'http://printer.lan:8080'],
+    ['https on another port', 'https://printer.lan:8443/status', 'https://printer.lan:8443'],
+    ['http on its default port', 'http://printer.lan/status', 'http://printer.lan'],
+  ])('names the whole origin "Always allow" saves when it is not https on its default port: %s', (_label, url, origin) => {
+    const { unmount } = nav(undefined, JSON.stringify({ url }))
+    expect(screen.getByRole('button', { name: `Always allow ${origin}` })).toBeInTheDocument()
+    unmount()
   })
 
   it('is the ordinary card, showing the whole summary, when the input is not exactly {url}', () => {
@@ -150,8 +155,8 @@ describe('the memory line', () => {
     for (const [item, headline] of cases) {
       const { unmount } = memory(item, true)
       const line = screen.getByTestId('agent-memory')
-      expect(line).toHaveAttribute('open')
-      expect(line.querySelector('summary')).toHaveTextContent(headline)
+      expect(line).toHaveAttribute('data-state', 'open')
+      expect(line.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent(headline)
       expect(line).toHaveTextContent('Bank scadbuddy')
       if (item.detail) expect(line).toHaveTextContent(item.detail)
       unmount()
@@ -159,20 +164,20 @@ describe('the memory line', () => {
     memory({ count: 1, input: 'make a <b>box</b>', memories: ['1. The user prints in PETG.'] }, true)
     expect(screen.getByTestId('agent-memory')).toHaveTextContent('Bank scadbuddy · 1 found')
     const query = screen.getByTestId('agent-memory-input')
-    expect(query).toHaveAttribute('open')
-    expect(query.querySelector('summary')).toHaveTextContent('Query')
+    expect(query).toHaveAttribute('data-state', 'open')
+    expect(query.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Query')
     // Plain text, never markup: memories and queries are untrusted.
     expect(query).toHaveTextContent('make a <b>box</b>')
     expect(query.querySelector('b')).toBeNull()
     const found = screen.getByTestId('agent-memory-output')
-    expect(found).toHaveAttribute('open')
+    expect(found).toHaveAttribute('data-state', 'open')
     expect(found).toHaveTextContent('1. The user prints in PETG.')
   })
 
   it("labels a retain's input as what was saved", () => {
     memory({ action: 'retain', input: 'user: a box, 40 mm' }, true)
     const saved = screen.getByTestId('agent-memory-input')
-    expect(saved.querySelector('summary')).toHaveTextContent('Saved')
+    expect(saved.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Saved')
     expect(saved).toHaveTextContent('user: a box, 40 mm')
     expect(screen.queryByTestId('agent-memory-output')).toBeNull()
   })
@@ -203,7 +208,8 @@ describe('the tool card', () => {
     expect(tool).toHaveTextContent('Done')
     expect(tool).not.toHaveTextContent('Set 1 parameter')
     expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
-    expect(tool.querySelector('details')).not.toHaveAttribute('open')
+    expect(screen.getByRole('button', { name: /^Why\?/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('link', { hidden: true, name: 'Customizer docs' })).not.toBeVisible()
   })
 
   it('in advanced mode shows its arguments and sources, open', () => {

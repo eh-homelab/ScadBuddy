@@ -226,7 +226,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     await user.click(await screen.findByRole('button', { name: `Test ${KEY}` }))
     expect(await screen.findByRole('alert')).toHaveTextContent('moments ago')
     await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
@@ -309,14 +309,14 @@ describe('AiCredentialSection (#1000, #1093)', () => {
   it('deletes one credential only after a confirmation, and the next moves up', async () => {
     const { user } = renderPage(<AiCredentialSection />)
     await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
-    const dialog = await screen.findByRole('dialog', { name: `Delete ${KEY}?` })
+    const dialog = await screen.findByRole('alertdialog', { name: `Delete ${KEY}?` })
     // The gateway behind it is rate limited, so nothing else is usable now.
     expect(dialog).toHaveTextContent('No other credential is usable now, so the assistant stops working')
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(rows()).toHaveLength(2)
 
     await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete credential' }))
     expect(await screen.findByText(`Deleted ${KEY}.`)).toBeInTheDocument()
     expect(screen.getByTestId('ai-credentials-none-usable')).toBeInTheDocument()
     await waitFor(() => expect(rows()).toHaveLength(1))
@@ -336,7 +336,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
       'Delete credential 2 (Gateway)',
     ])
     await user.click(deletes[1]!)
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Delete credential 2 (Gateway)?')
     expect(dialog).toHaveTextContent('The assistant keeps using credential 1 (Gateway).')
   })
@@ -352,7 +352,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     const { user } = renderPage(<AiCredentialSection />)
     const name = id === 'default' ? KEY : 'credential 2 (Anthropic API key ••••BBBB)'
     await user.click(await screen.findByRole('button', { name: `Delete ${name}` }))
-    expect(await screen.findByRole('dialog')).toHaveTextContent(message)
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent(message)
   })
 
   it('forgets a failed test once the key is replaced', async () => {
@@ -476,10 +476,10 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     )
     const { user } = renderPage(<AiCredentialSection />)
     await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
     expect(rows()).toHaveLength(2)
   })
 
@@ -510,10 +510,10 @@ describe('AiCredentialSection (#1000, #1093)', () => {
   it('closes the delete dialog when the credential was already deleted elsewhere', async () => {
     const { user } = renderPage(<AiCredentialSection />)
     await user.click(await screen.findByRole('button', { name: `Delete ${GATEWAY}` }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     setCredentials([credentialEntry({ id: 'default', last4: 'Q7xA' })])
     await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
     expect(screen.getByRole('status')).toHaveTextContent('Already deleted elsewhere.')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await waitFor(() => expect(rows()).toHaveLength(1))
@@ -532,10 +532,10 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     )
     const { user } = renderPage(<AiCredentialSection />)
     await user.click(await screen.findByRole('button', { name: `Delete ${KEY}` }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Delete credential' }))
     await user.keyboard('{Escape}')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
     finish()
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
   })
@@ -749,7 +749,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     const add = await screen.findByRole('button', { name: 'Add' })
     expect(add.closest('[data-agent-user-only]')).not.toBeNull()
     await user.click(screen.getByRole('button', { name: `Delete ${KEY}` }))
-    const confirm = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete credential' })
+    const confirm = within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete credential' })
     expect(confirm.closest('[data-agent-user-only]')).not.toBeNull()
   })
 

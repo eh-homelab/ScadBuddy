@@ -55,7 +55,30 @@ async def flow_host_functions(flows: FlowsDep) -> HostInterface:
     Settings' raised tiers applied and disabled tools left out, as the grant routes check
     a grant's rules. When the agent does not answer, no tools, and `tools_unavailable`
     says why."""
+    return await _host_interface(flows, None)
+
+
+class HostFunctionsFor(BaseModel):
+    """The flow a script is written for (#2651): its inputs schema, if any."""
+
+    inputs_schema: dict[str, Any] | None = None
+
+
+@router.post(
+    "/workflow-script/host-functions",
+    response_model=HostInterface,
+    summary="The host functions a script of a flow with these inputs may use",
+)
+async def flow_host_functions_for(body: HostFunctionsFor, flows: FlowsDep) -> HostInterface:
+    """As `GET /workflow-script/host-functions`, and with `inputs_schema`, `inputs()` and
+    the `FlowInputs` type the check types it with (#2651). A schema the check refuses
+    adds neither: its problems are `POST /workflow-script/check`'s."""
+    return await _host_interface(flows, body.inputs_schema)
+
+
+async def _host_interface(flows: Any, inputs_schema: dict[str, Any] | None) -> HostInterface:
     try:
-        return host_interface(await flows.agent_tools.tool_tiers())
+        tiers = await flows.agent_tools.tool_tiers()
     except AgentToolsUnavailableError:
-        return host_interface({}, tools_unavailable=TOOLS_UNAVAILABLE)
+        return host_interface({}, tools_unavailable=TOOLS_UNAVAILABLE, inputs_schema=inputs_schema)
+    return host_interface(tiers, inputs_schema=inputs_schema)

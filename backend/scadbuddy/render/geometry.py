@@ -85,7 +85,7 @@ import zipfile
 import zlib
 from collections.abc import Collection, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -271,7 +271,7 @@ class Unreadable3MFError(ValueError):
     """
 
 
-def parts_from_3mf(path: Path, plate: int = 1) -> list[ColourPart]:
+def parts_from_3mf(path: Path | IO[bytes], plate: int = 1) -> list[ColourPart]:
     """The parts on one plate of a ScadBuddy 3MF, in extruder order.
 
     Read from the ``3D/Objects/object_<n>.model`` files `bambu3mf.write_plates_3mf`
@@ -283,7 +283,7 @@ def parts_from_3mf(path: Path, plate: int = 1) -> list[ColourPart]:
     return _plate_parts(path, plate)[0]
 
 
-def _plate_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
+def _plate_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
     """The plate's parts and how many plates the 3MF has."""
     try:
         return _read_parts(path, plate)
@@ -291,7 +291,7 @@ def _plate_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
 
-def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
+def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())

@@ -1,8 +1,20 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { failure } from '../../lib/mediaFiles'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
 import { Spinner } from '../ui/Spinner'
+import { UploadIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 export interface PickerItem {
   /** Unique across every section. */
@@ -98,17 +110,12 @@ export function MediaPicker({
   const shown = sections.filter((section) => section.items.length > 0 || section.empty)
 
   return (
-    <Dialog
-      open={open}
-      title={title}
-      description={description}
-      onClose={close}
-      footer={
-        <Button onClick={close} disabled={busy !== null}>
-          Cancel
-        </Button>
-      }
-    >
+    <Dialog open={open} onOpenChange={(next) => !next && close()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl">
+      <DialogHeader>
+        <DialogTitle>{title}</DialogTitle>
+        {description ? <DialogDescription>{description}</DialogDescription> : <DialogDescription className="sr-only">{title}</DialogDescription>}
+      </DialogHeader>
       <div className="flex flex-col gap-4" data-testid="media-picker">
         {upload && !uploadBlocked && (
           <div
@@ -119,15 +126,16 @@ export function MediaPicker({
             }}
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
-            className={`flex items-center gap-3 rounded-[6px] border border-dashed px-3 py-2.5 transition-colors ${
-              dragging ? 'border-accent bg-accent/10' : 'border-line bg-surface-2/60'
-            }`}
+            className={cn(
+              'flex items-center gap-3 rounded-xl border-2 border-dashed px-3 py-2.5 transition-colors',
+              dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+            )}
           >
-            <div className="min-w-0 flex-1 text-[12px]">
-              <span className="block text-ink">
+            <div className="min-w-0 flex-1 text-xs">
+              <span className="block text-foreground">
                 {busy === 'upload' ? 'Uploading…' : 'Drop a file here, or upload one'}
               </span>
-              <span className="text-faint">{upload.hint}</span>
+              <span className="text-muted-foreground">{upload.hint}</span>
             </div>
             <input
               ref={input}
@@ -141,50 +149,49 @@ export function MediaPicker({
                 if (file) void run('upload', () => upload.onFile(file))
               }}
             />
-            <Button
-              size="sm"
-              disabled={busy !== null}
-              onClick={() => input.current?.click()}
-            >
-              {busy === 'upload' && <Spinner />}
+            <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => input.current?.click()}>
+              {busy === 'upload' ? <Spinner /> : <UploadIcon />}
               Upload…
             </Button>
           </div>
         )}
-        {uploadBlocked && <p className="text-[12px] text-faint">{uploadBlocked}</p>}
+        {uploadBlocked && <p className="text-xs text-muted-foreground">{uploadBlocked}</p>}
 
         {loading && (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading
-          </p>
+          <div role="status" aria-label="Loading" className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
+            {Array.from({ length: 6 }, (_, n) => (
+              <Skeleton key={n} className="aspect-square w-full" />
+            ))}
+          </div>
         )}
 
         {!loading &&
           shown.map((section) => (
             <section key={section.title} aria-label={section.title}>
-              <h3 className="mb-1.5 text-[11px] tracking-wide text-faint">{section.title}</h3>
+              <h3 className="mb-1.5 text-xs font-medium text-muted-foreground">{section.title}</h3>
               {section.items.length === 0 ? (
-                <p className="text-[12px] text-muted">{section.empty}</p>
+                <p className="text-xs text-muted-foreground">{section.empty}</p>
               ) : (
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
                   {section.items.map((item) => {
                     const chosen = item.key === selected
                     return (
+                      <Tooltip key={item.key}>
+                      <TooltipTrigger asChild>
                       <button
-                        key={item.key}
                         type="button"
                         aria-pressed={chosen}
                         aria-label={`Choose ${item.label}`}
-                        title={item.label}
                         disabled={busy !== null}
                         onClick={() => void run(item.key, () => onPick(item))}
-                        className={`relative flex flex-col gap-1 rounded-[6px] border p-1 text-left text-[11px] transition-colors disabled:opacity-60 ${
+                        className={cn(
+                          'relative flex flex-col gap-1 rounded-lg border p-1 text-left text-xs transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60',
                           chosen
-                            ? 'border-accent bg-accent/10 text-ink'
-                            : 'border-line bg-surface-2/60 text-muted hover:border-accent/60'
-                        }`}
+                            ? 'border-primary bg-primary/10 text-foreground ring-2 ring-primary/40'
+                            : 'bg-ui-muted/40 text-muted-foreground hover:border-primary/60',
+                        )}
                       >
-                        <span className="grid aspect-square w-full place-items-center overflow-hidden rounded-[4px] bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">
+                        <span className="grid aspect-square w-full place-items-center overflow-hidden rounded-md bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">
                           {busy === item.key ? (
                             <Spinner />
                           ) : item.src ? (
@@ -196,16 +203,17 @@ export function MediaPicker({
                               className="size-full object-contain"
                             />
                           ) : (
-                            <span className="text-faint">No preview</span>
+                            <span className="text-muted-foreground">No preview</span>
                           )}
                         </span>
                         <span className="w-full truncate">{item.label}</span>
                         {item.badge && (
-                          <span className="absolute top-1.5 left-1.5 rounded-[4px] bg-accent px-1 text-[10px] font-medium text-accent-ink">
-                            {item.badge}
-                          </span>
+                          <Badge className="absolute top-1.5 left-1.5 h-4 rounded-sm px-1 text-[10px]">{item.badge}</Badge>
                         )}
                       </button>
+                      </TooltipTrigger>
+                      <TooltipContent>{item.label}</TooltipContent>
+                      </Tooltip>
                     )
                   })}
                 </div>
@@ -214,11 +222,17 @@ export function MediaPicker({
           ))}
 
         {error && (
-          <p role="alert" className="text-[12px] text-warn">
+          <p role="alert" className="text-xs text-destructive">
             {error}
           </p>
         )}
       </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={close} disabled={busy !== null}>
+          Cancel
+        </Button>
+      </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

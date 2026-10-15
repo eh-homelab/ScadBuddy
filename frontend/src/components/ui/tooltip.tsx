@@ -17,10 +17,16 @@ function TooltipProvider({
   )
 }
 
+// Its own provider, as shadcn's current tooltip has, so a tooltip also works where the
+// app shell's provider is not above it (a component rendered alone in a test).
 function Tooltip({
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Root>) {
-  return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  return (
+    <TooltipProvider>
+      <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+    </TooltipProvider>
+  )
 }
 
 function TooltipTrigger({

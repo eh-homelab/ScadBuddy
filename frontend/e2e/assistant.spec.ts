@@ -229,7 +229,7 @@ test.describe('assistant panel (#256)', () => {
     await expect(touched.getByText('1 new version of gridfinity-bin, 1 preset saved')).toBeVisible()
 
     await touched.getByRole('button', { name: 'Undo changes to gridfinity-bin' }).click()
-    const dialog = page.getByRole('dialog', { name: "Undo this chat's changes to gridfinity-bin?" })
+    const dialog = page.getByRole('alertdialog', { name: "Undo this chat's changes to gridfinity-bin?" })
     await dialog.getByRole('button', { name: 'Undo changes' }).click()
     await expect(touched.getByRole('status')).toHaveText('gridfinity-bin is back to how it was before this chat.')
   })
@@ -257,7 +257,8 @@ test.describe('assistant panel (#256)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
     const forks = sessions.getByRole('list', { name: 'Forks of Tune the gridfinity bin' })
-    await forks.getByRole('button', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
+    await forks.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' }).click()
+    await page.getByRole('menuitem', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
     const title = sessions.getByRole('textbox', { name: 'Chat title' })
     await title.fill('Bin, taller')
     await title.press('Enter')
@@ -341,9 +342,63 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(panel).toBeVisible()
     await expect(dialog).toBeVisible()
   })
+
+  // #3675 — the activity drawer is a Radix Sheet, not ui/Dialog: the same #798/#1897
+  // behaviour on another mechanism (pointer events off outside a Radix modal, and its
+  // content remounting when it turns non-modal beside the panel).
+  test('opens from its button while the activity drawer is open', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/activity')
+    await page.getByTestId(/activity-row-/).first().getByRole('button').first().click()
+    const drawer = page.locator('[data-slot="sheet-content"]')
+    await expect(drawer).toBeVisible()
+
+    // A real click on the raised button: Radix turns pointer events off outside the
+    // sheet, and a press outside it closes the sheet. (Radix also hides the rest of the
+    // page from the accessibility tree while modal, hence the attribute, not the role.)
+    await page.locator('[data-modal-companion-toggle]').click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+    await expect(drawer).toBeVisible()
+    await expect(drawer).not.toHaveAttribute('aria-modal', 'true')
+
+    const drawerBox = await drawer.boundingBox()
+    const panelBox = await panel.boundingBox()
+    if (!drawerBox || !panelBox) throw new Error('not laid out')
+    expect(drawerBox.x + drawerBox.width).toBeLessThanOrEqual(panelBox.x + 1)
+
+    await composer.fill('What failed here?')
+    await expect(composer).toHaveValue('What failed here?')
+    await expect(composer).toBeFocused()
+
+    // Escape in the composer is the assistant's, not the drawer's.
+    await composer.press('Escape')
+    await expect(drawer).toBeVisible()
+  })
+
+  test('the activity drawer opened beside it leaves the chat usable', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/activity')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+
+    await page.getByTestId(/activity-row-/).first().getByRole('button').first().click()
+    const drawer = page.locator('[data-slot="sheet-content"]')
+    await expect(drawer).toBeVisible()
+    await expect(drawer).not.toHaveAttribute('aria-modal', 'true')
+
+    // A click in the chat neither closes the drawer nor is blocked by it.
+    await composer.click()
+    await composer.fill('Why did it fail?')
+    await expect(composer).toHaveValue('Why did it fail?')
+    await expect(drawer).toBeVisible()
+  })
 })
 
-// #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
+// #795 — a fork's row, and its actions menu (#3673), fit the panel at phone width.
 test.describe('the session switcher at 390 px (#795)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
   test.use({ viewport: { width: 390, height: 844 } })
@@ -359,14 +414,20 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
 
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    const actions = sessions.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' })
+    const row = (await actions.boundingBox())!
+    expect(row.x + row.width).toBeLessThanOrEqual(390)
+    await actions.click()
     for (const name of [
       'Rename Tune the gridfinity bin (fork)',
       'Mark Tune the gridfinity bin (fork) done',
       'Archive Tune the gridfinity bin (fork)',
     ]) {
-      const box = (await sessions.getByRole('button', { name }).boundingBox())!
+      const box = (await page.getByRole('menuitem', { name }).boundingBox())!
+      expect(box.x, name).toBeGreaterThanOrEqual(0)
       expect(box.x + box.width, name).toBeLessThanOrEqual(390)
     }
+    await page.keyboard.press('Escape')
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
   })
 
@@ -383,16 +444,17 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
 
-    await sessions.getByRole('button', { name: `Archive ${OWN}` }).click()
+    await sessions.getByRole('button', { name: `Actions for ${OWN}` }).click()
+    await page.getByRole('menuitem', { name: `Archive ${OWN}` }).click()
     await expect(panel.getByRole('button', { name: 'Sessions (1)' })).toBeVisible()
-    await expect(sessions.getByRole('button', { name: `Rename ${OWN}` })).toHaveCount(0)
+    await expect(sessions.getByRole('button', { name: `Actions for ${OWN}` })).toHaveCount(0)
     const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
     await expect(composer).toBeDisabled()
 
     await panel.getByRole('button', { name: 'New chat' }).click()
     await expect(composer).toBeEnabled()
     await panel.getByRole('button', { name: 'Sessions (1)' }).click()
-    await sessions.getByRole('button', { name: 'Archived' }).click()
+    await sessions.getByRole('tab', { name: 'Archived' }).click()
     const archived = sessions.getByRole('list', { name: 'Archived chats' })
     for (const name of [`Open ${OWN}`, `Unarchive ${OWN}`]) {
       const box = (await archived.getByRole('button', { name }).boundingBox())!

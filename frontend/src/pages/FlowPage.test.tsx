@@ -324,6 +324,14 @@ describe('FlowPage inputs (#2483)', () => {
     ])
   })
 
+  it('completes inputs() for the schema being edited (#2651)', async () => {
+    render('def-coasters')
+    const schema = await screen.findByRole('textbox', { name: 'Inputs (JSON Schema)' })
+    expect(await screen.findByText(/,inputs$/, undefined, LOAD)).toBeInTheDocument()
+    fireEvent.change(schema, { target: { value: '' } })
+    await vi.waitFor(() => expect(screen.getByTestId('completes').textContent).not.toMatch(/inputs/), LOAD)
+  })
+
   it('saves a blank schema as a flow with no inputs', async () => {
     const { user } = render('def-coasters')
     const schema = await screen.findByRole('textbox', { name: 'Inputs (JSON Schema)' })

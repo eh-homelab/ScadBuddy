@@ -10,9 +10,27 @@ import type {
 import { AI_NOT_ROUTED, api, ApiError } from '../../api/client'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
+import { ArrowDownIcon, ArrowUpIcon, ChevronDownIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/Spinner'
+import { Tip } from './Tip'
 
 const KIND_LABEL: Record<AiCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API key',
@@ -180,6 +198,8 @@ export function AiCredentialSection() {
   const [replacing, setReplacing] = useState<string | null>(null)
   const [replacement, setReplacement] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<AiCredentialEntry | null>(null)
+  /** The Delete that asked for the confirm: focus goes back to it when the dialog closes. */
+  const deleteButton = useRef<HTMLElement | null>(null)
   const [tests, setTests] = useState<Record<string, AiConnectionTest>>({})
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -253,14 +273,16 @@ export function AiCredentialSection() {
         {list.error ? (
           <div role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn">
             {describeError(list.error, list.error.message)}
-            <Button size="sm" onClick={list.reload}>
+            <Button size="sm" variant="outline" onClick={list.reload}>
               Retry
             </Button>
           </div>
         ) : (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading
-          </p>
+          <div role="status" className="flex flex-col gap-2">
+            <span className="sr-only">Loading</span>
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-8 w-2/3" />
+          </div>
         )}
       </Frame>
     )
@@ -430,15 +452,24 @@ export function AiCredentialSection() {
                 : noneUsable(credentials, current.can_save)}
             </p>
           )}
-          <ol className="flex flex-col divide-y divide-line rounded-[6px] border border-line" aria-label="Claude credentials, tried in this order">
+          <ol className="flex flex-col divide-y divide-border rounded-lg border border-border" aria-label="Claude credentials, tried in this order">
             {credentials.map((entry, index) => (
-              <li key={entry.id} className="flex flex-col gap-2 px-3 py-2.5" data-testid="ai-credential">
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <span className="text-muted">{index + 1}.</span>
+              <Collapsible
+                asChild
+                key={entry.id}
+                open={replacing === entry.id}
+                onOpenChange={(next) => {
+                  setReplacing(next ? entry.id : null)
+                  setReplacement('')
+                }}
+              >
+              <li className="flex flex-col gap-2 px-3 py-2.5" data-testid="ai-credential">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-muted-foreground">{index + 1}.</span>
                   <span className="font-medium">{KIND_LABEL[entry.kind]}</span>
-                  {entry.base_url && <span className="text-muted">at {entry.base_url}</span>}
+                  {entry.base_url && <span className="text-muted-foreground">at {entry.base_url}</span>}
                   {entry.last4 && (
-                    <span className="font-mono text-muted" data-testid="ai-credential-last4">
+                    <span className="font-mono text-muted-foreground" data-testid="ai-credential-last4">
                       <span aria-hidden="true">••••</span>
                       <span className="sr-only">ending in </span>
                       {entry.last4}
@@ -446,42 +477,47 @@ export function AiCredentialSection() {
                   )}
                   <StatusBadge entry={entry} />
                   {entry.last_used_at && (
-                    <span className="text-[12px] text-muted" title={entry.last_used_at}>
-                      used {timeAgo(entry.last_used_at)}
-                    </span>
+                    <Tip content={entry.last_used_at}>
+                      <span className="text-xs text-muted-foreground">used {timeAgo(entry.last_used_at)}</span>
+                    </Tip>
                   )}
                 </div>
                 {entry.status !== 'active' && entry.last_error && (
-                  <p className="text-[12px] text-muted">{entry.last_error}</p>
+                  <p className="text-xs text-muted-foreground">{entry.last_error}</p>
                 )}
                 {!entry.usable && (
-                  <p className="text-[12px] text-warn">
+                  <p className="text-xs text-warn">
                     {current.can_save
                       ? 'The agent cannot decrypt this key (it was saved under another encryption key, or in an old format). Replace it.'
                       : 'The agent cannot decrypt this key: no key-encryption key is mounted. Mount it, then replace the key if it still cannot be decrypted.'}
                   </p>
                 )}
                 <div className="flex flex-wrap items-center gap-1.5">
+                  <Tip wrap={index === 0 || busy !== null} content="Try it earlier">
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      onClick={() => move(index, -1)}
+                      disabled={index === 0 || busy !== null}
+                      aria-label={`Move ${nameOf(entry, credentials)} up`}
+                    >
+                      {isBusy(entry.id, 'up') ? <Spinner /> : <ArrowUpIcon />}
+                    </Button>
+                  </Tip>
+                  <Tip wrap={index === credentials.length - 1 || busy !== null} content="Try it later">
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      onClick={() => move(index, 1)}
+                      disabled={index === credentials.length - 1 || busy !== null}
+                      aria-label={`Move ${nameOf(entry, credentials)} down`}
+                    >
+                      {isBusy(entry.id, 'down') ? <Spinner /> : <ArrowDownIcon />}
+                    </Button>
+                  </Tip>
                   <Button
                     size="sm"
-                    variant="ghost"
-                    onClick={() => move(index, -1)}
-                    disabled={index === 0 || busy !== null}
-                    aria-label={`Move ${nameOf(entry, credentials)} up`}
-                  >
-                    {isBusy(entry.id, 'up') ? <Spinner /> : 'Up'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => move(index, 1)}
-                    disabled={index === credentials.length - 1 || busy !== null}
-                    aria-label={`Move ${nameOf(entry, credentials)} down`}
-                  >
-                    {isBusy(entry.id, 'down') ? <Spinner /> : 'Down'}
-                  </Button>
-                  <Button
-                    size="sm"
+                    variant="outline"
                     onClick={() => void test(entry)}
                     disabled={busy !== null || !entry.usable}
                     aria-busy={isBusy(entry.id, 'test')}
@@ -493,6 +529,7 @@ export function AiCredentialSection() {
                   {entry.status !== 'active' && entry.usable && (
                     <Button
                       size="sm"
+                      variant="outline"
                       onClick={() =>
                         void act(
                           { id: entry.id, action: 'reset' },
@@ -508,25 +545,27 @@ export function AiCredentialSection() {
                       Reset
                     </Button>
                   )}
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy !== null || !current.can_save}
+                      aria-label={`Replace the key of ${nameOf(entry, credentials)}`}
+                    >
+                      Replace key
+                      <ChevronDownIcon
+                        data-icon="inline-end"
+                        className={`transition-transform motion-reduce:transition-none ${replacing === entry.id ? 'rotate-180' : ''}`}
+                      />
+                    </Button>
+                  </CollapsibleTrigger>
                   <Button
                     size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setReplacing(replacing === entry.id ? null : entry.id)
-                      setReplacement('')
-                    }}
-                    disabled={busy !== null || !current.can_save}
-                    aria-expanded={replacing === entry.id}
-                    aria-label={`Replace the key of ${nameOf(entry, credentials)}`}
-                  >
-                    Replace key
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => {
+                    variant="destructive"
+                    onClick={(event) => {
                       // An earlier action's error is not this delete's.
                       setError(null)
+                      deleteButton.current = event.currentTarget
                       setConfirmDelete(entry)
                     }}
                     disabled={busy !== null}
@@ -535,29 +574,30 @@ export function AiCredentialSection() {
                     Delete
                   </Button>
                 </div>
-                {replacing === entry.id && (
+                <CollapsibleContent asChild>
                   <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void replace(event, entry)}>
-                    <label className="flex flex-col gap-1">
-                      {REPLACE_LABEL[entry.kind]}
-                      <input
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor={`ai-credential-replace-${entry.id}`} className="text-[13px] font-normal">
+                        {REPLACE_LABEL[entry.kind]}
+                      </Label>
+                      <Input
+                        id={`ai-credential-replace-${entry.id}`}
                         type="password"
                         required
                         value={replacement}
                         onChange={(event) => setReplacement(event.target.value)}
-                        className="sb-field w-72"
+                        className="w-72 max-w-full"
                         autoComplete="new-password"
                         spellCheck={false}
                       />
-                    </label>
+                    </div>
                     {replaceMismatch(entry.kind, replacement) && (
-                      <p data-testid="ai-credential-replace-kind-warning" className="basis-full text-[12px] text-warn">
+                      <p data-testid="ai-credential-replace-kind-warning" className="basis-full text-xs text-warn">
                         {replaceMismatch(entry.kind, replacement)}
                       </p>
                     )}
                     <Button
                       type="submit"
-                      variant="primary"
-                      size="sm"
                       disabled={replacement.trim() === '' || busy !== null}
                       aria-busy={isBusy(entry.id, 'replace')}
                     >
@@ -565,12 +605,12 @@ export function AiCredentialSection() {
                       Save key
                     </Button>
                   </form>
-                )}
+                </CollapsibleContent>
                 {tests[entry.id] && (
                   <p
                     role="status"
                     data-testid="ai-credential-test"
-                    className={`text-[12px] ${tests[entry.id]!.ok ? 'text-ok' : 'text-warn'}`}
+                    className={`text-xs ${tests[entry.id]!.ok ? 'text-ok' : 'text-warn'}`}
                   >
                     {tests[entry.id]!.ok
                       ? `Works${tests[entry.id]!.model ? ` (${tests[entry.id]!.model})` : ''}, ${(tests[entry.id]!.duration_ms / 1000).toFixed(1)} s.`
@@ -578,9 +618,10 @@ export function AiCredentialSection() {
                   </p>
                 )}
               </li>
+              </Collapsible>
             ))}
           </ol>
-          <p className="text-[12px] text-muted">
+          <p className="text-xs text-muted-foreground">
             The assistant uses the first usable credential. A refused one is disabled until you reset it or give it a
             new key; a rate-limited one is skipped until its limit resets. Test sends one short prompt, so it spends a
             few tokens, at most once per 10 seconds.
@@ -588,79 +629,90 @@ export function AiCredentialSection() {
         </>
       )}
       {!current.can_save && (
-        <p className="text-[12px] text-warn">
+        <p className="text-xs text-warn">
           Saving is not possible: {current.cannot_save_reason ?? 'the agent cannot store secrets'}.
         </p>
       )}
 
       <form className="flex flex-col gap-3" onSubmit={(event) => void add(event)}>
-        <fieldset className="flex flex-wrap gap-4" disabled={!current.can_save}>
-          <legend className="mb-1 text-[12px] text-muted">{credentials.length === 0 ? 'Save' : 'Add another'}</legend>
-          {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
-            <label key={option} className="flex items-center gap-1.5">
-              <input
-                type="radio"
-                name="ai-credential-kind"
-                value={option}
-                checked={kind === option}
-                onChange={() => {
-                  // A secret typed for one kind must not be sent as another.
-                  setKind(option)
-                  setSecret('')
-                  setBaseUrl('')
-                }}
-              />
-              {KIND_OPTION[option]}
-            </label>
-          ))}
+        <fieldset disabled={!current.can_save}>
+          <legend className="mb-2 text-xs text-muted-foreground">{credentials.length === 0 ? 'Save' : 'Add another'}</legend>
+          <RadioGroup
+            name="ai-credential-kind"
+            value={kind}
+            disabled={!current.can_save}
+            onValueChange={(option) => {
+              // A secret typed for one kind must not be sent as another.
+              setKind(option as AiCredentialKind)
+              setSecret('')
+              setBaseUrl('')
+            }}
+            className="flex flex-wrap gap-4"
+          >
+            {(Object.keys(KIND_OPTION) as AiCredentialKind[]).map((option) => (
+              <div key={option} className="flex items-center gap-1.5">
+                {/* 24 px each way: Settings' tap-target size (#1035, settings-tap-targets.spec.ts). */}
+                <RadioGroupItem id={`ai-credential-kind-${option}`} value={option} className="size-6" />
+                <Label htmlFor={`ai-credential-kind-${option}`} className="text-[13px] font-normal">
+                  {KIND_OPTION[option]}
+                </Label>
+              </div>
+            ))}
+          </RadioGroup>
         </fieldset>
         {kind === 'gateway' && (
-          <label className="flex flex-col gap-1">
-            Base URL
-            <input
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="ai-credential-base-url" className="text-[13px] font-normal">
+              Base URL
+            </Label>
+            <Input
+              id="ai-credential-base-url"
               type="url"
               required
               placeholder="https://gateway.example/anthropic"
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
               disabled={!current.can_save}
-              className="sb-field max-w-md"
+              className="max-w-md"
               autoComplete="off"
             />
-          </label>
+          </div>
         )}
-        <label className="flex flex-col gap-1">
-          {SECRET_FIELD[kind].label}
-          <input
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="ai-credential-secret" className="text-[13px] font-normal">
+            {SECRET_FIELD[kind].label}
+          </Label>
+          <Input
+            id="ai-credential-secret"
             type="password"
             required
             value={secret}
             onChange={(event) => setSecret(event.target.value)}
             disabled={!current.can_save}
             placeholder={SECRET_FIELD[kind].placeholder}
-            className="sb-field max-w-md"
+            className="max-w-md"
             autoComplete="new-password"
             spellCheck={false}
             aria-describedby="ai-credential-help"
           />
-        </label>
+        </div>
         {kindMismatch(kind, secret) && (
-          <p data-testid="ai-credential-kind-warning" className="text-[12px] text-warn">
+          <p data-testid="ai-credential-kind-warning" className="text-xs text-warn">
             {kindMismatch(kind, secret)}
           </p>
         )}
         {kind === 'claude_oauth_token' && (
-          <p className="text-[12px] text-muted">
+          <p className="text-xs text-muted-foreground">
             Run <code>claude setup-token</code> on a machine signed in to your Claude subscription, and paste the
             token it prints. Its use is subject to Anthropic&rsquo;s terms for your plan.
           </p>
         )}
-        <p id="ai-credential-help" className="text-[12px] text-muted">
+        <p id="ai-credential-help" className="text-xs text-muted-foreground">
           Sent once to ScadBuddy&rsquo;s agent service, which stores it encrypted. It is never shown again; only its
           last four characters are.
         </p>
         <div>
-          <Button type="submit" variant="primary" size="sm" disabled={!canAdd} aria-busy={adding}>
+          <Button type="submit" disabled={!canAdd} aria-busy={adding}>
             {adding && <Spinner />}
             {credentials.length === 0 ? 'Save' : 'Add'}
           </Button>
@@ -668,7 +720,7 @@ export function AiCredentialSection() {
       </form>
 
       {notice && (
-        <p role="status" className="text-[12px] text-ok">
+        <p role="status" className="text-xs text-ok">
           {notice}
         </p>
       )}
@@ -676,92 +728,112 @@ export function AiCredentialSection() {
         <div
           role="alert"
           data-testid="ai-credentials-stale"
-          className="flex flex-wrap items-center gap-2 text-[12px] text-warn"
+          className="flex flex-wrap items-center gap-2 text-xs text-warn"
         >
           Could not read the credentials again, so this list may be out of date.
-          <Button size="sm" onClick={reread}>
+          <Button size="sm" variant="outline" onClick={reread}>
             Retry
           </Button>
         </div>
       )}
       {error && confirmDelete === null && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-xs text-warn">
           {error}
         </p>
       )}
-      <Dialog
+      <AlertDialog
         open={confirmDelete !== null}
-        title={`Delete ${confirmDelete ? nameOf(confirmDelete, credentials) : 'the credential'}?`}
-        onClose={() => {
-          if (busy?.action === 'delete') return
+        onOpenChange={(next) => {
+          if (next || busy?.action === 'delete') return
           setConfirmDelete(null)
           setError(null)
         }}
-        footer={
-          <>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setConfirmDelete(null)
-                setError(null)
+      >
+        <AlertDialogContent
+          data-modal=""
+          onCloseAutoFocus={(event) => {
+            // Back to the Delete that opened it, while its credential is still listed.
+            event.preventDefault()
+            const back = deleteButton.current
+            if (back?.isConnected) back.focus()
+          }}
+          {...USER_ONLY}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {confirmDelete ? nameOf(confirmDelete, credentials) : 'the credential'}?</AlertDialogTitle>
+            <AlertDialogDescription>{confirmDelete && afterDelete(confirmDelete, credentials)}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {error && (
+            <p role="alert" className="text-[13px] text-warn">
+              {error}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy !== null}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy !== null}
+              aria-busy={busy?.action === 'delete'}
+              onClick={(event) => {
+                // Open until the agent answers: a refusal is shown here.
+                event.preventDefault()
+                if (confirmDelete) void remove(confirmDelete)
               }}
-              disabled={busy !== null}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => confirmDelete && void remove(confirmDelete)}
-              disabled={busy !== null}
               {...USER_ONLY}
             >
-              {busy?.action === 'delete' ? <Spinner /> : 'Delete credential'}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">{confirmDelete && afterDelete(confirmDelete, credentials)}</p>
-        {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {error}
-          </p>
-        )}
-      </Dialog>
+              {busy?.action === 'delete' && <Spinner />}
+              Delete credential
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Frame>
   )
 }
 
 function StatusBadge({ entry }: { entry: AiCredentialEntry }) {
-  const base = 'rounded-[4px] border px-1 py-px text-[12px]'
+  const warn = 'border-warn/50 text-warn'
   // Stored status and decryptability are separate (agent `entryView`): a key no mounted
   // key-encryption key opens is skipped whatever its status says.
   if (!entry.usable) {
-    return <span className={`${base} border-warn/50 text-warn`}>Cannot decrypt</span>
+    return (
+      <Badge variant="outline" className={warn}>
+        Cannot decrypt
+      </Badge>
+    )
   }
   if (entry.status === 'cooling_down') {
     return (
-      <span className={`${base} border-warn/50 text-warn`} title={entry.cooldown_until ?? undefined}>
-        {entry.cooldown_until ? `Rate limited until ${clock(entry.cooldown_until)}` : 'Rate limited'}
-      </span>
+      <Tip content={entry.cooldown_until ?? undefined}>
+        <Badge variant="outline" className={warn}>
+          {entry.cooldown_until ? `Rate limited until ${clock(entry.cooldown_until)}` : 'Rate limited'}
+        </Badge>
+      </Tip>
     )
   }
   if (entry.status === 'disabled') {
-    return <span className={`${base} border-warn/50 text-warn`}>Disabled</span>
+    return (
+      <Badge variant="outline" className={warn}>
+        Disabled
+      </Badge>
+    )
   }
-  return <span className={`${base} border-line text-ok`}>Active</span>
+  return (
+    <Badge variant="outline" className="border-ok/50 text-ok">
+      Active
+    </Badge>
+  )
 }
 
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <section
-      className="mt-4 rounded-[6px] border border-line bg-surface"
-      aria-labelledby="ai-credential-heading"
-      {...USER_ONLY}
-    >
-      <h2 id="ai-credential-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        Claude credentials
-      </h2>
-      <div className="flex flex-col gap-3 p-4 text-[13px]">{children}</div>
-    </section>
+    <Card role="region" className="mt-4" aria-labelledby="ai-credential-heading" {...USER_ONLY}>
+      <CardHeader className="border-b">
+        <h2 id="ai-credential-heading" className="font-heading text-sm font-medium">
+          Claude credentials
+        </h2>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 text-[13px]">{children}</CardContent>
+    </Card>
   )
 }

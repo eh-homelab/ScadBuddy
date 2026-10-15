@@ -17,6 +17,7 @@ import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
+import { chooseProject } from '../test/projectPicker'
 
 // #1723 — jsdom draws no WebGL: the preview's scene shows what it was asked to draw.
 vi.mock('./print/PlateScene', () => ({
@@ -2125,23 +2126,32 @@ describe('PrintPicker · Supports (#1899)', () => {
     })
   })
 
-  it('leaves an angle out of range out of the print, says why, and clears it with supports off', async () => {
-    const { bodies } = watch('POST', '/run')
+  it('leaves an angle out of range out of the print, and says why', async () => {
+    const run = watch('POST', '/run')
     const { user } = renderPicker()
     await loaded()
     await showAdvanced()
 
     await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
     await user.type(screen.getByLabelText('Threshold angle (°)'), '95')
-    await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]?.['supports']).toEqual({ enabled: true, type: 'normal', on_build_plate_only: false })
-
-    // The typed value stays, with why it is not sent (#2837 review).
+    // The typed value stays, with why it is not sent (#2837 review). Checked before the
+    // print: once the run is answered the dialog shows what was queued, not the form.
     expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(95)
     expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByText(/A whole number of degrees from 0 to 90/)).toBeInTheDocument()
 
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(run.answered).toBe(1))
+    expect(run.bodies[0]?.['supports']).toEqual({ enabled: true, type: 'normal', on_build_plate_only: false })
+  })
+
+  it('clears an angle out of range with supports off', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '95')
     await user.selectOptions(screen.getByLabelText('Support type'), 'off')
     expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
     await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
@@ -2444,7 +2454,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await chooseProject(user, await screen.findByTestId('project-select'), 2)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -2469,7 +2479,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await chooseProject(user, await screen.findByTestId('project-select'), 2)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -2556,8 +2566,8 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    const picker = screen.getByTestId<HTMLSelectElement>('project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('/api/v1/print/projects')
@@ -2576,7 +2586,7 @@ describe('PrintPicker · Projects', () => {
 
     release()
     await waitFor(() => expect(picker).toBeEnabled())
-    expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+    expect(picker).toHaveTextContent(/Workshop Bins/)
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -2599,7 +2609,7 @@ describe('PrintPicker · Projects', () => {
     await loaded()
     await showAdvanced()
 
-    await user.selectOptions(screen.getByTestId('project-select'), 'new')
+    await chooseProject(user, screen.getByTestId('project-select'), 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
     const release = hold('/api/v1/print/projects')
     await user.click(screen.getByTestId('create-project'))
@@ -4015,6 +4025,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     // save back for the life of the page, with nothing shown.
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const { answers, answer, saves, stored } = heldSaves()
+    const timeoutMs = rackAlgorithmSave.timeoutMs
     rackAlgorithmSave.timeoutMs = 100
     try {
       renderPicker()
@@ -4024,6 +4035,10 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       fireEvent.change(select, { target: { value: 'oldest_first' } })
       expect(await screen.findByTestId('rack-algorithm-unsaved')).toBeInTheDocument()
 
+      // Only the first save is meant to run out of time. Each save reads the timeout as it
+      // starts: at 100 ms the second, answered below, also timed out whenever its answer
+      // took that long to arrive under load, and the dialog showed it as not remembered.
+      rackAlgorithmSave.timeoutMs = timeoutMs
       fireEvent.change(select, { target: { value: 'bambuddy' } })
       await waitFor(() => expect(answers.length).toBe(2))
       answer(1, 200)
@@ -4031,7 +4046,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       expect(stored()).toBe('bambuddy')
       expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
     } finally {
-      rackAlgorithmSave.timeoutMs = 25_000
+      rackAlgorithmSave.timeoutMs = timeoutMs
     }
   })
 

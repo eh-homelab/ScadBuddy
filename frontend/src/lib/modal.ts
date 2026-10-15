@@ -37,7 +37,7 @@ export function focusInto(dialog: HTMLElement) {
  */
 export const ModalCompanionContext = createContext<HTMLElement | null>(null)
 
-/** The narrowest a dialog's overlay gets beside a companion; narrower, the dialog covers it. */
+/** The narrowest a dialog's side of the page gets beside a companion; narrower, it covers it. */
 const MIN_BESIDE = 360
 
 /**
@@ -80,4 +80,14 @@ export function leaveToCompanion(event: Event): void {
 /** Whether something already handled this key: `defaultPrevented`, but not by a dialog leaving it to the companion. */
 export function escapeTaken(event: Event): boolean {
   return leftToCompanion.get(event)?.() ?? event.defaultPrevented
+}
+
+/**
+ * #1897 — a Radix dialog's `onInteractOutside`: a press on the shell's Assistant button
+ * (raised above an open dialog, `data-modal-companion-toggle`) opens the assistant beside
+ * the dialog rather than closing it.
+ */
+export function keepOpenOnCompanionToggle(event: { target: EventTarget | null; preventDefault(): void }) {
+  const target = event.target
+  if (target instanceof Element && target.closest('[data-modal-companion-toggle]')) event.preventDefault()
 }
