@@ -148,12 +148,17 @@ async function showAdvanced() {
   await screen.findByRole('group', { name: /nozzles/i })
 }
 
+/** Every `watch` of the running test: `afterEach` waits until each request it saw has ended. */
+const watching: { urls: string[]; ended: number }[] = []
+
 /** The matching requests' URLs and bodies as they start, in order, and how many have
- *  been answered (under `/print/` by default; `/analyzers/run` is not one): a test that
- *  ends on a request waits for its answer, or the request is aborted at teardown and
- *  the next test's fetch can miss MSW. */
+ *  been answered (under `/print/` by default; `/analyzers/run` is not one). A request
+ *  still in flight when a test ends is aborted at teardown and the next test's fetch
+ *  can miss MSW (it showed "could not reach its server"), so `afterEach` waits for
+ *  every watched request to end. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
-  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
+  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0, ended: 0 }
+  watching.push(seen)
   const matches = (request: Request) => {
     const path = new URL(request.url).pathname
     return request.method === method && path.startsWith(prefix) && path.endsWith(suffix)
@@ -167,11 +172,18 @@ function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   server.events.on('response:mocked', ({ request }) => {
     if (matches(request)) seen.answered += 1
   })
+  server.events.on('request:end', ({ request }) => {
+    if (matches(request)) seen.ended += 1
+  })
   return seen
 }
 
 beforeEach(() => resetMockState())
-afterEach(() => {
+afterEach(async () => {
+  await waitFor(() => {
+    for (const seen of watching) expect(seen.ended).toBe(seen.urls.length)
+  })
+  watching.length = 0
   server.events.removeAllListeners()
   vi.restoreAllMocks()
 })
