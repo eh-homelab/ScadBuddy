@@ -192,7 +192,8 @@ class MirroredTranscript {
       load: async (key) => {
         const entries = await inner.load(key)
         if ((key.subpath ?? '') === '') {
-          const state = entries?.findLast((e) => e.type === 'cost-state')
+          // As `lastOfType` picks it (a row of the type with no uuid), so the two baselines name one entry.
+          const state = entries?.findLast((e) => e.type === 'cost-state' && e.uuid === undefined)
           this.loadedCostUsd = costStateUsd(state ? JSON.stringify(state) : null, log)
           this.onLoaded?.(this.loadedCostUsd)
         }
@@ -636,7 +637,7 @@ export class WarmSessions {
     if (mirror) {
       // Before its first result only: its later totals are differences within the process.
       const loaded = (usd: number) => {
-        if (slot.settled || entry.lastTotalUsd !== entry.costAtSpawnUsd) return
+        if (slot.settled) return
         slot.carriedUsd = usd
         entry.costAtSpawnUsd = usd
         entry.lastTotalUsd = usd

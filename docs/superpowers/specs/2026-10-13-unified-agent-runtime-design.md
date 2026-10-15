@@ -693,8 +693,12 @@ The row's owner changes, as today. Then:
 - **Recycling.** The reuse rule (§5.3) respawns whenever the remaining amount moved
   outside this process.
 - **`raiseBudget`** is unchanged (`manager.ts:2393-2452`).
-- **What is fixed.** The Python runner counted segments as turns
-  (`session/runner.py:700-706`). Unified, `turns` counts user turns again.
+- **What is fixed.** The Python runner added one to `turns` per segment
+  (`session/runner.py:700-706`). Unified, `turns` follows classic's reckoning, as the first
+  bullet requires: each placement's end adds its result's `num_turns` (Claude Code's answered
+  round trips; `turnCore.ts` `tallyTurn`), so one user turn with a tool call counts 2. Known
+  oddity: a stopped turn that still returns a result adds that result's `num_turns`, which Claude
+  Code reports as 3 for one interrupted request (#3695), as classic does too.
 
 ### 6.7 Credential, KEK, security
 

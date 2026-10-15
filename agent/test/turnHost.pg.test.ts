@@ -11,15 +11,18 @@ import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
-// An AgentSession placement's spend (sessions/turnHost.ts) when the session's transcript ends
-// in a `cost-state` the process it spawned may or may not count in its own total (#3695). The
-// real CLI restores the cost-state of the transcript it resumes, which the SDK loads through the
-// session store (sdk.mjs `sessionStore.load` before Claude Code starts; test/warm.pg.test.ts
-// "counts a resumed process from the total its transcript carried in": 2c after a first c;
-// harness/fallback.ts, measured on 2.1.283 and 2.1.287). Until #3695 the spawn read the baseline
-// from the table apart from that load, so a process that carried nothing in, whose total is its
-// own R, read as R carried plus nothing: its turn priced at 0. The scripted runner's totals are
-// the script's (support/sessions.ts `costUsd`); `loads` says whether it loaded the transcript.
+// An AgentSession placement's spend (sessions/turnHost.ts) over a `cost-state` its process
+// carries in. The real SDK loads the transcript a resume restores from through the session
+// store before Claude Code starts (sdk.mjs `sessionStore.load({projectKey, sessionId: resume})`),
+// and the CLI restores that cost-state's total (test/warm.pg.test.ts "counts a resumed process
+// from the total its transcript carried in": 2c after a first c; harness/fallback.ts, measured
+// on 2.1.283 and 2.1.287). The spawn's baseline is that loaded cost-state (warm.ts
+// `MirroredTranscript.loadedCostUsd`). Until 627eb4f05 it was a read of the table at spawn,
+// before the load: a cost-state that landed in between (a previous process's last append) was
+// restored by the process but not in its baseline, and its turn was over-priced by it. The
+// scripted runner's totals are the script's (support/sessions.ts `costUsd`); it loads as the
+// SDK does, except in the last case, a guard only: a resume that loads nothing is not a state
+// the real SDK produces, and that case is not a reproduction of #3695.
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
 const R = 0.000105
@@ -50,18 +53,24 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
   }
 
   /**
-   * A session whose earlier placement spent R (on the row) and left a `cost-state` of R in the
-   * transcript, then a placement of its turn here whose process reports `reported` as its total.
+   * A session whose earlier placement spent R (on the row), its transcript one user entry, then a
+   * placement of its turn here whose process reports `reported` as its total. `carried`: the
+   * cost-state of R is in the transcript `before` the spawn, lands `between` the spawn's start
+   * and the process's load, or is not there (`none`).
    */
-  async function placeAfterCarried(reported: number, loads: boolean) {
-    const scripted = scriptedRunner(() => ({ reply: 'carried on', costUsd: reported }), { loads })
+  async function place(reported: number, { carried, loads = true }: { carried: 'before' | 'between' | 'none'; loads?: boolean }) {
+    let id = ''
+    const store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    const costState = () => store.append({ projectKey: '', sessionId: id }, [{ type: 'cost-state', totalCostUSD: R }])
+    const scripted = scriptedRunner(() => ({ reply: 'carried on', costUsd: reported }), {
+      loads,
+      ...(carried === 'between' ? { beforeLoad: costState } : {}),
+    })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
     const { session } = await m.start(browser, { origin: 'chat' })
-    const id = session.id
-    await new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) }).append({ projectKey: '', sessionId: id }, [
-      { type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } },
-      { type: 'cost-state', totalCostUSD: R },
-    ])
+    id = session.id
+    await store.append({ projectKey: '', sessionId: id }, [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } }])
+    if (carried === 'before') await costState()
     const turnId = randomUUID()
     await db.sql`
       UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId},
@@ -79,20 +88,29 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     return { result, costUsd: Number(row!.cost_usd), audit: audit.map((a) => Number(a.cost_usd)), deltas, runs: scripted.runs }
   }
 
-  it('a process that carried nothing in: its own R is its spend, 2R in all, no write negative', async () => {
-    const { result, costUsd, audit, deltas, runs } = await placeAfterCarried(R, false)
-    expect(runs[0]!.resume).toBeDefined()
+  // Each of the three places on its own (soft): the row, the audit row, every increment.
+  const pricedAtR = ({ result, costUsd, audit, deltas }: Awaited<ReturnType<typeof place>>) => {
     expect(result).toMatchObject({ status: 'done' })
     expect.soft(costUsd).toBeCloseTo(2 * R, 12)
     expect.soft(audit).toEqual([expect.closeTo(R, 12)])
     expect.soft(deltas.every((d) => d >= 0)).toBe(true)
+  }
+
+  it('a cost-state that lands after the spawn and before the load: the process restores it, and its turn is priced past it, R', async () => {
+    const placed = await place(2 * R, { carried: 'between' })
+    expect(placed.runs[0]!.resume).toBeDefined()
+    pricedAtR(placed)
   })
 
-  it('a process that restored the carried total: what it added past it, R, 2R in all', async () => {
-    const { result, costUsd, audit, deltas } = await placeAfterCarried(2 * R, true)
-    expect(result).toMatchObject({ status: 'done' })
-    expect.soft(costUsd).toBeCloseTo(2 * R, 12)
-    expect.soft(audit).toEqual([expect.closeTo(R, 12)])
-    expect.soft(deltas.every((d) => d >= 0)).toBe(true)
+  it('a cost-state there before the spawn: the process restores it, and its turn is priced past it, R', async () => {
+    pricedAtR(await place(2 * R, { carried: 'before' }))
+  })
+
+  it('no cost-state: the process counts from 0, R', async () => {
+    pricedAtR(await place(R, { carried: 'none' }))
+  })
+
+  it('guard, not a state the real SDK produces: a resume that loads nothing is priced at what it reports, R', async () => {
+    pricedAtR(await place(R, { carried: 'before', loads: false }))
   })
 })
