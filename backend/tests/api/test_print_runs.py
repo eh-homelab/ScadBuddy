@@ -966,6 +966,11 @@ def test_the_prime_tower_is_part_of_the_key_only_when_chosen() -> None:
     )
     off = PrintRunRequest.model_validate({**body(), "prime_tower": {"enabled": False}})
     assert len({run_key("a" * 32, r) for r in (plain, on, sparse, off)}) == 4
+    # Off is off, whatever "No sparse layers" came with it (#3648 review).
+    off_sparse = PrintRunRequest.model_validate(
+        {**body(), "prime_tower": {"enabled": False, "no_sparse_layers": True}}
+    )
+    assert run_key("a" * 32, off_sparse) == run_key("a" * 32, off)
 
 
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:

@@ -18,7 +18,7 @@ anyway, with a warning that the slicer may not take it (:func:`prime_tower_warni
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
 from scadbuddy.bambuddy.filaments import FilamentWarning
@@ -37,6 +37,22 @@ class PrimeTowerChoice(BaseModel):
     #: With the tower on, print it only on layers that change filament; omitted keeps
     #: the template's, else the process preset's (off). Ignored with the tower off.
     no_sparse_layers: bool | None = None
+
+    @model_validator(mode="after")
+    def _off_is_only_off(self) -> PrimeTowerChoice:
+        # With the tower off, "No sparse layers" means nothing: dropped, so the two ways
+        # of saying "off" are one print with one run key (#3648 review).
+        if not self.enabled:
+            self.no_sparse_layers = None
+        return self
+
+
+def template_keys_dropped(choice: PrimeTowerChoice | None) -> frozenset[str]:
+    """The template's ``print_settings`` keys ``choice`` leaves unsent: its "No sparse
+    layers" with the tower off, as the dialog strikes it (#3648 review)."""
+    if choice is not None and not choice.enabled:
+        return frozenset({"wipe_tower_no_sparse_layers"})
+    return frozenset()
 
 
 def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:

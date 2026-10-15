@@ -67,9 +67,28 @@ def test_a_templates_tower_applies_and_the_prints_choice_wins(
     assert run_print(client, output_id, json={**body(), "prime_tower": tower}).status_code == 200
     assert overrides(sliced) == {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "0"}
 
+    # Off, the template's No sparse layers is not sent either, as the dialog strikes it.
     off = {**body(), "prime_tower": {"enabled": False}}
     assert run_print(client, output_id, json=off).status_code == 200
-    assert overrides(sliced)["enable_prime_tower"] == "0"
+    assert overrides(sliced) == {"enable_prime_tower": "0"}
+
+
+@respx.mock
+def test_an_unreadable_preset_still_sends_the_tower_and_says_nothing(
+    client: TestClient, model: str
+) -> None:
+    """#3648 review: both keys are single values, so a preset that cannot be read has no
+    shape to get wrong; the choice goes, with no prime-tower-unconfirmed warning."""
+    output_id = prepared(client, model)
+    sliced = routes()
+    preset_values(resolved=False, values={}, reason="sidecar_unavailable")
+    tower = {"enabled": True, "no_sparse_layers": True}
+
+    response = run_print(client, output_id, json={**body(), "prime_tower": tower})
+
+    assert response.status_code == 200, response.text
+    assert overrides(sliced) == {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"}
+    assert not [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-unconfirmed"]
 
 
 @respx.mock

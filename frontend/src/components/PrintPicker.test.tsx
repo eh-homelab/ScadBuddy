@@ -1953,7 +1953,7 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     const select = screen.getByLabelText('Prime tower')
     expect(select).toHaveValue('default')
     expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'Default (on with more than one filament)',
+      'Default (process: usually on with more than one filament)',
       'On',
       'Off',
     ])

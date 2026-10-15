@@ -26,7 +26,7 @@ function modeOf(value: PrimeTowerChoice | null): Mode {
 function defaultLabel(settings: Record<string, string> | undefined, fromFile: boolean): string {
   if (settings?.enable_prime_tower === '1') return 'Default (template: on)'
   if (settings?.enable_prime_tower === '0') return 'Default (template: off)'
-  return fromFile ? 'Default (file or process)' : 'Default (on with more than one filament)'
+  return fromFile ? 'Default (file or process)' : 'Default (process: usually on with more than one filament)'
 }
 
 /**
@@ -87,6 +87,8 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
             type="checkbox"
             className="mt-0.5"
             checked={noSparse}
+            // Intended: ticking it under Default makes the choice On, since No sparse
+            // layers only applies with a tower. PrintPicker.test pins it (select reads On).
             onChange={(event) => onChange({ enabled: true, no_sparse_layers: event.target.checked })}
           />
           <span>

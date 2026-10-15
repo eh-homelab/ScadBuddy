@@ -82,6 +82,7 @@ from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
     prime_tower_overrides,
     prime_tower_warnings,
+    template_keys_dropped,
 )
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
@@ -1373,7 +1374,11 @@ async def plan_run(
             bed_type=resolved.bed_type,
             process_overrides={
                 **from_profiles,
-                **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
+                **{
+                    k: v
+                    for k, v in source.print_settings.items()
+                    if k not in SUPPORT_KEYS and k not in template_keys_dropped(request.prime_tower)
+                },
                 **supports,
                 **prime_tower_overrides(request.prime_tower),
                 **(
