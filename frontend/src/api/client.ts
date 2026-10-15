@@ -40,6 +40,7 @@ import type {
   AiSessionView,
   RenderLimits,
   SessionLimits,
+  SessionRuntime,
   BlankTemplate,
   SessionModeSetting,
   DurableSubagentsSetting,
@@ -2153,6 +2154,15 @@ export const api = {
     request<SessionLimits>('/ai/settings/session-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
+    }),
+
+  /** The park hold, warm process cache and turn limit, served by the agent service. */
+  getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
+
+  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+    request<SessionRuntime>('/ai/settings/session-runtime', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
     }),
 
   /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */

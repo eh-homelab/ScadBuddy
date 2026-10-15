@@ -18,7 +18,7 @@ import { SessionFiles } from '../src/workspace/store.js'
 import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -194,8 +194,9 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
   })
 
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
-    const scripted = scriptedRunner((run) => {
-      const prompt = String(run.prompt)
+    // The turn's message, as the warm process was sent it (scriptedRunner's `prompts`).
+    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() => {
+      const prompt = promptText(scripted.prompts.at(-1)!)
       if (prompt.includes('give n')) return { reply: 'not json' }
       if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
       return { reply: 'hello from the agent' }
@@ -211,11 +212,11 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const [row] = await db.sql<{ root: string }[]>`SELECT budget_root_id AS root FROM ai_sessions WHERE id = ${child.id}`
     expect(row!.root).toBe(parent)
     // Claude Code's frame and instructions reach the child's turn.
-    expect(scripted.runs[0]!.prompt).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
+    expect(promptText(scripted.prompts[0]!)).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
     const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
     const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
     expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
-    expect(scripted.runs.at(-1)!.prompt).toMatch(/^Your reply did not match the schema:/)
+    expect(promptText(scripted.prompts.at(-1)!)).toMatch(/^Your reply did not match the schema:/)
 
     // Its options act as Claude Code's: the chat's own model, effort and subagent definition.
     const typed = managerAgents(mm, { agentTypes: async () => ['model-author', 'print-analyst'] })

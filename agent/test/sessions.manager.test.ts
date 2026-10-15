@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
+import { userMessage } from '../src/harness/inbox.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   BROWSER_TOOLS_GUIDE,
@@ -23,7 +24,8 @@ import { AuditLog } from '../src/audit/log.js'
 import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
+import { warmHarness } from './support/warm.js'
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -134,7 +136,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(session.title).toBe('Build a box')
       expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', costUsd: 0.02, turns: 1 })
       // The scripted runner writes no transcript, so this still looks like a first turn;
-      // mark it written to see the resume path.
+      // mark it written to see the resume path. That also moves the transcript's tail,
+      // so the warm process does not serve the next turn (warm.ts): it spawns again.
       await m.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'x' }])
       await (await m.send(session.id, agentA, 'again')).done
       expect(runs.map((r) => [r.sessionId, r.resume])).toEqual([
@@ -142,7 +145,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         [undefined, session.id],
       ])
       expect(runs[0]!.cwd).toBe(sessionWorkDir(paths, session.id))
-      expect(runs[0]!.sessionStore).toBe(m.store)
+      // The cache's mirror of the manager's store (warm.ts MirroredTranscript).
+      expect(runs[0]!.sessionStore).toBeDefined()
       expect(runs[0]!.includePartialMessages).toBe(true)
       expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false, turns: 2 })
     })
@@ -186,6 +190,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const m = manager({ sql: db.sql, paths, run: runner, ownPlugin: '/plugins/own' })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
+      // Only a spawn reports an init: the warm process is let go so the next turn spawns again.
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'again')).done
       expect(runs.map((r) => r.ownPlugin)).toEqual(['/plugins/own', '/plugins/own'])
       const logged = (
@@ -216,7 +222,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const m = manager({ sql: db.sql, paths, run: runner, settings: new SettingsStore(db.sql), httpRequest: {} })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
+      // Only a spawn reports an init: the warm process is let go before each later turn.
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'again')).done
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'and again')).done
       const logged = (
         await db.sql<{ event: string }[]>`
@@ -320,6 +329,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const m = manager({ sql: db.sql, paths, run: runner })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       await (await m.send(session.id, agentA, 'hi')).done
+      // On a fresh process: a warm one that throws before its first message is taken
+      // for dead and the turn tried once more (sessions/warmTurn.ts), which the script
+      // has no turn for.
+      await m.warm.evict(session.id, 'the test')
       expect(await (await m.send(session.id, agentA, 'again')).done).toEqual({
         kind: 'failed',
         message: 'upstream said: bad key [redacted]',
@@ -509,7 +522,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const fake = await startFakeHindsight()
       try {
         const paths = await tempPaths()
-        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const { runner, runs, prompts } = scriptedRunner(() => ({ reply: 'ok' }))
         const hindsight: CheckedPlugin = {
           plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/b/`, toolTiers: {}, disabledTools: [] },
           address: '127.0.0.1',
@@ -518,21 +531,19 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // it is enabled and its endpoint passed the egress check this turn.
         let loaded: CheckedPlugin | undefined = hindsight
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), terminate: async () => {}, release: () => {} })
         const context = '<page_context>\n{"route":"/"}\n</page_context>'
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box', context })
         await turn!.done
         const hooks = runs[0]!.memoryHooks
         expect(Object.keys(hooks ?? {}).sort()).toEqual(['Stop', 'UserPromptSubmit'])
-        await hooks!.UserPromptSubmit![0]!.hooks[0]!(
-          { session_id: session.id, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[0]!.prompt as string },
-          undefined,
-          { signal: new AbortController().signal },
-        )
-        expect(runs[0]!.prompt).toBe(`Make a box\n\n${context}`)
+        // The scripted process fired the hooks as Claude Code does (test/support/sessions.ts):
+        // the recall was against the user's words, not the prompt with its page context.
+        expect(promptText(prompts[0]!)).toBe(`Make a box\n\n${context}`)
         expect(fake.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['Make a box'])
 
+        // A plugin no longer loaded changes what the process was spawned with: the next turn spawns again.
         loaded = undefined
         await (await m.send(session.id, agentA, 'again')).done
         expect(runs[1]!.memoryHooks).toBeUndefined()
@@ -556,25 +567,19 @@ describe.skipIf(!TEST_DATABASE_URL)(
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const settings = new SettingsStore(db.sql)
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, settings, memory: { hookConfig: { autoRetain: false } } })
-        const recallOf = async (i: number, sessionId: string) =>
-          runs[i]!.memoryHooks!.UserPromptSubmit![0]!.hooks[0]!(
-            { session_id: sessionId, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[i]!.prompt as string },
-            undefined,
-            { signal: new AbortController().signal },
-          )
+        // Each turn's process fires the recall (test/support/sessions.ts); a changed cap is
+        // in the fingerprint, so each change spawns a process with the new one (warm.ts).
         const long = 'a'.repeat(1000)
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: long })
         await turn!.done
-        await recallOf(0, session.id)
         await settings.set(SETTING_RECALL_MAX_QUERY_CHARS, 12)
         await (await m.send(session.id, agentA, long)).done
-        await recallOf(1, session.id)
         await settings.set(SETTING_RECALL_MAX_QUERY_CHARS, 0)
         await (await m.send(session.id, agentA, long)).done
-        await recallOf(2, session.id)
+        expect(runs).toHaveLength(3)
         expect(fake.recalls().map((r) => (r.body as { query: string }).query.length)).toEqual([800, 12, 1000])
       } finally {
         await fake.close()
@@ -591,7 +596,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const audit = new AuditLog({ sql: db.sql })
         const pooled = (id: string, secret: string) => ({
           id,
@@ -600,28 +605,34 @@ describe.skipIf(!TEST_DATABASE_URL)(
           credential: { kind: 'anthropic_api_key' as const, secret },
         })
         const runs: HarnessRun[] = []
-        // Claude Code fires UserPromptSubmit for every query's prompt, the continuation's too;
-        // the first credential is refused after its init, so the second resumes.
+        const prompts: string[] = []
+        // Claude Code fires UserPromptSubmit for every prompt pushed into a process, the
+        // continuation's too; the first credential is refused after its init, so the
+        // second credential's process resumes.
         const runner = (run: HarnessRun): AsyncIterable<SDKMessage> => {
           runs.push(run)
           const attempt = runs.length
           const session_id = run.sessionId ?? run.resume ?? 'unknown'
           return (async function* () {
             const signal = new AbortController().signal
-            for (const matcher of run.memoryHooks?.UserPromptSubmit ?? []) {
-              await matcher.hooks[0]!(
-                { session_id, transcript_path: '/nonexistent', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: run.prompt as string },
-                undefined,
-                { signal },
-              )
+            for await (const message of run.prompt as AsyncIterable<SDKUserMessage>) {
+              const prompt = promptText(message)
+              prompts.push(prompt)
+              for (const matcher of run.memoryHooks?.UserPromptSubmit ?? []) {
+                await matcher.hooks[0]!(
+                  { session_id, transcript_path: '/nonexistent', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt },
+                  undefined,
+                  { signal },
+                )
+              }
+              yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+              if (attempt === 1) {
+                yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+                return
+              }
+              yield { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null, session_id } as unknown as SDKMessage
+              yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
             }
-            yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
-            if (attempt === 1) {
-              yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
-              return
-            }
-            yield { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null, session_id } as unknown as SDKMessage
-            yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
           })()
         }
         const m = manager({
@@ -639,7 +650,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
         expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
-        expect(runs.map((r) => r.prompt)).toEqual(['Make a box', CONTINUE_PROMPT])
+        expect(prompts).toEqual(['Make a box', CONTINUE_PROMPT])
         await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(1)
         const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
         expect(entries.map((e) => [e.action, e.turn_id])).toEqual([['recall', turn!.turnId]])
@@ -653,32 +664,23 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const fake = await startFakeHindsight()
       try {
         fake.memories = ['The user prints in PETG.', 'Boxes get 2 mm walls.']
+        // The retain is fire-and-forget (memory/hindsight.ts): answered this late, it
+        // finishes after the turn ended, the case the panel event and audit row must still cover.
+        fake.respond = (r) => (r.path.endsWith('/memories') ? { json: { success: true, operation_id: 'op-late' }, delayMs: 1_500 } : undefined)
         const paths = await tempPaths()
-        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const { runner } = scriptedRunner(() => ({ reply: 'A box, 40 mm wide.' }))
         const hindsight: CheckedPlugin = {
           plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/bank1/`, toolTiers: {}, disabledTools: [] },
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const failures: unknown[] = []
         const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })
+        // The scripted process fires the hooks as Claude Code does (test/support/sessions.ts).
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
         await turn!.done
-        // The hooks run as Claude Code would call them; this is after the turn ended,
-        // the case of a retain that finishes late.
-        const hooks = runs[0]!.memoryHooks!
-        const signal = new AbortController().signal
-        const base = { session_id: session.id, transcript_path: '/nonexistent', cwd: '/' }
-        for (const matcher of hooks.UserPromptSubmit!) {
-          await matcher.hooks[0]!({ ...base, hook_event_name: 'UserPromptSubmit', prompt: 'Make a box' }, undefined, { signal })
-        }
-        await hooks.Stop![0]!.hooks[0]!(
-          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'A box, 40 mm wide.' },
-          undefined,
-          { signal },
-        )
         await drainRetains()
         await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(2)
         const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
@@ -729,17 +731,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
             input: expect.stringContaining('40 mm'),
           },
         ])
-        // Both arrived after the turn's last status: the log keeps them in that order for a replay.
+        // The recall came in the turn; the retain after its last status: the log keeps
+        // them in that order for a replay.
         const lastStatus = events.findLastIndex((e) => e.type === 'session.status')
-        expect(events.findIndex((e) => e.type === 'memory')).toBeGreaterThan(lastStatus)
+        expect(events.findIndex((e) => e.type === 'memory')).toBeLessThan(lastStatus)
+        expect(events.findLastIndex((e) => e.type === 'memory')).toBeGreaterThan(lastStatus)
 
         // A failed retain is recorded as an error with its reason.
         fake.respond = (r) => (r.path.endsWith('/memories') ? { status: 503, text: 'overloaded' } : undefined)
-        await hooks.Stop![0]!.hooks[0]!(
-          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'Again.' },
-          undefined,
-          { signal },
-        )
+        await (await m.send(session.id, agentA, 'Again.')).done
         await drainRetains()
         const failed = (await audit.list({ sessionId: session.id, kind: 'memory', outcome: 'error' })).entries
         expect(failed).toMatchObject([{ action: 'retain', detail: expect.stringMatching(/HTTP 503/) }])
@@ -757,8 +757,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session } = await m.start(agentA, { origin: 'mcp' })
       await (await m.send(session.id, agentA, 'one')).done
       expect(runs[0]!.maxBudgetUsd).toBe(0.05)
-      // Second turn: the SDK reports the cumulative total (see manager.ts).
-      const { runner: r2, runs: runs2 } = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.06 }))
+      // Second turn, on another replica: a fresh process, resumed from a transcript
+      // with no `cost-state` yet (the first replica's process is still warm, and
+      // writes its only as it exits), so its total starts from 0 and is the turn's own.
+      const { runner: r2, runs: runs2 } = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.03 }))
       const m2 = manager({ sql: db.sql, paths, run: r2, settings })
       await (await m2.send(session.id, agentA, 'two')).done
       expect(runs2[0]!.maxBudgetUsd).toBeCloseTo(0.02)
@@ -945,6 +947,113 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const m = manager({ sql: db.sql, paths, run: scriptedRunner(() => ({ reply: 'x' })).runner })
         const { session } = await m.start(agentA, { origin: 'mcp' })
         await expect(m.attach(session.id, agentB)).rejects.toMatchObject({ code: 'not_found' })
+      })
+    })
+
+    // The session's warm Claude Code (spec 2026-10-13 §5.3, sessions/warm.ts,
+    // sessions/warmTurn.ts) over the scripted process. The real one is
+    // test/sessions.e2e.test.ts ("two sends in a row use one Claude Code process").
+    describe('the warm process', () => {
+      it('serves turn after turn from one process: each prompt into it, each turn its own share of the total', async () => {
+        const paths = await tempPaths()
+        const totals = [0.02, 0.05]
+        const { runner, runs, prompts } = scriptedRunner(() => ({ reply: 'ok', costUsd: totals.shift() }))
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
+        expect(await turn!.done).toMatchObject({ kind: 'result', costUsd: 0.02 })
+        const second = await (await m.send(session.id, agentA, 'two')).done
+        expect(second).toMatchObject({ kind: 'result', turns: 2 })
+        if (second.kind !== 'result') throw new Error('unreachable')
+        expect(second.costUsd).toBeCloseTo(0.05, 10)
+        expect(runs).toHaveLength(1)
+        expect(prompts.map(promptText)).toEqual(['one', 'two'])
+        expect(m.warm.size()).toBe(1)
+        await m.warm.close()
+        expect(m.warm.size()).toBe(0)
+      })
+
+      it('an interrupt stops the turn and keeps the process for the next', async () => {
+        const paths = await tempPaths()
+        const turns: FakeTurn[] = [{ hang: true }, { reply: 'ok' }]
+        const { runner, runs } = scriptedRunner(() => turns.shift()!)
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
+        await new Promise((r) => setTimeout(r, 50))
+        expect(await m.interrupt(session.id, agentA)).toBe(true)
+        expect(await turn!.done).toEqual({ kind: 'interrupted' })
+        expect(m.warm.size()).toBe(1)
+        expect(await (await m.send(session.id, agentA, 'again')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(runs).toHaveLength(1)
+        await m.warm.close()
+      })
+
+      it('a process that dies mid-turn is let go: the turn fails, and the next one spawns anew', async () => {
+        const paths = await tempPaths()
+        const turns: FakeTurn[] = [{ reply: 'ok' }, { stall: { model: 'claude-sonnet-4-5', usage: {} }, dies: 'Claude Code process exited with code 1' }, { reply: 'ok' }]
+        const { runner, runs } = scriptedRunner(() => turns.shift()!)
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
+        await turn!.done
+        expect(await (await m.send(session.id, agentA, 'two')).done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/exited with code 1/) })
+        expect(m.warm.size()).toBe(0)
+        expect(await (await m.send(session.id, agentA, 'three')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(runs).toHaveLength(2)
+        await m.warm.close()
+      })
+
+      it('a warm process gone before its first message is tried once more on a fresh one', async () => {
+        const paths = await tempPaths()
+        // The second process's first prompt finds it dead (it throws at once); the third serves the turn.
+        const turns: FakeTurn[] = [{ reply: 'ok' }, { throws: 'Claude Code process exited with code 1' }, { reply: 'ok' }]
+        const { runner, runs } = scriptedRunner(() => turns.shift()!)
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
+        await turn!.done
+        expect(await (await m.send(session.id, agentA, 'two')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(runs).toHaveLength(2)
+        await m.warm.close()
+      })
+
+      // Ruling 9: the manager's claim keeps two turns off one session, so an
+      // entry held by anything else when a turn acquires is a bug, surfaced as
+      // the turn's failure, never swallowed.
+      it('a turn whose process is held fails, saying so, and leaves the held process alone', async () => {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const h = await warmHarness({ db, url, schema, drop: () => Promise.resolve() })
+        try {
+          const { session } = await m.start(agentA, { origin: 'mcp' })
+          const held = await m.warm.acquire(session.id, h.assembled(), h.credential(), 1)
+          expect(held.outcome).toBe('miss')
+          expect(await (await m.send(session.id, agentA, 'hi')).done).toEqual({
+            kind: 'failed',
+            message: `session ${session.id} already has a turn running on its warm process`,
+          })
+          // The held process is as it was: still the cache's one entry, its inbox open, nothing pushed into it.
+          expect(m.warm.size()).toBe(1)
+          expect(runs).toHaveLength(1)
+          expect(() => held.entry.inbox.push(userMessage('still open'))).not.toThrow()
+          expect(await m.get(session.id, agentA)).toMatchObject({ status: 'failed' })
+          await m.warm.abandon(held.entry, 'the test')
+          expect(m.warm.size()).toBe(0)
+        } finally {
+          await h.close()
+        }
+      })
+
+      it('a changed setting spawns a new process for the next turn', async () => {
+        const paths = await tempPaths()
+        const settings = new SettingsStore(db.sql)
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const m = manager({ sql: db.sql, paths, run: runner, settings })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
+        await turn!.done
+        await settings.set('model', 'claude-opus-5')
+        await (await m.send(session.id, agentA, 'two')).done
+        expect(runs.map((r) => r.model)).toEqual([undefined, 'claude-opus-5'])
+        expect(m.warm.size()).toBe(1)
+        await m.warm.close()
       })
     })
   },

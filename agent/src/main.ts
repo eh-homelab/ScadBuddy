@@ -1,7 +1,6 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
-import os from 'node:os'
 import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
@@ -29,6 +28,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
@@ -49,6 +49,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
+import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
@@ -203,7 +204,13 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
-const pluginForwarder = await PluginForwarder.start()
+const pluginForwarder = await PluginForwarder.start({
+  ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
+  log: (message) => console.error(message),
+})
+// The database's clock the moment it is ready, before a turn can record a session: the pass at
+// start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
+const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
 const backend = createBackendClient(config.backendUrl)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
@@ -294,7 +301,7 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 
 // This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
 // Monitor commands, which run where its turns' Bash runs.
-const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
 // payloads are task ids only, so its client has no codec.
@@ -313,6 +320,7 @@ const backgroundTasks =
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+const runtime = await readStartSettings({ database, settings }, console.log)
 // Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
 // and durable ones (memoryActivities), so a knob set here applies to both (#2420).
 // Undefined: the defaults.
@@ -346,12 +354,12 @@ const sessions =
         ...(plugins
           ? {
               remotePlugins: async () =>
-                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
+                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder, { record: true }),
             }
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
@@ -362,6 +370,22 @@ const sessions =
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
+        // One warm Claude Code per classic session (unified runtime spec 2026-10-13
+        // §5.3, sessions/warm.ts), sized by the runtime settings (sessions/runtimeSettings.ts).
+        warm: { maxEntries: runtime.warm_max_per_replica, idleMs: runtime.warm_idle_seconds * 1000, log: (message) => console.log(message) },
+      })
+    : undefined
+// A credential, plugin or package change on any replica, and a session handed
+// off, marked done, archived or forgotten, evict warm processes everywhere
+// (sessions/warmEvict.ts): on the event bus's connection, like the relays above.
+const stopWarmSync =
+  sessions && settings && events
+    ? wireRuntimeSync({
+        settings,
+        warm: sessions.warm,
+        revalidate: () => sessions.revalidateWarm(),
+        events,
+        log: console.log,
       })
     : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
@@ -668,6 +692,31 @@ const stopOrphanSweep =
         },
       )
     : undefined
+// At start and every 5 min: the upstream MCP sessions of replicas that no longer poll
+// agent-tools (plugins/pluginSessions.ts); skipped, and logged, when Temporal cannot say who polls.
+const PLUGIN_SESSION_SWEEP_MS = 5 * 60_000
+const stopPluginSessionSweep =
+  database && plugins
+    ? (() => {
+        const deps = { plugins, kek: kek.ok ? kek.kek : undefined, log: (message: string) => console.error(message) }
+        let ownEnded = false
+        const sweep = async () => {
+          if (!(await database.ready())) return
+          // Once, first: what this hostname's previous incarnation left; nothing of this one's is live yet.
+          if (!ownEnded) {
+            const mark = await pluginSessionMark
+            if (mark) await endOwnSessions(database.sql, replicaIdentity(), deps, mark)
+            ownEnded = mark !== undefined
+          }
+          await runPluginSessionSweep({ sql: database.sql, client: temporalClient, ...deps })
+        }
+        const run = () => void sweep().catch((err: unknown) => console.error('plugin session sweep failed:', (err as Error).message))
+        run()
+        const timer = setInterval(run, PLUGIN_SESSION_SWEEP_MS)
+        timer.unref()
+        return () => clearInterval(timer)
+      })()
+    : undefined
 const commands =
   temporalClient && operationStore
     ? new AgentCommands({
@@ -773,11 +822,13 @@ async function stop(): Promise<void> {
   stopQuestionSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()
+  stopPluginSessionSweep?.()
   stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
   stopWorkspaceSweep?.()
+  stopWarmSync?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted
