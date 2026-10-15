@@ -192,8 +192,8 @@ class MirroredTranscript {
       load: async (key) => {
         const entries = await inner.load(key)
         if ((key.subpath ?? '') === '') {
-          // As `lastOfType` picks it (a row of the type with no uuid), so the two baselines name one entry.
-          const state = entries?.findLast((e) => e.type === 'cost-state' && e.uuid === undefined)
+          // As `lastOfType` picks it (a row of the type whose uuid the store keeps as NULL: none, or not a string), so the two baselines name one entry.
+          const state = entries?.findLast((e) => e.type === 'cost-state' && typeof e.uuid !== 'string')
           this.loadedCostUsd = costStateUsd(state ? JSON.stringify(state) : null, log)
           this.onLoaded?.(this.loadedCostUsd)
         }
