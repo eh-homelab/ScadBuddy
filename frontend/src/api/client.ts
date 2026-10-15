@@ -819,8 +819,15 @@ export const api = {
       signal,
     }),
 
-  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
-  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
 
   getFlowVersionSource: (name: string, commit: string) =>
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),

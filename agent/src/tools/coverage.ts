@@ -84,6 +84,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "register_flow's description, and check_flow_script's problems name a wrong call.",
   },
   {
+    operation: 'POST /api/v1/workflow-script/host-functions',
+    reason:
+      "The flow editor's completion and hover for a flow with inputs (#2651). An agent reads `inputs()` in " +
+      "register_flow's description, and check_flow_script types it against the schema it is given.",
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',
     reason:
       "A flow run's images as the run page's thumbnails (#2477). A flow hands them to a session by " +
