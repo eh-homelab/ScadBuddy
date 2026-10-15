@@ -1,6 +1,6 @@
 """The host functions and result types a flow script sees, for the editor's completion
-and hover (#2487). Rendered on each call by the harness from `SCRIPT_TOOLS`, the list
-`check_script`'s type check is built over, so the two never drift."""
+and hover (#2487). Rendered on each call by the harness from `HOST_FUNCTIONS`, the
+list `check_script`'s type check is built over, so the two never drift."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
 
-from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
+from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS
 
 
 class HostFunction(BaseModel):
@@ -48,7 +48,7 @@ def host_interface(
     tool_tiers: Mapping[str, str], *, tools_unavailable: str | None = None
 ) -> HostInterface:
     """The host functions and types, and the agent's tools at `tool_tiers`."""
-    source = render_host_interface(SCRIPT_TOOLS)
+    source = render_host_interface(HOST_FUNCTIONS)
     functions: list[HostFunction] = []
     types: list[HostType] = []
     for node in ast.parse(source).body:

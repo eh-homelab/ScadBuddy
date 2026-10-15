@@ -36,6 +36,13 @@ def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, P
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def recoloured(colours: list[str], recolour: Mapping[str, str]) -> list[str]:
+    """``colours`` (upper-cased) with each one ``recolour`` names swapped for its new
+    colour, once each, first seen first: two colours swapped to one are one filament."""
+    swap = {k.upper(): v.upper() for k, v in recolour.items()}
+    return list(dict.fromkeys(swap.get(c.upper(), c.upper()) for c in colours))
+
+
 def input_problem(slug: str, revision: str | None) -> str | None:
     """Why a workflow must not render ``slug`` at ``revision``, or None. The API
     validates both already; this is for a run started straight on the (unauthenticated,
@@ -200,6 +207,13 @@ class PackItem(BaseModel):
     count: int = Field(default=1, ge=1)
     #: `keep_together` keeps every copy with the same group on one plate.
     group: str | None = None
+    #: These copies print in other colours (#3637): each of the part's colours named
+    #: here (`#RRGGBB`) prints in the colour it maps to, as a filament slot of its own.
+    recolour: dict[str, str] = Field(default_factory=dict)
+
+    def colours(self) -> list[str]:
+        """The colours these copies print in, once each, in the part's order."""
+        return recoloured(self.part.colours, self.recolour)
 
 
 class Placed(BaseModel):
@@ -212,6 +226,8 @@ class Placed(BaseModel):
     #: A quarter turn about Z, in degrees (0, 90, 180 or 270); x and y place the
     #: turned box's min corner.
     rot: float = 0.0
+    #: The copy's colours swapped, as its `PackItem` says (#3637).
+    recolour: dict[str, str] = Field(default_factory=dict)
 
 
 class LayoutPlate(BaseModel):

@@ -635,6 +635,28 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(t.summarize({ ...args, supports: { enabled: true } })).not.toMatch(/supports (at|on)|tree|normal/)
   })
 
+  it('sends a prime tower when asked for, names it in its approval line, and omits it otherwise (#3628)', async () => {
+    const chosen: { body?: unknown } = {}
+    const off: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, prime_tower: { enabled: true, no_sparse_layers: true } }, ctx())
+    server.use(...capturedRun(off))
+    await t.execute({ ...args, prime_tower: { enabled: false, no_sparse_layers: true } }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: true, no_sparse_layers: true })
+    expect((off.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: false, no_sparse_layers: true })
+    expect(plain.body).not.toHaveProperty('prime_tower')
+    expect(t.summarize({ ...args, prime_tower: { enabled: true, no_sparse_layers: true } })).toContain(
+      ', with a prime tower (no sparse layers)',
+    )
+    expect(t.summarize({ ...args, prime_tower: { enabled: false } })).toContain(', without a prime tower')
+    expect(t.summarize(args)).not.toContain('prime tower')
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}

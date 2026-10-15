@@ -66,12 +66,25 @@ export function ActivityBell() {
   const [mounted] = useState(() => Date.now())
   const toasted = useRef(new Set<string>())
   const generation = useRef(0)
+  // A read that settles once the bell is gone sets nothing (#3706): React reads `window` on
+  // every update, and a test's teardown removes it, as useAsync guards (#2908).
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+    }
+  }, [])
 
   const loadFollow = useCallback(() => {
     api
       .getSettings()
-      .then((settings) => setFollow(settings.activity_follow ?? DEFAULT_FOLLOW))
-      .catch(() => setFollow((current) => current ?? DEFAULT_FOLLOW))
+      .then((settings) => {
+        if (live.current) setFollow(settings.activity_follow ?? DEFAULT_FOLLOW)
+      })
+      .catch(() => {
+        if (live.current) setFollow((current) => current ?? DEFAULT_FOLLOW)
+      })
   }, [])
   useEffect(loadFollow, [loadFollow])
   // Saved in Settings (here or elsewhere): follow the new list without a reload.
@@ -91,8 +104,8 @@ export function ActivityBell() {
           .catch(() => [] as Activity[]),
       ),
     )
-    // A newer read started meanwhile: its answer is the fresher one.
-    if (mine !== generation.current) return
+    // A newer read started meanwhile: its answer is the fresher one. Gone: nothing to show.
+    if (mine !== generation.current || !live.current) return
     const fresh = pages
       .flat()
       .filter((row) => finishedAt(row) > seen.current)

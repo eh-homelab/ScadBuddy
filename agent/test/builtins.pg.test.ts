@@ -6,8 +6,9 @@ import type { Database } from '../src/db.js'
 import { type BuiltinResult, GREP_BUDGET_MS } from '../src/builtins/files.js'
 import { BUILTIN_SERVER, builtinServer, type BuiltinContext } from '../src/builtins/server.js'
 import { TASKS_PATH } from '../src/builtins/session.js'
-import { type NestedQueries, webFetch } from '../src/builtins/web.js'
+import { CACHE_PAGES, type NestedQueries, webFetch } from '../src/builtins/web.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
+import { CALL_ID_META } from '../src/builtins/callId.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -139,6 +140,30 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect(await files.stat(ws, TASKS_PATH)).toBeDefined()
   })
 
+  it('answers every Task* call with an error naming the list file when it is not a task list (#3201)', async () => {
+    for (const bad of ['{not json', '{}', '{"next":1,"tasks":{}}', '[]']) {
+      await files.write(ws, TASKS_PATH, Buffer.from(bad))
+      for (const [name, args] of [
+        ['TaskList', {}],
+        ['TaskGet', { taskId: '1' }],
+        ['TaskCreate', { subject: 's', description: 'd' }],
+        ['TaskUpdate', { taskId: '1', status: 'completed' }],
+      ] as const) {
+        expect(await call(name, args), `${name} on ${bad}`).toMatchObject({ isError: true, text: expect.stringContaining(`/workspace/${TASKS_PATH}`) })
+      }
+      expect((await files.read(ws, TASKS_PATH))!.bytes.toString()).toBe(bad)
+    }
+  })
+
+  it('creates one task for a TaskCreate its activity retries, by the call id in _meta (#3201)', async () => {
+    const create = (callId: string) =>
+      client.callTool({ name: 'TaskCreate', arguments: { subject: 's', description: 'd' }, _meta: { [CALL_ID_META]: callId } }) as Promise<{ content: Content[] }>
+    expect((await create('toolu_a')).content[0]?.text).toBe('Task #1 created successfully: s')
+    expect((await create('toolu_a')).content[0]?.text).toBe('Task #1 created successfully: s')
+    expect((await create('toolu_b')).content[0]?.text).toBe('Task #2 created successfully: s')
+    expect((await call('TaskList', {})).text).toBe('#1 [pending] s\n#2 [pending] s')
+  })
+
   it('answers the built-ins with nothing to act on as a classic turn does', async () => {
     expect((await call('ReportFindings', { findings: [] })).text).toBe('No findings reported.')
     expect((await call('ReportFindings', { findings: [{}, {}] })).text).toBe('2 findings reported.')
@@ -183,6 +208,91 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
       text: expect.stringContaining('loopback'),
     })
     expect(asked).toEqual([])
+  })
+
+  describe('the page cache (#3199)', () => {
+    let hits: string[]
+    let port: number
+    beforeEach(async () => {
+      hits = []
+      const pages = createServer((req, res) => {
+        hits.push(req.url ?? '')
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end(`page ${req.url}`)
+      })
+      servers.push(pages)
+      await new Promise<void>((r) => pages.listen(0, '127.0.0.1', r))
+      port = (pages.address() as AddressInfo).port
+    })
+    const web = (sessionId: string) => ({
+      nested,
+      secrets: () => [],
+      actor: browser,
+      sessionId,
+      signal: new AbortController().signal,
+      resolve: async () => ['127.0.0.1'],
+      allowLoopback: true,
+    })
+
+    it("is a session's own: another session's fetch of the page fetches it, through the egress check", async () => {
+      const url = `http://pages.test:${port}/shared`
+      await webFetch(web('session-a'), { url, prompt: 'p' })
+      await webFetch(web('session-a'), { url, prompt: 'p' })
+      expect(hits).toEqual(['/shared'])
+      await webFetch(web('session-b'), { url, prompt: 'p' })
+      expect(hits).toEqual(['/shared', '/shared'])
+    })
+
+    it('refuses a cached page whose URL has since become a known secret, as a fetch of it would be', async () => {
+      const url = `http://pages.test:${port}/?k=tok-later-secret`
+      expect((await webFetch(web('session-s'), { url, prompt: 'p' })).isError).toBeUndefined()
+      const refused = await webFetch({ ...web('session-s'), secrets: () => ['tok-later-secret'] }, { url, prompt: 'p' })
+      expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('credential') })
+      expect(hits).toHaveLength(1)
+    })
+
+    it(`keeps at most ${CACHE_PAGES} pages, dropping the oldest`, async () => {
+      const ctx = web('session-c')
+      for (let i = 0; i <= CACHE_PAGES; i++) await webFetch(ctx, { url: `http://pages.test:${port}/${i}`, prompt: 'p' })
+      expect(hits).toHaveLength(CACHE_PAGES + 1)
+      await webFetch(ctx, { url: `http://pages.test:${port}/${CACHE_PAGES}`, prompt: 'p' })
+      expect(hits).toHaveLength(CACHE_PAGES + 1)
+      await webFetch(ctx, { url: `http://pages.test:${port}/0`, prompt: 'p' })
+      expect(hits).toHaveLength(CACHE_PAGES + 2)
+    })
+  })
+
+  it("stops a WebFetch's nested query when its caller gives up on the call (#3199)", async () => {
+    const pages = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('slow page')
+    })
+    servers.push(pages)
+    await new Promise<void>((r) => pages.listen(0, '127.0.0.1', r))
+    const port = (pages.address() as AddressInfo).port
+    let stopped: () => void
+    const askStopped = new Promise<void>((r) => (stopped = r))
+    const slow: NestedQueries = {
+      ...nested,
+      ask: (_prompt, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () => (stopped(), resolve('stopped')), { once: true })
+        }),
+    }
+    const own = await connectInProcess(() =>
+      builtinServer(['WebFetch'], () => ({
+        files: { files, ws },
+        web: { nested: slow, secrets: () => [], actor: browser, signal: new AbortController().signal, resolve: async () => ['127.0.0.1'], allowLoopback: true },
+      })),
+    )
+    try {
+      await expect(own.callTool({ name: 'WebFetch', arguments: { url: `http://slow.test:${port}/`, prompt: 'p' } }, undefined, { timeout: 300 })).rejects.toThrow(
+        /timed out/i,
+      )
+      await expect(Promise.race([askStopped.then(() => 'stopped'), new Promise((r) => setTimeout(() => r('still running'), 2_000))])).resolves.toBe('stopped')
+    } finally {
+      await own.close()
+    }
   })
 
   it('hands a search to the nested query as it was asked', async () => {

@@ -1,5 +1,5 @@
 import { decodeText, WorkspaceError } from '../workspace/store.js'
-import type { BuiltinResult, FileToolContext } from './files.js'
+import { type BuiltinResult, type FileToolContext, WORKSPACE_ROOT } from './files.js'
 
 // Claude Code's task list (TaskCreate, TaskGet, TaskList, TaskUpdate), ReportFindings and
 // the built-ins that answer the same in either mode (EnterWorktree, ExitWorktree,
@@ -21,22 +21,55 @@ type Task = {
   blocks: string[]
   blockedBy: string[]
   metadata?: Record<string, unknown>
+  /** The TaskCreate call that made it, by its tool_use id: a retry of that call answers this task (#3201). */
+  call?: string
 }
 type TaskList = { next: number; tasks: Task[] }
 
 const ok = (text: string): BuiltinResult => ({ text })
 
-async function loadTasks(ctx: FileToolContext): Promise<{ list: TaskList; sha: string | null }> {
+/** The model can write the list file with Write: one that is no task list fails the call, saying which file. */
+const malformed = (): BuiltinResult => ({
+  text: `The task list file ${WORKSPACE_ROOT}/${TASKS_PATH} is not a valid task list; fix it or delete it to start a new list.`,
+  isError: true,
+})
+
+function isTaskList(value: unknown): value is TaskList {
+  if (typeof value !== 'object' || value === null) return false
+  const { next, tasks } = value as Partial<TaskList>
+  return (
+    Number.isSafeInteger(next) &&
+    Array.isArray(tasks) &&
+    tasks.every(
+      (t: unknown) =>
+        typeof t === 'object' &&
+        t !== null &&
+        typeof (t as Task).id === 'string' &&
+        Array.isArray((t as Task).blocks) &&
+        Array.isArray((t as Task).blockedBy),
+    )
+  )
+}
+
+async function loadTasks(ctx: FileToolContext): Promise<{ list: TaskList; sha: string | null } | undefined> {
   const file = await ctx.files.read(ctx.ws, TASKS_PATH)
   if (!file) return { list: { next: 1, tasks: [] }, sha: null }
   const text = decodeText(file.bytes, file.mediaType)
-  return { list: JSON.parse(text ?? '{"next":1,"tasks":[]}') as TaskList, sha: file.sha256 }
+  let list: unknown
+  try {
+    list = JSON.parse(text ?? '')
+  } catch {
+    return undefined
+  }
+  return isTaskList(list) ? { list, sha: file.sha256 } : undefined
 }
 
 /** Runs `change` on the list and stores it, again from the top if another call wrote it meanwhile. */
 async function withTasks(ctx: FileToolContext, change: (list: TaskList) => BuiltinResult): Promise<BuiltinResult> {
   for (let attempt = 0; ; attempt++) {
-    const { list, sha } = await loadTasks(ctx)
+    const loaded = await loadTasks(ctx)
+    if (!loaded) return malformed()
+    const { list, sha } = loaded
     const result = change(list)
     try {
       await ctx.files.write(ctx.ws, TASKS_PATH, new TextEncoder().encode(JSON.stringify(list)), {
@@ -54,8 +87,11 @@ async function withTasks(ctx: FileToolContext, change: (list: TaskList) => Built
 export function taskCreate(
   ctx: FileToolContext,
   input: { subject: string; description: string; activeForm?: string; metadata?: Record<string, unknown> },
+  callId?: string,
 ): Promise<BuiltinResult> {
   return withTasks(ctx, (list) => {
+    const made = callId === undefined ? undefined : list.tasks.find((t) => t.call === callId)
+    if (made) return ok(`Task #${made.id} created successfully: ${made.subject}`)
     const id = String(list.next++)
     list.tasks.push({
       id,
@@ -66,6 +102,7 @@ export function taskCreate(
       blocks: [],
       blockedBy: [],
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      ...(callId !== undefined ? { call: callId } : {}),
     })
     return ok(`Task #${id} created successfully: ${input.subject}`)
   })
@@ -74,7 +111,9 @@ export function taskCreate(
 const live = (list: TaskList, ids: string[]) => ids.filter((id) => list.tasks.some((t) => t.id === id))
 
 export async function taskGet(ctx: FileToolContext, input: { taskId: string }): Promise<BuiltinResult> {
-  const { list } = await loadTasks(ctx)
+  const loaded = await loadTasks(ctx)
+  if (!loaded) return malformed()
+  const { list } = loaded
   const task = list.tasks.find((t) => t.id === input.taskId)
   if (!task) return ok('Task not found')
   const lines = [`Task #${task.id}: ${task.subject}`, `Status: ${task.status}`, `Description: ${task.description}`]
@@ -87,7 +126,9 @@ export async function taskGet(ctx: FileToolContext, input: { taskId: string }): 
 }
 
 export async function taskList(ctx: FileToolContext): Promise<BuiltinResult> {
-  const { list } = await loadTasks(ctx)
+  const loaded = await loadTasks(ctx)
+  if (!loaded) return malformed()
+  const { list } = loaded
   if (!list.tasks.length) return ok('No tasks found')
   return ok(
     list.tasks
