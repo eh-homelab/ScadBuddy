@@ -26,6 +26,8 @@ import type { BuiltinResult } from './files.js'
 export const PAGE_CHARS = 100_000
 /** How long a fetched page is reused, as Claude Code caches it. */
 export const CACHE_MS = 15 * 60_000
+/** How many pages the cache keeps at most, across sessions; the oldest go first (#3199). */
+export const CACHE_PAGES = 64
 const FETCH_TIMEOUT_MS = 60_000
 
 export type WebFetchInput = { url: string; prompt: string; offset?: number }
@@ -52,6 +54,10 @@ export type WebContext = {
   allowLoopback?: boolean
 }
 
+/**
+ * Fetched pages by session (or, outside one, by principal) and URL, oldest first: a hit
+ * skips the egress check and the audit row, so it is never another session's fetch (#3199).
+ */
 const cache = new Map<string, { at: number; markdown: string; finalUrl: string }>()
 
 const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' })
@@ -61,10 +67,14 @@ const error = (text: string): BuiltinResult => ({ text, isError: true })
 
 /** The page's markdown, or a refusal in Claude Code's terms. */
 async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; finalUrl: string } | BuiltinResult> {
-  const hit = cache.get(url.href)
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit
+  for (const [key, value] of cache) if (Date.now() - value.at >= CACHE_MS) cache.delete(key)
+  const key = `${ctx.sessionId ?? `${ctx.actor.kind}:${ctx.actor.id}`}\n${url.href}`
+  // Before the cache: a URL that has since become a known secret is refused on a hit too. The
+  // egress check is not repeated on a hit: it connects nowhere, and the cache is this session's (#3199).
   const problem = requestProblem({ method: 'GET', url: url.href, timeout_ms: FETCH_TIMEOUT_MS }, ctx.secrets())
   if (problem) return error(problem)
+  const hit = cache.get(key)
+  if (hit) return hit
   const outcome = await exchange(
     {
       method: 'GET',
@@ -102,8 +112,11 @@ async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; fina
   else if (!type || type.startsWith('text/') || type.includes('json') || type.includes('xml') || type.includes('markdown')) markdown = body
   else return error(`The content at ${url.href} is ${type}, not text; WebFetch reads web pages.`)
   const fetched = { at: Date.now(), markdown, finalUrl: outcome.url.href }
-  cache.set(url.href, fetched)
-  for (const [key, value] of cache) if (Date.now() - value.at >= CACHE_MS) cache.delete(key)
+  cache.set(key, fetched)
+  for (const oldest of cache.keys()) {
+    if (cache.size <= CACHE_PAGES) break
+    cache.delete(oldest)
+  }
   return fetched
 }
 
