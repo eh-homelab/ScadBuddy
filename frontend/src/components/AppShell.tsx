@@ -108,10 +108,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #3653 — read once; kept per browser in localStorage, which a cookie inside Bambuddy's
   // cross-origin frame would not be, and which no API request carries.
   const [sidebarOpen, setSidebarOpen] = useState(() => sidebarOpenAtStart(embedded))
-  const changeSidebar = useCallback((value: boolean) => {
-    setSidebarOpen(value)
-    rememberSidebar(value)
-  }, [])
+  const changeSidebar = useCallback(
+    (value: boolean) => {
+      setSidebarOpen(value)
+      rememberSidebar(embedded, value)
+    },
+    [embedded],
+  )
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
@@ -431,7 +434,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   )
 }
 
-const SIDEBAR_KEY = 'scadbuddy.sidebar.open'
+/**
+ * Where the sidebar's state is kept. One key inside Bambuddy's frame and another outside
+ * it: they share the origin's storage, and the frame sits beside Bambuddy's own navigation.
+ */
+const sidebarKey = (embedded: boolean) => (embedded ? 'scadbuddy.sidebar.open.embedded' : 'scadbuddy.sidebar.open')
 
 /**
  * Whether the sidebar starts expanded: as the user last left it in this browser, else
@@ -441,7 +448,7 @@ const SIDEBAR_KEY = 'scadbuddy.sidebar.open'
 function sidebarOpenAtStart(embedded: boolean): boolean {
   let saved: string | null = null
   try {
-    saved = window.localStorage.getItem(SIDEBAR_KEY)
+    saved = window.localStorage.getItem(sidebarKey(embedded))
   } catch {
     // Nothing remembered.
   }
@@ -449,9 +456,9 @@ function sidebarOpenAtStart(embedded: boolean): boolean {
   return !embedded && window.innerWidth >= WIDE_WINDOW
 }
 
-function rememberSidebar(open: boolean): void {
+function rememberSidebar(embedded: boolean, open: boolean): void {
   try {
-    window.localStorage.setItem(SIDEBAR_KEY, String(open))
+    window.localStorage.setItem(sidebarKey(embedded), String(open))
   } catch {
     // Nothing is remembered; the sidebar still works for this page.
   }

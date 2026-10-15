@@ -22,7 +22,11 @@
     "skipLibCheck": true,
     "noEmit": true,
 
-    "paths": { "@/*": ["./src/*"] }
+    "paths": {
+      "@/components/ui/button": ["./src/components/ui/shadcn-button.tsx"],
+      "@/components/ui/dialog": ["./src/components/ui/shadcn-dialog.tsx"],
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src", "vitest.setup.ts"]
 }

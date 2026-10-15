@@ -105,7 +105,10 @@ describe('the shell’s sidebar (#3653)', () => {
     </Routes>
   )
   const sidebarState = () => document.querySelector('[data-slot="sidebar"]')?.getAttribute('data-state')
-  const forget = () => window.localStorage.removeItem('scadbuddy.sidebar.open')
+  const forget = () => {
+    window.localStorage.removeItem('scadbuddy.sidebar.open')
+    window.localStorage.removeItem('scadbuddy.sidebar.open.embedded')
+  }
 
   it('marks the page’s own link, and folds to its icons and back', async () => {
     forget()
@@ -136,17 +139,24 @@ describe('the shell’s sidebar (#3653)', () => {
     expect(sidebarState()).toBe(before)
   })
 
-  it('starts as icons in Bambuddy’s frame, beside its own navigation', () => {
+  it('starts as icons in Bambuddy’s frame, beside its own navigation, whatever the app outside it does', () => {
     forget()
+    // Expanded outside the frame: the same origin's storage, but not the frame's choice.
+    window.localStorage.setItem('scadbuddy.sidebar.open', 'true')
+    onTestFinished(forget)
     renderPage(shell(true))
     expect(sidebarState()).toBe('collapsed')
     expect(screen.getByRole('banner')).toHaveAttribute('data-embedded', 'true')
   })
 
-  it('starts as the user left it', () => {
-    window.localStorage.setItem('scadbuddy.sidebar.open', 'true')
+  it('starts as the user left it, in the frame or out of it', () => {
+    window.localStorage.setItem('scadbuddy.sidebar.open.embedded', 'true')
+    window.localStorage.setItem('scadbuddy.sidebar.open', 'false')
     onTestFinished(forget)
-    renderPage(shell(true))
+    const { unmount } = renderPage(shell(true))
     expect(sidebarState()).toBe('expanded')
+    unmount()
+    renderPage(shell(false))
+    expect(sidebarState()).toBe('collapsed')
   })
 })

@@ -18,6 +18,14 @@ function files(dir: string): string[] {
 const generated = readdirSync(ui).filter((name) => /^[a-z][\w-]*\.tsx$/.test(name))
 
 describe('the shadcn components (src/components/ui)', () => {
+  it('share no name, ignoring case, with a legacy primitive', () => {
+    // `./ui/Button` finds button.tsx before Button/index.tsx on a case-insensitive file
+    // system (macOS, Windows): shadcn's button and dialog are shadcn-button.tsx and
+    // shadcn-dialog.tsx until the legacy ones go (vite.config.ts `alias`).
+    const names = readdirSync(ui).map((name) => name.replace(/\.tsx?$/, '').toLowerCase())
+    expect(names.filter((name, i) => names.indexOf(name) !== i)).toEqual([])
+  })
+
   it('use ui-accent and ui-muted for shadcn’s accent and muted surfaces', () => {
     // index.css: `bg-accent` is still ScadBuddy's amber and `text-muted` its secondary
     // text while unconverted pages use them; a component added with `shadcn add` comes
