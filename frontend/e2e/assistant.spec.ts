@@ -365,8 +365,15 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(drawer).toBeVisible()
     await expect(drawer).not.toHaveAttribute('aria-modal', 'true')
 
-    // Polled: the sheet slides in again as it moves aside for the panel.
-    await expect.poll(() => overlap(drawer, panel)).toBeLessThanOrEqual(1)
+    // Polled: the sheet remounts non-modal beside the panel and slides in again.
+    await expect
+      .poll(async () => {
+        const drawerBox = await drawer.boundingBox()
+        const panelBox = await panel.boundingBox()
+        if (!drawerBox || !panelBox) return Infinity
+        return drawerBox.x + drawerBox.width - panelBox.x
+      })
+      .toBeLessThanOrEqual(1)
 
     await composer.fill('What failed here?')
     await expect(composer).toHaveValue('What failed here?')

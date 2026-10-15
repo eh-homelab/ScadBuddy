@@ -265,7 +265,8 @@ export function ActivityPage() {
           </Button>
         </div>
       )}
-      {open && <ActivityDrawer id={open} onClose={() => setOpen(null)} />}
+      {/* Keyed: each row's drawer captures its own opener for focus return. */}
+      {open && <ActivityDrawer key={open} id={open} onClose={() => setOpen(null)} />}
     </div>
   );
 }
