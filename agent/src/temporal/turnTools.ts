@@ -603,7 +603,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>
       let reset: string | undefined
-      const callTool = (client: Client) => client.callTool({ name: tool.name, arguments: fields }, undefined, { signal })
+      // The activity's own limit, not the MCP client's 60 s default: a WebFetch alone may take that long (#3199).
+      const timeout = context.info.startToCloseTimeoutMs
+      const callTool = (client: Client) =>
+        client.callTool({ name: tool.name, arguments: fields }, undefined, { signal, ...(timeout > 0 ? { timeout } : {}) })
       const target = keptTarget(deps, caller.context, server)
       try {
         if (target && keptClient) {

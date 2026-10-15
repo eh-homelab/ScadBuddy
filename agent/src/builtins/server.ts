@@ -263,6 +263,11 @@ function toResult(result: BuiltinResult): CallToolResult {
   }
 }
 
+/** `context` whose web work also stops when the call's caller gives up on it (its request timed out or was cancelled, #3199). */
+function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext {
+  return { ...context, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
+}
+
 /** An MCP server offering `names` (those of BUILTINS), each run with `context()`. */
 export function builtinServer(names: readonly string[], context: () => BuiltinContext): Server {
   const offered = names.filter((n) => PROVIDED.has(n))
@@ -271,7 +276,7 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: offered.map((name) => ({ name, description: BUILTINS[name]!.description, inputSchema: schemas[name] as { type: 'object' } })),
   }))
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name
     const builtin = offered.includes(name) ? BUILTINS[name] : undefined
     if (!builtin) return toResult({ text: `No such tool: ${name}`, isError: true })
@@ -279,7 +284,7 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
     if (!parsed.success) {
       return toResult({ text: `<tool_use_error>InputValidationError: ${z.prettifyError(parsed.error)}</tool_use_error>`, isError: true })
     }
-    return toResult(await builtin.run(context(), parsed.data as never))
+    return toResult(await builtin.run(stoppable(context(), extra.signal), parsed.data as never))
   })
   return server
 }
