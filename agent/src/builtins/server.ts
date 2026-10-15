@@ -17,7 +17,7 @@ import SCHEMAS from './schemas.json' with { type: 'json' }
 import { type WebContext, webFetch, webSearch } from './web.js'
 import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
-import { CALL_ID_META } from '../temporal/turnTools.js'
+import { CALL_ID_META } from './callId.js'
 
 // A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
 // names, as one MCP server the agent offers as turn tools (turnServers.ts), named

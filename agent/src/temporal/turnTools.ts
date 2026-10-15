@@ -5,6 +5,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { AuditLog } from '../audit/log.js'
+import { CALL_ID_META } from '../builtins/callId.js'
 import type { Tier } from '../auth/principal.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import type { RiskTier } from '../harness/permissions.js'
@@ -77,9 +78,6 @@ const LIST_TIMEOUT_MS = 20_000
 export const LISTING_KEPT_MS = 30_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
-/** The key a call's `_meta` carries its tool_use id under, to a server whose `callIds` asks for it (#3201). */
-export const CALL_ID_META = 'scadbuddy/toolUseId'
-
 export type TurnServer = {
   /** Its name, as the classic turn's `mcpServers` key. */
   name: string

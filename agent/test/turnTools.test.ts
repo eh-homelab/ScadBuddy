@@ -15,8 +15,8 @@ import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpReque
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { CALL_ID_META } from '../src/builtins/callId.js'
 import {
-  CALL_ID_META,
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
   TURN_TOOLS_ACTIVITY,
