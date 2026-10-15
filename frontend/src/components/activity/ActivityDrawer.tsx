@@ -106,17 +106,20 @@ function ActivityLinkItem({ link }: { link: ActivityDetail['links'][number] }) {
   return <a href={href} target="_blank" rel="noreferrer" className={cls}>{link.label}</a>
 }
 
-/** Which JSON blocks are closed, kept above the sheet: its content remounts when `modal` flips. */
-const JsonClosed = createContext<{ closed: Set<string>; toggle: (label: string, open: boolean) => void }>({
-  closed: new Set(),
+/**
+ * Which JSON blocks are closed, per row shown, kept above the sheet: its content remounts
+ * when `modal` flips.
+ */
+const JsonClosed = createContext<{ isOpen: (label: string) => boolean; toggle: (label: string, open: boolean) => void }>({
+  isOpen: () => true,
   toggle: () => {},
 })
 
 function Json({ label, value }: { label: string; value: unknown }) {
-  const { closed, toggle } = useContext(JsonClosed)
+  const { isOpen, toggle } = useContext(JsonClosed)
   if (value === undefined) return null
   return (
-    <Collapsible open={!closed.has(label)} onOpenChange={(open) => toggle(label, open)} asChild>
+    <Collapsible open={isOpen(label)} onOpenChange={(open) => toggle(label, open)} asChild>
       <section>
         <CollapsibleTrigger className="group/json mb-1 flex items-center gap-1 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
           <ChevronRightIcon aria-hidden="true" className="size-3.5 transition-transform group-data-[state=open]/json:rotate-90" />
@@ -165,15 +168,21 @@ export function ActivityDrawer({ id, onClose }: Props) {
   // Beside the assistant panel the drawer is not modal (#798): the panel stays usable.
   const beside = companion !== null && room !== 0
   const [closed, setClosed] = useState<Set<string>>(() => new Set())
-  const toggleJson = useCallback((label: string, open: boolean) => {
-    setClosed((current) => {
-      const next = new Set(current)
-      if (open) next.delete(label)
-      else next.add(label)
-      return next
-    })
-  }, [])
-  const jsonClosed = useMemo(() => ({ closed, toggle: toggleJson }), [closed, toggleJson])
+  const toggleJson = useCallback(
+    (label: string, open: boolean) => {
+      setClosed((was) => {
+        const next = new Set(was)
+        if (open) next.delete(`${current}\n${label}`)
+        else next.add(`${current}\n${label}`)
+        return next
+      })
+    },
+    [current],
+  )
+  const jsonClosed = useMemo(
+    () => ({ isOpen: (label: string) => !closed.has(`${current}\n${label}`), toggle: toggleJson }),
+    [closed, current, toggleJson],
+  )
 
   return (
     <JsonClosed.Provider value={jsonClosed}>
