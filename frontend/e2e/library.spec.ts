@@ -58,8 +58,9 @@ test.describe('library', () => {
     await expect(first).toBeVisible()
     await expect(second).toBeVisible()
     expect(await first.innerText()).not.toEqual(await second.innerText())
-    // The name is cut in the middle, so the end (and the extension) stays readable.
-    await expect(first.getByText('64efc.3mf', { exact: false })).toBeVisible()
+    // The name is cut in the middle, so its end stays readable (#3634: two lines first).
+    await expect(first.getByTestId('library-name-89')).toHaveText('bag-clip-3155628dc2bb…6dba164efc')
+    await expect(first.getByTestId('library-name-89')).toBeVisible()
     await expect(first.locator('time')).toHaveAttribute('datetime', '2026-09-26T17:05:45Z')
     await expect(first).toContainText('110 kB')
   })

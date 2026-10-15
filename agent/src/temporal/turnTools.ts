@@ -611,7 +611,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       let result: Awaited<ReturnType<Client['callTool']>>
       let reset: string | undefined
       const meta = server.callIds ? { _meta: { [CALL_ID_META]: toolUseId } } : {}
-      const callTool = (client: Client) => client.callTool({ name: tool.name, arguments: fields, ...meta }, undefined, { signal })
+      // The activity's own limit, not the MCP client's 60 s default: a WebFetch alone may take that long (#3199).
+      const timeout = context.info.startToCloseTimeoutMs
+      const callTool = (client: Client) =>
+        client.callTool({ name: tool.name, arguments: fields, ...meta }, undefined, { signal, ...(timeout > 0 ? { timeout } : {}) })
       const target = keptTarget(deps, caller.context, server)
       try {
         if (target && keptClient) {

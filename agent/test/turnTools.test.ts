@@ -344,6 +344,27 @@ describe('turn tools in a durable session', () => {
     expect(other.calls).toEqual(['read a'])
   })
 
+  it("gives a call the activity's own time, not the MCP client's 60 s default (#3199)", async () => {
+    const slow = () => () => {
+      const server = new McpServer({ name: 'notes', version: '1' })
+      server.registerTool('read.note', { description: 'reads slowly', inputSchema: { id: z.string() } }, async ({ id }) => {
+        await new Promise((r) => setTimeout(r, 1_000))
+        return { content: [{ type: 'text', text: `note ${id}` }] }
+      })
+      return server
+    }
+    const run = (startToCloseTimeoutMs: number) =>
+      new MockActivityEnvironment({
+        activityId: 'tool-toolu_01',
+        activityType: 'turn:notes__read_note',
+        workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+        taskQueue: 'agent-tools',
+        startToCloseTimeoutMs,
+      }).run(harness({ server: slow }).call, { id: 'a' })
+    expect((await failure(run(300))).message).toMatch(/timed out/i)
+    expect(await run(10 * 60_000)).toBe('note a')
+  })
+
   it("records the durable turn on a call's audit row and in its servers' context, as a classic turn's (#2497)", async () => {
     const turnId = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
     const h = harness({ owner: { ...BROWSER, turnId } as never })
