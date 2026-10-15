@@ -88,9 +88,14 @@ describe("a headless-browser navigation's approval card (#982)", () => {
     expect(again.onDecide).not.toHaveBeenCalled()
   })
 
-  it('names the whole origin "Always allow" saves when it is not https on its default port', () => {
-    nav(undefined, '{"url":"http://printer.lan:8080/status"}')
-    expect(screen.getByRole('button', { name: 'Always allow http://printer.lan:8080' })).toBeInTheDocument()
+  it.each([
+    ['http on another port', 'http://printer.lan:8080/status', 'http://printer.lan:8080'],
+    ['https on another port', 'https://printer.lan:8443/status', 'https://printer.lan:8443'],
+    ['http on its default port', 'http://printer.lan/status', 'http://printer.lan'],
+  ])('names the whole origin "Always allow" saves when it is not https on its default port: %s', (_label, url, origin) => {
+    const { unmount } = nav(undefined, JSON.stringify({ url }))
+    expect(screen.getByRole('button', { name: `Always allow ${origin}` })).toBeInTheDocument()
+    unmount()
   })
 
   it('is the ordinary card, showing the whole summary, when the input is not exactly {url}', () => {
