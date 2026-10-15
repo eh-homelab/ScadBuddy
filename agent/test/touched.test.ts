@@ -157,6 +157,12 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a renamed output as modified, under the model its answer names (#2288)', () => {
+    expect(touches('rename_output', { output_id: 'o1', name: 'x' }, { id: 'o1', slug: 'box' }, 'write')).toEqual([
+      { type: 'output', id: 'o1', action: 'modified', model: 'box' },
+    ])
+  })
+
   it('records presets and assets', () => {
     expect(touches('save_preset', { slug: 'box', name: 'Tall' }, { id: 'p1', name: 'Tall' })).toEqual([
       { type: 'preset', id: 'p1', action: 'created', model: 'box' },

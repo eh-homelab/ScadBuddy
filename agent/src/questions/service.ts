@@ -218,6 +218,11 @@ export class QuestionService {
   ): Promise<T> {
     let logged: { events: ServerEvent[]; seqs: number[] } | undefined
     const value = await this.deps.sql.begin(async (tx) => {
+      // The session row first (review of #3685): two resolutions of one session's questions
+      // that overlapped each saw the other as pending and neither moved the session back.
+      // Locked, the second waits for the first's commit, and its refresh reads both. The
+      // ask takes the same lock before it touches a question row, so the order is one.
+      await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
       const { value, events } = await change(tx)
       if (events.length) logged = { events, seqs: await this.deps.events.append(sessionId, events, tx) }
       return value

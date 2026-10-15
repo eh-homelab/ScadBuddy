@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { defineConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { alias } from './aliases'
 
 const backend = process.env.SCADBUDDY_BACKEND_URL ?? 'http://127.0.0.1:8080'
 const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
@@ -44,6 +45,7 @@ const proxy: Record<string, ProxyOptions> = {
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: { alias },
   server: {
     port: 5173,
     proxy: process.env.VITE_MOCK_API ? undefined : proxy,

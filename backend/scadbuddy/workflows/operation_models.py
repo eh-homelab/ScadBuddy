@@ -44,6 +44,9 @@ class PreludeStep(BaseModel):
     kind: str
     task_queue: str
     run_attempts: int = 1
+    #: The prelude kind's ``where`` (#1174): what to check when the prelude may have
+    #: done its part, which is not where the outer kind's run writes.
+    where: str | None = None
 
 
 class OperationInput(BaseModel):
@@ -68,6 +71,8 @@ class OperationInput(BaseModel):
     #: The kind's ``answers_running`` (#2462): the Update answers with the running
     #: record, not the finished one.
     answer_running: bool = False
+    #: The kind's ``where`` (#1174): what to check when it may have been done.
+    where: str = "Bambuddy"
 
 
 class OperationAnswer(BaseModel):

@@ -8,8 +8,9 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react'
-import { ModalCompanionContext, focusInto, focusables } from '../../lib/modal'
-import { Button } from './Button'
+import { createPortal } from 'react-dom'
+import { ModalCompanionContext, focusInto, focusables } from '../../../lib/modal'
+import { Button } from '../Button'
 
 interface Props {
   open: boolean
@@ -146,7 +147,9 @@ export function Dialog({ open, title, description, onClose, children, footer, si
 
   if (!open) return null
 
-  return (
+  // #3653 — on <body>, as a Radix dialog is: rendered where it was opened, inside a card
+  // whose footer is `relative z-10`, a later card's carousel painted over it.
+  return createPortal(
     <div
       className={`fixed inset-0 z-50 flex bg-black/55 ${placement === 'right' ? 'justify-end' : 'items-center justify-center p-4'}`}
       style={companion && reserve ? { right: reserve } : undefined}
@@ -193,6 +196,7 @@ export function Dialog({ open, title, description, onClose, children, footer, si
           )}
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

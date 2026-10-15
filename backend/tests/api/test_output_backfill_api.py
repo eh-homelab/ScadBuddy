@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 import pytest
 from fastapi import FastAPI
@@ -156,6 +157,59 @@ def test_an_arranged_output_is_a_422(client: TestClient, app: FastAPI, pool: Poo
     refused = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert refused.status_code == 422, refused.text
     assert "arranged" in refused.json()["detail"]
+
+
+def test_a_backfill_still_being_accepted_passes_its_key_and_queues_nothing(
+    client: TestClient, app: FastAPI, pool: Pool
+) -> None:
+    """#2280: the backfill's render is started with the request's Idempotency-Key, so the
+    client's re-send of a 503 still-accepting is the same claim, and a re-send that is
+    answered is the one that records the backfill. `submit` is patched, so this holds the
+    route's wiring only; that a re-send with the same key joins the first start is
+    `RenderService.submit`'s own tests'."""
+    output_id = legacy_output(client, app)
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/outputs/{output_id}/backfill", headers={"Idempotency-Key": "b" * 32}
+        )
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == "b" * 32
+    assert _state(app).outputs.backfill(output_id) is None
+
+
+def test_a_backfill_sent_again_with_its_key_is_the_one_claim_end_to_end(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2280, through the real route and `RenderService.submit`: a re-send with the first
+    request's Idempotency-Key, once nothing on the output answers it (no backfill in flight
+    to join, as when the first answer was a 503 that recorded none), is answered with the
+    first start's job, not a second render. A different key is a new request."""
+    monkeypatch.setattr(backfill_module, "_attach", lambda *args, **kwargs: False)
+    output_id = legacy_output(client, app)
+    store = _state(app).render.store
+    read = store.read
+    long_ago = datetime.now(UTC) - outputs_api.BACKFILL_ATTACH_GRACE - timedelta(seconds=1)
+
+    def finished(job_id: str) -> Job:
+        # Past the attach grace: the route's own "answer the job in flight" stands aside.
+        return read(job_id).model_copy(update={"state": "done", "finished_at": long_ago})
+
+    key = "c" * 32
+    first = client.post(f"/api/v1/outputs/{output_id}/backfill", headers={"Idempotency-Key": key})
+    assert first.status_code == 202, first.text
+    assert wait_for_job(client, first.json()["id"])["status"] == "done"
+    monkeypatch.setattr(store, "read", finished)
+    again = client.post(f"/api/v1/outputs/{output_id}/backfill", headers={"Idempotency-Key": key})
+    assert again.status_code == 202, again.text
+    assert again.json()["id"] == first.json()["id"]
+    other = client.post(
+        f"/api/v1/outputs/{output_id}/backfill", headers={"Idempotency-Key": "d" * 32}
+    )
+    assert other.status_code == 202, other.text
+    assert other.json()["id"] != first.json()["id"]
 
 
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:

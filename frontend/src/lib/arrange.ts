@@ -1,5 +1,6 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
+import { shortId } from './format'
 import type { Within } from './traceAction'
 import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
 
@@ -87,6 +88,19 @@ export function arrangedNote(plates: number): string {
   return `Arranged onto ${plates} ${plates === 1 ? 'plate' : 'plates'}.`
 }
 
+/** #2283 — what `runArrange` says at each stage, in order. */
+export const ARRANGE_STAGES = {
+  starting: 'Starting the arrange…',
+  waiting: 'Waiting for a worker…',
+  laying: 'Laying out the objects…',
+  saving: 'Saving the arranged output…',
+} as const
+
+/** #2283 — the re-render stage's line; each output's own progress is listed under it. */
+export function rerenderStage(count: number): string {
+  return `Re-rendering ${count} ${count === 1 ? 'output' : 'outputs'} first…`
+}
+
 /**
  * spec 2026-09-27 §7 — lay objects out again, wait for the job, save its output. The
  * plate count is the job's: `plates` lists every plate of the new file and is empty
@@ -107,6 +121,11 @@ export async function runArrange(
     /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
     saveKey?: string
     /**
+     * The arrange start's key, likewise (#3526): a "Try again" after a start whose answer
+     * was lost joins the job the server did start, not a second one.
+     */
+    arrangeKey?: string
+    /**
      * A job this arrange already finished: a "Try again" after only its save failed
      * saves that job again, under the same key, rather than arranging anew (a new job
      * is a new save, which the key could not tell from the first).
@@ -121,12 +140,14 @@ export async function runArrange(
   const within = opts.within ?? untraced
   let done = opts.arranged
   if (!done) {
-    const started = await within(() => api.arrangeOutputs(body))
+    // #2283 — every stage says itself, so the last message never stands for the next one.
+    opts.onProgress?.(ARRANGE_STAGES.starting)
+    const started = await within(() => api.arrangeOutputs(body, signal, opts.arrangeKey))
     signal?.throwIfAborted()
     const job = await waitForJob(started.id, {
       pollMs: opts.pollMs ?? 1000,
       signal,
-      onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
+      onJob: (read) => opts.onProgress?.(read.status === 'running' ? ARRANGE_STAGES.laying : ARRANGE_STAGES.waiting),
     })
     if (job.status === 'failed' || job.status === 'cancelled') {
       throw new Error(job.error ?? `The arrange was ${job.status}.`)
@@ -134,6 +155,7 @@ export async function runArrange(
     done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
     opts.onArranged?.(done)
   }
+  opts.onProgress?.(ARRANGE_STAGES.saving)
   const jobId = done.jobId
   const output = await within(() =>
     api.createOutput(slug, jobId, body.name ?? undefined, undefined, undefined, opts.saveKey),
@@ -167,7 +189,8 @@ export function backfillIds(cause: unknown): string[] | null {
 
 /** "A", "A and B", "A, B and C". */
 export function listNames(outputs: OutputRef[]): string {
-  const names = outputs.map((o) => o.name ?? o.id)
+  // #2285 — an unnamed one by its id's head, as History shows it.
+  const names = outputs.map((o) => o.name ?? shortId(o.id))
   if (names.length <= 1) return names[0] ?? ''
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
@@ -195,17 +218,25 @@ function shortReason(error: string): string {
 }
 
 /**
- * "A could not be re-rendered: why." for each failure, one sentence each. `retry` is the
- * button that tries again where this is shown: Arrange in its dialog, Re-arrange in Print.
+ * "A could not be re-rendered: why." One sentence per reason (#2286): outputs that failed
+ * for the same reason are named together, so three failures of one cause read as one.
+ * `retry` is the button that tries again where this is shown: Arrange in its dialog,
+ * Re-arrange in Print.
  */
 export function backfillFailures(failed: Backfilled['failed'], retry = 'Arrange'): string {
-  return failed
-    .map(({ output, error, running }) =>
-      running
-        ? `${output.name ?? output.id} is still re-rendering; try ${retry} again later.`
-        : `${output.name ?? output.id} could not be re-rendered: ${shortReason(error)}.`,
-    )
-    .join(' ')
+  const running = failed.filter((f) => f.running).map((f) => f.output)
+  const byReason = new Map<string, OutputRef[]>()
+  for (const { output, error, running: still } of failed) {
+    if (still) continue
+    const reason = shortReason(error)
+    byReason.set(reason, [...(byReason.get(reason) ?? []), output])
+  }
+  return [
+    ...(running.length > 0
+      ? [`${listNames(running)} ${running.length === 1 ? 'is' : 'are'} still re-rendering; try ${retry} again later.`]
+      : []),
+    ...[...byReason].map(([reason, outputs]) => `${listNames(outputs)} could not be re-rendered: ${reason}.`),
+  ].join(' ')
 }
 
 /** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
@@ -244,7 +275,7 @@ export async function backfillOutputs(
     say('Queuing a re-render…')
     let job
     try {
-      job = await within(() => api.backfillOutput(output.id))
+      job = await within(() => api.backfillOutput(output.id, signal))
     } catch (cause) {
       // Re-rendered since the list was read (a closed dialog's backfill finished). By its
       // code, not the status alone: another 409 is no sign the objects are there (#1007).
@@ -295,4 +326,28 @@ export async function backfillOutputs(
     }
   })
   return result
+}
+
+/**
+ * #2285 — each object of `output` by name: its BOM piece, else the model it was rendered
+ * from (never the template's file, "model.scad" for nearly every one). Two objects that
+ * would read the same are numbered, so the rows can be told apart.
+ */
+export function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
+  // #3637 — one part in two colourings is two entries but one object: named once.
+  const objects = [...new Map((output.manifest ?? []).map((object) => [object.part, object])).values()]
+  const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
+  // Counted once, not per object: a manifest runs to thousands of parts.
+  const uses = new Map<string, number>()
+  for (const name of base) uses.set(name, (uses.get(name) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  return new Map(
+    objects.map((object, index) => {
+      const name = base[index]!
+      if ((uses.get(name) ?? 0) < 2) return [object.part, name]
+      const n = (seen.get(name) ?? 0) + 1
+      seen.set(name, n)
+      return [object.part, `${name} ${n}`]
+    }),
+  )
 }

@@ -45,7 +45,8 @@ export class DownloadWindowClosedError extends DownloadBlockedError {
  */
 export async function downloadBlob(
   load: () => Promise<Blob>,
-  filename: string,
+  /** The name to save under, or a function asked once the file has loaded. */
+  filename: string | (() => string),
   embedded = isEmbedded(),
 ): Promise<void> {
   const popup = embedded ? openDownloadWindow() : null
@@ -61,7 +62,7 @@ export async function downloadBlob(
     const host = popup ? popup.document : document
     const anchor = host.createElement('a')
     anchor.href = url
-    anchor.download = filename
+    anchor.download = typeof filename === 'function' ? filename() : filename
     anchor.rel = 'noopener'
     host.body.appendChild(anchor)
     anchor.click()
