@@ -3,7 +3,7 @@ import { WorkflowNotFoundError } from '@temporalio/common'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../src/gate/durable.js'
 import { durableRequestId } from '../src/gate/ids.js'
@@ -41,9 +41,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     await env?.teardown()
   })
 
-  async function park(sessionId = randomUUID(), queue = QUEUE) {
+  async function park(sessionId = randomUUID(), queue = QUEUE, hold = false) {
     const requestId = durableRequestId(sessionId, 'run-1', 'toolu_1')
-    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, 'approval'] })
+    await env.client.workflow.start('gateStandIn', { workflowId: sessionWorkflowId(sessionId), taskQueue: queue, args: [requestId, 'approval', hold] })
     return { sessionId, requestId }
   }
 
@@ -53,10 +53,41 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     expect(await gate.pendingInput(sessionId)).toEqual([expect.objectContaining({ id: requestId, kind: 'approval' })])
     const args = { request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: BROWSER_USER, role: 'browser' as const }
     expect(await gate.respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
-    await expect(gate.respond(sessionId, args)).rejects.toMatchObject({ code: 'resolved' })
+    // The same body again is the Update it repeats (#3717): its outcome, not a refusal.
+    expect(await gate.respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
+    await expect(gate.respond(sessionId, { ...args, response: { kind: 'approval', decision: 'deny' } })).rejects.toMatchObject({ code: 'resolved' })
     await expect(gate.respond(sessionId, { ...args, request_id: `${requestId}x` })).rejects.toBeInstanceOf(RespondRefusal)
     expect(await gate.pendingInput(sessionId)).toEqual([])
     expect(await gate.cancelInput(sessionId, 'interrupted')).toBe('none')
+  }, 60_000)
+
+  it('a retry after the deadline joins the Update the workflow already took, and a different response is refused (#3717)', async () => {
+    const { sessionId, requestId } = await park(randomUUID(), QUEUE, true)
+    const args = { request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: BROWSER_USER, role: 'browser' as const }
+    await expect(new DurableGate(env.client, { timeoutMs: 1_500 }).respond(sessionId, args)).rejects.toBeInstanceOf(DurableUnavailable)
+    // The handler took effect (the entry is resolved) and is held; the latch lets it answer.
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
+    const retry = new DurableGate(env.client).respond(sessionId, args)
+    await handle.signal('release')
+    expect(await retry).toEqual({ kind: 'approval', outcome: 'approved' })
+    await expect(
+      new DurableGate(env.client).respond(sessionId, { ...args, response: { kind: 'approval', decision: 'deny' } }),
+    ).rejects.toMatchObject({ code: 'resolved' })
+  }, 60_000)
+
+  it('measures: an Update ID is not remembered across continue-as-new (#3717)', async () => {
+    const { sessionId, requestId } = await park()
+    const args = { request_id: requestId, response: { kind: 'approval', decision: 'approve' }, responder: BROWSER_USER, role: 'browser' as const }
+    const gate = new DurableGate(env.client)
+    expect(await gate.respond(sessionId, args)).toEqual({ kind: 'approval', outcome: 'approved' })
+    const first = await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).describe()
+    await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).signal('rollover')
+    await vi.waitFor(async () => {
+      expect((await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).describe()).runId).not.toBe(first.runId)
+    }, { timeout: 20_000 })
+    // The same Update ID reaches the new run, which does not know it: the validator refuses.
+    await expect(gate.respond(sessionId, args)).rejects.toMatchObject({ code: 'resolved' })
+    await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).terminate('test')
   }, 60_000)
 
   it('cancels the parked entry with cancel_input', async () => {
@@ -96,9 +127,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       await drop()
     })
 
-    async function durableSession(owner = BROWSER_USER) {
+    async function durableSession(owner = BROWSER_USER, timeoutMs = 5_000) {
       const m = manager({ sql: db.sql, paths: await tempPaths(), approvalGrants: async () => true })
-      m.durable = new DurableGate(env.client)
+      m.durable = new DurableGate(env.client, { timeoutMs })
       const sessionId = randomUUID()
       await db.sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
@@ -115,7 +146,24 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
         kind: 'approval',
         outcome: 'approved',
       })
-      await expect(respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'approve' })).rejects.toMatchObject({ status: 409 })
+      await expect(respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'deny' })).rejects.toMatchObject({ status: 409 })
+    }, 60_000)
+
+    it('a retry after the run continued as new returns the recorded decision; another decision is still refused (#3717)', async () => {
+      const { m, sessionId, requestId } = await durableSession(agentA, 30_000)
+      const approve = { kind: 'approval' as const, decision: 'approve' as const }
+      expect(await respond(m, BROWSER_USER, requestId, approve)).toEqual({ id: requestId, kind: 'approval', outcome: 'approved' })
+      // What the real gate's resolve_input records (agent-durable gate/store.py).
+      await db.sql`
+        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, response, responder)
+        VALUES (${requestId}, ${sessionId}, 'approval', 'approved', ${db.sql.json({ decision: 'approve' })}, ${db.sql.json(BROWSER_USER)})`
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
+      const first = await handle.describe()
+      await handle.signal('rollover')
+      await vi.waitFor(async () => expect((await handle.describe()).runId).not.toBe(first.runId), { timeout: 20_000 })
+      expect(await respond(m, BROWSER_USER, requestId, approve)).toEqual({ id: requestId, kind: 'approval', outcome: 'approved' })
+      await expect(respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'deny' })).rejects.toMatchObject({ status: 409 })
+      await handle.terminate('test')
     }, 60_000)
 
     it('a grant holder that owns the session is the owner, and sessions_approve is refused before any Update', async () => {

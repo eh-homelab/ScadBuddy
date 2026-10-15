@@ -367,11 +367,30 @@ async function respondDurable(
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
-    if (err instanceof RespondRefusal) throw refused(err)
+    if (err instanceof RespondRefusal) {
+      // A retry after the run continued as new (#3717): the Update ID is per run, so the
+      // new run refuses a decision the old one took. The same decision by the same
+      // responder is that decision's outcome, read from the record, not a refusal.
+      if (err.code === 'resolved' || err.code === 'stale') {
+        const done = await repeated(sessions, requestId, body, principal)
+        if (done) return done
+      }
+      throw refused(err)
+    }
     if (err instanceof WorkflowNotFoundError) throw stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
   }
+}
+
+/** An approval already decided exactly as `body` says, by `principal`: its recorded outcome. */
+async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
+  const done = await sessions.projection.recorded(requestId)
+  if (!done || done.kind !== 'approval' || body.kind !== 'approval') return undefined
+  const decision = (done.response as { decision?: string } | null)?.decision
+  if (decision === undefined || decision !== body.decision) return undefined
+  if (done.responder.kind !== principal.kind || done.responder.id !== principal.id) return undefined
+  return { id: requestId, kind: done.kind, outcome: done.outcome }
 }
 
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {

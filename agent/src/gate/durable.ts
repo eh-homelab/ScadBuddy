@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
@@ -33,6 +34,27 @@ export type DurableGateOptions = {
   timeoutMs?: number
   /** How long `cancel_input` may take before its caller decides without it (spec: 10 s). */
   cancelTimeoutMs?: number
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const o = value as Record<string, unknown>
+    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/**
+ * The `respond` Update's ID (#3717): the same request, response, responder and role
+ * always give the same ID, so a retry after a 503 joins the Update the workflow
+ * already accepted and gets its outcome; any difference is a new Update, which the
+ * validator still judges. A hash, so the ID stays far inside Temporal's length limit
+ * whatever the request id or response holds.
+ */
+export function respondUpdateId(args: RespondArgs): string {
+  const digest = createHash('sha256').update(canonical([args.request_id, args.response, args.responder, args.role])).digest('hex')
+  return `respond-${digest}`
 }
 
 function refusalOf(err: unknown): RespondRefusal | undefined {
@@ -75,7 +97,7 @@ export class DurableGate {
   /** Answers one entry; the workflow's validator may refuse it (RespondRefusal). */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args] }))
+    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId: respondUpdateId(args) }))
   }
 
   /**
