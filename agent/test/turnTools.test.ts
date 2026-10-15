@@ -16,6 +16,7 @@ import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpReque
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { CALL_ID_META } from '../src/builtins/callId.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -50,8 +51,9 @@ function noDatabase(): unknown {
 function notes(calls: string[]): () => McpServer {
   return () => {
     const server = new McpServer({ name: 'notes', version: '1' })
-    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }) => {
-      calls.push(`read ${id}`)
+    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }, extra) => {
+      const callId = extra._meta?.[CALL_ID_META]
+      calls.push(`read ${id}${callId === undefined ? '' : ` as ${String(callId)}`}`)
       return { content: [{ type: 'text', text: `note ${id}` }] }
     })
     server.registerTool('post', { description: 'posts', inputSchema: { method: z.string(), body: z.string() } }, async ({ body }) => {
@@ -102,6 +104,7 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
+    callIds?: boolean
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -121,6 +124,7 @@ function harness(
     ...(options.mayPark === false ? {} : { mayPark }),
     ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
+    ...(options.callIds ? { callIds: true } : {}),
   }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
@@ -330,6 +334,15 @@ describe('turn tools in a durable session', () => {
     expect(await env('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
     expect(h.calls).toEqual(['read a'])
     expect(h.audits).toEqual([expect.objectContaining({ action: 'notes__read_note', tier: 'read', outcome: 'ok', sessionId: SESSION })])
+  })
+
+  it("tells a server of its own each call's tool_use id, so a retried activity is one call; never another server (#3201)", async () => {
+    const own = harness({ callIds: true })
+    await env('turn:notes__read_note', 'tool-toolu_01').run(own.call, { id: 'a' })
+    expect(own.calls).toEqual(['read a as toolu_01'])
+    const other = harness()
+    await env('turn:notes__read_note', 'tool-toolu_01').run(other.call, { id: 'a' })
+    expect(other.calls).toEqual(['read a'])
   })
 
   it("gives a call the activity's own time, not the MCP client's 60 s default (#3199)", async () => {

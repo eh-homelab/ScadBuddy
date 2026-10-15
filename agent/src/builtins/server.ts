@@ -17,6 +17,7 @@ import SCHEMAS from './schemas.json' with { type: 'json' }
 import { type WebContext, webFetch, webSearch } from './web.js'
 import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
+import { CALL_ID_META } from './callId.js'
 
 // A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
 // names, as one MCP server the agent offers as turn tools (turnServers.ts), named
@@ -34,6 +35,8 @@ export type BuiltinContext = {
   web: WebContext
   /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
   background?: BackgroundContext | undefined
+  /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
+  callId?: string | undefined
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
@@ -128,7 +131,7 @@ export const BUILTINS: Record<string, Builtin> = {
       activeForm: z.string().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
     }),
-    run: (ctx, input: Parameters<typeof taskCreate>[1]) => taskCreate(ctx.files, input),
+    run: (ctx, input: Parameters<typeof taskCreate>[1]) => taskCreate(ctx.files, input, ctx.callId),
   },
   TaskGet: {
     description: "Claude Code's TaskGet: one task of the session's task list.",
@@ -286,7 +289,8 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
     if (!parsed.success) {
       return toResult({ text: `<tool_use_error>InputValidationError: ${z.prettifyError(parsed.error)}</tool_use_error>`, isError: true })
     }
-    return toResult(await builtin.run(stoppable(context(), extra.signal), parsed.data as never))
+    const callId = request.params._meta?.[CALL_ID_META]
+    return toResult(await builtin.run(stoppable({ ...context(), ...(typeof callId === 'string' ? { callId } : {}) }, extra.signal), parsed.data as never))
   })
   return server
 }
