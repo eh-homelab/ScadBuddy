@@ -55,6 +55,7 @@ import type {
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
+  LibraryFileName,
   LibraryFolder,
   LibraryFolderCreate,
   LibraryFolderDeleteResult,
@@ -827,8 +828,15 @@ export const api = {
       signal,
     }),
 
-  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
-  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
 
   getFlowVersionSource: (name: string, commit: string) =>
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
@@ -1832,6 +1840,9 @@ export const api = {
   libraryPreviewGlbUrl: (fileId: number, plate: number) =>
     `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
+  /** #2349 — library files' names by id; `name: null` for one Bambuddy no longer has. */
+  libraryFileNames: (ids: readonly number[]) =>
+    request<LibraryFileName[]>(`/print/library/names?${ids.map((id) => `ids=${id}`).join('&')}`),
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */

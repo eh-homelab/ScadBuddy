@@ -22,6 +22,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'already reports the same characters as a missing-glyph warning, which render_model returns to an agent.',
   },
   {
+    operation: 'GET /api/v1/print/library/names',
+    reason:
+      "Settings' Remembered choices labels its library-file rows by name (#2349). An agent reads a file's name " +
+      'with the library listing tools.',
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
@@ -82,6 +88,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "The flow editor's completion and hover (#2487). An agent has the same host functions in " +
       "register_flow's description, and check_flow_script's problems name a wrong call.",
+  },
+  {
+    operation: 'POST /api/v1/workflow-script/host-functions',
+    reason:
+      "The flow editor's completion and hover for a flow with inputs (#2651). An agent reads `inputs()` in " +
+      "register_flow's description, and check_flow_script types it against the schema it is given.",
   },
   {
     operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',

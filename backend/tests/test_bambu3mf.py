@@ -8,6 +8,7 @@ import re
 import tracemalloc
 import zipfile
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, BinaryIO
 from xml.etree import ElementTree as ET
@@ -1854,15 +1855,41 @@ def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> Non
     )
 
 
-def test_written_extents_are_read_a_batch_at_a_time() -> None:
-    vertices = b"".join(
-        b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(bambu3mf._VERTEX_BATCH + 5)
-    )
+def test_written_extents_are_read_a_window_at_a_time() -> None:
+    """#3678: vertices are matched a window of the file at a time; a box over several
+    windows is the box over every vertex, and none is counted twice or missed."""
+    count = 3 * bambu3mf._WINDOW // len(b'<vertex x="0" y="0" z="1"/>')
+    vertices = b"".join(b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(count))
     data = _object_bytes(vertices)
+    assert len(list(bambu3mf._windows(data, 0))) > 2
     box, painted = bambu3mf._written_extents(data) or (None, None)
     assert box is not None
-    assert box.tolist() == [
-        [0, -(bambu3mf._VERTEX_BATCH + 4), 1],
-        [bambu3mf._VERTEX_BATCH + 4, 0, 1],
-    ]
+    assert box.tolist() == [[0, -(count - 1), 1], [count - 1, 0, 1]]
     assert painted == frozenset()
+
+
+def test_a_run_of_paint_attributes_is_counted_without_being_held() -> None:
+    """Security review of #3711: the bare attribute needs no ``<``, so a window can hold
+    any number of them; collecting them cost four times the file, which at the archive's
+    cap is gigabytes."""
+    junk = b' paint_color="' * 400_000
+    data = _object_bytes(_THREE, tail=b'<metadata name="' + junk + b'"/>')
+    tracemalloc.start()
+    try:
+        bambu3mf._written_extents(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+def test_windows_cover_the_file_and_end_before_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3678: the windows run end to end from where they start, and each but the last
+    ends just before a ``<``, so no tag starts in one window and ends in the next."""
+    data = _object_bytes(b'<vertex x="1" y="2" z="3"/>' * 50)
+    monkeypatch.setattr(bambu3mf, "_WINDOW", 100)
+    windows = list(bambu3mf._windows(data, 7))
+    assert len(windows) > 5
+    assert windows[0][0] == 7 and windows[-1][1] == len(data)
+    assert all(end == start for (_, end), (start, _) in pairwise(windows))
+    assert all(data[end : end + 1] == b"<" for _, end in windows[:-1])
