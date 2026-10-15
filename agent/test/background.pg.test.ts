@@ -225,9 +225,8 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
   }, 60_000)
 
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
-    // The turn's message, as the warm process was sent it (scriptedRunner's `prompts`).
-    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() => {
-      const prompt = promptText(scripted.prompts.at(-1)!)
+    // The turn's message, as the warm process was sent it.
+    const scripted = scriptedRunner((_run, prompt) => {
       if (prompt.includes('give n')) return { reply: 'not json' }
       if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
       return { reply: 'hello from the agent' }
