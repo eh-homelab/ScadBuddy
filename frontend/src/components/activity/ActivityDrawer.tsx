@@ -115,6 +115,11 @@ const JsonClosed = createContext<{ isOpen: (label: string) => boolean; toggle: (
   toggle: () => {},
 })
 
+/** A JSON block's key in the drawer's closed set: the row shown, then its label. */
+function jsonKey(row: string, label: string): string {
+  return `${row}\n${label}`
+}
+
 function Json({ label, value }: { label: string; value: unknown }) {
   const { isOpen, toggle } = useContext(JsonClosed)
   if (value === undefined) return null
@@ -146,9 +151,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 /** One activity row's detail, in a drawer: Simple in words, Advanced with ids and raw JSON. */
 export function ActivityDrawer({ id, onClose }: Props) {
-  // A child opened from the list replaces the row shown, until the page names another.
-  const [trail, setTrail] = useState<{ from: string; ids: string[] }>({ from: id, ids: [] })
-  const ids = trail.from === id ? trail.ids : []
+  // A child opened from the list replaces the row shown; the page keys the drawer by row.
+  const [ids, setIds] = useState<string[]>([])
   const current = ids.at(-1) ?? id
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const view = useAsync(() => api.getActivity(current, advanced), [current, advanced], [`activity:${current}`])
@@ -172,15 +176,15 @@ export function ActivityDrawer({ id, onClose }: Props) {
     (label: string, open: boolean) => {
       setClosed((was) => {
         const next = new Set(was)
-        if (open) next.delete(`${current}\n${label}`)
-        else next.add(`${current}\n${label}`)
+        if (open) next.delete(jsonKey(current, label))
+        else next.add(jsonKey(current, label))
         return next
       })
     },
     [current],
   )
   const jsonClosed = useMemo(
-    () => ({ isOpen: (label: string) => !closed.has(`${current}\n${label}`), toggle: toggleJson }),
+    () => ({ isOpen: (label: string) => !closed.has(jsonKey(current, label)), toggle: toggleJson }),
     [closed, current, toggleJson],
   )
 
@@ -230,7 +234,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
           </SheetHeader>
           <div className="flex items-center gap-2 border-b px-4 py-2.5">
             {ids.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={() => setTrail({ from: id, ids: ids.slice(0, -1) })}>
+              <Button size="sm" variant="ghost" onClick={() => setIds(ids.slice(0, -1))}>
                 Back
               </Button>
             )}
@@ -322,7 +326,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
                             <Button
                               variant="link"
                               className="h-auto p-0 text-left whitespace-normal text-foreground"
-                              onClick={() => setTrail({ from: id, ids: [...ids, c.id] })}
+                              onClick={() => setIds([...ids, c.id])}
                             >
                               {c.title}
                             </Button>
