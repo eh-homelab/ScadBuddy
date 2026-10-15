@@ -67,7 +67,8 @@ describe('ModelLibrariesButton', () => {
     expect(within(within(dialog).getByRole('list', { name: 'Catalogue' })).queryByRole('listitem', {
       name: 'BOSL2',
     })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^Libraries\s*1$/ })).toBeInTheDocument()
+    // Behind the open dialog, so hidden from the accessibility tree (Radix's modal).
+    expect(screen.getByRole('button', { name: /^Libraries\s*1$/, hidden: true })).toBeInTheDocument()
     expect(seen).toEqual([
       `PUT BOSL2 ${JSON.stringify({ url: BOSL2_URL, ref: 'v2.0.761' })}`,
     ])
@@ -132,7 +133,7 @@ describe('ModelLibrariesButton', () => {
         name: 'BOSL2',
       }),
     ).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^Libraries$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Libraries$/, hidden: true })).toBeInTheDocument()
     expect(seen).toEqual(['DELETE BOSL2'])
 
     await user.keyboard('{Escape}')
@@ -242,7 +243,7 @@ describe('ModelLibrariesButton', () => {
     release()
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent('Libraries1')
+    expect(screen.getByRole('button', { name: /^Libraries/, hidden: true })).toHaveTextContent('Libraries1')
   })
 
   it("keeps the open dialog's read when the first read lands after it", async () => {
@@ -275,7 +276,7 @@ describe('ModelLibrariesButton', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).getByText(/None yet/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent(/^Libraries$/)
+    expect(screen.getByRole('button', { name: /^Libraries/, hidden: true })).toHaveTextContent(/^Libraries$/)
   })
 })
 

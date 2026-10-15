@@ -1,8 +1,13 @@
 import useEmblaCarousel from 'embla-carousel-react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentProps, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { useHref, useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
+import { ChevronLeftIcon, ChevronRightIcon, Maximize2Icon, PlayIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 interface Props {
   slides: Slide[]
@@ -53,7 +58,7 @@ function Cover({
   className?: string
 }) {
   return (
-    <div className={`relative ${className ?? ''}`}>
+    <div className={cn('relative', className)}>
       <SlideMedia slide={slide} index={0} onOpen={onOpen} to={to} focusable eager />
       {to && onOpen && <ExpandButton slide={slide} onClick={() => onOpen(0)} />}
     </div>
@@ -167,9 +172,9 @@ function Carousel({ slides, onOpen, to, className, label }: Omit<Props, 'fallbac
       aria-label={label}
       tabIndex={0}
       onKeyDown={onKeyDown}
-      className={`group relative rounded-[4px] outline-none focus-visible:ring-2 focus-visible:ring-accent ${className ?? ''}`}
+      className={cn('group relative rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50', className)}
     >
-      <div ref={viewportRef} className="overflow-hidden rounded-[4px]">
+      <div ref={viewportRef} className="overflow-hidden rounded-lg">
         <div className="flex touch-pan-y">
           {slides.map((slide, position) => (
             <div
@@ -225,47 +230,66 @@ function Carousel({ slides, onOpen, to, className, label }: Omit<Props, 'fallbac
               contained(event)
               go(position)
             }}
-            className={`pointer-events-auto h-1.5 w-1.5 rounded-full shadow ${
-              position === index ? 'bg-white' : 'bg-white/50 hover:bg-white/80'
-            }`}
+            className={cn(
+              'pointer-events-auto h-1.5 rounded-full shadow transition-all outline-none focus-visible:ring-2 focus-visible:ring-white',
+              position === index ? 'w-4 bg-white' : 'w-1.5 bg-white/50 hover:bg-white/80',
+            )}
           />
         ))}
       </div>
-      <span
+      <Badge
         data-testid="carousel-position"
         aria-live="polite"
-        className="absolute right-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[11px] text-white"
+        className="sb-num absolute top-1.5 right-1.5 bg-black/55 text-[11px] text-white"
       >
         {index + 1} of {count}
-      </span>
+      </Badge>
     </section>
+  )
+}
+
+/** A round button over the media, named by its tooltip as well as its label. */
+function OverlayButton({
+  label,
+  className,
+  children,
+  ...props
+}: Omit<ComponentProps<typeof Button>, 'aria-label'> & { label: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={label}
+          className={cn(
+            'absolute rounded-full bg-black/55 text-white opacity-80 hover:bg-black/70 hover:text-white hover:opacity-100 focus-visible:opacity-100 disabled:hidden',
+            className,
+          )}
+          {...props}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }
 
 /** Opens the lightbox where a click on the media follows a link instead. */
 function ExpandButton({ slide, onClick }: { slide: Slide; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      aria-label={`View ${slide.alt} full size`}
+    <OverlayButton
+      label={`View ${slide.alt} full size`}
       data-carousel-expand=""
       onClick={(event) => {
         contained(event)
         onClick()
       }}
-      className="absolute left-1.5 top-1.5 flex h-7 w-7 cursor-zoom-in items-center justify-center rounded-full bg-black/55 text-white opacity-80 hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+      className="top-1.5 left-1.5 cursor-zoom-in"
     >
-      <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden="true">
-        <path
-          d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </button>
+      <Maximize2Icon />
+    </OverlayButton>
   )
 }
 
@@ -280,24 +304,14 @@ function ArrowButton({
 }) {
   const previous = direction === 'previous'
   return (
-    <button
-      type="button"
-      aria-label={previous ? 'Previous slide' : 'Next slide'}
+    <OverlayButton
+      label={previous ? 'Previous slide' : 'Next slide'}
       disabled={disabled}
       onClick={onClick}
-      className={`absolute top-1/2 -translate-y-1/2 ${previous ? 'left-1.5' : 'right-1.5'} flex h-7 w-7 items-center justify-center rounded-full bg-black/55 text-white opacity-80 hover:opacity-100 focus-visible:opacity-100 disabled:hidden`}
+      className={cn('top-1/2 -translate-y-1/2 active:not-aria-[haspopup]:-translate-y-1/2', previous ? 'left-1.5' : 'right-1.5')}
     >
-      <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden="true">
-        <path
-          d={previous ? 'M10 3 5 8l5 5' : 'M6 3l5 5-5 5'}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </button>
+      {previous ? <ChevronLeftIcon /> : <ChevronRightIcon />}
+    </OverlayButton>
   )
 }
 
@@ -327,7 +341,12 @@ function SlideMedia({
   const [cardFailed, setCardFailed] = useState(false)
   const original = slide.kind === 'video' ? slide.poster : slide.src
   const src = slide.card && !cardFailed ? slide.card : original
-  const frame = 'relative block aspect-[4/3] w-full overflow-hidden rounded-[4px] bg-surface-2'
+  // A skeleton's pulse until the picture is in (#3670).
+  const [loaded, setLoaded] = useState<string | null>(null)
+  const frame = cn(
+    'relative block aspect-[4/3] w-full overflow-hidden rounded-lg bg-ui-muted',
+    src && loaded !== src && 'animate-pulse',
+  )
   const picture = (
     <>
       {src ? (
@@ -336,22 +355,21 @@ function SlideMedia({
           alt={slide.alt}
           loading={eager ? 'eager' : 'lazy'}
           draggable={false}
-          onError={src === slide.card ? () => setCardFailed(true) : undefined}
+          onLoad={() => setLoaded(src)}
+          onError={src === slide.card ? () => setCardFailed(true) : () => setLoaded(src)}
           className="h-full w-full object-cover"
         />
       ) : (
         <span role="img" aria-label={slide.alt} className="block h-full w-full" />
       )}
       {slide.kind === 'video' && (
-        <span
+        <Badge
           data-testid={`play-badge-${slide.key}`}
           aria-hidden="true"
-          className="absolute inset-0 m-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/60 text-white"
+          className="absolute inset-0 m-auto size-10 rounded-full bg-black/60 p-0 text-white [&>svg]:size-4!"
         >
-          <svg viewBox="0 0 16 16" className="ml-0.5 h-4 w-4">
-            <path d="M4 2.5v11l9-5.5z" fill="currentColor" />
-          </svg>
-        </span>
+          <PlayIcon className="ml-0.5 fill-current" />
+        </Badge>
       )}
     </>
   )
@@ -367,7 +385,7 @@ function SlideMedia({
         contained(event)
         onOpen(index)
       }}
-      className={`${frame} cursor-zoom-in focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none`}
+      className={cn(frame, 'cursor-zoom-in outline-none focus-visible:ring-3 focus-visible:ring-ring/50')}
     >
       {picture}
     </button>
@@ -397,7 +415,7 @@ function LinkedPicture({ to, className, picture }: { to: string; className: stri
         contained(event)
         newTab()
       }}
-      className={`${className} cursor-pointer`}
+      className={cn(className, 'cursor-pointer')}
     >
       {picture}
     </span>

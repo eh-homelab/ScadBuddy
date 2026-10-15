@@ -120,11 +120,12 @@ describe('CatalogueFilters', () => {
 
   it('sets the origin and the sort', async () => {
     const { onChange, user } = setup()
-    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true')
-    await user.click(screen.getByRole('button', { name: 'Built-in' }))
+    expect(screen.getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true')
+    await user.click(screen.getByRole('radio', { name: 'Built-in' }))
     expect(onChange).toHaveBeenLastCalledWith({ ...DEFAULT_QUERY, origin: 'builtin' })
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
+    await user.click(screen.getByRole('combobox', { name: 'Sort' }))
+    await user.click(await screen.findByRole('option', { name: 'Name' }))
     expect(onChange).toHaveBeenLastCalledWith({ ...DEFAULT_QUERY, sort: 'name' })
   })
 

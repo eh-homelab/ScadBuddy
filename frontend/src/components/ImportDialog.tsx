@@ -1,18 +1,24 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ModelSummary } from '../api/types'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 interface Props {
   open: boolean
   onClose: () => void
   onImported: (model: ModelSummary) => void
 }
-
-const inputClass =
-  'h-8 w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
 
 /**
  * The seconds a 503 asks to wait (#1295): the server's import budget is spent, and it
@@ -87,62 +93,60 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
   }
 
   return (
-    <Dialog
-      open={open}
-      title="Import from URL"
-      description="Paste an https link to a .scad file, such as a GitHub or gist raw link. The server fetches it and reads its customizer parameters."
-      onClose={reset}
-      footer={
-        <>
-          <Button onClick={reset} disabled={importing}>
+    <Dialog open={open} onOpenChange={(next) => !next && reset()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Import from URL</DialogTitle>
+          <DialogDescription>
+            Paste an https link to a .scad file, such as a GitHub or gist raw link. The server fetches it and reads its
+            customizer parameters.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-4">
+          <div className="grid gap-2">
+            <Label htmlFor="import-url">URL</Label>
+            <Input
+              id="import-url"
+              type="url"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="https://raw.githubusercontent.com/…/model.scad"
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="import-name">Name (optional)</Label>
+            <Input
+              id="import-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Taken from the file name"
+            />
+          </div>
+          {/* A form of two fields with no submit button ignores Enter (implicit
+              submission, https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#implicit-submission),
+              and the Import button sits in the dialog's footer, outside the form (#2114). */}
+          <button type="submit" hidden tabIndex={-1} />
+        </form>
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        {busy && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {wait > 0 ? `Try again in ${wait} s.` : 'You can try again now.'}
+          </p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={reset} disabled={importing}>
             Cancel
           </Button>
-          <Button
-            variant="primary"
-            onClick={() => void submit()}
-            disabled={!url.trim() || importing || wait > 0}
-          >
+          <Button onClick={() => void submit()} disabled={!url.trim() || importing || wait > 0}>
             {importing && <Spinner />}
             {importing ? 'Importing' : busy ? 'Try again' : 'Import'}
           </Button>
-        </>
-      }
-    >
-      <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-3">
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
-          URL
-          <input
-            type="url"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            placeholder="https://raw.githubusercontent.com/…/model.scad"
-            className={inputClass}
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-[13px] text-muted">
-          Name (optional)
-          <input
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Taken from the file name"
-            className={inputClass}
-          />
-        </label>
-        {/* A form of two fields with no submit button ignores Enter (implicit
-            submission, https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#implicit-submission),
-            and the Import button sits in the dialog's footer, outside the form (#2114). */}
-        <button type="submit" hidden tabIndex={-1} />
-      </form>
-      {error && (
-        <p role="alert" className="mt-3 text-[13px] text-warn">
-          {error}
-        </p>
-      )}
-      {busy && (
-        <p role="status" className="mt-1 text-[13px] text-muted">
-          {wait > 0 ? `Try again in ${wait} s.` : 'You can try again now.'}
-        </p>
-      )}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

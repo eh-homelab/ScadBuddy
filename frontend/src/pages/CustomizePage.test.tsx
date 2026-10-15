@@ -34,6 +34,7 @@ import { AssistantOpenerContext } from '../agent/chat/opener'
 import { setSessionResources } from '../mocks/features/assistantSessions'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
+import { chooseProject, pickerValue } from '../test/projectPicker'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
 // The viewer itself is covered by the Playwright smoke test. The page's own buttons,
@@ -179,7 +180,7 @@ describe('CustomizePage', () => {
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
-    expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
+    expect(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
   it('manages the template media from a Media dialog (#279)', async () => {
@@ -1830,7 +1831,7 @@ describe('CustomizePage, project file (#317)', () => {
     return bodies
   }
 
-  function pagePicker(): HTMLSelectElement {
+  function pagePicker(): HTMLElement {
     return screen.getByTestId('customize-project-select')
   }
 
@@ -1844,14 +1845,14 @@ describe('CustomizePage, project file (#317)', () => {
   it('opens the picker on the last project', async () => {
     withLastProject(1)
     render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
   })
 
   it('files the generated output in the chosen project and links to it', async () => {
     withLastProject(1)
     const filed = watchBodies('POST', '/project-file')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     const status = await screen.findByTestId('project-filed')
@@ -1866,8 +1867,8 @@ describe('CustomizePage, project file (#317)', () => {
     const filed = watchBodies('POST', '/project-file')
     const remembered = watchBodies('PUT', '/print/projects/last')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
-    await user.selectOptions(pagePicker(), '')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await chooseProject(user, pagePicker(), null)
     await waitFor(() => expect(remembered).toHaveLength(1))
     expect(await remembered[0]).toEqual({ project_id: null })
 
@@ -1896,7 +1897,7 @@ describe('CustomizePage, project file (#317)', () => {
       }),
     )
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     // The print reuses the filed copy, and the file lands where the picker showed.
@@ -1911,8 +1912,8 @@ describe('CustomizePage, project file (#317)', () => {
   it('shares one choice with the print dialog', async () => {
     withLastProject(null)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue(''))
-    await user.selectOptions(pagePicker(), '2')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe(''))
+    await chooseProject(user, pagePicker(), 2)
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -1921,10 +1922,10 @@ describe('CustomizePage, project file (#317)', () => {
     // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
     await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
-    expect(dialogPicker).toHaveValue('2')
+    expect(pickerValue(dialogPicker)).toBe('2')
 
-    await user.selectOptions(dialogPicker, '1')
-    expect(pagePicker()).toHaveValue('1')
+    await chooseProject(user, dialogPicker, 1)
+    expect(pickerValue(pagePicker())).toBe('1')
   })
 
   it('keeps a project created in the dialog while the remembered one is still the old one', async () => {
@@ -1939,7 +1940,7 @@ describe('CustomizePage, project file (#317)', () => {
       }
     })
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -1947,19 +1948,19 @@ describe('CustomizePage, project file (#317)', () => {
     const dialog = await screen.findByRole('dialog')
     // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
     await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
-    const dialogPicker = await within(dialog).findByTestId<HTMLSelectElement>('project-select')
-    await user.selectOptions(dialogPicker, 'new')
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    await chooseProject(user, dialogPicker, 'new')
     await user.type(within(dialog).getByTestId('new-project-name'), 'Workshop Bins')
     await user.click(within(dialog).getByTestId('create-project'))
 
-    await waitFor(() => expect(dialogPicker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
-    const created = dialogPicker.value
+    await waitFor(() => expect(dialogPicker).toHaveTextContent(/Workshop Bins/))
+    const created = pickerValue(dialogPicker)
     expect(created).not.toBe('1')
-    expect(pagePicker()).toHaveValue(created)
+    expect(pickerValue(pagePicker())).toBe(created)
     // Neither picker snaps back to the remembered project on a later re-read.
     await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(pagePicker()).toHaveValue(created)
-    expect(dialogPicker).toHaveValue(created)
+    expect(pickerValue(pagePicker())).toBe(created)
+    expect(pickerValue(dialogPicker)).toBe(created)
     // One list for the page and the dialog, not one each.
     expect(listed).toBe(1)
   })
@@ -1971,8 +1972,8 @@ describe('CustomizePage, project file (#317)', () => {
     // The print run only: the dialog's analyzers also POST to `/analyzers/run` (#563).
     const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
-    await user.selectOptions(pagePicker(), '')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await chooseProject(user, pagePicker(), null)
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -2015,7 +2016,7 @@ describe('CustomizePage, project file (#317)', () => {
     withLastProject(1)
     const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     await waitFor(() => expect(remembered).toHaveLength(1))
@@ -2031,7 +2032,7 @@ describe('CustomizePage, project file (#317)', () => {
     const { user } = render()
     await firstRender()
     await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(pagePicker()).toHaveValue('')
+    expect(pickerValue(pagePicker())).toBe('')
     await generate(user)
     expect(filed).toHaveLength(0)
   })
@@ -2040,7 +2041,7 @@ describe('CustomizePage, project file (#317)', () => {
     withLastProject(1)
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
     render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
   })
 
   it("moves to a preset's remembered project when it is loaded, and back without one", async () => {
@@ -2053,12 +2054,12 @@ describe('CustomizePage, project file (#317)', () => {
     })
     const { user } = render()
     await firstRender()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     const presets = screen.getByRole('combobox', { name: 'Preset' })
     await selectOption(user, presets, 'Tiny')
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
     await selectOption(user, presets, 'No preset')
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
   })
 
   it("opens a preset never filed on the model's project, without asking", async () => {
@@ -2067,10 +2068,10 @@ describe('CustomizePage, project file (#317)', () => {
     const filed = watchBodies('POST', '/project-file')
     const { user } = render()
     await firstRender()
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
     await selectOption(user, screen.getByRole('combobox', { name: 'Preset' }), 'Tiny')
     await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(pagePicker()).toHaveValue('2')
+    expect(pickerValue(pagePicker())).toBe('2')
     await generate(user)
     // The preset was never filed anywhere, so there is nothing to ask about.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
@@ -2082,8 +2083,8 @@ describe('CustomizePage, project file (#317)', () => {
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
     const filed = watchBodies('POST', '/project-file')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
-    await user.selectOptions(pagePicker(), '1')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await chooseProject(user, pagePicker(), 1)
     await firstRender()
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
 
@@ -2104,20 +2105,20 @@ describe('CustomizePage, project file (#317)', () => {
     )
     await screen.findByTestId('project-filed')
     expect(await filed[0]).toEqual({ project_id: 2 })
-    expect(pagePicker()).toHaveValue('2')
+    expect(pickerValue(pagePicker())).toBe('2')
   })
 
   it('reads the remembered project again when another tab files the model', async () => {
     withLastProject(2)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 1 } } })
     await waitFor(() => {
       emitRealtime('settings.changed', ['settings'], { section: 'model_project' })
-      expect(pagePicker()).toHaveValue('1')
+      expect(pickerValue(pagePicker())).toBe('1')
     })
     // The question is asked against the project now remembered, not the one read first.
-    await user.selectOptions(pagePicker(), '2')
+    await chooseProject(user, pagePicker(), 2)
     await firstRender()
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
     await user.click(screen.getByTestId('generate'))
@@ -2129,7 +2130,7 @@ describe('CustomizePage, project file (#317)', () => {
   it("names the print's project in Simple mode, and (change) opens its picker", async () => {
     withLastProject(1)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
@@ -2144,7 +2145,7 @@ describe('CustomizePage, project file (#317)', () => {
     expect(within(dialog).queryByTestId('print-filed-under')).not.toBeInTheDocument()
 
     // "No project" is named too, so a print filed nowhere is not a surprise either.
-    await user.selectOptions(dialogPicker, '')
+    await chooseProject(user, dialogPicker, null)
     await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
     expect(within(dialog).getByTestId('print-filed-under')).toHaveTextContent('Filed under: No project')
   })
@@ -2155,8 +2156,8 @@ describe('CustomizePage, project file (#317)', () => {
     const filed = watchBodies('POST', '/project-file')
     const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
-    await user.selectOptions(pagePicker(), '1')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await chooseProject(user, pagePicker(), 1)
     await firstRender()
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
     await user.click(screen.getByTestId('generate'))
@@ -2167,7 +2168,7 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await filed[0]).toEqual({ project_id: 1 })
     await waitFor(() => expect(remembered).toHaveLength(1))
     expect(await remembered[0]).toMatchObject({ project_id: 1 })
-    expect(pagePicker()).toHaveValue('1')
+    expect(pickerValue(pagePicker())).toBe('1')
 
     // Now they match: no question.
     await user.click(screen.getByTestId('generate'))
