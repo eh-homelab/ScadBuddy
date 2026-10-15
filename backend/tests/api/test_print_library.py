@@ -166,6 +166,75 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
 
 
 @respx.mock
+def test_a_search_finds_files_in_every_folder_from_one_kept_read(client: TestClient) -> None:
+    """#3630: the whole library in one read, kept; ``fresh`` reads it again."""
+    configure(client)
+    files = listing_routes(recording("library-files-folder.json"))
+
+    found = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()
+    again = client.get(
+        "/api/v1/print/library/search", params={"q": "desiccant", "all": "true"}
+    ).json()
+
+    assert files.call_count == 1
+    assert files.calls.last.request.url.params["include_root"] == "false"
+    assert [hit["filename"] for hit in found["files"]] == [
+        "AMS_2_Pro_Dry_Pods_-_ABS.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PETG.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PLA.3mf",
+    ]
+    assert found["hidden"] == 1  # the sliced Dry Pods file, only under Advanced
+    assert {tuple(hit["folder_path"]) for hit in found["files"]} == {("Supplies", "Storage")}
+    assert "Desiccant_Box.stl" in [hit["filename"] for hit in again["files"]]
+
+    # ``fresh`` shares a read that started within 2 s of it (`test_library_search` pins
+    # the read it starts past that), so a burst of fresh searches is one read.
+    client.get("/api/v1/print/library/search", params={"q": "pods", "fresh": "true"})
+
+    assert files.call_count == 1
+
+
+@respx.mock
+def test_a_search_hit_scadbuddy_uploaded_names_its_output(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """As the listing does (#1864): Arrange reads a found file's objects through it."""
+    configure(client)
+    output_id = make_output(client, model)
+    listing_routes(recording("library-files-folder.json"))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(output_id, LibraryCopy(id=48, folder_id=4, target_key="k")))
+
+    hits = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()["files"]
+
+    assert {hit["id"]: hit["output_id"] for hit in hits} == {59: None, 52: None, 48: output_id}
+
+
+@respx.mock
+def test_a_search_answers_as_the_listing_does_when_bambuddy_is_unset_or_down(
+    client: TestClient,
+) -> None:
+    """The search's read runs in a shielded task; its problem is still the listing's."""
+    unset_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    unset_listing = client.get("/api/v1/print/library")
+    assert (unset_search.status_code, unset_search.json()["type"]) == (
+        unset_listing.status_code,
+        unset_listing.json()["type"],
+    )
+    assert unset_search.status_code == 409
+
+    configure(client)
+    respx.get(f"{API}/library/folders").mock(side_effect=httpx.ConnectError("refused"))
+    respx.get(f"{API}/library/files/").mock(side_effect=httpx.ConnectError("refused"))
+
+    down_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    down_listing = client.get("/api/v1/print/library")
+
+    assert down_search.status_code == down_listing.status_code == 502
+    assert down_search.json()["type"] == down_listing.json()["type"]
+
+
+@respx.mock
 def test_a_file_scadbuddy_uploaded_names_its_output(
     client: TestClient, app: FastAPI, model: str
 ) -> None:
