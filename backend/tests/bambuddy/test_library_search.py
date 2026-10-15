@@ -332,35 +332,55 @@ class GatedClient:
 
 
 async def test_a_queued_read_joins_one_started_after_it_was_queued() -> None:
-    """Review of #3666: in the gap between a read ending and the queued one waking, a
-    request may start a read; the queued one joins it rather than read again at once."""
-    client = GatedClient()
+    """Review of #3666: a read fails, and in the gap before the fresh read queued behind
+    it wakes, a search with nothing kept starts a read. The queued one joins that read
+    rather than start a second whole-library read at once."""
+    reads: list[asyncio.Event] = []
+    failing = True
+
+    class Client:
+        async def folders(self) -> list[object]:
+            return []
+
+        async def library_listing(
+            self, *, folder_id: int | None, every_folder: bool = False
+        ) -> list[LibraryListRow]:
+            gate = asyncio.Event()
+            reads.append(gate)
+            await gate.wait()
+            if failing and len(reads) == 1:
+                raise RuntimeError("down")
+            return []
 
     @asynccontextmanager
     async def connect() -> AsyncIterator[BambuddyClient]:
-        yield client  # type: ignore[misc]
+        yield Client()  # type: ignore[misc]
 
     clock = Clock()
-    index = LibraryIndex(clock=clock)
-    ended: asyncio.Future[LibrarySnapshot] = asyncio.get_running_loop().create_future()
-    ended.set_result(LibrarySnapshot(folders=[], files=[], read_at=0))
-    queued_at = clock.now
-    clock.now += 1
-    meanwhile = index._start("bambuddy", connect)  # started after the queued read was
-
-    joined = asyncio.ensure_future(
-        index._after("bambuddy", connect, asyncio.ensure_future(_done(ended)), queued_at=queued_at)
-    )
-    while not client.gates:
+    index = LibraryIndex(shared=0, clock=clock)
+    first = asyncio.ensure_future(index.snapshot("bambuddy", connect))
+    while not reads:
         await asyncio.sleep(0)
-    client.gates[0].set()
+    gap: list[asyncio.Future[LibrarySnapshot]] = []
+    # Runs as the first read ends, before the queued read wakes: the gap.
+    index._reading["bambuddy"][1].add_done_callback(
+        lambda _: gap.append(asyncio.ensure_future(index.snapshot("bambuddy", connect)))
+    )
+    clock.now += 1
+    queued = asyncio.ensure_future(index.snapshot("bambuddy", connect, fresh=True))
+    await asyncio.sleep(0.01)
 
-    assert await joined is await meanwhile
-    assert len(client.gates) == 1
+    reads[0].set()
+    with pytest.raises(RuntimeError):
+        await first
+    while len(reads) < 2:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    reads[1].set()
 
-
-async def _done(future: asyncio.Future[LibrarySnapshot]) -> LibrarySnapshot:
-    return await future
+    async with asyncio.timeout(5):  # a second read at once never ends here
+        assert await queued is await gap[0]
+    assert len(reads) == 2
 
 
 async def test_a_late_read_of_an_old_source_never_drops_the_new_one() -> None:
