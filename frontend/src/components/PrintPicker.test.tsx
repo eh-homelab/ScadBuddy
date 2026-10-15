@@ -180,12 +180,17 @@ function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
 
 beforeEach(() => resetMockState())
 afterEach(async () => {
-  await waitFor(() => {
-    for (const seen of watching) expect(seen.ended).toBe(seen.urls.length)
-  })
-  watching.length = 0
-  server.events.removeAllListeners()
-  vi.restoreAllMocks()
+  try {
+    // The wait is `asyncUtilTimeout` (3 s, vitest.setup.ts), as for any find in a test.
+    await waitFor(() => {
+      for (const seen of watching) expect(seen.ended).toBe(seen.urls.length)
+    })
+  } finally {
+    // Even when a request never ends: only the test that left it fails, not every later one.
+    watching.length = 0
+    server.events.removeAllListeners()
+    vi.restoreAllMocks()
+  }
 })
 
 describe('PrintPicker', () => {
