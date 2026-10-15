@@ -64,7 +64,7 @@ def not_resliced(choice: PrimeTowerChoice | None) -> list[FilamentWarning]:
         return []
     return [
         FilamentWarning(
-            kind="prime-tower-unconfirmed",
+            kind="prime-tower-not-applied",
             message=(
                 "This file is already sliced, so it prints with the prime tower it was "
                 "sliced with: the tower chosen here is not applied."

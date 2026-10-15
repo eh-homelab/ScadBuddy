@@ -1308,6 +1308,7 @@ async def plan_run(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
+    # No second round trip: `read` (read_once) answers again what supports just read.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     tower_dropped = template_keys_dropped(request.prime_tower)
     printed = await source.file_to_print(

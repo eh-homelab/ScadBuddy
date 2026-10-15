@@ -648,7 +648,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     server.use(...capturedRun(plain))
     await t.execute(args, ctx())
     expect((chosen.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: true, no_sparse_layers: true })
-    expect((off.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: false })
+    expect((off.body as { prime_tower?: unknown }).prime_tower).toEqual({ enabled: false, no_sparse_layers: true })
     expect(plain.body).not.toHaveProperty('prime_tower')
     expect(t.summarize({ ...args, prime_tower: { enabled: true, no_sparse_layers: true } })).toContain(
       ', with a prime tower (no sparse layers)',

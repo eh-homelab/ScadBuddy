@@ -39,8 +39,13 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
   const mode = modeOf(value)
   // On, chosen here or by Default when nothing says off. A library 3MF's own settings are
   // unread here, so under Default its "No sparse layers" is not shown as if known.
+  // Nor under Default for a one-filament plate, which the slicer prints with no tower.
   const on =
-    mode === 'on' || (mode === 'default' && !fromFile && templateSettings?.enable_prime_tower !== '0')
+    mode === 'on' ||
+    (mode === 'default' &&
+      !fromFile &&
+      templateSettings?.enable_prime_tower !== '0' &&
+      (colours === null || colours > 1))
   const noSparse = value?.no_sparse_layers ?? templateSettings?.wipe_tower_no_sparse_layers === '1'
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">

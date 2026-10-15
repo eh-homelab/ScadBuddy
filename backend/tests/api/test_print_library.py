@@ -633,7 +633,7 @@ def test_a_sliced_files_checks_say_a_tower_choice_is_not_applied(client: TestCli
 
     assert check.status_code == 200, check.text
     [warning] = check.json()["warnings"]
-    assert warning["kind"] == "prime-tower-unconfirmed"
+    assert warning["kind"] == "prime-tower-not-applied"
     assert "already sliced" in warning["message"]
 
 

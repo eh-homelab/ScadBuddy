@@ -1015,19 +1015,8 @@ export const printTools: Tool[] = [
                       : { on_build_plate_only: args.supports.on_build_plate_only }),
                   },
             }),
-        ...(args.prime_tower === undefined
-          ? {}
-          : {
-              // With the tower off, only that: the backend sends nothing else.
-              prime_tower: !args.prime_tower.enabled
-                ? { enabled: false }
-                : {
-                    enabled: true,
-                    ...(args.prime_tower.no_sparse_layers === undefined
-                      ? {}
-                      : { no_sparse_layers: args.prime_tower.no_sparse_layers }),
-                  },
-            }),
+        // As given: the backend drops No sparse layers with the tower off (#3648 review).
+        ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
       const started = await reattach(

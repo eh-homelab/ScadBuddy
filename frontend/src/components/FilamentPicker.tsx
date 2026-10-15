@@ -72,6 +72,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'supports-not-applied': 'text-warn',
   // #3628 — a prime tower setting the process preset has no value for, sent anyway.
   'prime-tower-unconfirmed': 'text-warn',
+  // #3628 — a prime tower chosen for an already-sliced file, which queues as it is.
+  'prime-tower-not-applied': 'text-warn',
   // #2671 — a sliced file queued as it is: what to set right before starting it.
   'sliced-other-model': 'text-warn',
   'sliced-nozzle-missing': 'text-warn',
