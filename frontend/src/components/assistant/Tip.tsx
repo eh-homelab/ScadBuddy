@@ -1,4 +1,5 @@
 import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from 'react'
+import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 /**
@@ -53,7 +54,7 @@ function Wrap({
       {...props}
       tabIndex={focusable ? 0 : undefined}
       aria-describedby={focusable ? props['aria-describedby'] : undefined}
-      className="inline-flex rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+      className={cn(props.className, 'inline-flex rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50')}
     >
       {focusable
         ? children

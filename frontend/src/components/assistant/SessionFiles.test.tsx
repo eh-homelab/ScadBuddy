@@ -184,6 +184,33 @@ describe('SessionFiles', () => {
     expect(screen.getByText('notes.txt')).toBeInTheDocument()
   })
 
+  it('keeps each overlapping delete to its own file, and both rows go (review of #3732)', async () => {
+    seedSessionFile('sess-f', 'a.txt', text('a'), 'text/plain')
+    seedSessionFile('sess-f', 'b.txt', text('b'), 'text/plain')
+    // Each delete is held until the test answers it, then runs for real (the list reads again after).
+    const answers: Record<string, () => void> = {}
+    const real = api.deleteAiSessionFile.bind(api)
+    vi.spyOn(api, 'deleteAiSessionFile').mockImplementation((id, path) =>
+      new Promise<void>((resolve) => (answers[path] = resolve)).then(() => real(id, path)),
+    )
+    const user = userEvent.setup()
+    render()
+    const confirmFor = async (path: string) => {
+      await user.click(await screen.findByRole('button', { name: `Delete ${path}` }))
+      return screen.findByRole('alertdialog', { name: `Delete ${path}?` })
+    }
+    await user.click(within(await confirmFor('a.txt')).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(await confirmFor('b.txt')).getByRole('button', { name: 'Delete file' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    // A's delete is still in flight: its confirm, opened again, cannot send a second one.
+    expect(within(await confirmFor('a.txt')).getByRole('button', { name: 'Delete file' })).toBeDisabled()
+    await act(async () => answers['b.txt']!())
+    expect(screen.getByRole('alertdialog', { name: 'Delete a.txt?' })).toBeInTheDocument()
+    await act(async () => answers['a.txt']!())
+    expect(await screen.findByText(/No files yet/)).toBeInTheDocument()
+  })
+
   it('offers no upload or delete on a session the user cannot write', async () => {
     seedSessionFile('sess-f', 'notes.txt', text('hello'), 'text/plain')
     render({ canWrite: false })
