@@ -314,7 +314,7 @@ describe('LibraryPage', () => {
     expect(within(card).getByTestId('library-name-7001')).toHaveTextContent(/^tfic-creeper-keychain-long$/)
     expect(within(card).getByText('ScadBuddy copy')).toBeInTheDocument()
     expect(within(card).getByText('Copy 2')).toBeInTheDocument()
-    expect(card.querySelector(`[title="${copy}"]`)).not.toBeNull()
+    expect(within(card).getByTestId('library-name-7001')).toHaveAttribute('data-filename', copy)
     const slicedCard = screen.getByTestId('library-file-7002')
     expect(within(slicedCard).getByText('Sliced')).toBeInTheDocument()
     expect(within(slicedCard).queryByText(/Copy/)).toBeNull()
@@ -460,7 +460,7 @@ describe('LibraryPage, item context (#975)', () => {
   it("names each card's Print after its file", async () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-89')
-    const filename = card.querySelector('[title]')?.getAttribute('title') ?? ''
+    const filename = card.querySelector('[data-filename]')?.getAttribute('data-filename') ?? ''
     expect(filename).not.toBe('')
     expect(within(card).getByRole('button', { name: `Print ${filename}` })).toBeInTheDocument()
   })
@@ -468,7 +468,7 @@ describe('LibraryPage, item context (#975)', () => {
   it('links each printable file to its own print history (#1755)', async () => {
     renderPage(<LibraryPage />, { route: '/library' })
     const card = await screen.findByTestId('library-file-89')
-    const filename = card.querySelector('[title]')?.getAttribute('title') ?? ''
+    const filename = card.querySelector('[data-filename]')?.getAttribute('data-filename') ?? ''
     expect(within(card).getByRole('link', { name: `Prints of ${filename}` })).toHaveAttribute(
       'href',
       '/prints?file=89',
@@ -579,7 +579,7 @@ describe('LibraryPage, item context (#975)', () => {
   it('deletes a file to the trash after a confirmation, and Undo restores it (#2167)', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
     await user.click(await screen.findByRole('button', { name: 'Delete drawer-label.3mf' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete drawer-label.3mf?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete drawer-label.3mf?' })
     expect(dialog).toHaveTextContent("It goes to Bambuddy's trash.")
     await user.click(within(dialog).getByRole('button', { name: 'Delete file' }))
     const toast = await screen.findByTestId('library-deleted')
@@ -600,7 +600,7 @@ describe('LibraryPage, item context (#975)', () => {
       await user.click(screen.getByRole('checkbox', { name: `Select ${name}` }))
     }
     await user.click(screen.getByRole('button', { name: 'Delete selected (3)' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete 3 files?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete 3 files?' })
     expect(within(dialog).getByRole('list', { name: 'Files to delete' })).toHaveTextContent('nas-share-bracket.3mf')
     expect(within(dialog).getByTestId('library-delete-external')).toHaveTextContent(
       'nas-share-bracket.3mf is linked from an external folder',
@@ -714,8 +714,135 @@ describe('LibraryPage, item context (#975)', () => {
     // Waited for as a whole: the rename reloads the listing, which unmounts the card
     // until the reload answers, so a card got before then never shows the new name.
     await waitFor(() =>
-      expect(within(screen.getByTestId('library-file-67')).getByTitle('Wand for Clara.3mf')).toBeInTheDocument(),
+      expect(within(screen.getByTestId('library-file-67')).getByTestId('library-name-67')).toHaveAttribute(
+        'data-filename',
+        'Wand for Clara.3mf',
+      ),
     )
+  })
+})
+
+/** #3650 — a folder's row in the sidebar tree: what a right-click lands on. */
+function folderRow(id: number): HTMLElement {
+  return screen.getByTestId(`library-folder-${id}`).querySelector<HTMLElement>('[data-row]')!
+}
+
+describe('LibraryPage, folders and projects (#3650)', () => {
+  beforeEach(() => {
+    resetMockState()
+    window.localStorage.clear()
+  })
+
+  it('opens a folder’s menu on right-click, and from the keyboard on its row', async () => {
+    renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+
+    fireEvent.contextMenu(folderRow(13))
+    const menu = await screen.findByRole('menu', { name: 'Lamp' })
+    expect(within(menu).getByRole('menuitem', { name: 'Rename…' })).toBeInTheDocument()
+    expect(within(menu).getByRole('menuitem', { name: 'Open the project Desk lamp' })).toBeInTheDocument()
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+
+    // Shift+F10 on the focused treeitem opens the same menu.
+    const item = screen.getByTestId('library-folder-1')
+    item.focus()
+    fireEvent.keyDown(item, { key: 'F10', shiftKey: true })
+    expect(await screen.findByRole('menu', { name: 'MakerWorld' })).toBeInTheDocument()
+  })
+
+  it('renames the open folder from its menu, and the URL follows it', async () => {
+    const posted: unknown[] = []
+    const listen = async ({ request }: { request: Request }) => {
+      if (request.method === 'PATCH') posted.push(await request.clone().json())
+    }
+    server.events.on('request:start', listen)
+    onTestFinished(() => server.events.removeListener('request:start', listen))
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/Spec/MakerWorld/Work' })
+    await screen.findByTestId('library-file-120')
+
+    await user.click(screen.getByTestId('library-folder-actions'))
+    await user.click(await screen.findByRole('menuitem', { name: 'Rename…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rename the folder Work' })
+    const field = within(dialog).getByRole('textbox', { name: 'Folder name' })
+    await user.clear(field)
+    await user.type(field, 'Desk{Enter}')
+
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Spec\/MakerWorld\/Desk$/))
+    expect(posted).toEqual([{ name: 'Desk' }])
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+  })
+
+  it('moves a folder, never into itself, and deletes one after a confirmation', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/Spec' })
+    await screen.findByTestId('library-subfolder-11')
+
+    fireEvent.contextMenu(folderRow(10))
+    await user.click(await screen.findByRole('menuitem', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: 'Move the folder Spec to…' })
+    const tree = within(move).getByRole('tree', { name: 'Destination folder' })
+    // Spec and the folders inside it are not offered.
+    expect(within(tree).queryByRole('treeitem', { name: 'Spec' })).toBeNull()
+    expect(within(move).getByTestId('library-folder-move-confirm')).toBeDisabled()
+    await user.click(within(tree).getByRole('treeitem', { name: 'Supplies' }))
+    await user.click(within(move).getByTestId('library-folder-move-confirm'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Supplies\/Spec$/))
+
+    await user.click(screen.getByTestId('library-folder-actions'))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete…' }))
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete the folder Spec?' })
+    expect(confirm).toHaveTextContent('Its 3 files go to Bambuddy')
+    await user.click(within(confirm).getByTestId('library-folder-delete-confirm'))
+
+    expect(await screen.findByTestId('library-deleted')).toHaveTextContent(
+      "Deleted the folder Spec. Moved 2 files to Bambuddy's trash. Removed 1 external file for good.",
+    )
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Supplies$/))
+  })
+
+  it('makes a folder inside the open one', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/MakerWorld' })
+    await screen.findByTestId('library-file-67')
+    await user.click(screen.getByTestId('library-new-folder'))
+    const dialog = await screen.findByRole('dialog', { name: 'New folder' })
+    expect(dialog).toHaveTextContent('In MakerWorld.')
+    await user.type(within(dialog).getByRole('textbox', { name: 'Folder name' }), 'Wands{Enter}')
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\/Wands$/))
+  })
+
+  it('arranges a folder’s files from its menu', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    fireEvent.contextMenu(folderRow(1))
+    await user.click(await screen.findByRole('menuitem', { name: 'Arrange its files…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
+    expect(dialog).toHaveTextContent("Clara's Wand")
+  })
+
+  it('browses by project, each view linking to the other', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/Lamp' })
+    await screen.findByTestId('library-file-130')
+
+    // The folder names its project, as a link to the project view.
+    await user.click(screen.getByTestId('library-folder-project-link'))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\?project=7$/)
+    expect(screen.getByRole('radio', { name: 'Projects' })).toHaveAttribute('aria-checked', 'true')
+    const projects = screen.getByRole('tree', { name: 'Library projects' })
+    expect(within(projects).getByRole('treeitem', { name: 'Desk lamp' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByTestId('library-file-130')).toBeInTheDocument()
+
+    // The project names its folder, as a link back to the folder view.
+    await user.click(screen.getByTestId('library-project-folder-13'))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Lamp$/)
+
+    // The toggle lists every project, with no files until one is chosen.
+    await user.click(screen.getByRole('radio', { name: 'Projects' }))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\?project=7$/)
+    await user.click(within(screen.getByRole('tree', { name: 'Library projects' })).getByRole('treeitem', { name: 'All projects' }))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\?by=project$/)
+    expect(await screen.findByTestId('library-project-card-7')).toHaveTextContent('Desk lamp')
+    await user.click(screen.getByRole('radio', { name: 'Folders' }))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
   })
 })
 

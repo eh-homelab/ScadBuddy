@@ -53,6 +53,10 @@ import type {
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryListing,
   LibrarySearch,
   LibraryMoveResult,
@@ -1797,6 +1801,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ file_id: fileId, filename }),
     }),
+
+  /** #3650 — a folder renamed, or moved under another (`parent_id` 0 is the top level). */
+  updateLibraryFolder: (folderId: number, update: LibraryFolderUpdate) =>
+    command<LibraryFolder>(`/print/library/folders/${folderId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  /** #3650 — a new folder, at the top level without `parent_id`. */
+  createLibraryFolder: (body: LibraryFolderCreate) =>
+    command<LibraryFolder>('/print/library/folders', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #3650 — a folder and everything in it: its files to Bambuddy's trash, then its folders. */
+  deleteLibraryFolder: (folderId: number) =>
+    command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 

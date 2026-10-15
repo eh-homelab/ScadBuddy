@@ -3,10 +3,18 @@ import { USER_ONLY } from '../../agent/dom'
 import { ApiError } from '../../api/client'
 import type { LibraryEntry, LibraryFolderView } from '../../api/types'
 import { folderLabel, projectLosses } from '../../lib/libraryTransfer'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
 import { Spinner } from '../ui/Spinner'
 import { LibraryTree } from './LibraryTree'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 export type TransferMode = 'copy' | 'move'
 
@@ -68,67 +76,68 @@ export function TransferLibraryFilesDialog({ mode, files, folders, onClose, onCo
   }
 
   return (
-    <Dialog
-      open={open}
-      title={one ? `${verb} ${files[0]!.filename} to…` : `${verb} ${files.length} files to…`}
-      onClose={close}
-      footer={
-        <>
-          <Button variant="ghost" onClick={close} disabled={busy}>
+    <Dialog open={open} onOpenChange={(next) => !next && close()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="break-all leading-snug">
+            {one ? `${verb} ${files[0]!.filename} to…` : `${verb} ${files.length} files to…`}
+          </DialogTitle>
+          <DialogDescription>
+            {mode === 'copy'
+              ? 'Pick the folder for the copies. Each copy is a new file; the original stays where it is.'
+              : 'Pick the folder to move to. Each file keeps its print history and remembered choices.'}
+          </DialogDescription>
+        </DialogHeader>
+        {!one && (
+          <ul aria-label={`Files to ${mode}`} className="list-disc pl-5 text-sm break-all">
+            {files.slice(0, LISTED).map((file) => (
+              <li key={file.id}>{file.filename}</li>
+            ))}
+            {files.length > LISTED && <li className="list-none text-muted-foreground">and {files.length - LISTED} more</li>}
+          </ul>
+        )}
+        <ScrollArea className="h-64 rounded-lg border p-1">
+          <LibraryTree
+            folders={folders}
+            selected={target}
+            onSelect={setTarget}
+            label="Destination folder"
+            testIdPrefix={`library-${mode}-folder`}
+          />
+        </ScrollArea>
+        {staying.length > 0 && (
+          <p className="text-sm text-muted-foreground" data-testid="library-move-staying">
+            {going.length === 0
+              ? `${one ? 'It is' : 'They are'} in ${folderLabel(folders, target)} already. Pick another folder.`
+              : `${names(staying)} ${staying.length === 1 ? 'is' : 'are'} there already and stay${staying.length === 1 ? 's' : ''}.`}
+          </p>
+        )}
+        {losses.map((loss) => (
+          <p key={loss.projectId} className="text-sm text-destructive" data-testid="library-move-project-loss">
+            The project {loss.name} will lose {names(loss.files)}: a Bambuddy project lists only the files in its own
+            folder.
+          </p>
+        ))}
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={close} disabled={busy}>
             Cancel
           </Button>
           <Button
-            variant="primary"
             data-testid={`library-${mode}-confirm`}
             onClick={() => void confirm()}
             disabled={busy || going.length === 0}
+            className="max-w-full"
             {...USER_ONLY}
           >
-            {busy ? <Spinner /> : `${verb} to ${folderLabel(folders, target)}`}
+            {busy ? <Spinner /> : <span className="truncate">{`${verb} to ${folderLabel(folders, target)}`}</span>}
           </Button>
-        </>
-      }
-    >
-      {!one && (
-        <ul aria-label={`Files to ${mode}`} className="mb-2 list-disc pl-5 text-[13px] break-all text-ink">
-          {files.slice(0, LISTED).map((file) => (
-            <li key={file.id}>{file.filename}</li>
-          ))}
-          {files.length > LISTED && <li className="list-none text-muted">and {files.length - LISTED} more</li>}
-        </ul>
-      )}
-      <p className="mb-1 text-[13px] text-muted">
-        {mode === 'copy'
-          ? 'Pick the folder for the copies. Each copy is a new file; the original stays where it is.'
-          : 'Pick the folder to move to. Each file keeps its print history and remembered choices.'}
-      </p>
-      <div className="max-h-64 overflow-y-auto rounded-[6px] border border-line p-1">
-        <LibraryTree
-          folders={folders}
-          selected={target}
-          onSelect={setTarget}
-          label="Destination folder"
-          testIdPrefix={`library-${mode}-folder`}
-        />
-      </div>
-      {staying.length > 0 && (
-        <p className="mt-2 text-[13px] text-muted" data-testid="library-move-staying">
-          {going.length === 0
-            ? `${one ? 'It is' : 'They are'} in ${folderLabel(folders, target)} already. Pick another folder.`
-            : `${names(staying)} ${staying.length === 1 ? 'is' : 'are'} there already and stay${staying.length === 1 ? 's' : ''}.`}
-        </p>
-      )}
-      {losses.map((loss) => (
-        <p key={loss.projectId} className="mt-2 text-[13px] text-warn" data-testid="library-move-project-loss">
-          The project {loss.name} will lose {names(loss.files)}: a Bambuddy project lists only the files in its own
-          folder.
-        </p>
-      ))}
-      {error && (
-        <p role="alert" className="mt-3 text-[13px] text-warn">
-          {error}
-        </p>
-      )}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

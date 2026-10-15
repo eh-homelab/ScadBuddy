@@ -16,9 +16,20 @@ import {
   type Skipped,
 } from '../lib/modelFolder'
 import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { FileUpIcon, FolderUpIcon, XIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { cn } from '@/lib/utils'
 
 interface Props {
   open: boolean
@@ -193,36 +204,15 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
   }
 
   return (
-    <Dialog
-      open={open}
-      title="Add a model"
-      description="Drop an OpenSCAD source file, or a model folder holding model.scad with its model.json, thumbnail.png and README.md. Its customizer parameters are read on upload."
-      onClose={reset}
-      footer={
-        created ? (
-          <Button
-            variant="primary"
-            onClick={() => {
-              onUploaded(created)
-              reset()
-            }}
-          >
-            Open model
-          </Button>
-        ) : (
-          <>
-            {progress && <span className="mr-auto truncate text-[12px] text-muted">{progress}</span>}
-            <Button onClick={reset} disabled={uploading}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={() => void upload()} disabled={!files || uploading}>
-              {uploading && <Spinner />}
-              {uploading ? 'Uploading' : 'Add model'}
-            </Button>
-          </>
-        )
-      }
-    >
+    <Dialog open={open} onOpenChange={(next) => !next && reset()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl">
+      <DialogHeader>
+        <DialogTitle>Add a model</DialogTitle>
+        <DialogDescription>
+          Drop an OpenSCAD source file, or a model folder holding model.scad with its model.json, thumbnail.png and
+          README.md. Its customizer parameters are read on upload.
+        </DialogDescription>
+      </DialogHeader>
       <div
         onDragOver={(event) => {
           event.preventDefault()
@@ -231,13 +221,14 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         data-testid="upload-dropzone"
-        className={`flex flex-col items-center justify-center gap-3 rounded-[6px] border border-dashed px-6 py-10 text-center transition-colors ${
-          dragging ? 'border-accent bg-accent/8' : 'border-line-strong bg-surface-2'
-        }`}
+        className={cn(
+          'flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors',
+          dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+        )}
       >
-        <p className="text-[13px] text-muted">
+        <p className="text-sm text-muted-foreground">
           {files ? (
-            <span className="sb-num text-ink">
+            <span className="sb-num text-foreground">
               {files.folder ? `${files.folder}/${files.scad.name}` : files.scad.name}
             </span>
           ) : (
@@ -245,11 +236,11 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
           )}
         </p>
         <div className="flex gap-2">
-          <Button size="sm" onClick={() => inputRef.current?.click()}>
-            Choose files
+          <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
+            <FileUpIcon /> Choose files
           </Button>
-          <Button size="sm" onClick={() => folderRef.current?.click()}>
-            Choose folder
+          <Button size="sm" variant="outline" onClick={() => folderRef.current?.click()}>
+            <FolderUpIcon /> Choose folder
           </Button>
         </div>
         <input
@@ -279,16 +270,16 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
       </div>
 
       {files && (
-        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 text-[13px]">
-          <dt className="text-muted">Details</dt>
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 text-sm">
+          <dt className="text-muted-foreground">Details</dt>
           <dd className="truncate" data-testid="upload-meta">
             {files.meta ? (
               <>
                 <span className="sb-num">{files.meta.name}</span>
-                {metaName && <span className="text-muted"> — {metaName}</span>}
+                {metaName && <span className="text-muted-foreground"> — {metaName}</span>}
               </>
             ) : (
-              <span className="text-faint">Named after the file</span>
+              <span className="text-muted-foreground">Named after the file</span>
             )}
           </dd>
           <dd>
@@ -304,12 +295,12 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
             )}
           </dd>
 
-          <dt className="text-muted">Thumbnail</dt>
+          <dt className="text-muted-foreground">Thumbnail</dt>
           <dd className="truncate" data-testid="upload-thumbnail">
             {files.thumbnail ? (
               <span className="sb-num">{files.thumbnail.name}</span>
             ) : (
-              <span className="text-faint">None; the first generated plate stands in</span>
+              <span className="text-muted-foreground">None; the first generated plate stands in</span>
             )}
           </dd>
           <dd>
@@ -329,33 +320,33 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
             )}
           </dd>
 
-          <dt className="self-start text-muted">Media</dt>
+          <dt className="self-start text-muted-foreground">Media</dt>
           <dd className="min-w-0" data-testid="upload-media">
             {media.length === 0 ? (
-              <span className="text-faint">No images or videos</span>
+              <span className="text-muted-foreground">No images or videos</span>
             ) : (
               <>
-                <ol className="flex flex-col gap-1">
+                <ScrollArea className={cn(media.length > 5 && 'h-40')}>
+                <ol className="flex flex-col gap-1 pr-2">
                   {media.map((file, index) => (
                     <li key={`${file.name}-${index}`} className="flex items-center gap-2">
                       <span className="sb-num min-w-0 truncate">{file.name}</span>
-                      {index === 0 && !files.thumbnail && (
-                        <span className="text-[11px] text-accent">cover</span>
-                      )}
+                      {index === 0 && !files.thumbnail && <Badge variant="outline">cover</Badge>}
                       <Button
-                        size="sm"
+                        size="icon-xs"
                         variant="ghost"
                         className="ml-auto"
                         aria-label={`Remove ${file.name}`}
                         onClick={() => setMedia((all) => all.filter((_, at) => at !== index))}
                       >
-                        Remove
+                        <XIcon />
                       </Button>
                     </li>
                   ))}
                 </ol>
+                </ScrollArea>
                 {files.thumbnail && (
-                  <p className="mt-1 text-[12px] text-faint">
+                  <p className="mt-1 text-xs text-muted-foreground">
                     Added after the thumbnail, which stays the cover.
                   </p>
                 )}
@@ -368,12 +359,12 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
             </Button>
           </dd>
 
-          <dt className="text-muted">README</dt>
+          <dt className="text-muted-foreground">README</dt>
           <dd className="truncate" data-testid="upload-readme">
             {files.readme ? (
               <span className="sb-num">{files.readme.name}</span>
             ) : (
-              <span className="text-faint">None</span>
+              <span className="text-muted-foreground">None</span>
             )}
           </dd>
           <dd>
@@ -430,7 +421,7 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
       />
 
       {ignored.length > 0 && (
-        <p className="mt-3 text-[12px] text-muted" data-testid="upload-ignored">
+        <p className="text-xs text-muted-foreground" data-testid="upload-ignored">
           Not uploaded:{' '}
           {ignored.map(({ name, reason }, index) => (
             <span key={name + index}>
@@ -442,10 +433,34 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         </p>
       )}
       {error && (
-        <p role="alert" className="mt-3 text-[13px] text-warn">
+        <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
+      <DialogFooter className="items-center">
+        {created ? (
+          <Button
+            onClick={() => {
+              onUploaded(created)
+              reset()
+            }}
+          >
+            Open model
+          </Button>
+        ) : (
+          <>
+            {progress && <span className="mr-auto truncate text-xs text-muted-foreground">{progress}</span>}
+            <Button variant="outline" onClick={reset} disabled={uploading}>
+              Cancel
+            </Button>
+            <Button onClick={() => void upload()} disabled={!files || uploading}>
+              {uploading && <Spinner />}
+              {uploading ? 'Uploading' : 'Add model'}
+            </Button>
+          </>
+        )}
+      </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }

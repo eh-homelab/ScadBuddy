@@ -115,7 +115,7 @@ test.describe('library', () => {
   test('deletes one file and undoes it, then several, reporting the one skipped', async ({ page }) => {
     await page.goto('/library/Spec/MakerWorld/Work')
     await page.getByRole('button', { name: 'Delete drawer-label.3mf' }).click()
-    let dialog = page.getByRole('dialog', { name: 'Delete drawer-label.3mf?' })
+    let dialog = page.getByRole('alertdialog', { name: 'Delete drawer-label.3mf?' })
     await expect(dialog).toContainText("It goes to Bambuddy's trash.")
     await dialog.getByRole('button', { name: 'Delete file' }).click()
     const toast = page.getByTestId('library-deleted')
@@ -129,7 +129,7 @@ test.describe('library', () => {
       await page.getByRole('checkbox', { name: `Select ${name}` }).check()
     }
     await page.getByRole('button', { name: 'Delete selected (3)' }).click()
-    dialog = page.getByRole('dialog', { name: 'Delete 3 files?' })
+    dialog = page.getByRole('alertdialog', { name: 'Delete 3 files?' })
     await expect(dialog.getByTestId('library-delete-external')).toContainText('cannot be restored')
     await dialog.getByRole('button', { name: 'Delete 3 files' }).click()
     await expect(toast).toContainText('Removed 1 external file for good.')
