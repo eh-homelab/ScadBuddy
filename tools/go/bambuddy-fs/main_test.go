@@ -98,7 +98,7 @@ func TestParseHelpAndErrors(t *testing.T) {
 			t.Errorf("%v: %v, want ErrHelp", args, err)
 		}
 	}
-	for _, args := range [][]string{{"unsent", "x"}, {"unsent", "--api", "http://h/api/v1"}, {"frobnicate"}, {"mount", "--api", ""}, {"mount", "--api", "http://h/api/v1", "a", "b"}, {"mount", "--bogus"}, {"mount", "--allow-other", "--no-allow-other"}, {"umount", "a", "b"}, {"status", "--ro"}} {
+	for _, args := range [][]string{{"unsent", "x"}, {"unsent", "--api", "http://h/api/v1"}, {"frobnicate"}, {"mount", "--api", ""}, {"mount", "--api", "http://h/api/v1", "a", "b"}, {"mount", "--bogus"}, {"mount", "--allow-other", "--no-allow-other"}, {"umount", "a", "b"}, {"status", "--ro"}, {"allow-other", "x"}} {
 		if _, err := parse(args); err == nil || errors.Is(err, flag.ErrHelp) {
 			t.Errorf("%v: %v, want an error", args, err)
 		}

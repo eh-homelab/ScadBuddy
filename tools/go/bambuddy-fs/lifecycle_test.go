@@ -146,3 +146,61 @@ func TestStatusAndUmountWithNothingMounted(t *testing.T) {
 		t.Fatalf("umount: %d %q %q", code, out.String(), errOut.String())
 	}
 }
+
+func TestUserAllowOtherIsUncommentedOrAppended(t *testing.T) {
+	for in, want := range map[string]string{
+		"# comment\n#user_allow_other\n#mount_max = 1000\n": "# comment\nuser_allow_other\n#mount_max = 1000\n",
+		"# user_allow_other\n":                              "user_allow_other\n",
+		"#mount_max = 1000":                                 "#mount_max = 1000\nuser_allow_other\n",
+		"":                                                  "user_allow_other\n",
+		// A comment that only mentions it is not the option.
+		"# user_allow_other - Using the allow_other mount option\n": "# user_allow_other - Using the allow_other mount option\nuser_allow_other\n",
+	} {
+		got, changed := withUserAllowOther([]byte(in))
+		if string(got) != want || !changed {
+			t.Errorf("%q: %q %v, want %q", in, got, changed, want)
+		}
+	}
+	if got, changed := withUserAllowOther([]byte("a\n user_allow_other\n")); changed || string(got) != "a\n user_allow_other\n" {
+		t.Errorf("already on: %q %v", got, changed)
+	}
+}
+
+func TestEnableUserAllowOtherKeepsTheFileMode(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "fuse.conf")
+	if err := os.WriteFile(conf, []byte("#user_allow_other\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := enableUserAllowOther(conf); err != nil || !changed {
+		t.Fatalf("%v %v", changed, err)
+	}
+	st, err := os.Stat(conf)
+	if err != nil || st.Mode().Perm() != 0o640 || !userAllowOther(conf) {
+		t.Fatalf("%v %v", st.Mode(), err)
+	}
+	if changed, err := enableUserAllowOther(conf); err != nil || changed {
+		t.Fatalf("again: %v %v", changed, err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("temp file left: %v", entries)
+	}
+	missing := filepath.Join(dir, "new.conf")
+	if _, err := enableUserAllowOther(missing); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(missing); err != nil || st.Mode().Perm() != 0o644 || !userAllowOther(missing) {
+		t.Fatalf("new: %v %v", st, err)
+	}
+}
+
+func TestAllowOtherCommandWhenAlreadyOn(t *testing.T) {
+	conf := filepath.Join(t.TempDir(), "fuse.conf")
+	if err := os.WriteFile(conf, []byte("user_allow_other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut strings.Builder
+	if code := allowOtherCommand(conf, &out, &errOut); code != 0 || !strings.Contains(out.String(), "already on") {
+		t.Fatalf("%d %q %q", code, out.String(), errOut.String())
+	}
+}

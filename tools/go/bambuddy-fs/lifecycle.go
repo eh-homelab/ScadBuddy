@@ -286,3 +286,99 @@ func status(cfg config, out io.Writer) int {
 	}
 	return 1
 }
+
+// withUserAllowOther returns conf with user_allow_other on a line of its own: a
+// commented-out "#user_allow_other" is uncommented, else the line is appended.
+func withUserAllowOther(conf []byte) ([]byte, bool) {
+	lines := strings.Split(string(conf), "\n")
+	for i, line := range lines {
+		switch t := strings.TrimSpace(line); {
+		case t == "user_allow_other":
+			return conf, false
+		case strings.HasPrefix(t, "#") && strings.TrimSpace(strings.TrimLeft(t, "#")) == "user_allow_other":
+			lines[i] = "user_allow_other"
+			return []byte(strings.Join(lines, "\n")), true
+		}
+	}
+	out := string(conf)
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return []byte(out + "user_allow_other\n"), true
+}
+
+// enableUserAllowOther adds user_allow_other to conf, replacing the file in one rename
+// so a reader never sees half of it, with its mode kept (0644 for a new one).
+func enableUserAllowOther(conf string) (bool, error) {
+	data, err := os.ReadFile(conf)
+	mode := os.FileMode(0o644)
+	switch {
+	case err == nil:
+		if st, err := os.Stat(conf); err == nil {
+			mode = st.Mode().Perm()
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return false, err
+	}
+	out, changed := withUserAllowOther(data)
+	if !changed {
+		return false, nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(conf), ".fuse.conf.*")
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	return true, os.Rename(tmp.Name(), conf)
+}
+
+// allowOtherCommand turns on user_allow_other in fuse.conf, so mounts pass FUSE
+// allow_other by default (Windows Explorer's \\wsl$ needs it). Not root, it runs itself
+// again under sudo, which asks for the password.
+func allowOtherCommand(conf string, out, errOut io.Writer) int {
+	if userAllowOther(conf) {
+		fmt.Fprintf(out, "user_allow_other is already on in %s\n", conf)
+		return 0
+	}
+	if os.Geteuid() != 0 {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(errOut, "bambuddy-fs: %v\n", err)
+			return 1
+		}
+		sudo, err := exec.LookPath("sudo")
+		if err != nil {
+			fmt.Fprintf(errOut, "bambuddy-fs: %s needs root, and sudo is not installed; run bambuddy-fs allow-other as root\n", conf)
+			return 1
+		}
+		fmt.Fprintf(errOut, "editing %s needs root; running sudo %s allow-other\n", conf, exe)
+		cmd := exec.Command(sudo, exe, "allow-other")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, out, errOut
+		if err := cmd.Run(); err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				return exit.ExitCode()
+			}
+			fmt.Fprintf(errOut, "bambuddy-fs: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if _, err := enableUserAllowOther(conf); err != nil {
+		fmt.Fprintf(errOut, "bambuddy-fs: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "user_allow_other is on in %s; mounts now pass allow_other (remount a running one)\n", conf)
+	return 0
+}

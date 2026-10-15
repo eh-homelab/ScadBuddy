@@ -52,6 +52,7 @@ const usageText = `Usage: bambuddy-fs mount [flags] [<mountpoint>]
        bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
        bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
        bambuddy-fs unsent [--state-dir <dir>]
+       bambuddy-fs allow-other
 
 mount mounts Bambuddy's print library, through ScadBuddy's API, as a filesystem, at
 <mountpoint> (default $BAMBUDDY_FS_DIR, else ~/bambuddy). It stays in the foreground
@@ -59,6 +60,8 @@ unless --background.
 umount unmounts it and stops its process.
 status says whether it is mounted and its process running.
 unsent lists the writes whose upload failed, kept to be sent again, and exits.
+allow-other turns on user_allow_other in /etc/fuse.conf (through sudo), so mounts let
+other users and Windows Explorer (\\wsl$) see them.
 
 Flags:
 `
@@ -197,6 +200,12 @@ func parse(args []string) (config, error) {
 			return cfg, errors.New("unsent takes no arguments")
 		}
 		return cfg, nil
+	case "allow-other":
+		cfg.Command = "allow-other"
+		if len(args) > 1 {
+			return cfg, errors.New("allow-other takes no arguments")
+		}
+		return cfg, nil
 	case "umount", "unmount", "status":
 		cfg.Command = strings.Replace(args[0], "unmount", "umount", 1)
 		fl := flag.NewFlagSet(cfg.Command, flag.ContinueOnError)
@@ -250,6 +259,8 @@ func main() {
 		os.Exit(umount(cfg, os.Stdout, os.Stderr))
 	case "status":
 		os.Exit(status(cfg, os.Stdout))
+	case "allow-other":
+		os.Exit(allowOtherCommand(fuseConf, os.Stdout, os.Stderr))
 	}
 	if cfg.Background && os.Getenv(detachedEnv) == "" {
 		os.Exit(background(cfg, os.Args[1:], os.Stdout, os.Stderr))
@@ -303,7 +314,7 @@ func run(cfg config) int {
 		return 2
 	}
 	if !allow && !cfg.NoAllowOther {
-		log.Printf("bambuddy-fs: only you see the mount; uncomment user_allow_other in %s to see it from Windows (\\\\wsl$) or other users", fuseConf)
+		log.Printf("bambuddy-fs: only you see the mount; bambuddy-fs allow-other turns on user_allow_other in %s, so Windows (\\\\wsl$) and other users see it", fuseConf)
 	}
 	if err := os.MkdirAll(cfg.Mountpoint, 0o755); err != nil {
 		log.Printf("bambuddy-fs: %v", err)

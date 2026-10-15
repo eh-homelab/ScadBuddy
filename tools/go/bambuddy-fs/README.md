@@ -39,9 +39,11 @@ mountpoint and `--state-dir` of the mount they act on.
 
 ### WSL and Windows
 
-Windows Explorer reaches a WSL mount only when other users may see it. Uncomment
-`user_allow_other` in `/etc/fuse.conf` (the mount then passes FUSE `allow_other` by
-default), then open `\\wsl$\<distro>\home\<you>\bambuddy`.
+Windows Explorer reaches a WSL mount only when other users may see it. Run
+`bambuddy-fs allow-other` once: it turns on `user_allow_other` in `/etc/fuse.conf`
+(uncommenting it, or adding the line), through `sudo` unless run as root, and does
+nothing if it is already on. Mounts then pass FUSE `allow_other` by default (remount
+a running one). Then open `\\wsl$\<distro>\home\<you>\bambuddy`.
 
 `allow_other` has a cost: the mount does not check permissions (no
 `default_permissions`), so with it every local user, and every container that shares
@@ -100,6 +102,7 @@ bambuddy-fs mount [--api <url>] [--background] [--ro] [--all] [--allow-other | -
 bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs unsent [--state-dir <dir>]
+bambuddy-fs allow-other
 ```
 
 | Flag | Meaning |
