@@ -75,6 +75,8 @@ export type ForwardOptions = {
    * client's). One that only ever `release`s would leave a row nothing removes.
    */
   record?: boolean
+  /** The id its sessions are recorded under: the plugin's name (a registry plugin's) unless given (pluginSessions.ts `packageLedgerId`). */
+  ledgerId?: string
 }
 
 export type Registration = {
@@ -104,6 +106,8 @@ type Route = {
   sessions: Set<string>
   /** Whether its sessions are in the ledger (`ForwardOptions.record`). */
   record: boolean
+  /** The id they are recorded under (`ForwardOptions.ledgerId`). */
+  ledgerId: string
   filterTools: boolean
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
@@ -375,6 +379,7 @@ export class PluginForwarder {
       address,
       sessions: new Set(),
       record: options.record ?? false,
+      ledgerId: options.ledgerId ?? plugin.name,
       filterTools: options.filterTools ?? true,
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
@@ -406,13 +411,13 @@ export class PluginForwarder {
     if (route.sessions.has(id)) return
     route.sessions.add(id)
     if (!route.record) return
-    this.ledger?.seen(route.plugin.name, id).catch((err: unknown) => this.log(`plugins: recording an MCP session failed: ${String(err)}`))
+    this.ledger?.seen(route.ledgerId, id).catch((err: unknown) => this.log(`plugins: recording an MCP session failed: ${String(err)}`))
   }
 
   private forget(route: Route, id: string): void {
     route.sessions.delete(id)
     if (!route.record) return
-    this.ledger?.ended(route.plugin.name, id).catch((err: unknown) => this.log(`plugins: forgetting an MCP session failed: ${String(err)}`))
+    this.ledger?.ended(route.ledgerId, id).catch((err: unknown) => this.log(`plugins: forgetting an MCP session failed: ${String(err)}`))
   }
 
   get size(): number {

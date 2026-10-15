@@ -1,6 +1,11 @@
 import { randomBytes } from 'node:crypto'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { PluginForwarder } from '../src/plugins/forwarder.js'
+import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
 import { endOwnSessions, PluginSessions, runPluginSessionSweep, startMark, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -120,6 +125,44 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek })).toBe(0)
       expect(fake.deletes).toEqual([])
       expect(await left()).toEqual(['memory/young'])
+    })
+
+    it("records a package server's sessions apart from the registry's, and never sends them a registry plugin's DELETE (#3599)", async () => {
+      const pkgFake = await startFakeMcp({ sessions: true })
+      const forwarder = await PluginForwarder.start({ sessions: new PluginSessions(db.sql, 'replica-dead') })
+      try {
+        const dir = await mkdtemp(path.join(os.tmpdir(), 'ledger-pkg-'))
+        await mkdir(path.join(dir, '.claude-plugin'))
+        await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+        await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { api: { type: 'http', url: pkgFake.url } } }))
+        const servers = await forwardPackageServers(
+          [{ name: 'notes', contentHash: 'sha256:x', dir, allowed: false, builtinTools: [] }],
+          forwarder,
+          async () => ['127.0.0.1'],
+          { record: true },
+        )
+        const [server] = servers.plugins
+        await fetch(server!.url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+          }),
+        })
+        const [issued] = pkgFake.issued
+        await expect.poll(left).toEqual([`pkg:plugin_notes_api/${issued}`])
+        // A registry plugin is looked up by its own name only: this row is never sent to `memory`, or any other.
+        await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0 })
+        expect(fake.deletes).toEqual([])
+        expect(await left()).toEqual([])
+        servers.release()
+      } finally {
+        await forwarder.close()
+        await pkgFake.close()
+      }
     })
 
     it('records a session once and forgets it', async () => {

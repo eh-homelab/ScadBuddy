@@ -1,4 +1,4 @@
-import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../harness/questions.js'
+import { ANSWER_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX, utf8Length } from './limits.js'
 import { type Owner, sameOwner } from '../sessions/protocol.js'
 
 // The tool-call gate's validator (durable-agents spec §6.6, "Responses"): what a
@@ -96,7 +96,7 @@ const isAnswer = (v: unknown): v is string => typeof v === 'string' && v.length 
 
 /** The UTF-8 length of the response's JSON. */
 export function responseBytes(response: unknown): number {
-  return Buffer.byteLength(JSON.stringify(response) ?? 'null', 'utf8')
+  return utf8Length(JSON.stringify(response) ?? 'null')
 }
 
 function malformed(message: string): RespondRefusal {
