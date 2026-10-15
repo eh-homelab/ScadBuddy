@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
-import { libraryFiles } from '../mocks/features/library'
+import { libraryFiles, libraryFolders } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -843,6 +843,15 @@ describe('LibraryPage, folders and projects (#3650)', () => {
     expect(await screen.findByTestId('library-project-card-7')).toHaveTextContent('Desk lamp')
     await user.click(screen.getByRole('radio', { name: 'Folders' }))
     expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
+  })
+
+  it('says which folder a project of several shows (#3719 review)', async () => {
+    libraryFolders.push({ id: 14, name: 'Lamp parts', parent_id: null, depth: 0, file_count: 0, project_id: 7, project_name: 'Desk lamp' })
+    onTestFinished(() => void libraryFolders.pop())
+    renderPage(<LibraryPage />, { route: '/library?project=7' })
+    expect(await screen.findByTestId('library-file-130')).toBeInTheDocument()
+    expect(screen.getByTestId('library-project-folder-14')).toBeInTheDocument()
+    expect(screen.getByTestId('library-project-shown')).toHaveTextContent('Showing the files in Lamp.')
   })
 })
 
