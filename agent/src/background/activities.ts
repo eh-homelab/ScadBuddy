@@ -361,7 +361,15 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
           await acquire()
           try {
             if (signal.aborted) return null
-            const r = await agents.run({ sessionId: t.sessionId, owner: t.createdBy, workflow: name, prompt, opts, signal })
+            const r = await agents.run({
+              sessionId: t.sessionId,
+              owner: t.createdBy,
+              workflow: name,
+              prompt,
+              opts,
+              signal,
+              onChild: (childId) => deps.store.recordChild(t.id, childId),
+            })
             // Only a result is kept: a failed agent runs again on a retry or a resume.
             if (r.ok) await deps.store.journal(t.id, key, occurrence, { result: r.result, ok: true, childId: r.childId })
             counted(r.ok, r.result)
@@ -383,6 +391,8 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       }
       const beat = setInterval(() => ctx.heartbeat(), 5000)
       try {
+        // An earlier attempt whose worker died left its running agents' chats open (#3395).
+        for (const childId of await deps.store.openChildren(t.id)) await agents.end(childId, t.createdBy)
         const out = await runScript(String(t.spec.body), t.spec.args ?? null, host, signal)
         if (signal.reason === expired) throw expired
         return ended(out.ok ? { status: 'completed', result: out.result } : { status: 'failed', error: out.error })

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
@@ -192,6 +193,36 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await call('Workflow', { name: 'saved' })).toMatchObject({ isError: true, text: expect.stringContaining('No saved workflow named "saved"') })
     expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
   })
+
+  it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
+    // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
+    const scripted = scriptedRunner((run) => (String(run.prompt).includes('first') ? { hang: true } : { reply: 'done again' }))
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
+    const t = (await store.create({
+      sessionId: parent,
+      kind: 'workflow',
+      description: 'retry',
+      spec: { name: 'retry', description: 'retry', body: `return await agent('first')`, scriptPath: '/workspace/_claude/workflows/retry-wf_x.js' },
+      createdBy: browser,
+    }))!
+    const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${parent}-${t.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
+    const first = new MockActivityEnvironment({ ...info, attempt: 1 })
+    const abandoned = first.run(acts.wf_run!, { taskId: t.id }).catch(() => undefined)
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const [orphan] = await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions WHERE parent_id = ${parent}`
+    expect((await mm.get(orphan!.id, browser)).status).toBe('running')
+
+    // The retry: its script differs only so its own agent can answer.
+    await db.sql`UPDATE ai_background_tasks SET spec = spec || ${db.sql.json({ body: `return await agent('second')` } as never)} WHERE id = ${t.id}`
+    const out = await new MockActivityEnvironment({ ...info, attempt: 2 }).run(acts.wf_run!, { taskId: t.id })
+    expect(out).toMatchObject({ status: 'completed', result: 'done again' })
+    expect((await mm.get(orphan!.id, browser)).status).toBe('done')
+    first.cancel()
+    await abandoned
+    mm.abortAll()
+  }, 60_000)
 
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
     // The turn's message, as the warm process was sent it (scriptedRunner's `prompts`).
