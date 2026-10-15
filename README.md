@@ -229,7 +229,9 @@ on shutdown.
   - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
     runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
     so it stays on the prune Schedule while the background-slice sweep obeys 0. It
-    needs the same `Recreate` rollout.
+    needs the same `Recreate` rollout: until it finishes, a prune run whose sweep an
+    old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
+    sweep waits for the next tick (300 s).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
