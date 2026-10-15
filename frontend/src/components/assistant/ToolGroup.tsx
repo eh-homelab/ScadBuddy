@@ -1,4 +1,7 @@
-import { useId, useState } from 'react'
+import { useState } from 'react'
+import { ChevronRightIcon, Loader2Icon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Link } from 'react-router'
 import { toolTitle } from '../../agent/chat/labels'
 import { blobUrl, type ToolImage } from '../../agent/chat/protocol'
@@ -12,6 +15,7 @@ import {
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { RiskBadge } from './badges'
 import { JsonView } from './JsonView'
+import { Tip } from './Tip'
 
 // #782 — tool calls as the panel shows them (design 2026-10-08 §3.3): each call is one
 // line, its title and status, with its arguments and raw result behind Details; calls
@@ -19,24 +23,19 @@ import { JsonView } from './JsonView'
 // inside a group (chat/toolGroups.ts `feedBlocks`).
 
 const STATUS_STYLE: Record<ToolStatus, string> = {
-  running: 'text-muted',
+  running: 'text-muted-foreground',
   waiting_approval: 'text-warn',
-  waiting_input: 'text-accent',
+  waiting_input: 'text-primary',
   done: 'text-ok',
   failed: 'text-warn',
-  not_run: 'text-faint',
-  stopped: 'text-faint',
+  not_run: 'text-muted-foreground',
+  stopped: 'text-muted-foreground',
 }
 
 /** A shape per status, so it does not rest on colour alone; the words beside it say it too. */
 function StatusIcon({ status }: { status: ToolStatus }) {
   if (status === 'running') {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-block h-3 w-3 shrink-0 rounded-full border-2 border-line-strong border-t-accent motion-safe:animate-spin"
-      />
-    )
+    return <Loader2Icon aria-hidden="true" className="size-3 shrink-0 text-primary motion-safe:animate-spin" />
   }
   const glyph: Record<Exclude<ToolStatus, 'running'>, string> = {
     waiting_approval: '!',
@@ -59,7 +58,8 @@ function ToolImages({ images, sessionId, title, size }: { images: ToolImage[]; s
       {images.map((image, i) => {
         const url = blobUrl(sessionId, image.name)
         return (
-          <a key={image.name} href={url} target="_blank" rel="noreferrer noopener" className="block" title="Open the full image">
+          <Tip key={image.name} content="Open the full image">
+          <a href={url} target="_blank" rel="noreferrer noopener" className="block rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
             <img
               src={url}
               alt={images.length > 1 ? `${title} (${i + 1} of ${images.length})` : title}
@@ -67,11 +67,12 @@ function ToolImages({ images, sessionId, title, size }: { images: ToolImage[]; s
               data-testid="agent-tool-image"
               className={
                 size === 'full'
-                  ? 'max-h-56 max-w-full rounded-[4px] border border-line bg-bg object-contain'
-                  : 'h-10 w-10 rounded-[3px] border border-line bg-bg object-cover'
+                  ? 'max-h-56 max-w-full rounded-md border border-border bg-background object-contain'
+                  : 'h-10 w-10 rounded-sm border border-border bg-background object-cover'
               }
             />
           </a>
+          </Tip>
         )
       })}
     </div>
@@ -94,12 +95,14 @@ export function ToolCallView({
 }) {
   const [toggled, setToggled] = useState<boolean | undefined>(undefined)
   const open = toggled ?? advanced
-  const detailsId = useId()
+  const [sourcesToggled, setSourcesToggled] = useState<boolean | undefined>(undefined)
   const title = toolTitle(call)
   const { result } = call
   return (
-    <div
-      className={`rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5 text-[12.5px] ${nested ? 'ml-4' : ''}`}
+    <Collapsible
+      open={open}
+      onOpenChange={setToggled}
+      className={`rounded-lg border border-border bg-card px-2.5 py-1.5 text-[12.5px] ${nested ? 'ml-4' : ''}`}
       data-testid="agent-tool"
       data-status={status}
     >
@@ -110,16 +113,11 @@ export function ToolCallView({
         <span className={`shrink-0 text-[11px] ${STATUS_STYLE[status]}`} data-testid="agent-tool-status">
           {toolStatusLabel(status)}
         </span>
-        <button
-          type="button"
-          className="shrink-0 rounded-[4px] px-1 text-[11px] text-muted underline hover:text-ink"
-          aria-expanded={open}
-          aria-controls={detailsId}
-          aria-label={`Details: ${title}`}
-          onClick={() => setToggled(!open)}
-        >
-          Details
-        </button>
+        <CollapsibleTrigger asChild>
+          <Button variant="link" size="xs" className="h-auto shrink-0 px-1 text-[11px] text-muted-foreground" aria-label={`Details: ${title}`}>
+            Details
+          </Button>
+        </CollapsibleTrigger>
       </div>
       {/* Only a call that ran and broke: a refused or stopped one's result is Claude Code's
           note to the model ("The user doesn't want to proceed…"), kept under Details (#2149). */}
@@ -132,17 +130,23 @@ export function ToolCallView({
       {result?.version && (
         <Link
           to={`/m/${encodeURIComponent(result.version.slug)}/versions`}
-          className="mt-1 inline-block text-[11.5px] text-accent underline"
+          className="mt-1 inline-block text-[11.5px] text-primary underline underline-offset-2"
         >
           Undo from version {result.version.revision.slice(0, 7)}
         </Link>
       )}
       {result && result.sources.length > 0 && (
-        <details open={advanced} className="mt-1">
-          <summary className="cursor-pointer text-[11.5px] text-muted">
+        <Collapsible open={sourcesToggled ?? advanced} onOpenChange={setSourcesToggled} className="mt-1">
+          <CollapsibleTrigger className="flex items-center gap-1 rounded-sm text-[11.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
+            <ChevronRightIcon
+              aria-hidden="true"
+              className={`size-3 transition-transform motion-reduce:transition-none ${(sourcesToggled ?? advanced) ? 'rotate-90' : ''}`}
+            />
             Why? {result.sources.length} source{result.sources.length === 1 ? '' : 's'}
-          </summary>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted">
+          </CollapsibleTrigger>
+          {/* Kept in the page while closed, as the disclosure it replaced kept them. */}
+          <CollapsibleContent forceMount hidden={!(sourcesToggled ?? advanced)}>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted-foreground">
             {result.sources.map((source, i) => {
               const href = safeHttpUrl(source.url)
               return (
@@ -154,23 +158,24 @@ export function ToolCallView({
                   ) : (
                     source.title
                   )}
-                  {source.ref && <span className="ml-1 font-mono text-faint">{source.ref}</span>}
+                  {source.ref && <span className="ml-1 font-mono text-muted-foreground/80">{source.ref}</span>}
                 </li>
               )
             })}
           </ul>
-        </details>
+          </CollapsibleContent>
+        </Collapsible>
       )}
-      <div id={detailsId} hidden={!open} className="mt-1.5 space-y-2" data-testid="agent-tool-details">
+      <CollapsibleContent forceMount hidden={!open} className="mt-1.5 space-y-2" data-testid="agent-tool-details">
         {open && (
           <>
-            <p className="font-mono text-[11px] text-faint">{call.name}</p>
+            <p className="font-mono text-[11px] text-muted-foreground">{call.name}</p>
             <JsonView label="Arguments" value={call.input} testId="agent-tool-arguments" />
             {result && <JsonView label="Result" value={result.summary} testId="agent-tool-result" />}
           </>
         )}
-      </div>
-    </div>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -193,7 +198,6 @@ export function ToolGroup({
   advanced: boolean
 }) {
   const [toggled, setToggled] = useState<boolean | undefined>(undefined)
-  const listId = useId()
   const status = groupStatus(statuses)
   const ids = new Set(calls.map((c) => c.id))
   const rows = calls.map((call, i) => (
@@ -213,38 +217,35 @@ export function ToolGroup({
   const last = calls.at(-1)!
   const images = calls.flatMap((c) => c.result?.images ?? [])
   return (
+    <Collapsible asChild open={open} onOpenChange={setToggled}>
     <section
-      className={many ? 'rounded-[6px] border border-line text-[12.5px]' : undefined}
+      className={many ? 'rounded-lg border border-border text-[12.5px]' : undefined}
       data-testid={many ? 'agent-tool-group' : undefined}
       aria-label={many ? `${calls.length} steps` : undefined}
     >
       {many && (
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 rounded-[6px] px-2.5 py-1.5 text-left hover:bg-surface-2"
-          aria-expanded={open}
-          aria-controls={listId}
-          onClick={() => setToggled(!open)}
-        >
-          <span aria-hidden="true" className="w-3 shrink-0 text-[10px] text-muted">
-            {open ? '▾' : '▸'}
-          </span>
+        <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left outline-none hover:bg-ui-muted focus-visible:ring-3 focus-visible:ring-ring/50">
+          <ChevronRightIcon
+            aria-hidden="true"
+            className={`size-3 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none ${open ? 'rotate-90' : ''}`}
+          />
           <StatusIcon status={status} />
           <span className="shrink-0 font-medium">{calls.length} steps</span>
-          <span className="min-w-0 flex-1 truncate text-muted">{toolTitle(last)}</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{toolTitle(last)}</span>
           <span className={`shrink-0 text-[11px] ${STATUS_STYLE[status]}`} data-testid="agent-tool-group-status">
             {toolStatusLabel(status)}
           </span>
-        </button>
+        </CollapsibleTrigger>
       )}
       {many && !open && images.length > 0 && (
         <div className="px-2.5 pb-1.5">
           <ToolImages images={images} sessionId={sessionId} title={toolTitle(last)} size="thumb" />
         </div>
       )}
-      <div id={listId} hidden={!open} className={many ? 'space-y-1.5 px-1.5 pb-1.5' : undefined}>
+      <CollapsibleContent forceMount hidden={!open} className={many ? 'space-y-1.5 px-1.5 pb-1.5' : undefined}>
         {open && rows}
-      </div>
+      </CollapsibleContent>
     </section>
+    </Collapsible>
   )
 }

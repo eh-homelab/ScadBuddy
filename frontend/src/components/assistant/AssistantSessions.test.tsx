@@ -38,13 +38,35 @@ const sentOf = <T extends ClientMessage['type']>(type: T) =>
   agent.sent.filter((m): m is Extract<ClientMessage, { type: T }> => m.type === type)
 
 const picker = () => screen.getByRole('navigation', { name: 'Sessions' })
+
+type User = Awaited<ReturnType<typeof openParent>>['user']
+
+/** #3673 — the row's actions menu (`Actions for <title>`), opened. */
+async function rowMenu(user: User, title: string | RegExp) {
+  await user.click(within(picker()).getByRole('button', { name: typeof title === 'string' ? `Actions for ${title}` : title }))
+  return screen.findByRole('menu')
+}
+
+/** Picks one of a row's actions from its menu. */
+async function rowAction(user: User, title: string, action: string) {
+  await user.click(within(await rowMenu(user, title)).getByRole('menuitem', { name: action }))
+}
+
+/** Whether a row's menu offers an action; the menu is closed again. */
+async function offers(user: User, title: string | RegExp, action: string | RegExp): Promise<boolean> {
+  const found = within(await rowMenu(user, title)).queryByRole('menuitem', { name: action }) !== null
+  await user.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+  return found
+}
 const activeTitle = () => screen.getByTestId('active-session-title')
 
 /** The panel open on the desktop agent's session, its reply shown. */
 async function openParent() {
   const view = renderShell()
   await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
-  await view.user.click(await screen.findByRole('button', { name: /^Sessions/ }))
+  // The panel is a lazy chunk: on a cold transform cache the first test waits past the default.
+  await view.user.click(await screen.findByRole('button', { name: /^Sessions/ }, { timeout: 10_000 }))
   await view.user.click(within(picker()).getByRole('button', { name: new RegExp(`^${PARENT}`) }))
   await screen.findByText(PARENT_REPLY)
   return view
@@ -141,7 +163,9 @@ describe('Fork (#794)', () => {
     await user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
     const fork = await screen.findByRole('button', { name: 'Fork' })
     expect(fork).toBeDisabled()
-    expect(fork).toHaveAttribute('title', expect.stringMatching(/no reply to fork yet/i))
+    // Its hint is on the wrapper a disabled button needs to be hovered or focused (#3673).
+    await user.hover(fork.parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/no reply to fork yet/i)
   })
 })
 
@@ -166,10 +190,9 @@ describe('the session switcher (#795)', () => {
     await user.click(screen.getByRole('button', { name: 'Fork' }))
     await waitFor(() => expect(activeTitle()).toHaveTextContent(`${PARENT} (fork)`))
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
-    expect(within(picker()).queryByRole('button', { name: `Rename ${PARENT}` })).toBeNull()
-    expect(within(picker()).queryByRole('button', { name: `Mark ${PARENT} done` })).toBeNull()
+    expect(within(picker()).queryByRole('button', { name: `Actions for ${PARENT}` })).toBeNull()
 
-    await user.click(within(picker()).getByRole('button', { name: `Rename ${PARENT} (fork)` }))
+    await rowAction(user, `${PARENT} (fork)`, `Rename ${PARENT} (fork)`)
     const title = within(picker()).getByRole('textbox', { name: 'Chat title' })
     expect(title).toHaveFocus()
     await user.clear(title)
@@ -178,10 +201,10 @@ describe('the session switcher (#795)', () => {
     expect(await within(picker()).findByRole('button', { name: /^Bin, taller/ })).toBeInTheDocument()
     expect(activeTitle()).toHaveTextContent('Bin, taller')
 
-    await user.click(within(picker()).getByRole('button', { name: 'Mark Bin, taller done' }))
+    await rowAction(user, 'Bin, taller', 'Mark Bin, taller done')
     expect(sessionWrites().at(-1)).toMatchObject({ method: 'PATCH', body: { done: true } })
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Done'))
-    expect(within(picker()).queryByRole('button', { name: 'Mark Bin, taller done' })).toBeNull()
+    expect(await offers(user, 'Bin, taller', 'Mark Bin, taller done')).toBe(false)
   })
 
   it('keeps a rename to edit when it is refused, and Escape leaves the title as it was', async () => {
@@ -189,7 +212,7 @@ describe('the session switcher (#795)', () => {
     await user.click(screen.getByRole('button', { name: 'Fork' }))
     await waitFor(() => expect(activeTitle()).toHaveTextContent(`${PARENT} (fork)`))
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
-    await user.click(within(picker()).getByRole('button', { name: `Rename ${PARENT} (fork)` }))
+    await rowAction(user, `${PARENT} (fork)`, `Rename ${PARENT} (fork)`)
     const title = within(picker()).getByRole('textbox', { name: 'Chat title' })
     await user.clear(title)
     await user.type(title, '   {Enter}')
@@ -228,16 +251,16 @@ describe('archive (#1885)', () => {
   it("archives the user's chat from the switcher: it leaves the list, and the Archived view lists it to unarchive", async () => {
     const { user } = await ownChat()
     // The agent's chat cannot be archived: it is not the user's.
-    expect(within(picker()).queryByRole('button', { name: `Archive ${PARENT}` })).toBeNull()
+    expect(within(picker()).queryByRole('button', { name: `Actions for ${PARENT}` })).toBeNull()
     expect(screen.getByRole('button', { name: 'Sessions (2)' })).toBeInTheDocument()
 
-    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    await rowAction(user, OWN, `Archive ${OWN}`)
     expect(sessionWrites().at(-1)).toEqual({ method: 'PATCH', path: expect.stringMatching(/^\/sessions\//), body: { archived: true } })
     await waitFor(() => expect(ownRow()).toBeNull())
     expect(screen.getByRole('button', { name: 'Sessions (1)' })).toBeInTheDocument()
 
-    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
-    expect(within(picker()).getByRole('button', { name: 'Archived' })).toHaveAttribute('aria-pressed', 'true')
+    await user.click(within(picker()).getByRole('tab', { name: 'Archived' }))
+    expect(within(picker()).getByRole('tab', { name: 'Archived' })).toHaveAttribute('aria-selected', 'true')
     const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
     expect(within(archived).getByText(OWN)).toBeInTheDocument()
     expect(within(archived).queryByText(PARENT)).toBeNull()
@@ -245,13 +268,13 @@ describe('archive (#1885)', () => {
     await user.click(within(archived).getByRole('button', { name: `Unarchive ${OWN}` }))
     expect(sessionWrites().at(-1)).toMatchObject({ method: 'PATCH', body: { archived: false } })
     expect(await within(picker()).findByText('No archived chats.')).toBeInTheDocument()
-    await user.click(within(picker()).getByRole('button', { name: 'Chats' }))
-    expect(within(picker()).getByRole('button', { name: `Archive ${OWN}` })).toBeInTheDocument()
+    await user.click(within(picker()).getByRole('tab', { name: 'Chats' }))
+    expect(await offers(user, OWN, `Archive ${OWN}`)).toBe(true)
   })
 
   it('opens an archived chat read-only: its transcript, the composer locked with a note, and Unarchive', async () => {
     const { user } = await ownChat()
-    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    await rowAction(user, OWN, `Archive ${OWN}`)
     // The open chat stays open, read-only.
     await waitFor(() => expect(composerBox()).toBeDisabled())
     expect(screen.getByText(/This chat is archived/)).toBeInTheDocument()
@@ -259,7 +282,7 @@ describe('archive (#1885)', () => {
     await user.click(screen.getByRole('button', { name: 'New chat' }))
     expect(composerBox()).toBeEnabled()
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
-    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    await user.click(within(picker()).getByRole('tab', { name: 'Archived' }))
     const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
     await user.click(within(archived).getByRole('button', { name: `Open ${OWN}` }))
     await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
@@ -279,9 +302,9 @@ describe('archive (#1885)', () => {
 
   it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
     const { user } = await ownChat()
-    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    await rowAction(user, OWN, `Archive ${OWN}`)
     await waitFor(() => expect(composerBox()).toBeDisabled())
-    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    await user.click(within(picker()).getByRole('tab', { name: 'Archived' }))
     const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
     expect(within(archived).getByText(OWN)).toBeInTheDocument()
 
@@ -297,7 +320,7 @@ describe('archive (#1885)', () => {
     await user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
     await screen.findByRole('button', { name: 'Stop' })
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
-    expect(within(picker()).queryByRole('button', { name: /^Archive / })).toBeNull()
+    expect(await offers(user, 'hello', /^Archive /)).toBe(false)
   })
 })
 
@@ -313,15 +336,16 @@ describe('handoff offers (#1284)', () => {
     // shows, and there is nothing for the user to cancel there.
     mockAgentSessions()!.offerChat(PARENT, { kind: 'bearer', id: 'token:t2', label: 'MCP token:t2' })
     expect(await within(picker()).findByText('Offered to MCP token t2')).toBeInTheDocument()
-    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${PARENT}` })).toBeNull()
+    expect(within(picker()).queryByRole('button', { name: `Actions for ${PARENT}` })).toBeNull()
 
     mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' })
     expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
 
-    await user.click(within(picker()).getByRole('button', { name: `Cancel the offer of ${OWN}` }))
+    await rowAction(user, OWN, `Cancel the offer of ${OWN}`)
     expect(sessionWrites().at(-1)).toEqual({ method: 'DELETE', path: expect.stringMatching(/^\/sessions\/.+\/handoff$/), body: {} })
     await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull())
-    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
+    // The mock's answer names no title; the user's row is the one with a menu.
+    expect(await offers(user, /^Actions for/, /^Cancel the offer of/)).toBe(false)
   })
   it('drops an offer once it lapses, with no new snapshot', async () => {
     const { user } = await openParent()
@@ -333,7 +357,7 @@ describe('handoff offers (#1284)', () => {
     expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
     // The agent sends nothing when the offer lapses; the row stops showing it anyway.
     await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull(), { timeout: 3000 })
-    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
+    expect(await offers(user, OWN, `Cancel the offer of ${OWN}`)).toBe(false)
   })
 })
 

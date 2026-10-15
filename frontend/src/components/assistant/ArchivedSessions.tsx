@@ -4,7 +4,10 @@ import { api, ApiError } from '../../api/client'
 import type { AiSessionView } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Tip } from './Tip'
 
 // #1885 — the switcher's Archived view: the archived chats, newest first, read over
 // HTTP (`GET /api/v1/ai/sessions?archived=true`), since the socket's snapshot leaves
@@ -31,20 +34,22 @@ export function ArchivedSessions({ onOpen, onUnarchive, unarchived }: Props) {
 
   if (archived.loading) {
     return (
-      <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
-        Loading archived chats…
-      </p>
+      <div role="status" className="flex flex-col gap-1.5 px-3 py-2">
+        <span className="sr-only">Loading archived chats…</span>
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+      </div>
     )
   }
   if (archived.error) {
     return (
-      <p role="alert" className="px-3 py-2 text-[12.5px] text-warn">
+      <p role="alert" className="px-3 py-2 text-xs text-warn">
         {archived.error instanceof ApiError ? archived.error.detail : 'The assistant service did not answer.'}
       </p>
     )
   }
   const sessions = (archived.data?.sessions ?? []).filter((s) => !gone.has(s.id) && !unarchived(s.id))
-  if (sessions.length === 0) return <p className="px-3 py-2 text-[12.5px] text-muted">No archived chats.</p>
+  if (sessions.length === 0) return <p className="px-3 py-2 text-xs text-muted-foreground">No archived chats.</p>
 
   const unarchive = async (session: AiSessionView) => {
     setErrors(({ [session.id]: _, ...rest }) => rest)
@@ -57,19 +62,20 @@ export function ArchivedSessions({ onOpen, onUnarchive, unarchived }: Props) {
   }
 
   return (
-    <ul aria-label="Archived chats" className="max-h-56 overflow-y-auto py-1">
+    <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-56">
+    <ul aria-label="Archived chats" className="flex flex-col gap-0.5 p-1.5">
       {sessions.map((s) => (
-        <li key={s.id} className="px-3 py-1.5">
+        <li key={s.id} className="rounded-md px-2.5 py-1.5 hover:bg-ui-muted">
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-            <span className="min-w-0 flex-1 basis-40 truncate text-[12.5px]" title={s.title}>
-              {s.title}
-            </span>
+            <Tip content={s.title}>
+              <span className="min-w-0 flex-1 basis-40 truncate text-[13px]">{s.title}</span>
+            </Tip>
             <span className="flex shrink-0 items-center gap-0.5">
               <Button variant="ghost" size="sm" aria-label={`Open ${s.title}`} onClick={() => onOpen(s)}>
                 Open
               </Button>
               <Button
-                variant="ghost"
+                variant="outline"
                 size="sm"
                 aria-label={`Unarchive ${s.title}`}
                 data-agent-user-only=""
@@ -80,21 +86,22 @@ export function ArchivedSessions({ onOpen, onUnarchive, unarchived }: Props) {
             </span>
           </div>
           <span className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] text-faint">{statusLabel(s.status)}</span>
-            {s.parent_id && <span className="text-[10.5px] text-faint">fork</span>}
+            <span className="text-[11px] text-muted-foreground">{statusLabel(s.status)}</span>
+            {s.parent_id && <span className="text-[10.5px] text-muted-foreground">fork</span>}
             {s.archived_at && (
-              <time dateTime={s.archived_at} className="text-[11px] text-faint">
+              <time dateTime={s.archived_at} className="text-[11px] text-muted-foreground">
                 archived {timeAgo(s.archived_at)}
               </time>
             )}
           </span>
           {errors[s.id] && (
-            <p role="alert" className="pt-1 text-[12px] text-warn">
+            <p role="alert" className="pt-1 text-xs text-warn">
               {errors[s.id]}
             </p>
           )}
         </li>
       ))}
     </ul>
+    </ScrollArea>
   )
 }
