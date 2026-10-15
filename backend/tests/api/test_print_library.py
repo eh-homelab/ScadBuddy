@@ -621,6 +621,23 @@ def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
 
 
 @respx.mock
+def test_a_sliced_files_checks_say_a_tower_choice_is_not_applied(client: TestClient) -> None:
+    """#3648 review: a sliced file queues as it is, so a prime tower chosen for it is
+    said not to apply rather than silently ignored."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+
+    request = {**SLICED_RUN, "prime_tower": {"enabled": False}}
+    check = client.post("/api/v1/print/library/104/check", json=request)
+
+    assert check.status_code == 200, check.text
+    [warning] = check.json()["warnings"]
+    assert warning["kind"] == "prime-tower-unconfirmed"
+    assert "already sliced" in warning["message"]
+
+
+@respx.mock
 def test_a_sliced_file_is_never_preview_sliced(client: TestClient) -> None:
     configure(client)
     sliced_file(104)

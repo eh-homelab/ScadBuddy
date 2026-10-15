@@ -25,7 +25,9 @@ from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.core.problems import ApiError
 
-#: The Bambu Studio process keys a prime tower choice sets.
+#: The Bambu Studio process keys a prime tower choice sets. ``frontend/src/lib/primeTower.ts``
+#: copies them (``PRIME_TOWER_KEYS``) to strike them in the template's slicer defaults;
+#: a key added here goes there too, and both tests pin the list.
 PRIME_TOWER_KEYS: tuple[str, ...] = ("enable_prime_tower", "wipe_tower_no_sparse_layers")
 
 
@@ -53,6 +55,22 @@ def template_keys_dropped(choice: PrimeTowerChoice | None) -> frozenset[str]:
     if choice is not None and not choice.enabled:
         return frozenset({"wipe_tower_no_sparse_layers"})
     return frozenset()
+
+
+def not_resliced(choice: PrimeTowerChoice | None) -> list[FilamentWarning]:
+    """A sliced 3MF queues as it is (#2671), so a tower choice for it is said not to
+    apply rather than silently ignored (#3648 review)."""
+    if choice is None:
+        return []
+    return [
+        FilamentWarning(
+            kind="prime-tower-unconfirmed",
+            message=(
+                "This file is already sliced, so it prints with the prime tower it was "
+                "sliced with: the tower chosen here is not applied."
+            ),
+        )
+    ]
 
 
 def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:

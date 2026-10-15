@@ -80,6 +80,7 @@ from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
@@ -688,7 +689,7 @@ async def check_print(
     if source.is_sliced:
         # Queued as it is, never refused (#2671): what to set right first is a warning,
         # and there is no nozzle plan, slots or rack side to judge before it.
-        return PrintCheck(warnings=prepared.warnings)
+        return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(client)
     nozzle_plan = (
         await plan_for(
@@ -1308,6 +1309,7 @@ async def plan_run(
     )
     # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
     tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
+    tower_dropped = template_keys_dropped(request.prime_tower)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1377,7 +1379,7 @@ async def plan_run(
                 **{
                     k: v
                     for k, v in source.print_settings.items()
-                    if k not in SUPPORT_KEYS and k not in template_keys_dropped(request.prime_tower)
+                    if k not in SUPPORT_KEYS and k not in tower_dropped
                 },
                 **supports,
                 **prime_tower_overrides(request.prime_tower),
@@ -1554,7 +1556,8 @@ async def _plan_sliced(
         warnings=prepared.warnings
         + _filament_warnings(
             [(options, []) for options in per_plate], request.filament_plan, copies
-        ),
+        )
+        + not_resliced(request.prime_tower),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
     )

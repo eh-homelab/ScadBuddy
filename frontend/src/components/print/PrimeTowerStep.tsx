@@ -70,9 +70,10 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
           <option value="on">On</option>
           <option value="off">Off</option>
         </select>
-        {colours !== null && colours <= 1 && (
+        {/* Only under Default, so it never reads as contradicting an explicit On (#3648 review). */}
+        {colours !== null && colours <= 1 && mode === 'default' && (
           <p className="text-[12px] text-muted">
-            This plate prints one filament, so the slicer leaves the tower out either way.
+            This plate prints one filament, so the slicer leaves the tower out.
           </p>
         )}
         {mode === 'off' && colours !== null && colours > 1 && (
