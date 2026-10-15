@@ -6,6 +6,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { AuditLog } from '../audit/log.js'
+import { CALL_ID_META } from '../builtins/callId.js'
 import type { Tier } from '../auth/principal.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { GUARD_DEADLINE_MS, type GuardVerdict, judgeInput, type RiskTier, tierAfter, within as withinMs } from '../harness/permissions.js'
@@ -127,6 +128,12 @@ export type TurnServer = {
    * `TurnToolsDeps.clients`, its calls are pinned to the replica that holds the client.
    */
   keep?: { fingerprint: string; connect(): Promise<KeptConnection> }
+  /**
+   * Whether each call carries its tool_use id in `_meta` (CALL_ID_META), so a call its
+   * activity retries after a lost answer is known for the same call (#3201). Only a
+   * server of our own: a remote one is never told it.
+   */
+  callIds?: boolean
 }
 
 export type TurnServers = {
@@ -629,10 +636,11 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>
       let reset: string | undefined
+      const meta = server.callIds ? { _meta: { [CALL_ID_META]: toolUseId } } : {}
       // The activity's own limit, not the MCP client's 60 s default: a WebFetch alone may take that long (#3199).
       const timeout = context.info.startToCloseTimeoutMs
       const callTool = (client: Client) =>
-        client.callTool({ name: tool.name, arguments: fields }, undefined, { signal, ...(timeout > 0 ? { timeout } : {}) })
+        client.callTool({ name: tool.name, arguments: fields, ...meta }, undefined, { signal, ...(timeout > 0 ? { timeout } : {}) })
       const target = keptTarget(deps, caller.context, server)
       try {
         if (target && keptClient) {

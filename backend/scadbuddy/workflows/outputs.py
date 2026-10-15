@@ -244,17 +244,20 @@ def _stated_materials(req: OutputRequest) -> tuple[dict[str, str], set[str]]:
         if materials.setdefault(colour.upper(), material) != material:
             conflicting.add(colour.upper())
 
-    for obj in req.provenance.values():
-        for colour, material in obj.materials.items():
-            state(colour, material)
-    # A recoloured copy's new colour is the same material as the one it replaces (#3637).
-    for plate in req.layout.plates:
-        for placed in plate.items:
-            source = req.provenance.get(placed.piece_key)
-            stated = {c.upper(): m for c, m in source.materials.items()} if source else {}
-            for old, new in placed.recolour.items():
-                if old.upper() in stated:
-                    state(new, stated[old.upper()])
+    # Each copy states the colours it prints in: a recoloured copy's new colour is the
+    # material of the one it replaces, and a colour it swapped away is not stated (#3637).
+    placed = [p for plate in req.layout.plates for p in plate.items]
+    for copy in placed:
+        source = req.provenance.get(copy.piece_key)
+        swap = {k.upper(): v.upper() for k, v in copy.recolour.items()}
+        for colour, material in (source.materials if source else {}).items():
+            state(swap.get(colour.upper(), colour.upper()), material)
+    # A source no copy places still states its own (a layout read without its plates).
+    shown = {copy.piece_key for copy in placed}
+    for key, obj in req.provenance.items():
+        if key not in shown:
+            for colour, material in obj.materials.items():
+                state(colour, material)
     return {c: m for c, m in materials.items() if c not in conflicting}, conflicting
 
 

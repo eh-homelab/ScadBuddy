@@ -333,6 +333,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
           tierOf: () => 'outward',
           mayPark: () => true,
+          callIds: true,
         })
         notes.push(builtinNote(named))
       }

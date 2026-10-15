@@ -13,7 +13,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
-import { carries } from '../harness/fallback.js'
+import { RESTORED_EPSILON } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
 import type { PostgresSessionStore } from './store.js'
@@ -71,7 +71,10 @@ export type WarmEntry = {
   readonly fingerprint: string
   /** `maxBudgetUsd` at spawn: Claude Code counts it against the spend since its query started (E5, §2.2). */
   readonly capUsd: number
-  /** The process's `total_cost_usd` before its first turn: what the transcript carried in, or 0. */
+  /**
+   * The process's `total_cost_usd` before its first turn: what Claude Code
+   * restored from the transcript it loaded (`restoredCostUsd`), or 0.
+   */
   costAtSpawnUsd: number
   /** The `total_cost_usd` of the last settled turn: cumulative for the process (§2.2). */
   lastTotalUsd: number
@@ -138,8 +141,21 @@ class MirroredTranscript {
   readonly own = new Set<string>()
   /** Every append so far, in order; never rejects. */
   pending: Promise<void> = Promise.resolve()
+  /**
+   * What Claude Code restores from the main transcript the SDK loaded through
+   * this mirror for the resume (`restoredCostUsd`), told to `onLoaded` for the
+   * first such load only: the SDK loads it before Claude Code starts, so
+   * before the first result.
+   */
+  onLoaded: (restoredUsd: number) => void = () => {}
+  private loaded = false
 
-  constructor(inner: SessionStore, since: string | null) {
+  constructor(
+    inner: SessionStore,
+    sessionId: string,
+    since: string | null,
+    log: (message: string) => void,
+  ) {
     this.since = since
     const append = (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
       if ((key.subpath ?? '') === '') {
@@ -155,7 +171,14 @@ class MirroredTranscript {
     }
     this.store = {
       append,
-      load: (key) => inner.load(key),
+      load: async (key) => {
+        const entries = await inner.load(key)
+        if (!this.loaded && (key.subpath ?? '') === '' && key.sessionId === sessionId) {
+          this.loaded = true
+          this.onLoaded(restoredCostUsd(entries ?? [], sessionId, log))
+        }
+        return entries
+      },
       ...(inner.listSessions ? { listSessions: inner.listSessions.bind(inner) } : {}),
       ...(inner.listSessionSummaries ? { listSessionSummaries: inner.listSessionSummaries.bind(inner) } : {}),
       ...(inner.delete ? { delete: inner.delete.bind(inner) } : {}),
@@ -171,8 +194,6 @@ type Slot = {
   /** The pool candidate it was spawned on, when the turn's candidates held it: what a resync looks for again. */
   candidate: { id: string; epoch: number } | undefined
   mirror: MirroredTranscript | undefined
-  /** What the transcript's last `cost-state` held at spawn: what a resume restores (manager.ts `finish`). */
-  carriedUsd: number
   settled: boolean
   /** From `acquire` (its checks included) to `settle` or `abandon`: never evicted for idleness or the cap. */
   busy: boolean
@@ -244,9 +265,14 @@ export class WarmSessions {
     const slot = this.slots.get(entry.sessionId)
     if (!slot || slot.entry !== entry) return
     if (!slot.settled) {
-      // A resumed process's total starts from the transcript's `cost-state`
-      // (§2.2), unless the restore did not happen (fallback.ts `carries`).
-      entry.costAtSpawnUsd = carries(result.total_cost_usd, slot.carriedUsd) ? slot.carriedUsd : 0
+      // A resumed process's total starts from what it restored (§2.2,
+      // `costAtSpawnUsd`); one below that says it restored less (`turnCostUsd`).
+      if (!restoredAll(entry, result)) {
+        this.log(
+          `warm: session ${entry.sessionId}'s resumed total (${result.total_cost_usd}) is below the cost-state it loaded (${entry.costAtSpawnUsd}); counting from 0`,
+        )
+        entry.costAtSpawnUsd = 0
+      }
       slot.settled = true
     }
     entry.lastTotalUsd = result.total_cost_usd
@@ -458,18 +484,20 @@ export class WarmSessions {
   }
 
   private async spawn(sessionId: string, turn: AssembledTurn, credential: Credential, remainingUsd: number, print: string): Promise<WarmEntry> {
-    // The tail the process resumes from, whether there is a transcript to
-    // resume at all, and the cost a resume restores (its last `cost-state`).
+    // The tail the process resumes from, and whether there is a transcript to
+    // resume at all. With a mirror, the cost a resume restores is read from
+    // what the process loads through it (`onLoaded`); without one, from the
+    // table's last `cost-state`.
     const [row] = await this.deps.sql<{ since: string | null; resume: boolean }[]>`
       SELECT
         (SELECT max(id) FROM ai_session_entries
           WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL)::text AS since,
         EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume`
-    const costState = row?.resume ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
-    const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const mirror = turn.run.sessionStore
-      ? new MirroredTranscript(turn.run.sessionStore, row?.since ?? null)
+      ? new MirroredTranscript(turn.run.sessionStore, sessionId, row?.since ?? null, this.log)
       : undefined
+    const costState = row?.resume && !mirror ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
+    const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
     const query = this.start({
@@ -492,6 +520,12 @@ export class WarmSessions {
       lastTotalUsd: carriedUsd,
       lastUsedAt: this.now(),
     }
+    if (mirror) {
+      mirror.onLoaded = (restoredUsd) => {
+        entry.costAtSpawnUsd = restoredUsd
+        entry.lastTotalUsd = restoredUsd
+      }
+    }
     const hash = credentialHash(credential)
     const on = turn.candidates.find((c) => credentialHash(c.credential) === hash)
     this.slots.set(sessionId, {
@@ -499,7 +533,6 @@ export class WarmSessions {
       credential: hash,
       candidate: on ? { id: on.id, epoch: on.epoch } : undefined,
       mirror,
-      carriedUsd,
       settled: false,
       busy: true,
       closed: false,
@@ -635,16 +668,93 @@ export class WarmSessions {
 }
 
 /**
+ * Whether `result`'s total holds what its process stood at before the turn.
+ * It always does once the process has a result (the total only grows); for
+ * the first result of a resumed process the baseline is what Claude Code
+ * restored, as `restoredCostUsd` reads the transcript it loaded, and a total
+ * below it says it restored less than that rule says.
+ */
+const restoredAll = (entry: WarmEntry, result: SDKResultMessage) => result.total_cost_usd >= entry.lastTotalUsd - RESTORED_EPSILON
+
+/**
  * What a turn that ended with `result` cost on `entry`'s process: the
  * process's total less what it stood at before the turn (`total_cost_usd` is
  * cumulative per process, §2.2), taken before `settle` moves it. For the
- * first result of a resumed process the baseline is the transcript's carried
- * cost, unless the restore did not happen (`carries`, as `settle` judges it):
- * then the total is the turn's own.
+ * first result of a resumed process that is what it restored
+ * (`costAtSpawnUsd`); a total below it is the turn's own (`settle` logs it).
+ * The total alone never decides whether the restore happened (#3695): a turn
+ * that cost at least what the transcript carried reads the same either way.
  */
 export function turnCostUsd(entry: WarmEntry, result: SDKResultMessage): number {
-  const before = entry.lastTotalUsd
-  return carries(result.total_cost_usd, before) ? Math.max(result.total_cost_usd - before, 0) : result.total_cost_usd
+  return restoredAll(entry, result) ? Math.max(result.total_cost_usd - entry.lastTotalUsd, 0) : result.total_cost_usd
+}
+
+/** USD, tokens and durations: what Claude Code's `cost-state` schema bounds every number to (and totalCostUSD to 1e9). */
+const COST_STATE_MAX = 1e15
+const COST_STATE_MAX_USD = 1e9
+const COST_STATE_NUMBERS = [
+  'totalAPIDuration',
+  'totalAPIDurationWithoutRetries',
+  'totalToolDuration',
+  'totalLinesAdded',
+  'totalLinesRemoved',
+  'totalDuration',
+  'startTime',
+] as const
+const MODEL_USAGE_NUMBERS = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'webSearchRequests', 'costUSD'] as const
+const MODEL_USAGE_TOKENS = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'] as const
+const MODEL_NAME_RE = /^[^\p{Cc}\p{Cf}]+$/u
+
+const bounded = (value: unknown, max = COST_STATE_MAX): boolean =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max
+
+/**
+ * Whether Claude Code would restore `entry` on a resume of `sessionId`: a
+ * `cost-state` of that session that its schema accepts. The schema as Claude
+ * Code 2.1.296 has it (every number non-negative, finite and at most 1e15,
+ * totalCostUSD at most 1e9; `thinkingTokens` and `hasUnknownModelCost`
+ * optional; other keys ignored); test/warmResumeCost.sdk.test.ts measures each
+ * way it refuses one against the bundled binary.
+ */
+function restorable(entry: unknown, sessionId: string): entry is { totalCostUSD: number } {
+  if (typeof entry !== 'object' || entry === null) return false
+  const e = entry as Record<string, unknown>
+  if (e.type !== 'cost-state' || e.sessionId !== sessionId || !bounded(e.totalCostUSD, COST_STATE_MAX_USD)) return false
+  if (!COST_STATE_NUMBERS.every((key) => bounded(e[key]))) return false
+  if (e.hasUnknownModelCost !== undefined && typeof e.hasUnknownModelCost !== 'boolean') return false
+  const usage = e.modelUsage
+  if (typeof usage !== 'object' || usage === null || Array.isArray(usage)) return false
+  const models = Object.entries(usage as Record<string, unknown>)
+  for (const [name, model] of models) {
+    if (!MODEL_NAME_RE.test(name) || typeof model !== 'object' || model === null) return false
+    const m = model as Record<string, unknown>
+    if (!MODEL_USAGE_NUMBERS.every((key) => bounded(m[key]))) return false
+    if (m.thinkingTokens !== undefined && !bounded(m.thinkingTokens)) return false
+  }
+  return MODEL_USAGE_TOKENS.every((key) => models.reduce((sum, [, m]) => sum + ((m as Record<string, number>)[key] ?? 0), 0) <= COST_STATE_MAX)
+}
+
+/**
+ * What a resume of `sessionId` restores from the main transcript `entries`
+ * the SDK hands Claude Code: the totalCostUSD of the last `cost-state` it
+ * would restore (`restorable`), or 0. Measured on Claude Code 2.1.296
+ * (test/warmResumeCost.sdk.test.ts): it passes over a `cost-state` of another
+ * session and one its schema refuses, and restores the last one it accepts.
+ * One passed over is said in `log`.
+ */
+export function restoredCostUsd(entries: readonly unknown[], sessionId: string, log: (message: string) => void): number {
+  let skipped = 0
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
+    if (typeof entry !== 'object' || entry === null || (entry as { type?: unknown }).type !== 'cost-state') continue
+    if (restorable(entry, sessionId)) {
+      if (skipped > 0) log(`warm: session ${sessionId}: ${skipped} later cost-state entries are not ones Claude Code restores; counting from an earlier one`)
+      return entry.totalCostUSD
+    }
+    skipped++
+  }
+  if (skipped > 0) log(`warm: session ${sessionId}: no cost-state entry is one Claude Code restores; counting from 0`)
+  return 0
 }
 
 /**

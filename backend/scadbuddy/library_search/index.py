@@ -73,7 +73,9 @@ class LibraryIndex:
         self._queued: dict[str, asyncio.Task[LibrarySnapshot]] = {}
         #: The source of the read started last: a read of another, landing late, is not
         #: kept. Set when a read starts, not on every request, so a request holding the
-        #: settings from before a change does not turn it back without reading.
+        #: settings from before a change does not turn it back without reading. A request
+        #: that finds the old source stale still starts its refresh, and so turns it back:
+        #: the new source's read in flight is then not kept, costing one more read later.
         self._latest: str | None = None
 
     async def snapshot(
@@ -139,7 +141,8 @@ class LibraryIndex:
                 del self._queued[source]
         reading = self._reading.get(source)
         if reading is not None and reading[0] >= queued_at:
-            # Shielded: cancelling this task must not cancel a read others wait on.
+            # Shielded, defensively: nothing cancels this task but close(), which cancels
+            # the joined read too; a future cancel must not reach a read others wait on.
             return await asyncio.shield(reading[1])
         return await self._start(source, connect)
 
