@@ -555,7 +555,8 @@ const turnToolDeps = temporal
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
-                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    credentials: new CredentialPool({ repo: credentials, kek, audit }),
+                    ...(context.flow ? {} : { sessionId: context.session }),
                     // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
                     ...(context.flow
                       ? {}
