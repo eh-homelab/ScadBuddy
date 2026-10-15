@@ -24,3 +24,9 @@ export function utf8Length(text: string): number {
   }
   return bytes
 }
+
+/** At most `limit` code points of `text`, as Python slices (`text[:limit]`): a pair is never split. */
+export function cut(text: string, limit: number): string {
+  const points = [...text]
+  return points.length <= limit ? text : points.slice(0, limit).join('')
+}

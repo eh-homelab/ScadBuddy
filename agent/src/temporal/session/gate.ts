@@ -13,6 +13,8 @@ import {
 import type { Duration } from '@temporalio/common'
 import { ASK_USER, buildEntry, DEFAULT_TIMEOUT_S, MalformedAnswerInputError } from '../../gate/entry.js'
 import { durableRequestId } from '../../gate/ids.js'
+import { cut } from '../../gate/limits.js'
+import { refusal } from '../../gate/refusal.js'
 import { CANCEL_INPUT_UPDATE, GATE_REFUSED, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../../gate/names.js'
 import type { DenyInput, GrantInput, OpenInput, ResolveInput, Responder } from '../../gate/store.js'
 import { type GateEntry, type RefusalCode, RespondRefusal, type RespondRequest, type Role, validateRespond } from '../../gate/validate.js'
@@ -133,21 +135,10 @@ function ignoreCancellation(err: unknown): void {
 
 const iso = (at: number): string => new Date(at).toISOString()
 
+export { refusal }
+
 export function refused(code: RefusalCode, message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, `${GATE_REFUSED}:${code}`)
-}
-
-/** What the model is told when its call was not approved, in the words a classic turn uses (approvals/service.ts `refusal`). */
-export function refusal(tool: string, requestId: string, outcome: string, reason?: string | null): string {
-  const what = `${tool} (approval ${requestId})`
-  if (outcome === 'denied') return `The user denied ${what}; it was not run. Do not retry it unless the user asks you to.`
-  if (outcome === 'flow_denied') {
-    return `The flow that sent this turn refused ${what}: it is outside what the run may do (${reason || 'no reason given'}), so it was not run. Do not retry it.`
-  }
-  if (outcome === 'expired') return `Nobody decided on ${what} before it expired, so it was not run. Tell the user it needs their approval.`
-  if (outcome === 'cancelled') return `The approval for ${what} was cancelled (${reason || 'no reason given'}), so it was not run.`
-  if (outcome === 'withdrawn') return `The approval for ${what} was withdrawn before it ran (${reason || 'no reason given'}), so it was not run.`
-  return `${what} was not approved, so it was not run.`
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -211,7 +202,7 @@ export class SessionGate {
   install(): void {
     setHandler(respondUpdate, (args) => this.#respond(args), { validator: (args) => this.#validateRespond(args) })
     setHandler(cancelInputUpdate, async (args) => {
-      const reason = String(args?.reason || 'cancelled').slice(0, 200)
+      const reason = cut(String(args?.reason || 'cancelled'), 200)
       return (await this.cancelAll(reason, true)) > 0 ? 'cancelled' : 'none'
     })
     setHandler(pendingInputQuery, () => this.pending())
@@ -266,7 +257,8 @@ export class SessionGate {
     }
     if (this.#opts.turnTools?.().has(call.name) && !(await this.#outward(call))) {
       // A read or write call goes straight through, as the permission seam lets it; its activity checks the tier again.
-      return settled(true, 'scadbuddy', { kind, outcome: 'approved' } as Resolution)
+      // A turn tool is never an answer tool (kindOf names only ask_user and wait_for_user), so this is an approval.
+      return settled(true, 'scadbuddy', { kind: 'approval', outcome: 'approved' })
     }
     let summary = ''
     let inputHash: string | null = null
@@ -404,7 +396,7 @@ export class SessionGate {
     } catch (err) {
       parked.openFailed = true
       this.#parked.delete(rid)
-      slot.resolve({ kind, outcome: 'cancelled' } as Resolution)
+      slot.resolve({ kind, outcome: 'cancelled' } satisfies Resolution)
       throw err
     }
     parked.opened = true
