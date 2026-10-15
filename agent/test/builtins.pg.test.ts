@@ -218,6 +218,14 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
       expect(hits).toEqual(['/shared', '/shared'])
     })
 
+    it('refuses a cached page whose URL has since become a known secret, as a fetch of it would be', async () => {
+      const url = `http://pages.test:${port}/?k=tok-later-secret`
+      expect((await webFetch(web('session-s'), { url, prompt: 'p' })).isError).toBeUndefined()
+      const refused = await webFetch({ ...web('session-s'), secrets: () => ['tok-later-secret'] }, { url, prompt: 'p' })
+      expect(refused).toMatchObject({ isError: true, text: expect.stringContaining('credential') })
+      expect(hits).toHaveLength(1)
+    })
+
     it(`keeps at most ${CACHE_PAGES} pages, dropping the oldest`, async () => {
       const ctx = web('session-c')
       for (let i = 0; i <= CACHE_PAGES; i++) await webFetch(ctx, { url: `http://pages.test:${port}/${i}`, prompt: 'p' })

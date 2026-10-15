@@ -68,10 +68,12 @@ const error = (text: string): BuiltinResult => ({ text, isError: true })
 async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; finalUrl: string } | BuiltinResult> {
   for (const [key, value] of cache) if (Date.now() - value.at >= CACHE_MS) cache.delete(key)
   const key = `${ctx.sessionId ?? `${ctx.actor.kind}:${ctx.actor.id}`}\n${url.href}`
-  const hit = cache.get(key)
-  if (hit) return hit
+  // Before the cache: a URL that has since become a known secret is refused on a hit too. The
+  // egress check is not repeated on a hit: it connects nowhere, and the cache is this session's (#3199).
   const problem = requestProblem({ method: 'GET', url: url.href, timeout_ms: FETCH_TIMEOUT_MS }, ctx.secrets())
   if (problem) return error(problem)
+  const hit = cache.get(key)
+  if (hit) return hit
   const outcome = await exchange(
     {
       method: 'GET',
