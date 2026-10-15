@@ -42,7 +42,7 @@ _ACTIVITY = timedelta(seconds=8)
 
 
 class RunFlow(BaseModel):
-    """A flow script to run once, with its inputs (#2483). Both are in the run's history
+    """A flow script to run once, with its inputs (#2483). They are in the run's history
     (sealed, as every payload of the run is), so a Reset replays the same values."""
 
     script: str
@@ -50,6 +50,9 @@ class RunFlow(BaseModel):
     inputs_schema: dict[str, Any] | None = None
     #: The run's inputs, checked against the schema and its defaults filled in.
     inputs: dict[str, Any] | None = None
+    #: The event a trigger fired this run on, as the fire recorded it (#2666): what
+    #: `trigger()` returns. Data only; None for a run started by hand or on a schedule.
+    event: dict[str, Any] | None = None
 
 
 class FlowStart(BaseModel):
@@ -64,6 +67,12 @@ class FlowStart(BaseModel):
     approval_timeout_s: int = 0
     #: Where the agent serves the tools `tool(...)` calls.
     tools_queue: str = "agent-tools"
+    #: Seconds a turn tool's call waits for a worker on one agent replica's own queue
+    #: before it fails as that replica gone (#2937). Tests shorten it.
+    host_queue_start_s: int = 60
+    #: The same wait for a call a person already approved: longer, since failing it asks
+    #: them to approve it again (#3420). Tests shorten it.
+    approved_queue_start_s: int = 600
     #: The agent's tools and their tiers as the agent resolved them when the run started
     #: (#2704, `flows/agent_tools.py`); each call asks the agent again, whose answer only
     #: raises them. A run from before #2704 took them from a file and asks nothing.
@@ -108,6 +117,14 @@ class ProjectWorkflow:
     def tools_queue(self) -> str:
         return self._start.tools_queue
 
+    @property
+    def host_queue_start_s(self) -> int:
+        return self._start.host_queue_start_s
+
+    @property
+    def approved_queue_start_s(self) -> int:
+        return self._start.approved_queue_start_s
+
     def tool_tier(self, name: str) -> str | None:
         return self._start.tool_tiers.get(name)
 
@@ -127,8 +144,10 @@ class ProjectWorkflow:
                 "this run has a script already", type="AlreadyExecuted", non_retryable=True
             )
         self._executed = True
-        if message.inputs_schema is not None:
-            self._flow = run_flow_tool(self._runner, message.inputs_schema, message.inputs)
+        if message.inputs_schema is not None or message.event is not None:
+            self._flow = run_flow_tool(
+                self._runner, message.inputs_schema, message.inputs, message.event
+            )
         info = workflow.info()
         start = self._start
         await workflow.execute_activity(

@@ -8,7 +8,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Textarea } from '@/components/ui/textarea'
+import { type BrowserNavigation, browserNavigation } from '../../agent/chat/browserApproval'
 import { Markdown } from '../../agent/chat/Markdown'
+import { api, ApiError } from '../../api/client'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
 import { formatBytes } from '../../lib/format'
@@ -115,14 +117,97 @@ function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
   )
 }
 
+/**
+ * #982 — the buttons of a headless-browser navigation's approval: once (the approval
+ * alone), for this chat (the origin approved for the session first), or always (the
+ * origin added to the allow list first). Each write is the user's own, through the
+ * agent's routes; the approval follows only once it landed.
+ */
+function BrowserApprovalButtons({
+  nav,
+  sessionId,
+  onDecide,
+}: {
+  nav: BrowserNavigation
+  sessionId: string
+  onDecide: (approve: boolean) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // What was saved before the approval was sent: it stays saved even if the approval
+  // then fails (a request already resolved), so the card says so (review of #3654).
+  const [saved, setSaved] = useState<string | null>(null)
+  const host = new URL(nav.origin).host
+  // The rule "Always allow" saves: a bare host means https on its default port, so any other origin is shown whole.
+  const rule = nav.origin === `https://${host}` ? host : nav.origin
+  async function remember(write: () => Promise<unknown>, done: string) {
+    setBusy(true)
+    setError(null)
+    try {
+      await write()
+      setSaved(done)
+      onDecide(true)
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.detail : 'Could not save that choice')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      <div className="mt-0.5 flex flex-wrap gap-2">
+        {/* Human-only: the browser bridge (#254) must never let an agent press these. */}
+        <Button size="sm" data-agent-user-only="" disabled={busy} onClick={() => onDecide(true)}>
+          Allow once
+        </Button>
+        {sessionId && (
+          <Button
+            size="sm"
+            data-agent-user-only=""
+            disabled={busy}
+            onClick={() => void remember(() => api.approveBrowserOrigin(sessionId, nav.origin), `Saved: ${nav.origin} is allowed for this chat.`)}
+          >
+            Allow for this chat
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          data-agent-user-only=""
+          disabled={busy}
+          onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${nav.origin} is on the allow list (Settings → Assistant).`)}
+        >
+          Always allow {rule}
+        </Button>
+        <Button variant="destructive" size="sm" data-agent-user-only="" disabled={busy} onClick={() => onDecide(false)}>
+          Deny
+        </Button>
+      </div>
+      {saved && (
+        <p role="status" className="text-[12px] text-muted-foreground">
+          {saved}
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-[12px] text-destructive">
+          {error}
+        </p>
+      )}
+    </>
+  )
+}
+
 function ApprovalCard({
   item,
   onDecide,
+  sessionId = '',
 }: {
   item: Approval
   onDecide: (approve: boolean) => void
+  sessionId?: string
 }) {
   const headingId = `approval-${item.id}`
+  const nav = browserNavigation(item.summary)
   return (
     <Card
       size="sm"
@@ -137,8 +222,17 @@ function ApprovalCard({
           Needs your approval
         </h3>
       </div>
-      <p>{item.summary}</p>
-      {item.state === 'pending' ? (
+      {nav ? (
+        <p>
+          Open <span className="break-all font-mono text-[12px]">{nav.url}</span> in the assistant&rsquo;s browser? This
+          site is not on its allow list.
+        </p>
+      ) : (
+        <p>{item.summary}</p>
+      )}
+      {item.state === 'pending' && nav ? (
+        <BrowserApprovalButtons nav={nav} sessionId={sessionId} onDecide={onDecide} />
+      ) : item.state === 'pending' ? (
         <div className="mt-0.5 flex gap-2">
           {/* Human-only: the browser bridge (#254) must never let an agent press these. */}
           <Button size="sm" data-agent-user-only="" onClick={() => onDecide(true)}>
@@ -536,7 +630,7 @@ export function FeedItemView({
         />
       )
     case 'approval':
-      return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
+      return <ApprovalCard item={item} sessionId={sessionId} onDecide={(approve) => onDecide(item.id, approve)} />
     case 'question':
       return isDone(item.attention) ? (
         <DoneCard item={item} summary={item.attention.summary} onAnswer={(answers) => onAnswer(item.id, answers)} />
