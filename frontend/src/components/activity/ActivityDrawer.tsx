@@ -1,4 +1,4 @@
-import { useContext, useLayoutEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useState } from 'react'
 import { ChevronRightIcon } from 'lucide-react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
@@ -7,7 +7,7 @@ import { formatDuration, timeAgo } from '../../lib/format'
 import { useAdvanced } from '../../lib/advanced'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { temporalWorkflowUrl } from '../../lib/temporal'
-import { ModalCompanionContext } from '../../lib/modal'
+import { ModalCompanionContext, roomFor } from '../../lib/modal'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -21,8 +21,6 @@ import { StatusBadge } from './StatusBadge'
 
 const ADVANCED_KEY = 'scadbuddy.activity.advanced'
 const LINK = 'font-medium text-primary underline-offset-4 hover:underline'
-/** The narrowest the drawer's side of the page gets beside a companion; narrower, it covers it. */
-const MIN_BESIDE = 360
 
 /**
  * #798 — the room to keep at the right edge for the assistant panel (the modal
@@ -31,14 +29,12 @@ const MIN_BESIDE = 360
  */
 function useCompanionRoom(): { companion: HTMLElement | null; room: number | null } {
   const companion = useContext(ModalCompanionContext)
-  const [room, setRoom] = useState<number | null>(null)
+  // Measured as the drawer first renders, so on a phone it mounts modal rather than
+  // mounting beside and then remounting modal (Radix remounts the content when `modal` flips).
+  const [room, setRoom] = useState<number | null>(() => (companion ? roomFor(companion) : null))
   useLayoutEffect(() => {
     if (!companion) return
-    const measure = () => {
-      const { left, width } = companion.getBoundingClientRect()
-      // Not laid out (jsdom): it counts as beside, with nothing to reserve.
-      setRoom(width === 0 ? null : left >= MIN_BESIDE ? window.innerWidth - left : 0)
-    }
+    const measure = () => setRoom(roomFor(companion))
     measure()
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
     observer?.observe(companion)
@@ -110,10 +106,17 @@ function ActivityLinkItem({ link }: { link: ActivityDetail['links'][number] }) {
   return <a href={href} target="_blank" rel="noreferrer" className={cls}>{link.label}</a>
 }
 
+/** Which JSON blocks are closed, kept above the sheet: its content remounts when `modal` flips. */
+const JsonClosed = createContext<{ closed: Set<string>; toggle: (label: string, open: boolean) => void }>({
+  closed: new Set(),
+  toggle: () => {},
+})
+
 function Json({ label, value }: { label: string; value: unknown }) {
+  const { closed, toggle } = useContext(JsonClosed)
   if (value === undefined) return null
   return (
-    <Collapsible defaultOpen asChild>
+    <Collapsible open={!closed.has(label)} onOpenChange={(open) => toggle(label, open)} asChild>
       <section>
         <CollapsibleTrigger className="group/json mb-1 flex items-center gap-1 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
           <ChevronRightIcon aria-hidden="true" className="size-3.5 transition-transform group-data-[state=open]/json:rotate-90" />
@@ -161,172 +164,183 @@ export function ActivityDrawer({ id, onClose }: Props) {
   const [opener] = useState(() => document.activeElement)
   // Beside the assistant panel the drawer is not modal (#798): the panel stays usable.
   const beside = companion !== null && room !== 0
+  const [closed, setClosed] = useState<Set<string>>(() => new Set())
+  const toggleJson = useCallback((label: string, open: boolean) => {
+    setClosed((current) => {
+      const next = new Set(current)
+      if (open) next.delete(label)
+      else next.add(label)
+      return next
+    })
+  }, [])
+  const jsonClosed = useMemo(() => ({ closed, toggle: toggleJson }), [closed, toggleJson])
 
   return (
-    <Sheet
-      open
-      modal={!beside}
-      onOpenChange={(next) => {
-        if (!next) onClose()
-      }}
-    >
-      <SheetContent
-        side="right"
-        // Closed from the footer: the corner is where the shell raises its Assistant
-        // button above an open dialog (#1897).
-        showCloseButton={false}
-        aria-describedby={undefined}
-        // Modal to the shell (AppShell's assistant toggle reads aria-modal) unless the
-        // companion beside it is usable too (#798); Radix itself sets no aria-modal.
-        {...(beside ? {} : { 'aria-modal': 'true' as const })}
-        // Still modal to the agent bridge (agent/dom activeDialog) either way.
-        data-modal=""
-        style={beside && room ? { right: room } : undefined}
-        onInteractOutside={(event) => {
-          // The assistant, and the shell's button that opens it beside the drawer (#1897).
-          const target = event.target as Element
-          if (companion?.contains(target) || target.closest?.('[data-modal-companion-toggle]')) event.preventDefault()
+    <JsonClosed.Provider value={jsonClosed}>
+      <Sheet
+        open
+        modal={!beside}
+        onOpenChange={(next) => {
+          if (!next) onClose()
         }}
-        onOpenAutoFocus={(event) => {
-          // Left in the assistant beside it: the drawer may open while the user types there.
-          if (beside && companion.contains(document.activeElement)) event.preventDefault()
-        }}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault()
-          // Only focus that fell to <body> comes back: a link in the drawer may have moved it.
-          const now = document.activeElement
-          if ((!now || now === document.body) && opener instanceof HTMLElement && opener.isConnected) opener.focus()
-        }}
-        onEscapeKeyDown={(event) => {
-          // The companion's own Escape (closing the assistant) is not the drawer's.
-          if (beside && companion.contains(event.target as Node)) event.preventDefault()
-        }}
-        className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[480px]"
       >
-        <SheetHeader className="border-b sm:pr-32">
-          <SheetTitle className="break-words">{row?.title ?? 'Activity'}</SheetTitle>
-        </SheetHeader>
-        <div className="flex items-center gap-2 border-b px-4 py-2.5">
-          {ids.length > 0 && (
-            <Button size="sm" variant="ghost" onClick={() => setTrail({ from: id, ids: ids.slice(0, -1) })}>
-              Back
-            </Button>
-          )}
-          <Label htmlFor="activity-advanced" className="ml-auto font-normal">
-            Advanced
-          </Label>
-          <Switch id="activity-advanced" checked={advanced} onCheckedChange={toggleAdvanced} />
-        </div>
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="flex flex-col gap-4 p-4">
-            {view.error ? (
-              <p role="alert" className="text-[13px] text-warn">
-                Could not load this: {view.error.message}
-              </p>
-            ) : !row ? (
-              <div role="status" aria-label="Loading" className="flex flex-col gap-2">
-                <Skeleton className="h-4 w-2/3" />
-                <Skeleton className="h-4 w-1/2" />
-                <Skeleton className="h-4 w-3/5" />
-              </div>
-            ) : (
-              <>
-                <dl className="flex flex-col gap-2">
-                  <Row label="Status">
-                    <StatusBadge status={row.status} />
-                  </Row>
-                  <Row label="Started by">{principalLabel(row.principal)}</Row>
-                  <Row label="When">{timing(row)}</Row>
-                  {advanced && (
-                    <>
-                      {row.workflow_id && <Row label="Workflow">{row.workflow_id}</Row>}
-                      {row.run_id && <Row label="Run">{row.run_id}</Row>}
-                      {temporal && (
-                        <Row label="Temporal">
-                          <a href={temporal} target="_blank" rel="noreferrer" className={LINK}>
-                            Temporal UI ↗
-                          </a>
-                        </Row>
-                      )}
-                      {row.traceparent && <Row label="Trace">{row.traceparent}</Row>}
-                      {row.facets && Object.keys(row.facets).length > 0 && (
-                        <Row label="Facets">{JSON.stringify(row.facets)}</Row>
-                      )}
-                      {row.via_tool && (
-                        <Row label="Via tool">
-                          <Link to="/settings#plugins" className={LINK}>
-                            {row.via_tool}
-                          </Link>
-                        </Row>
-                      )}
-                    </>
+        <SheetContent
+          side="right"
+          // Closed from the footer: the corner is where the shell raises its Assistant
+          // button above an open dialog (#1897).
+          showCloseButton={false}
+          aria-describedby={undefined}
+          // Modal to the shell (AppShell's assistant toggle reads aria-modal) unless the
+          // companion beside it is usable too (#798); Radix itself sets no aria-modal.
+          {...(beside ? {} : { 'aria-modal': 'true' as const })}
+          // Still modal to the agent bridge (agent/dom activeDialog) either way.
+          data-modal=""
+          style={beside && room ? { right: room } : undefined}
+          onInteractOutside={(event) => {
+            // The assistant beside it; the shell's Assistant button is SheetContent's (#1897).
+            if (companion?.contains(event.target as Node)) event.preventDefault()
+          }}
+          onOpenAutoFocus={(event) => {
+            // Left in the assistant beside it: the drawer may open while the user types there.
+            if (beside && companion.contains(document.activeElement)) event.preventDefault()
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            // Only focus that fell to <body> comes back: a link in the drawer may have moved it.
+            const now = document.activeElement
+            if ((!now || now === document.body) && opener instanceof HTMLElement && opener.isConnected) opener.focus()
+          }}
+          onEscapeKeyDown={(event) => {
+            // The companion's own Escape (closing the assistant) is not the drawer's.
+            if (beside && companion.contains(event.target as Node)) event.preventDefault()
+          }}
+          className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[480px]"
+        >
+          <SheetHeader className="border-b sm:pr-32">
+            <SheetTitle className="break-words">{row?.title ?? 'Activity'}</SheetTitle>
+          </SheetHeader>
+          <div className="flex items-center gap-2 border-b px-4 py-2.5">
+            {ids.length > 0 && (
+              <Button size="sm" variant="ghost" onClick={() => setTrail({ from: id, ids: ids.slice(0, -1) })}>
+                Back
+              </Button>
+            )}
+            <Label htmlFor="activity-advanced" className="ml-auto font-normal">
+              Advanced
+            </Label>
+            <Switch id="activity-advanced" checked={advanced} onCheckedChange={toggleAdvanced} />
+          </div>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="flex flex-col gap-4 p-4">
+              {view.error ? (
+                <p role="alert" className="text-[13px] text-warn">
+                  Could not load this: {view.error.message}
+                </p>
+              ) : !row ? (
+                <div role="status" aria-label="Loading" className="flex flex-col gap-2">
+                  <Skeleton className="h-4 w-2/3" />
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="h-4 w-3/5" />
+                </div>
+              ) : (
+                <>
+                  <dl className="flex flex-col gap-2">
+                    <Row label="Status">
+                      <StatusBadge status={row.status} />
+                    </Row>
+                    <Row label="Started by">{principalLabel(row.principal)}</Row>
+                    <Row label="When">{timing(row)}</Row>
+                    {advanced && (
+                      <>
+                        {row.workflow_id && <Row label="Workflow">{row.workflow_id}</Row>}
+                        {row.run_id && <Row label="Run">{row.run_id}</Row>}
+                        {temporal && (
+                          <Row label="Temporal">
+                            <a href={temporal} target="_blank" rel="noreferrer" className={LINK}>
+                              Temporal UI ↗
+                            </a>
+                          </Row>
+                        )}
+                        {row.traceparent && <Row label="Trace">{row.traceparent}</Row>}
+                        {row.facets && Object.keys(row.facets).length > 0 && (
+                          <Row label="Facets">{JSON.stringify(row.facets)}</Row>
+                        )}
+                        {row.via_tool && (
+                          <Row label="Via tool">
+                            <Link to="/settings#plugins" className={LINK}>
+                              {row.via_tool}
+                            </Link>
+                          </Row>
+                        )}
+                      </>
+                    )}
+                  </dl>
+                  {error && (
+                    <p
+                      className={`rounded-lg border px-3 py-2 text-[13px] ${
+                        row.status === 'failed' ? 'border-destructive/30 bg-destructive/10 text-destructive' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {error}
+                    </p>
                   )}
-                </dl>
-                {error && (
-                  <p
-                    className={`rounded-lg border px-3 py-2 text-[13px] ${
-                      row.status === 'failed' ? 'border-destructive/30 bg-destructive/10 text-destructive' : 'text-muted-foreground'
-                    }`}
-                  >
-                    {error}
-                  </p>
-                )}
-                {stages.length > 0 && (
-                  <ol aria-label="Stages" className="flex flex-col gap-1.5 text-[13px]">
-                    {stages.map((s, i) => (
-                      <li key={i} className="flex items-center gap-2">
-                        {s.status && <StatusBadge status={s.status} />}
-                        <span>{s.name}</span>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-                {(view.data?.links.length ?? 0) > 0 && (
-                  <ul aria-label="Links" className="flex flex-col gap-1 text-[13px]">
-                    {view.data?.links.map((l) => (
-                      <li key={l.href}>
-                        <ActivityLinkItem link={l} />
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {(view.data?.children.length ?? 0) > 0 && (
-                  <section>
-                    <h3 className="mb-1.5 text-xs text-muted-foreground">Parts</h3>
-                    <ul className="flex flex-col gap-1.5 text-[13px]">
-                      {view.data?.children.map((c) => (
-                        <li key={c.id} className="flex items-center gap-2">
-                          <StatusBadge status={c.status} />
-                          <Button
-                            variant="link"
-                            className="h-auto p-0 text-left whitespace-normal text-foreground"
-                            onClick={() => setTrail({ from: id, ids: [...ids, c.id] })}
-                          >
-                            {c.title}
-                          </Button>
+                  {stages.length > 0 && (
+                    <ol aria-label="Stages" className="flex flex-col gap-1.5 text-[13px]">
+                      {stages.map((s, i) => (
+                        <li key={i} className="flex items-center gap-2">
+                          {s.status && <StatusBadge status={s.status} />}
+                          <span>{s.name}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {(view.data?.links.length ?? 0) > 0 && (
+                    <ul aria-label="Links" className="flex flex-col gap-1 text-[13px]">
+                      {view.data?.links.map((l) => (
+                        <li key={l.href}>
+                          <ActivityLinkItem link={l} />
                         </li>
                       ))}
                     </ul>
-                  </section>
-                )}
-                {advanced && (
-                  <>
-                    <Json label="Request" value={detail.request} />
-                    <Json label="Result" value={detail.result} />
-                    <Json label="Error" value={detail.error} />
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        </ScrollArea>
-        {/* #2386 — a way out that is not Esc or the backdrop: touch has no Esc. */}
-        <SheetFooter className="flex-row justify-end border-t py-3">
-          <SheetClose asChild>
-            <Button variant="outline">Close</Button>
-          </SheetClose>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+                  )}
+                  {(view.data?.children.length ?? 0) > 0 && (
+                    <section>
+                      <h3 className="mb-1.5 text-xs text-muted-foreground">Parts</h3>
+                      <ul className="flex flex-col gap-1.5 text-[13px]">
+                        {view.data?.children.map((c) => (
+                          <li key={c.id} className="flex items-center gap-2">
+                            <StatusBadge status={c.status} />
+                            <Button
+                              variant="link"
+                              className="h-auto p-0 text-left whitespace-normal text-foreground"
+                              onClick={() => setTrail({ from: id, ids: [...ids, c.id] })}
+                            >
+                              {c.title}
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  )}
+                  {advanced && (
+                    <>
+                      <Json label="Request" value={detail.request} />
+                      <Json label="Result" value={detail.result} />
+                      <Json label="Error" value={detail.error} />
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          </ScrollArea>
+          {/* #2386 — a way out that is not Esc or the backdrop: touch has no Esc. */}
+          <SheetFooter className="flex-row justify-end border-t py-3">
+            <SheetClose asChild>
+              <Button variant="outline">Close</Button>
+            </SheetClose>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+    </JsonClosed.Provider>
   )
 }
