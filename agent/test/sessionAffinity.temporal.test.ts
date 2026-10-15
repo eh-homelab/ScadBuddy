@@ -75,6 +75,26 @@ const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.m
 const PINNED_WORKFLOWS = fileURLToPath(new URL('./support/pinnedWorkflows.ts', import.meta.url))
 const PINNED_TEST_QUEUE = 'pinned-test'
 
+// The lone-stall test's budget (#3693), from its phases as the dump's timeline measured them
+// (local, load 11-15, host clock stepping +-8.5 s every ~2 s: 4 runs; the hosted runs of the
+// report): no single 180 s, a sum of what each phase may take.
+/** session_turn's heartbeatTimeout (workflow.ts). */
+const HEARTBEAT_TIMEOUT_MS = 20_000
+/** One step of this host's wall clock, which the dev server's timers run on (measured 8.0-8.6 s). */
+const CLOCK_STEP_MS = 10_000
+/**
+ * A stalled placement is given up on this long after it froze: the SDK sends a beat at once and
+ * flushes the next, throttled, at 80 % of the heartbeat timeout, and the server's timeout runs
+ * from that flush (measured: freeze to the second acquire 36.0-36.3 s), plus a clock step.
+ */
+const STALL_MS = 0.8 * HEARTBEAT_TIMEOUT_MS + HEARTBEAT_TIMEOUT_MS + CLOCK_STEP_MS
+/** A placement from its acquire to its first model answer: Claude Code's start and one request (measured 0.2-9 s). */
+const PLACEMENT_MS = 30_000
+/** How long a new placement waits for the one it replaced to end (TurnHost.run). */
+const REPLACED_WAIT_MS = 10_000
+/** The replica's start (`replica`'s own wait), the first placement to its held call, the stall, the second placement after the cut, and the closing checks. */
+const LONE_STALL_BUDGET_MS = 30_000 + PLACEMENT_MS + STALL_MS + REPLACED_WAIT_MS + PLACEMENT_MS + 10_000
+
 function latch(): { promise: Promise<void>; release: () => void } {
   let release!: () => void
   const promise = new Promise<void>((resolve) => {
@@ -177,6 +197,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   afterEach(async ({ task }) => {
     // A test that failed, its timeout included: where each session waits (#3693), before it is terminated.
     if (task.result?.state === 'fail') await dumpSessions(task.name)
+    // Every test's timeline, passed or not: what its time was spent on.
+    // (process.stderr: vitest keeps a passed test's console output back.)
+    else process.stderr.write(`phases of "${task.name}" (ms): ${phases.map((p) => `${p.at} ${p.what}`).join('; ')}; end ${Math.round(performance.now() - startedAt)}\n`)
     // This test's sessions end with it: an open one would go on asking for a home on the shared
     // `agent-tools`, where the next test's replicas answer (its own queues are named apart, that
     // one cannot be: the workflow names it).
@@ -208,7 +231,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     for (const row of await db.sql<Record<string, unknown>[]>`
       SELECT id, status, durable_turn_id, turn_attempt, turn_mark, cost_usd, turns FROM ai_sessions ORDER BY created_at`) {
       lines.push(`row ${JSON.stringify(row)}`)
-      lines.push(await dumpWorkflow(env.client, sessionWorkflowId(String(row.id))))
+      lines.push(await dumpWorkflow(env.client, sessionWorkflowId(String(row.id)), 60))
       const events = await replicas[0]?.m.events.read(String(row.id), 0, 10_000)
       if (events) lines.push(`session events: ${events.map((e) => e.event.type).join(', ')}`)
     }
@@ -774,7 +797,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     phase('a frozen')
     // The heartbeat times out and acquire runs again, with A excluded: A is the only replica
     // there is, so A is asked and takes it.
-    await pollUntil(() => a.acquired, 2, 60_000)
+    await pollUntil(() => a.acquired, 2, STALL_MS)
     a.frozen = false
     phase('a unfrozen')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
@@ -792,7 +815,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await said(a, id, 'slow done')).toBe(false)
     const row = await recorded(id)
     expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
-  })
+  }, LONE_STALL_BUDGET_MS)
 
   it('a lost home asked alone refers the turn to the other live replica, which reserves on its own queue and takes it', async () => {
     const hold = latch()
