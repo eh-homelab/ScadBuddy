@@ -366,7 +366,8 @@ class ArrangeRequest(BaseModel):
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     #: The filament order the plan's slots refer to; omitted means the first object's
-    #: output's colours, then any colour the others add.
+    #: output's colours, then any colour the others add. Omitted, a source colour every
+    #: copy swaps away (`recolour`) is left out; given, every slot named keeps its place.
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
     #: The template the result is filed under (#1864): one of the outputs', omitted the

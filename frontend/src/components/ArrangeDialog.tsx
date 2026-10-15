@@ -548,9 +548,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             setProgress(`Making a model for ${homeFile.filename}…`)
             // The slug is guessed here; a model the list did not show (or a name the
             // guess gets wrong) is a 409, and the next free name is tried.
-            const taken: Pick<ModelSummary, 'slug'>[] = [...(models ?? [])]
+            const first = freeName(stemOf(homeFile.filename), models ?? [], `Library file ${homeFile.id}`)
             for (let attempt = 0; made === undefined; attempt += 1) {
-              const name = freeName(stemOf(homeFile.filename), taken, `Library file ${homeFile.id}`)
+              // Refused as taken (a model the list did not show): the server's own check,
+              // so the next try numbers the name on rather than guessing slugs again.
+              const name = attempt === 0 ? first : `${first} ${attempt + 1}`
               try {
                 made = await within(() =>
                   api.createMeshModel({
@@ -561,7 +563,6 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 )
               } catch (cause) {
                 if (!(cause instanceof ApiError && cause.status === 409) || attempt >= 4) throw cause
-                taken.push({ slug: slugOf(name) })
               }
             }
             const added = made
@@ -760,7 +761,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 onEdit={() => setEditing(editing === row.key ? null : row.key)}
                 onRecolour={(next) => setSwaps({ ...swaps, [row.key]: next })}
                 // #2286 — out of this arrange, without setting its copies to 0.
-                onRemove={busy || asking ? undefined : () => setRemoved((now) => [...now, row.key])}
+                onRemove={() => setRemoved((now) => [...now, row.key])}
+                locked={busy || asking}
               />
               {copiesOf(row.key).map((copy, index) => {
                 const label = `${row.label}, copy ${index + 1} in other colours`
@@ -775,9 +777,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                       editing={editing === copy.key}
                       onEdit={() => setEditing(editing === copy.key ? null : copy.key)}
                       onRecolour={(next) => setSwaps({ ...swaps, [copy.key]: next })}
-                      onRemove={
-                        busy || asking ? undefined : () => setVariants((now) => now.filter((v) => v.key !== copy.key))
-                      }
+                      onRemove={() => setVariants((now) => now.filter((v) => v.key !== copy.key))}
+                      locked={busy || asking}
                     />
                   </div>
                 )
@@ -956,6 +957,7 @@ function ArrangeRow({
   onEdit,
   onRecolour,
   onRemove,
+  locked = false,
 }: {
   label: string
   count: number
@@ -966,6 +968,8 @@ function ArrangeRow({
   onEdit: () => void
   onRecolour: (next: Record<string, string>) => void
   onRemove?: () => void
+  /** Busy or asking: Remove shows, disabled, so the row does not shift. */
+  locked?: boolean
 }) {
   return (
     <div className="flex flex-col gap-1">
@@ -973,9 +977,9 @@ function ArrangeRow({
         <span>{label}</span>
         <span className="flex items-center gap-2">
           {onRemove && (
-            <button type="button" onClick={onRemove} className="text-[12px] text-accent hover:underline" aria-label={`Remove ${label}`}>
+            <Button size="sm" variant="ghost" aria-label={`Remove ${label}`} disabled={locked} onClick={onRemove}>
               Remove
-            </button>
+            </Button>
           )}
           <input
             type="number"

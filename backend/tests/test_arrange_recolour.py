@@ -57,6 +57,92 @@ def test_a_recoloured_copy_prints_in_its_own_colours() -> None:
     assert PackItem(part=_part(), recolour={GREEN: BLACK}).colours() == [BLACK]
 
 
+def test_a_swap_pair_swaps_both_ways_at_once() -> None:
+    item = PackItem(part=_part(), recolour={GREEN: BLACK, BLACK: GREEN})
+    assert item.colours() == [BLACK, GREEN]
+    part = _part()
+    entry = _library_entry("ef", part.bbox, [GREEN, BLACK]).model_copy(
+        update={"part": part.piece_key, "materials": {GREEN: "PLA", BLACK: "PETG"}}
+    )
+    req = OutputRequest(
+        job_id="r4",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(
+                    items=[
+                        Placed(
+                            piece_key=part.piece_key,
+                            x=0,
+                            y=0,
+                            recolour={GREEN: BLACK, BLACK: GREEN},
+                        )
+                    ]
+                )
+            ]
+        ),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([]),
+        provenance={part.piece_key: entry},
+    )
+    # Black now prints where green was, in green's material: the two disagree.
+    assert _materials(req) == {}
+    [manifest] = manifest_of(req)
+    assert manifest.recolour == {GREEN: BLACK, BLACK: GREEN}
+
+
+async def test_a_swap_pair_is_written_swapped(tmp_path: Path) -> None:
+    deps, paths = _deps(tmp_path)
+    out = tmp_path / "pair.3mf"
+    write_bambu_3mf(
+        [
+            ColourPart(1, "Body", GREEN, trimesh.creation.box(extents=(20, 10, 4))),
+            ColourPart(2, "Face", BLACK, trimesh.creation.box(extents=(6, 6, 9))),
+        ],
+        out,
+        thumbnails=None,
+    )
+    read = read_objects(out.read_bytes())
+    entry = _library_entry("ba", bounding_box(read[0].parts), [GREEN, BLACK])
+    await publish_library_pieces(deps.blobs, [entry], read)
+    part = part_of(entry)
+    req = OutputRequest(
+        job_id="r5",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(
+                    items=[
+                        Placed(
+                            piece_key=part.piece_key,
+                            x=0,
+                            y=0,
+                            recolour={GREEN: BLACK, BLACK: GREEN},
+                        )
+                    ]
+                )
+            ]
+        ),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+        provenance={entry.part: entry},
+        colours=[GREEN, BLACK],
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    # The body (green in the file, the 20 mm box) now prints black, the face green.
+    [again] = read_objects((paths.root / written.result.model_3mf).read_bytes())
+    by_width = {round(float(p.mesh.extents.max())): p.colour for p in again.parts}
+    assert by_width == {20: BLACK, 9: GREEN}
+
+
 def test_both_colourings_share_one_plate_and_each_copy_keeps_its_own() -> None:
     part = _part()
     layout = arrange(
