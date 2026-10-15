@@ -11,7 +11,7 @@ import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { TASK_QUEUE } from '../temporal/names.js'
-import { SESSION_QUEUE, SESSION_RUNTIME_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
+import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
@@ -46,7 +46,7 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 //   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
 // Which workflow runs a session is its `runtime` column, fixed by its first send (unified
-// runtime spec 2026-10-13 §5.1): the setting `session_runtime = 'unified'` starts a NEW
+// runtime spec 2026-10-13 §5.1): the setting `unified_sessions = true` starts a NEW
 // session's workflow as AgentSession on `agent-sessions`; every other session, and every one
 // that has run a turn already, is a DurableSession on `agent`, for life. The gate calls, the
 // Updates after the first and the signals are by workflow id, the same for both types.
@@ -205,10 +205,10 @@ export class DurableTurns {
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
   }
 
-  /** The runtime a session that has run nothing would get at its first send: the `session_runtime` flag (spec 2026-10-13 §5.1). */
+  /** The runtime a session that has run nothing would get at its first send: the `unified_sessions` flag (spec 2026-10-13 §5.1). */
   async newRuntime(): Promise<SessionRuntime> {
-    const [row] = await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`
-    return row?.value === 'unified' ? 'unified' : 'durable'
+    const [row] = await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
+    return row?.value === true ? 'unified' : 'durable'
   }
 
   /**

@@ -37,7 +37,7 @@ export const SESSION_SETTINGS_ACTIVITY = 'session_settings'
 /** The turn's end (events and status), on `agent-tools`; agent-durable's is `finish_turn`. */
 export const SESSION_FINISH_ACTIVITY = 'session.finish_turn'
 /** `ai_settings` key of the flag that starts new durable sessions on AgentSession; read, never written through a route, until phase 6. */
-export const SESSION_RUNTIME_SETTING = 'session_runtime'
+export const UNIFIED_SESSIONS_SETTING = 'unified_sessions'
 
 /**
  * The gate's activities (temporal/session/gate.ts). Under the agent's own `gate.` prefix, never

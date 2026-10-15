@@ -22,7 +22,7 @@ import {
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
   SESSION_QUEUE,
-  SESSION_RUNTIME_SETTING,
+  UNIFIED_SESSIONS_SETTING,
   SESSION_SETTINGS_ACTIVITY,
   SESSION_TURN_ACTIVITY,
   SESSION_WORKFLOW,
@@ -367,10 +367,10 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await drop()
     })
 
-    const flag = async (value: string | undefined) => {
-      await db.sql`DELETE FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`
-      // Set in the database, never by a route: no route or tool writes this key (sessionRuntimeFlag.pg.test.ts).
-      if (value) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json(value)})`
+    const flag = async (value: boolean | undefined) => {
+      await db.sql`DELETE FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
+      // Set in the database, never by a route: no route or tool writes this key (unifiedSessionsFlag.pg.test.ts).
+      if (value) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(value)})`
     }
 
     async function durableManager(): Promise<SessionManager> {
@@ -391,7 +391,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     }
 
     it('starts a new session as AgentSession on agent-sessions with the flag set, and reads each turn`s end from the event log', async () => {
-      await flag('unified')
+      await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket', context: '[page: /]' })
@@ -418,7 +418,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await runtimeOf(session.id)).toBe('durable')
       await db.sql`UPDATE ai_sessions SET status = 'idle' WHERE id = ${session.id}`
       await handleOf(session.id).signal('end_turn')
-      await flag('unified')
+      await flag(true)
       await m.send(session.id, browser, 'two')
       expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
       expect(await runtimeOf(session.id)).toBe('durable')
@@ -431,7 +431,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     })
 
     it('keeps a session that existed before the migration, with offset 0 and a Python workflow, DurableSession with the flag set', async () => {
-      await flag('unified')
+      await flag(true)
       const m = await durableManager()
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       // As a row from before the column: no runtime, nothing output yet, its workflow running.
@@ -449,7 +449,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     })
 
     it('refuses to fork a unified session, whatever its state, writing nothing', async () => {
-      await flag('unified')
+      await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })

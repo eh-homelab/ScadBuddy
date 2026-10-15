@@ -867,7 +867,7 @@ gives them a single home:
 done. Their conversation exists only in workflow state.
 
 1. **New durable sends go to `AgentSession`** once Phase 7 ships. The flag
-   `session_runtime=unified` comes first (Phase 5) and becomes the only path in Phase 7.
+   `unified_sessions=true` comes first (Phase 5) and becomes the only path in Phase 7.
 2. **Lazy migration on next send.**
    - When `send` finds an open `DurableSession` for the session (`describe` reports the
      workflow type), it first cancels its parked entries: `cancel_input(migrated)`.

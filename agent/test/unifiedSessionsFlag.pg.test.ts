@@ -8,11 +8,11 @@ import { originPolicy } from '../src/http/origins.js'
 import { registerSessionModeRoutes, SESSION_MODE_PATH } from '../src/routes/sessionMode.js'
 import { registerSessionRuntimeRoutes, SESSION_RUNTIME_PATH } from '../src/routes/sessionRuntime.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { SESSION_RUNTIME_SETTING } from '../src/temporal/session/names.js'
+import { UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, tempPaths } from './support/sessions.js'
 
-// The flag that starts new durable sessions on AgentSession (`ai_settings.session_runtime`,
+// The flag that starts new durable sessions on AgentSession (`ai_settings.unified_sessions`,
 // unified runtime spec 2026-10-13 §5.1) is set in the database, never through a route, a
 // tool or the settings store, until fork works on that runtime (phase 6).
 
@@ -20,7 +20,7 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const put = (app: Hono, path: string, body: unknown) =>
   app.request(`https://scadbuddy.example${path}`, { method: 'PUT', headers: UI, body: JSON.stringify(body) })
 
-describe.skipIf(!TEST_DATABASE_URL)(`the session_runtime flag is not writable${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf(!TEST_DATABASE_URL)(`the unified_sessions flag is not writable${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
   let drop: () => Promise<void>
   let app: Hono
@@ -39,31 +39,31 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session_runtime flag is not writable${T
     await drop()
   })
 
-  const stored = () => db.sql`SELECT key FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`
+  const stored = () => db.sql`SELECT key FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
 
   it('is refused by the runtime settings route, which takes only its own four keys', async () => {
-    expect((await put(app, SESSION_RUNTIME_PATH, { session_runtime: 'unified' })).status).toBe(422)
-    expect((await put(app, SESSION_RUNTIME_PATH, { session_runtime: 'unified', warm_max_per_replica: 2 })).status).toBe(422)
+    expect((await put(app, SESSION_RUNTIME_PATH, { unified_sessions: true })).status).toBe(422)
+    expect((await put(app, SESSION_RUNTIME_PATH, { unified_sessions: true, warm_max_per_replica: 2 })).status).toBe(422)
     expect(await stored()).toHaveLength(0)
     expect(await store.get('warm_max_per_replica')).toBeUndefined()
   })
 
   it('is not a session mode: the mode route takes classic or durable only', async () => {
     expect((await put(app, SESSION_MODE_PATH, { mode: 'unified' })).status).toBe(400)
-    expect((await put(app, SESSION_MODE_PATH, { mode: 'durable', session_runtime: 'unified' })).status).toBe(400)
+    expect((await put(app, SESSION_MODE_PATH, { mode: 'durable', unified_sessions: true })).status).toBe(400)
     expect(await stored()).toHaveLength(0)
   })
 
   it('is refused by the settings store itself, which every route, tool and sweep writes through', async () => {
-    await expect(store.set(SESSION_RUNTIME_SETTING, 'unified')).rejects.toThrow(/cannot be written yet/)
-    await expect(store.setMany({ [SESSION_RUNTIME_SETTING]: 'unified', model: 'x' })).rejects.toThrow(/cannot be written yet/)
+    await expect(store.set(UNIFIED_SESSIONS_SETTING, true)).rejects.toThrow(/cannot be written yet/)
+    await expect(store.setMany({ [UNIFIED_SESSIONS_SETTING]: true, model: 'x' })).rejects.toThrow(/cannot be written yet/)
     expect(await stored()).toHaveLength(0)
     expect(await store.get('model')).toBeUndefined()
   })
 
   it('can still be read once set in the database', async () => {
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json('unified')})`
-    expect(await store.get(SESSION_RUNTIME_SETTING)).toBe('unified')
+    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
+    expect(await store.get(UNIFIED_SESSIONS_SETTING)).toBe(true)
   })
 })
 
@@ -82,8 +82,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`a new session's readiness follows the flag$
     await drop()
   })
 
-  async function asked(flag: string | undefined): Promise<string[]> {
-    if (flag) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json(flag)})`
+  async function asked(flag: boolean | undefined): Promise<string[]> {
+    if (flag) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(flag)})`
     const queues: string[] = []
     const client = {
       options: { namespace: 'default' },
@@ -106,6 +106,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`a new session's readiness follows the flag$
   })
 
   it('is the three AgentSession queues with the flag set', async () => {
-    expect(await asked('unified')).toEqual(['agent-sessions/1', 'agent-tools/2', 'agent-sessions.here/2'])
+    expect(await asked(true)).toEqual(['agent-sessions/1', 'agent-tools/2', 'agent-sessions.here/2'])
   })
 })

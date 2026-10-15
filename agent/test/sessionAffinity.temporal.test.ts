@@ -29,7 +29,7 @@ import type { AcquireInput } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
   SESSION_QUEUE,
-  SESSION_RUNTIME_SETTING,
+  UNIFIED_SESSIONS_SETTING,
   SESSION_SETTINGS_ACTIVITY,
   sessionHostQueue,
 } from '../src/temporal/session/names.js'
@@ -151,8 +151,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     fake = await startFakeAnthropic((r) => script(r))
     ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    // Set in the database, as no route writes it (sessionRuntimeFlag.pg.test.ts).
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json('unified')})`
+    // Set in the database, as no route writes it (unifiedSessionsFlag.pg.test.ts).
+    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     slowCalls = 0
     slowReturned = 0
     slowGate = Promise.resolve()
