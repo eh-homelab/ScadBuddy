@@ -118,8 +118,9 @@ editor's settings, versioned the same way: `{"date", "units": "mm", "version":
 
 ## 3. The API (`/api/v1/creation-service`)
 
-The client is one module (`_app-de45e9df87af6b5e.js:1700–2500`). The make and template
-calls, which every tool shares:
+The client is one module (`_app-de45e9df87af6b5e.js:1700–2500`). Each endpoint's
+request, response and callers, and the diff against ScadBuddy's routes, are in
+`creation-service-api.md`. The make and template calls, which every tool shares:
 
 | call | body / params | notes |
 |---|---|---|
