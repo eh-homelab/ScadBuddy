@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.prime_tower import (
     prime_tower_overrides,
 )
 from scadbuddy.core.paths import DataPaths
+from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_preview import Job, sliced_routes, start_slice
 from tests.api.test_print_run_choices import body, declare_print_settings, run_print, run_routes
@@ -25,6 +26,9 @@ from tests.api.test_send import upload_route
 
 pytestmark = pytest.mark.requires_postgres
 
+#: The tower settings as every Bambu process preset has them (``fdm_process_common``).
+PRESET = {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "0"}
+
 
 @respx.mock
 def test_the_prints_prime_tower_goes_out_as_process_overrides(
@@ -32,6 +36,7 @@ def test_the_prints_prime_tower_goes_out_as_process_overrides(
 ) -> None:
     output_id = prepared(client, model)
     sliced = routes()
+    preset_values(PRESET)
     tower = {"enabled": True, "no_sparse_layers": True}
 
     response = run_print(client, output_id, json={**body(), "prime_tower": tower})
@@ -52,6 +57,7 @@ def test_a_templates_tower_applies_and_the_prints_choice_wins(
         paths, model, {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"}
     )
     sliced = routes()
+    preset_values(PRESET)
 
     assert run_print(client, output_id, json=body()).status_code == 200
     assert overrides(sliced) == {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"}
@@ -64,6 +70,37 @@ def test_a_templates_tower_applies_and_the_prints_choice_wins(
     off = {**body(), "prime_tower": {"enabled": False}}
     assert run_print(client, output_id, json=off).status_code == 200
     assert overrides(sliced)["enable_prime_tower"] == "0"
+
+
+@respx.mock
+def test_a_setting_the_preset_lacks_is_sent_and_named(client: TestClient, model: str) -> None:
+    """#3648 review: a custom process preset with no "No sparse layers" still gets it,
+    and the run says the slicer may not take it."""
+    output_id = prepared(client, model)
+    sliced = routes()
+    preset_values({"enable_prime_tower": "1"})
+    tower = {"enabled": True, "no_sparse_layers": True}
+
+    response = run_print(client, output_id, json={**body(), "prime_tower": tower})
+
+    assert response.status_code == 200, response.text
+    assert overrides(sliced)["wipe_tower_no_sparse_layers"] == "1"
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-unconfirmed"]
+    assert "wipe_tower_no_sparse_layers" in warning["message"]
+    assert "enable_prime_tower" not in warning["message"]
+
+
+@respx.mock
+def test_a_preset_with_both_settings_says_nothing(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+    routes()
+    preset_values(PRESET)
+    tower = {"enabled": True, "no_sparse_layers": True}
+
+    response = run_print(client, output_id, json={**body(), "prime_tower": tower})
+
+    assert response.status_code == 200, response.text
+    assert not [w for w in response.json()["warnings"] if w["kind"] == "prime-tower-unconfirmed"]
 
 
 @respx.mock
@@ -81,6 +118,7 @@ def test_the_background_slice_slices_with_the_prints_tower(client: TestClient, m
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    preset_values(PRESET)
     sliced = Job().routes()
     sliced_routes()
     queued = queue_route()

@@ -96,6 +96,8 @@ WarningKind = Literal[
     # #1899: a support setting left out because the preset's shape for it is unknown:
     # its values could not be read, or it has no value (or an empty one) for that key.
     "supports-not-applied",
+    # #3628: a prime tower setting the process preset has no value for, sent anyway.
+    "prime-tower-unconfirmed",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",
     "sliced-nozzle-missing",

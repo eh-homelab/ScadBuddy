@@ -78,7 +78,11 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, prime_tower_overrides
+from scadbuddy.bambuddy.prime_tower import (
+    PrimeTowerChoice,
+    prime_tower_overrides,
+    prime_tower_warnings,
+)
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
     LibrarySource,
@@ -761,6 +765,8 @@ async def check_print(
                     read=read,
                 )
             )[1],
+            # #3628: and of a prime tower setting the preset has no value for.
+            *(await prime_tower_warnings(client, process, request.prime_tower, read=read)),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -1299,6 +1305,8 @@ async def plan_run(
     supports, support_warnings = await support_overrides(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
+    # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
+    tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1433,7 +1441,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware + support_warnings + _reused_notes(planned),
+        warnings=warnings + hardware + support_warnings + tower_warnings + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no

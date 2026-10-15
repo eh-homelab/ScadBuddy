@@ -1174,7 +1174,9 @@ export function PrintPicker({
                             onChange={setPrimeTower}
                             templateSettings={given?.kind === 'output' ? printSettings : undefined}
                             fromFile={given?.kind !== 'output'}
-                            colours={(filaments?.slots ?? []).length}
+                            // The filament step is the chosen plate's (useFilamentPlan reads it per
+                            // plate), so these are that plate's filaments; null while they load.
+                            colours={filaments ? (filaments.slots ?? []).length : null}
                           />
 
                           {given?.kind === 'output' && (

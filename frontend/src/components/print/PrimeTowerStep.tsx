@@ -8,8 +8,11 @@ type Props = {
   templateSettings?: Record<string, string> | undefined
   /** A library 3MF: its own project settings, unread here, may declare the tower. */
   fromFile?: boolean
-  /** How many filaments the plate prints: the tower only matters past one. */
-  colours: number
+  /**
+   * How many filaments the chosen plate prints (every plate's under "All plates"): the
+   * tower only matters past one. `null` while they load, which says nothing either way.
+   */
+  colours: number | null
 }
 
 type Mode = 'default' | 'on' | 'off'
@@ -34,8 +37,10 @@ function defaultLabel(settings: Record<string, string> | undefined, fromFile: bo
  */
 export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = false, colours }: Props) {
   const mode = modeOf(value)
-  // On, chosen here or by Default when nothing says off.
-  const on = mode === 'on' || (mode === 'default' && templateSettings?.enable_prime_tower !== '0')
+  // On, chosen here or by Default when nothing says off. A library 3MF's own settings are
+  // unread here, so under Default its "No sparse layers" is not shown as if known.
+  const on =
+    mode === 'on' || (mode === 'default' && !fromFile && templateSettings?.enable_prime_tower !== '0')
   const noSparse = value?.no_sparse_layers ?? templateSettings?.wipe_tower_no_sparse_layers === '1'
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
@@ -52,7 +57,12 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
             if (next === 'default') onChange(null)
             else if (next === 'off') onChange({ enabled: false })
             // Keeps a "No sparse layers" chosen before, so switching back is not a reset.
-            else onChange(value?.no_sparse_layers == null ? { enabled: true } : { enabled: true, no_sparse_layers: value.no_sparse_layers })
+            else
+              onChange(
+                value?.no_sparse_layers == null
+                  ? { enabled: true }
+                  : { enabled: true, no_sparse_layers: value.no_sparse_layers },
+              )
           }}
           className="sb-field"
         >
@@ -60,12 +70,12 @@ export function PrimeTowerStep({ value, onChange, templateSettings, fromFile = f
           <option value="on">On</option>
           <option value="off">Off</option>
         </select>
-        {colours <= 1 && (
+        {colours !== null && colours <= 1 && (
           <p className="text-[12px] text-muted">
             This plate prints one filament, so the slicer leaves the tower out either way.
           </p>
         )}
-        {mode === 'off' && colours > 1 && (
+        {mode === 'off' && colours !== null && colours > 1 && (
           <p className="text-[12px] text-warn">
             Without a tower, a filament or nozzle change can leave blobs and gaps on the model.
           </p>

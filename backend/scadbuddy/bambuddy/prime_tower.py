@@ -11,11 +11,19 @@ The keys are Bambu Studio's, from ``src/libslic3r/PrintConfig.cpp``: ``enable_pr
 values in every Bambu process preset (``fdm_process_common.json``: ``"1"`` and ``"0"``),
 so they are sent as they are, never shaped per extruder variant. Bambu Studio itself
 still turns the tower off for a plate that prints one filament.
+
+A process preset that has no value for one of them (a custom or non-Bambu one) gets it
+anyway, with a warning that the slicer may not take it (:func:`prime_tower_warnings`).
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel
+
+from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues
+from scadbuddy.bambuddy.filaments import FilamentWarning
+from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.core.problems import ApiError
 
 #: The Bambu Studio process keys a prime tower choice sets.
 PRIME_TOWER_KEYS: tuple[str, ...] = ("enable_prime_tower", "wipe_tower_no_sparse_layers")
@@ -42,3 +50,39 @@ def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:
     if choice.no_sparse_layers is not None:
         wanted["wipe_tower_no_sparse_layers"] = "1" if choice.no_sparse_layers else "0"
     return wanted
+
+
+async def prime_tower_warnings(
+    client: BambuddyClient,
+    process: PresetRef | None,
+    choice: PrimeTowerChoice | None,
+    *,
+    read: ReadPresetValues | None = None,
+) -> list[FilamentWarning]:
+    """A warning naming each setting ``choice`` sends that the process preset has no
+    value for, as supports warn (#1899). Never refuses, and the setting still goes.
+
+    Nothing is said when the preset cannot be read: both keys are single values, so
+    there is no shape to get wrong, and every Bambu preset has them."""
+    wanted = prime_tower_overrides(choice)
+    if not wanted or process is None:
+        return []
+    try:
+        answer = await (read or client.preset_values)(process)
+    except ApiError:
+        return []
+    if not answer.resolved:
+        return []
+    missing = [key for key in wanted if key not in answer.values]
+    if not missing:
+        return []
+    return [
+        FilamentWarning(
+            kind="prime-tower-unconfirmed",
+            message=(
+                f"The process preset has no value for {', '.join(missing)}: it is sent "
+                "anyway, but a slicer that does not know it prints the tower as the preset "
+                "says."
+            ),
+        )
+    ]

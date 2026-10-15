@@ -1996,6 +1996,25 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     expect(struck('No sparse layers on the prime tower')).toBe(true)
   })
 
+  it('does not claim a library file’s No sparse layers under Default (#3648 review)', async () => {
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(within(screen.getByLabelText('Prime tower')).getAllByRole('option')[0]).toHaveTextContent(
+      'Default (file or process)',
+    )
+    expect(screen.queryByRole('checkbox', { name: /No sparse layers/ })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'on')
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).not.toBeChecked()
+  })
+
   it('checks and reslices for the chosen tower, as the run will slice it', async () => {
     const checks = watch('POST', '/check')
     const previews = watch('POST', '/preview-slice')
