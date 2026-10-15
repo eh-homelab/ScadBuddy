@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { MockActivityEnvironment } from '@temporalio/testing'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
@@ -426,6 +426,9 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(humanSize(1_048_575)).toBe('1.0 MB (1,048,575 bytes)')
       expect(humanSize(1024 ** 3 - 1)).toBe('1.0 GB (1,073,741,823 bytes)')
       expect(humanSize(1023 * 1024)).toBe('1023.0 KB (1,047,552 bytes)')
+      // GB is the last unit: past it the count grows, never an index past the units (#3085).
+      expect(humanSize(1024 ** 4 - 1)).toBe('1024.0 GB (1,099,511,627,775 bytes)')
+      expect(humanSize(1024 ** 4)).toBe('1024.0 GB (1,099,511,627,776 bytes)')
       expect(await withWorkspaceSize(files, ws, call)).toEqual({ ...call, workspace_size: size })
       // A file that is gone or no longer at that sha256, or a bad path, is said to be; an input with no upload is left alone.
       const stale = await withWorkspaceSize(files, ws, { ...call, workspace_sha256: 'f'.repeat(64) })
@@ -467,16 +470,20 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
           signal: stop.signal,
         })
         .catch(() => undefined)
-      let row: Awaited<ReturnType<typeof m.approvals.list>>[number] | undefined
-      for (let i = 0; i < 250 && !row; i++) {
-        row = (await m.approvals.list(browser, { sessionId, pending: true })).find((a) => a.toolUseId === 'toolu_gated')
-        if (!row) await new Promise((r) => setTimeout(r, 20))
-      }
-      stop.abort()
+      // Named on a timeout, so a slow runner reads apart from a gate that never parked (#3085).
+      const row = await vi
+        .waitFor(
+          async () => {
+            const found = (await m.approvals.list(browser, { sessionId, pending: true })).find((a) => a.toolUseId === 'toolu_gated')
+            if (!found) throw new Error('no pending approval for toolu_gated yet')
+            return found
+          },
+          { timeout: 5000, interval: 20 },
+        )
+        .finally(() => stop.abort())
       await parked
-      expect(row).toBeDefined()
-      expect(JSON.parse(row!.inputSummary)).toEqual({ ...call, workspace_size: size })
-      expect(row!.inputHash).toBe(m.approvals.hash('import_model', gated))
+      expect(JSON.parse(row.inputSummary)).toEqual({ ...call, workspace_size: size })
+      expect(row.inputHash).toBe(m.approvals.hash('import_model', gated))
 
       // /mcp: a prepare outside any session reads the caller's own workspace.
       const principal = { id: 'token:up', kind: 'bearer' as const, tiers: tiersUpTo('outward') }

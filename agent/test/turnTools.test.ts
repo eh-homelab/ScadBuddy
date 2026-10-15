@@ -12,6 +12,7 @@ import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
 import {
@@ -35,6 +36,15 @@ const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
 const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
+
+/** An `sql` for a test that saves no http body: a call (a read) throws, and so does any
+ * property, `begin` included, which a save opens with. */
+function noDatabase(): unknown {
+  const refuse = () => {
+    throw new Error('this test saves no http body: no database is set up for one')
+  }
+  return new Proxy(refuse, { apply: refuse, get: refuse })
+}
 
 function notes(calls: string[]): () => McpServer {
   return () => {
@@ -267,6 +277,7 @@ describe('turn tools in a durable session', () => {
       ],
       problems: [],
       secrets: [],
+      terminate: async () => {},
       release: () => {},
     }
     const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
@@ -286,8 +297,13 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      // Its saved bodies are in Postgres; this test saves none.
-      servers: turnServers({ httpRequest: { saveRoot, sql: {} as never } }),
+      // Its saved bodies are in Postgres; this test saves none, and says so if it ever does.
+      servers: turnServers({
+        httpRequest: {
+          saveRoot,
+          sql: noDatabase() as never,
+        },
+      }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
@@ -505,6 +521,15 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe('the no-database sql stub (#2963 review)', () => {
+  it('says why on a save, which opens with sql.begin, as well as on a read', async () => {
+    const bodies = new PgHttpBodies(noDatabase() as never, SESSION)
+    const meta = { url: 'http://example.test/', content_type: null, size_bytes: 1, complete: true }
+    await expect(bodies.save('b1', Buffer.from('x'), meta)).rejects.toThrow('this test saves no http body')
+    await expect(bodies.meta('b1')).rejects.toThrow('this test saves no http body')
   })
 })
 

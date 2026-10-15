@@ -193,6 +193,14 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         await asyncio.to_thread(state.outputs.write_thumbnail, output_id, png)
         return {}
 
+    async def rename_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        meta = await asyncio.to_thread(state.outputs.rename, request["output_id"], request["name"])
+        emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
+        copies = await state.uploads.for_outputs([meta.id])
+        detail = await asyncio.to_thread(outputs_api.detail, state.outputs, meta, copies[meta.id])
+        dumped: dict[str, Any] = detail.model_dump(mode="json")
+        return dumped
+
     async def delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         output_id = request["output_id"]
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
@@ -250,6 +258,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
     return [
         kind("output_create", create_check, create_run, "the template's outputs"),
         kind("output_thumbnail", output_check, thumbnail_run, "the output"),
+        kind("output_rename", output_check, rename_run, "the output"),
         kind(
             "output_delete",
             output_check,

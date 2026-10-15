@@ -175,9 +175,11 @@ async def previews(
     why: str | None
     try:
         values = await (read or client.preset_values)(process)
-    except ApiError as error:
+    except ApiError:
         # Unreachable or failing: skip the profiles, never refuse the print for them.
-        why = error.detail
+        # Not ``error.detail``, which repeats the operation the sentence already names;
+        # the same fixed phrase supports.py uses (#3183, #2804 review).
+        why = "the read failed (Bambuddy unreachable or answering with an error)"
     else:
         why = (
             None

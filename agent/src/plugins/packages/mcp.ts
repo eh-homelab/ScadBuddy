@@ -4,7 +4,7 @@ import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/prom
 import path from 'node:path'
 import { declaredConfigs, noCommand } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
-import { type HarnessPlugin, type PluginEndpoint, pluginEndpoint, type PluginForwarder } from '../forwarder.js'
+import { type HarnessPlugin, type PluginEndpoint, pluginEndpoint, type PluginForwarder, type Registration, type ForwardOptions } from '../forwarder.js'
 import {
   assertEndpointAllowed,
   harnessToolName,
@@ -17,6 +17,7 @@ import {
 } from '../registry.js'
 import { hashTree, PackageContentError } from './hash.js'
 import type { LoadedPackage } from './install.js'
+import { packageLedgerId } from '../pluginSessions.js'
 
 // A plugin package's http MCP servers, reached the way a remote plugin is (#2320):
 // through the loopback forwarder (../forwarder.ts), never by the package's URL. Claude
@@ -43,6 +44,8 @@ export type PackageServers = {
   problems: string[]
   /** The header values and the forwarder URLs, for redaction. */
   secrets: string[]
+  /** Ends the servers' upstream MCP sessions, then releases their routes (forwarder.ts `Registration.terminate`). */
+  terminate(): Promise<void>
   release(): void
 }
 
@@ -67,11 +70,13 @@ export async function forwardPackageServers(
   loaded: readonly LoadedPackage[],
   forwarder: Pick<PluginForwarder, 'register'>,
   resolve: Resolver = systemResolver,
+  options: Pick<ForwardOptions, 'record'> = {},
 ): Promise<PackageServers> {
   const plugins: HarnessPlugin[] = []
   const endpoints: PluginEndpoint[] = []
   const problems: string[] = []
   const secrets: string[] = []
+  const registrations: Registration[] = []
   const releases: (() => void)[] = []
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
@@ -120,8 +125,9 @@ export async function forwardPackageServers(
           toolTiers: {},
           disabledTools: [],
         }
-        const registration = forwarder.register(plugin, address)
+        const registration = forwarder.register(plugin, address, { ...options, ledgerId: packageLedgerId(name) })
         releases.push(registration.release)
+        registrations.push(registration)
         if (header) secrets.push(...headerSecretVariants(header.value))
         secrets.push(registration.url)
         plugins.push({ name, url: registration.url, toolTiers: {}, disabledTools: [] })
@@ -129,7 +135,16 @@ export async function forwardPackageServers(
       }
     }
   }
-  return { plugins, endpoints, problems, secrets, release: () => releases.forEach((r) => r()) }
+  return {
+    plugins,
+    endpoints,
+    problems,
+    secrets,
+    terminate: async () => {
+      await Promise.all(registrations.map((r) => r.terminate()))
+    },
+    release: () => releases.forEach((r) => r()),
+  }
 }
 
 /** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */

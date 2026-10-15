@@ -3,7 +3,7 @@ import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { ClearSwatch, Swatch, UnknownSwatch } from '../../components/print/Swatch'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
-import { spoolColour, spoolName } from '../../lib/filamentColour'
+import { spoolChip, spoolName } from '../../lib/filamentColour'
 import { trayPlace } from '../../lib/filaments'
 
 /** Bambuddy's not-configured refusal: a setup step still to take, not a failure. */
@@ -28,15 +28,12 @@ function where(spool: InventorySpool): string {
   return trayPlace(spool.loaded, { printer: true })
 }
 
-/** Bambuddy's RGBA with a zero alpha: a clear spool, as its own record says. */
-const CLEAR_RGBA = /^#?[0-9a-fA-F]{6}00$/
-
 /** The spool's chip: its colour; a clear one only for a spool recorded clear (alpha 00);
  * otherwise, with no colour recorded or one unreadable, an unknown one. Never black. */
 function colourOf(spool: InventorySpool) {
-  const colour = spoolColour(spool)
-  if (colour) return <Swatch colour={colour.hex} size="sm" />
-  return CLEAR_RGBA.test((spool.rgba ?? '').trim()) ? <ClearSwatch size="sm" /> : <UnknownSwatch size="sm" />
+  const chip = spoolChip(spool)
+  if (chip.kind === 'colour') return <Swatch colour={chip.hex} size="sm" />
+  return chip.kind === 'clear' ? <ClearSwatch size="sm" /> : <UnknownSwatch size="sm" />
 }
 
 /**
@@ -49,6 +46,8 @@ export function SpoolInventoryPanel() {
   const [spools, setSpools] = useState<InventorySpool[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [unconfigured, setUnconfigured] = useState(false)
+  // #3357: a toggle's re-read is in flight, so the table on screen is the last selection.
+  const [reading, setReading] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -60,10 +59,12 @@ export function SpoolInventoryPanel() {
         setSpools([...(view.spools ?? [])].sort(order))
         setError(null)
         setUnconfigured(false)
+        setReading(false)
       },
       (cause: unknown) => {
         if (!live) return
         setSpools(null)
+        setReading(false)
         const notConfigured = cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED
         setUnconfigured(notConfigured)
         setError(
@@ -76,13 +77,27 @@ export function SpoolInventoryPanel() {
     }
   }, [archived])
 
+  // #3357: every re-read goes through here, so none skips the reset. The last answer's
+  // error or setup note is not this read's; the result stays, marked as being read
+  // again, until the new one answers.
+  const showArchived = (next: boolean) => {
+    setArchived(next)
+    setReading(true)
+    setError(null)
+    setUnconfigured(false)
+  }
+
   const base = bambuddyBase()
   const total = (spools ?? []).filter((spool) => !spool.archived).reduce((sum, spool) => sum + spool.remaining_g, 0)
   return (
     <div data-testid="spool-inventory">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
         <label className="flex items-center gap-2 text-muted">
-          <input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={archived}
+            onChange={(event) => showArchived(event.target.checked)}
+          />
           Include archived spools
         </label>
         {base && (
@@ -104,9 +119,13 @@ export function SpoolInventoryPanel() {
       {spools === null && !error && !unconfigured && (
         <p className="text-[12px] text-muted">Reading Bambuddy's inventory…</p>
       )}
-      {spools !== null && spools.length === 0 && <p className="text-[12px] text-muted">Bambuddy has no spools.</p>}
-      {spools !== null && spools.length > 0 && (
-        <>
+      {spools !== null && (
+        // #3486 review: the total and the empty note are the last selection's too, so the
+        // whole result is marked as being read again, not the table alone.
+        <div data-testid="spool-inventory-result" aria-busy={reading} className={reading ? 'opacity-60' : undefined}>
+          {spools.length === 0 && <p className="text-[12px] text-muted">Bambuddy has no spools.</p>}
+          {spools.length > 0 && (
+            <>
           <p className="sb-num mb-2 text-[12px] text-muted" data-testid="spool-inventory-total">
             {spools.filter((spool) => !spool.archived).length} spools, {(total / 1000).toFixed(2)} kg left
           </p>
@@ -152,7 +171,9 @@ export function SpoolInventoryPanel() {
               </tbody>
             </table>
           </div>
-        </>
+            </>
+          )}
+        </div>
       )}
     </div>
   )

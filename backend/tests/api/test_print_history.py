@@ -330,8 +330,9 @@ def test_a_page_reads_its_archives_in_one_list_read(
     assert window.attributes is not None
     assert (
         window.attributes["scadbuddy.archives"],
+        window.attributes["scadbuddy.archives_missing"],
         window.attributes["scadbuddy.archives_listed"],
-    ) == (3, 3)
+    ) == (3, 3, 3)
 
 
 @respx.mock
@@ -385,7 +386,10 @@ def test_a_page_reads_its_template_revisions_defaults_at_once(
 
     items = client.get("/api/v1/prints").json()["items"]
 
-    assert [item["params_diff"] is not None for item in items] == [True, True]
+    assert [item["params_diff"] is not None for item in items] == [True, True], (
+        f"{arrived} defaults read(s) reached the barrier, which waits for two at once: "
+        "a page reading them one after another times out there and shows no diff"
+    )
 
 
 @respx.mock

@@ -27,7 +27,7 @@
  * by default), as the header's working indicator reads them; any other status lists none.
  */
 import { HttpResponse, http } from 'msw'
-import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
+import type { AiSessionView, ResourceRef, SessionLimits, SessionResource, SessionRuntime } from '../../api/types'
 import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
 import { versionIds } from '../fixtures'
 
@@ -37,6 +37,20 @@ const base = '/api/v1/ai'
 export const MAX_BUDGET_USD = 100
 export const MAX_TURNS = 200
 const DEFAULTS: SessionLimits = { budget_usd: 1, max_turns: 25 }
+
+/** agent `sessions/runtimeSettings.ts` RUNTIME_DEFAULTS and RUNTIME_BOUNDS (spec §13). */
+export const RUNTIME_DEFAULTS: SessionRuntime = {
+  park_hold_seconds: 300,
+  warm_max_per_replica: 8,
+  warm_idle_seconds: 600,
+  turn_max_seconds: 7200,
+}
+export const RUNTIME_BOUNDS: Record<keyof SessionRuntime, { min: number; max: number }> = {
+  park_hold_seconds: { min: 30, max: 3600 },
+  warm_max_per_replica: { min: 0, max: 32 },
+  warm_idle_seconds: { min: 60, max: 86400 },
+  turn_max_seconds: { min: 300, max: 86400 },
+}
 
 /** What the desktop agent's scripted session (`../agent.ts`) changed. */
 const EXTERNAL_RESOURCES: readonly SessionResource[] = [
@@ -67,6 +81,9 @@ const state = {
   limits: { ...DEFAULTS },
   /** Every limits write, for tests. */
   writes: [] as SessionLimits[],
+  runtime: { ...RUNTIME_DEFAULTS },
+  /** Every session-runtime write's body, for tests. */
+  runtimeWrites: [] as Partial<SessionRuntime>[],
   resources: new Map<string, SessionResource[]>(),
   /** The session each resource list belongs to, as the reverse lookup shows it. */
   views: new Map<string, AiSessionView>(),
@@ -90,6 +107,8 @@ export function sessionWrites(): readonly SessionWrite[] {
 export function reset(): void {
   state.limits = { ...DEFAULTS }
   state.writes = []
+  state.runtime = { ...RUNTIME_DEFAULTS }
+  state.runtimeWrites = []
   state.sessionWrites = []
   state.running = 0
   state.resources = new Map([[EXTERNAL_SESSION_ID, [...EXTERNAL_RESOURCES]]])
@@ -144,6 +163,10 @@ export function mockSessionLimitWrites(): readonly SessionLimits[] {
   return state.writes
 }
 
+export function mockSessionRuntimeWrites(): readonly Partial<SessionRuntime>[] {
+  return state.runtimeWrites
+}
+
 const detail = (text: string, status: number) => HttpResponse.json({ detail: text }, { status })
 
 function view(fields: Partial<AiSessionView> & Pick<AiSessionView, 'id'>): AiSessionView {
@@ -178,6 +201,22 @@ export const handlers = [
     state.limits = { budget_usd: Math.round(budget_usd * 100) / 100, max_turns }
     state.writes.push(state.limits)
     return HttpResponse.json(state.limits)
+  }),
+
+  http.get(`${base}/settings/session-runtime`, () => HttpResponse.json(state.runtime)),
+
+  http.put(`${base}/settings/session-runtime`, async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>
+    for (const [key, value] of Object.entries(body)) {
+      const bounds = RUNTIME_BOUNDS[key as keyof SessionRuntime] as { min: number; max: number } | undefined
+      if (!bounds) return detail(`${key}: unrecognized key`, 422)
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < bounds.min || value > bounds.max) {
+        return detail(`${key}: must be an integer from ${bounds.min} to ${bounds.max}`, 422)
+      }
+    }
+    state.runtime = { ...state.runtime, ...(body as Partial<SessionRuntime>) }
+    state.runtimeWrites.push(body as Partial<SessionRuntime>)
+    return HttpResponse.json(state.runtime)
   }),
 
   // #1288 — one session: a 404 for one that neither the open mock agent nor a test knows.

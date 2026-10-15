@@ -65,10 +65,44 @@ def test_output_writes_are_operations(client: TestClient, app: FastAPI, model: s
     )
     assert covered.status_code == 204, covered.text
     assert client.get(f"/api/v1/outputs/{output_id}/thumbnail").content == PNG_BYTES
+    # #2288 — named, then the name cleared: a blank one is no name.
+    renamed = client.patch(
+        f"/api/v1/outputs/{output_id}", json={"name": "  Zach blue  "}, headers=press()
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Zach blue"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["name"] == "Zach blue"
+    cleared = client.patch(f"/api/v1/outputs/{output_id}", json={"name": " "}, headers=press())
+    assert cleared.status_code == 200 and cleared.json()["name"] is None
+    assert (
+        client.patch(f"/api/v1/outputs/{'0' * 32}", json={"name": "x"}, headers=press()).status_code
+        == 404
+    )
     assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
-    for kind in ("output_create", "output_thumbnail", "output_delete"):
+    for kind in ("output_create", "output_thumbnail", "output_rename", "output_delete"):
         assert _workflow_ids(app, kind), kind
+
+
+def test_a_renamed_output_writes_meta_json_as_a_save_does(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    """#2786 review: a rename rewrites meta.json; renamed back, the file is byte for byte
+    the one the save wrote, so a renamed output's file never differs in format."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _job(client, model), "name": "Once"},
+        headers=press(),
+    )
+    assert created.status_code == 201, created.text
+    output_id = created.json()["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    meta = state.outputs.directory(output_id) / "meta.json"
+    saved = meta.read_bytes()
+    for name in ("Twice", "Once"):
+        renamed = client.patch(f"/api/v1/outputs/{output_id}", json={"name": name}, headers=press())
+        assert renamed.status_code == 200, renamed.text
+    assert meta.read_bytes() == saved
 
 
 def test_a_job_not_done_is_still_409_without_an_operation_record(
@@ -114,7 +148,11 @@ def test_only_a_delete_of_the_inbox_copies_waits_on_the_print_worker(client: Tes
 
     assert _prelude(ops, kind, request) is None
     assert _prelude(ops, kind, {**request, "delete_inbox_copies": True}) == PreludeStep(
-        kind="output_inbox_delete", task_queue=ops.queues["bambuddy"], run_attempts=3
+        kind="output_inbox_delete",
+        task_queue=ops.queues["bambuddy"],
+        run_attempts=3,
+        # Its own "where", for a prelude that fails after its effect may have happened.
+        where=ops.kinds["output_inbox_delete"].where,
     )
     assert ops.kinds["output_inbox_delete"].queue == "bambuddy"
 
