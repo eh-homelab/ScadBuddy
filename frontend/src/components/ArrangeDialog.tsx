@@ -78,14 +78,18 @@ function slugOf(name: string): string {
     .replace(/(^-|-$)/g, '')
 }
 
-/** `stem`, or `stem 2`, `stem 3`…: the first name whose slug no model has. */
-function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): string {
+/** `base`, or `base 2`, `base 3`… */
+function numbered(base: string, n: number): string {
+  return n === 1 ? base : `${base} ${n}`
+}
+
+/** The name to try (`stem`, else `fallback`) and the first number whose slug no model has. */
+function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): { base: string; n: number } {
   const base = slugOf(stem) ? stem : fallback
   const taken = new Set(models.map((model) => model.slug))
-  for (let n = 1; ; n += 1) {
-    const name = n === 1 ? base : `${base} ${n}`
-    if (!taken.has(slugOf(name))) return name
-  }
+  let n = 1
+  while (taken.has(slugOf(numbered(base, n)))) n += 1
+  return { base, n }
 }
 
 /** #3637 — a copy added to a row, in other colours. */
@@ -552,7 +556,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             for (let attempt = 0; made === undefined; attempt += 1) {
               // Refused as taken (a model the list did not show): the server's own check,
               // so the next try numbers the name on rather than guessing slugs again.
-              const name = attempt === 0 ? first : `${first} ${attempt + 1}`
+              const name = numbered(first.base, first.n + attempt)
               try {
                 made = await within(() =>
                   api.createMeshModel({
