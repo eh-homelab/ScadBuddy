@@ -9,7 +9,8 @@ import tempfile
 import uuid
 import zipfile
 from array import array
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -841,12 +842,11 @@ def _attribute(tag: str, name: str) -> str | None:
 #: under this; a longer one is not that writer's, and is parsed instead. It bounds what
 #: one vertex costs as an array row, whatever the file holds (#2877).
 _MAX_WRITTEN_NUMBER = 32
-#: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
-#: two counted against each other, so a file written any other way is parsed instead.
+#: A ``<vertex>`` exactly as :func:`object_model` writes one, counted against every tag
+#: named so (:data:`_NAMED_TAG`), so a file written any other way is parsed instead.
 _WRITTEN_VERTEX = re.compile(
     rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
 )
-_ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
 #: How far into a ``<triangle>`` tag its paint code is looked for: the writer puts it after
 #: three vertex indices, well inside this.
 _MAX_TRIANGLE_LEAD = 256
@@ -858,21 +858,38 @@ _PAINT_CODE = re.compile(
     rb"<triangle\b[^>]{0,%d}?\s%s=\"([^\"]{0,%d})\""
     % (_MAX_TRIANGLE_LEAD, PAINT_ATTRIBUTE.encode(), MAX_CODE_DIGITS + 1)
 )
-_ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
+# The name first and the space behind it after, so `re` searches for the name as a
+# literal rather than trying every space in the file (#3678).
+_ANY_PAINT = re.compile(rb'%s(?<=\s%s)="' % ((PAINT_ATTRIBUTE.encode(),) * 2))
 #: The elements :func:`object_model` writes exactly one of; another count is the shape
 #: the parse refuses or reads otherwise (#2024), so it is left to the parse.
-_ONE_EACH = tuple(
-    re.compile(rb"<(?:[\w.-]+:)?%s\b" % tag)
-    for tag in (b"object", b"mesh", b"vertices", b"triangles")
-)
-#: Vertices turned into numbers at a time, so the copy never costs more than a batch.
-_VERTEX_BATCH = 65536
+_ONE_EACH = (b"object", b"mesh", b"vertices", b"triangles")
+#: Any tag of those names or named ``vertex``, under any prefix: one pass counts them
+#: all, where a pass each cost a second of a re-placement (#3678).
+_NAMED_TAG = re.compile(rb"<(?:[\w.-]+:)?(%s)\b" % b"|".join((*_ONE_EACH, b"vertex")))
+#: Bytes searched at a time (#3678). Each window ends just before a ``<``, so no tag
+#: the counts compare starts in one window and ends in the next, and the matches of one
+#: window are all that is held as Python objects at once. A tag a window boundary does
+#: split (a quoted value holding a ``<``) is missed by its pattern and still counted by
+#: the one it is checked against, which leaves the file to the parse.
+_WINDOW = 1 << 20
 #: The writer's root, in the core namespace that makes its bare ``<vertex>`` tags the
 #: 3MF's own; and any default namespace declared, the two counted against each other,
 #: so a file that puts its vertices in another namespace is left to the parse.
 _CORE_ROOT = re.compile(rb'<model\b[^>]{0,1024}?\sxmlns="%s"' % re.escape(CORE_NS.encode()))
-_ANY_DEFAULT_NAMESPACE = re.compile(rb"\sxmlns\s*=")
+_ANY_DEFAULT_NAMESPACE = re.compile(rb"xmlns(?<=\sxmlns)\s*=")
 _LEADING_SPACE = re.compile(rb"\s*")
+
+
+def _windows(data: bytes, start: int) -> Iterator[tuple[int, int]]:
+    """``data`` from ``start`` as :data:`_WINDOW`-sized ``(start, end)`` offsets, each
+    ending just before a ``<``."""
+    end = len(data)
+    while start < end:
+        stop = data.find(b"<", start + _WINDOW)
+        stop = end if stop == -1 else stop
+        yield start, stop
+        start = stop
 
 
 def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
@@ -891,7 +908,7 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     as it was written, never rebuilt from its triangles.
 
     Every value is bounded before it is copied: no entity is expanded (none is
-    accepted), coordinates are read a batch at a time into rows of at most
+    accepted), coordinates are read a :data:`_WINDOW` at a time into rows of at most
     :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
     # The writer's one processing instruction is its XML declaration; any other, like a
     # comment, CDATA or an entity, is something the pattern does not read as XML does.
@@ -911,40 +928,36 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
         or sum(1 for _ in _ANY_DEFAULT_NAMESPACE.finditer(data)) != 1
     ):
         return None
-    if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
-        return None
     low = np.full(3, np.inf)
     high = np.full(3, -np.inf)
-    count = 0
-    batch: list[tuple[bytes, bytes, bytes]] = []
-
-    def reduce() -> None:
-        points = np.array(batch, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
-        np.minimum(low, points.min(axis=0), out=low)
-        np.maximum(high, points.max(axis=0), out=high)
-        batch.clear()
-
-    try:
-        for match in _WRITTEN_VERTEX.finditer(data):
-            batch.append((match[1], match[2], match[3]))
-            count += 1
-            if len(batch) == _VERTEX_BATCH:
-                reduce()
-        if batch:
-            reduce()
-    except ValueError:
-        return None
-    if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
-        return None
+    written = found = paints = 0
     codes: set[bytes] = set()
-    found = 0
-    for match in _PAINT_CODE.finditer(data):
-        code = match.group(1)
-        if len(code) > MAX_CODE_DIGITS or not code.isascii():
-            return None
-        codes.add(code)
-        found += 1
-    if found != sum(1 for _ in _ANY_PAINT.finditer(data)):
+    tags: Counter[bytes] = Counter()
+    # Each pattern is run over a window by `findall`, which matches in C: a Python step
+    # per vertex or triangle cost most of a re-placement (#3678).
+    for low_at, high_at in _windows(data, start):
+        rows = _WRITTEN_VERTEX.findall(data, low_at, high_at)
+        if rows:
+            try:
+                points = np.array(rows, dtype=f"S{_MAX_WRITTEN_NUMBER}").astype(np.float64)
+            except ValueError:
+                return None
+            np.minimum(low, points.min(axis=0), out=low)
+            np.maximum(high, points.max(axis=0), out=high)
+            written += len(rows)
+        tags.update(_NAMED_TAG.findall(data, low_at, high_at))
+        found_here = _PAINT_CODE.findall(data, low_at, high_at)
+        found += len(found_here)
+        codes.update(found_here)
+        # Counted, never collected: the attribute needs no ``<``, so a window holds as
+        # many as a run of them fits, and a list of them would cost several times the
+        # file (security review of #3711).
+        paints += sum(1 for _ in _ANY_PAINT.finditer(data, low_at, high_at))
+    if any(tags[tag] != 1 for tag in _ONE_EACH):
+        return None
+    if not written or written != tags[b"vertex"] or found != paints:
+        return None
+    if any(len(code) > MAX_CODE_DIGITS or not code.isascii() for code in codes):
         return None
     painted: set[int] = set()
     for code in codes:
