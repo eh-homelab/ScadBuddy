@@ -201,12 +201,14 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
     // The new process passes a check (four), and only then does another write land.
     const four = await h.turn(id, h.assembled(), 1 - three.result.total_cost_usd)
     expect(four.outcome).toBe('hit')
+    expect(h.spawns).toHaveLength(2)
     written = arm()
     const five = await h.turn(id, h.assembled(), 1 - four.result.total_cost_usd)
     expect(five.outcome).toBe('hit')
     await written
     const six = await h.turn(id, h.assembled(), 1 - five.result.total_cost_usd)
     expect(six).toMatchObject({ outcome: 'recycle', reason: 'tail' })
+    expect(h.spawns).toHaveLength(3)
   }, 60_000)
 
   it('recycles when the remaining budget moved', async () => {
