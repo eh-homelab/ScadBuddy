@@ -5,6 +5,9 @@ import { UI_ACTOR } from '../audit/writes.js'
 import { type BrowserLists, DEFAULT_ALLOW, DEFAULT_DENY, MAX_RULE_LENGTH, MAX_RULES, originOf, RuleError } from '../browser/origins.js'
 import type { ApprovedOrigin, BrowserOrigins } from '../browser/store.js'
 import type { OriginPolicy } from '../http/origins.js'
+import { archivedError, type SessionManager, SessionError } from '../sessions/manager.js'
+import { sameOwner } from '../sessions/protocol.js'
+import { BROWSER_USER } from './approvals.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -22,12 +25,16 @@ import { ready, type RouteModule } from './module.js'
 //
 // Only the user writes them: every write passes guard.ts `uiRequestProblem` (the UI's
 // origin, through the HTTPS ingress, JSON only) and is audited as the UI user (a list
-// change by SettingsStore.set; an approval or revocation here). No agent tool reaches
+// change by SettingsStore.set; an approval or revocation here). A session's approvals
+// are written as its other writes are (routes/sessionFiles.ts): only a session the user
+// controls, and never an archived one. No agent tool reaches
 // them: an agent must not widen where its own browser may go (spec §8.1).
 
 export type BrowserOriginsRouteDeps = {
   /** Undefined when there is no database (spec §9). */
   store: BrowserOrigins | undefined
+  /** The sessions an approval is written to; undefined exactly when `store` is. */
+  sessions: Pick<SessionManager, 'get'> | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -79,6 +86,21 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
     defaults: { allow: [...DEFAULT_ALLOW], deny: [...DEFAULT_DENY] },
     approved: await s.listApproved(),
   })
+  /** As routes/sessionFiles.ts `writable`: the user's own session only, and never an archived one; a Response when refused. */
+  async function refusedSession(c: Context, id: string): Promise<Response | undefined> {
+    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    try {
+      const session = await deps.sessions.get(id, BROWSER_USER)
+      if (!sameOwner(BROWSER_USER, session.owner)) {
+        throw new SessionError('forbidden', `session ${session.id} is controlled by ${session.owner.label}; take it over first`)
+      }
+      if (session.archivedAt !== null) throw archivedError(session.id)
+      return undefined
+    } catch (err) {
+      if (err instanceof SessionError) return c.json({ detail: err.message }, err.status)
+      throw err
+    }
+  }
   const context = (c: Context) => ({ actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) })
 
   app.get(BROWSER_ORIGINS_PATH, async (c) => {
@@ -152,6 +174,8 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
     const origin = asOrigin(parsed.origin)
     if (!origin) return c.json({ detail: `origin: "${parsed.origin}" is not an http or https origin (scheme://host[:port])` }, 400)
     const id = c.req.param('id')
+    const refused = await refusedSession(c, id)
+    if (refused) return refused
     const ok = await s.approve(id, origin, 'session')
     if (!ok) return c.json({ detail: `no session ${id}` }, 404)
     await audited(c, 'browser_session_origin', `${origin} approved for the session`, true)
@@ -164,6 +188,8 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
     const s = await store()
     if (typeof s === 'string') return c.json({ detail: s }, 503)
     const origin = c.req.query('origin') ?? ''
+    const refused = await refusedSession(c, c.req.param('id'))
+    if (refused) return refused
     const ok = await s.revoke(c.req.param('id'), origin)
     if (!ok) return c.json({ detail: `${origin || 'that origin'} is not approved in session ${c.req.param('id')}` }, 404)
     await audited(c, 'browser_session_origin', `${origin} revoked for the session`, true)
@@ -183,6 +209,7 @@ export const route: RouteModule = {
   register(app, deps) {
     registerBrowserOriginsRoutes(app, {
       store: deps.browserOrigins,
+      sessions: deps.sessions,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

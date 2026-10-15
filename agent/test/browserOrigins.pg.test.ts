@@ -7,6 +7,7 @@ import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { BROWSER_ORIGINS_PATH, registerBrowserOriginsRoutes } from '../src/routes/browserOrigins.js'
+import { SessionError, type SessionRecord } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // #982: the headless browser's allow and deny lists (ai_settings) and each session's
@@ -44,8 +45,18 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
     }
     store = new BrowserOrigins(db.sql, new SettingsStore(db.sql, audit as never))
     app = new Hono()
+    // The session's owner and archive mark, as SessionManager.get answers for the user.
+    const sessions = {
+      async get(id: string): Promise<SessionRecord> {
+        const [row] = await db.sql<{ owner_kind: string; owner_id: string; owner_label: string; archived_at: Date | null }[]>`
+          SELECT owner_kind, owner_id, owner_label, archived_at FROM ai_sessions WHERE id = ${id}`
+        if (!row) throw new SessionError('not_found', `no session ${id}`)
+        return { id, owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }, archivedAt: row.archived_at } as unknown as SessionRecord
+      },
+    }
     registerBrowserOriginsRoutes(app, {
       store,
+      sessions,
       ready: () => Promise.resolve(true),
       remoteAddress: () => '10.0.0.7',
       origins: originPolicy(HOST, '10.0.0.0/8'),
@@ -121,6 +132,22 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
     expect(
       (await send('POST', '/api/v1/ai/sessions/00000000-0000-4000-8000-000000000000/browser-origins', { origin: 'https://example.org' })).status,
     ).toBe(404)
+  })
+
+  it("refuses to approve or revoke in another owner's session, or an archived one", async () => {
+    const theirs = await session()
+    await db.sql`UPDATE ai_sessions SET owner_kind = 'bearer', owner_id = 'token-1', owner_label = 'Claude Desktop' WHERE id = ${theirs}`
+    const archived = await session()
+    await store.approve(archived, 'https://example.org', 'session')
+    await db.sql`UPDATE ai_sessions SET archived_at = now() WHERE id = ${archived}`
+
+    const other = await send('POST', `/api/v1/ai/sessions/${theirs}/browser-origins`, { origin: 'https://example.org' })
+    expect(other.status).toBe(403)
+    expect(((await other.json()) as { detail: string }).detail).toMatch(/controlled by Claude Desktop/)
+    expect((await send('POST', `/api/v1/ai/sessions/${archived}/browser-origins`, { origin: 'https://example.net' })).status).toBe(409)
+    expect((await send('DELETE', `/api/v1/ai/sessions/${archived}/browser-origins?origin=https%3A%2F%2Fexample.org`)).status).toBe(409)
+    expect(await store.approved(theirs)).toEqual(new Map())
+    expect(await store.approved(archived)).toEqual(new Map([['https://example.org', 'session']]))
   })
 
   it.each([

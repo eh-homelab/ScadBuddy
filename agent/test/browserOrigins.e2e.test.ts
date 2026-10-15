@@ -70,7 +70,14 @@ describe.skipIf(cliMissing !== undefined)(`the headless browser's lists on a cla
         : { toolUse: { name: 'mcp__playwright__browser_navigate', input: { url: navigateTo } } },
     )
     mcp = await startFakeMcp({
-      browser: { redirects: { 'https://makerworld.com/go': 'https://elsewhere.example/landing', 'https://makerworld.com/bad': 'https://evil.example/' } },
+      browser: {
+        redirects: {
+          'https://makerworld.com/go': 'https://elsewhere.example/landing',
+          'https://makerworld.com/bad': 'https://evil.example/',
+          'https://makerworld.com/slow': 'https://evil.example/slow',
+        },
+        fails: ['https://makerworld.com/slow'],
+      },
     })
   })
   afterEach(async () => {
@@ -148,5 +155,12 @@ describe.skipIf(cliMissing !== undefined)(`the headless browser's lists on a cla
       expect(JSON.stringify(messages.filter((m) => m.type === 'user'))).not.toContain('The text of')
       forwarded?.release()
     }
+  })
+
+  it('an error result from a page the lists do not let it read is withheld too', async () => {
+    const { seen, messages } = await navigate('https://makerworld.com/slow')
+    expect(seen).toContain('withheld this result: the browser is now on https://evil.example')
+    expect(seen).not.toContain('The text of')
+    expect(JSON.stringify(messages.filter((m) => m.type === 'user'))).not.toContain('The text of')
   })
 })

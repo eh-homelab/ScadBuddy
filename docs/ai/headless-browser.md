@@ -87,10 +87,19 @@ can take the browser somewhere no navigation named. Playwright MCP reports the p
 on in each result (`- Page URL: …`); a result whose page is denied, or on neither list
 and not approved in the session, is replaced before the model reads it (and in the
 transcript) by a note saying where the browser is, so the page's content never reaches
-the model. A result that names no page at all is withheld too (except from
-`browser_close`, `browser_resize` and `browser_install`, which show none): a page can move
-by itself at any time, so a result that cannot be placed is never assumed to come from an
-allowed one. A check or screen that fails or takes longer than 20 s refuses the call or
+the model. Playwright MCP names the page only when the tool shows a snapshot or a tab
+changed since its last result (measured in the `playwright-core` that `@playwright/mcp`
+0.0.82 ships, `Response._build`), so a result that names none (`browser_take_screenshot`,
+`browser_console_messages`, `browser_network_requests`) is judged by the page the turn
+last saw that browser on, and is withheld when it has seen none yet (call
+`browser_snapshot` first); `browser_close`, `browser_resize` and `browser_install` show no
+page and pass. A blank tab (`about:blank`) is read only while it is the browser's one
+tab: a page in another tab can write into a tab it opened, and Playwright MCP lists the
+tabs whenever there is more than one. A browser tool's error is screened the same way:
+the forwarder passes it to Claude Code as the tool's result, since Claude Code hands an
+MCP error to the model through `PostToolUseFailure`, which no hook can replace (measured,
+`agent/test/browserOrigins.e2e.test.ts`). Both turns screen the same text, the whole
+result (`browser/origins.ts` `screenedText`). A check or screen that fails or takes longer than 20 s refuses the call or
 withholds the result; a deny rule that no longer parses refuses every page; a stored list
 that cannot be read leaves no allow list (everything asks) and the default deny list. The
 allow list lowers only `browser_navigate`'s tier: another browser tool that names a `url`
@@ -102,7 +111,9 @@ the pages of that origin stay readable in the chat while the next navigation the
 again. A flow run has no chat to remember it in: only the approved call's own result is
 shown.
 
-Settings lists the origins approved in each chat, with **Revoke**. Page content still
+Settings lists the origins approved in each chat, with **Revoke**. An approval or a
+revocation is written only to a chat the user controls and that is not archived, as the
+chat's other writes are. Page content still
 arrives as untrusted data: the forwarder wraps every plugin result in the envelope
 (`agent/src/plugins/forwarder.ts`).
 

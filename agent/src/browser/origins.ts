@@ -278,6 +278,15 @@ export function judge(lists: CompiledLists, approved: ReadonlyMap<string, Approv
 }
 
 /**
+ * The text a browser result is screened as, the same in a classic turn (a PostToolUse
+ * hook's `tool_response`, the content blocks) and a durable one (the MCP result's
+ * `content`): the whole of it, whatever its shape, so a page named anywhere in it is read.
+ */
+export function screenedText(response: unknown): string {
+  return typeof response === 'string' ? response : (JSON.stringify(response) ?? '')
+}
+
+/**
  * The `Page URL:` lines of a Playwright MCP result (raw text or JSON-escaped in the
  * untrusted envelope), up to the end of the line. Each is judged with `judge`, which
  * refuses one that is not a URL as the browser writes it, so a line the extraction cut
@@ -302,6 +311,15 @@ export function withheldText(judgement: Exclude<Judgement, { kind: 'allowed' }>)
     `ScadBuddy withheld this result: the browser is now on ${judgement.origin} (a redirect, a link or a new tab), which is ` +
     'not on the allow list and was not approved in this session. Nothing the page said is shown. To read it, call ' +
     'browser_navigate with that address: the user is asked first.'
+  )
+}
+
+/** What the model reads in place of a blank tab's result while another tab is open (browser/guard.ts). */
+export function blankTabText(url: string): string {
+  return (
+    `ScadBuddy withheld this result: the browser is on a blank tab (${url}) while another tab is open, and a page in ` +
+    "another tab can write into a tab it opened, so it cannot be checked against the headless browser's lists. Close " +
+    'the other tabs, or navigate this one to a page, to read it.'
   )
 }
 

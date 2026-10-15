@@ -344,6 +344,32 @@ describe('the guard fails closed (security review of #3654)', () => {
     expect(await guard.screen('mcp__playwright__browser_close', {}, 'No open tabs.')).toBeUndefined()
   })
 
+  it('judges a result that names no page by the page this guard last saw that browser on (@playwright/mcp 0.0.82)', async () => {
+    const { guard } = guardOf({ allow: ['makerworld.com'], deny: [] })
+    const shot = 'mcp__playwright__browser_take_screenshot'
+    expect(await guard.screen(nav, { url: 'https://makerworld.com/x' }, page('https://makerworld.com/x'))).toBeUndefined()
+    expect(await guard.screen(shot, {}, '### Result\n- Took a screenshot')).toBeUndefined()
+    expect(await guard.screen('mcp__playwright__browser_console_messages', {}, 'console text')).toBeUndefined()
+    // The browser moved to a page it may not read: what follows is withheld too, until it is back.
+    expect(await guard.screen('mcp__playwright__browser_click', {}, page('https://elsewhere.example/'))).toMatch(/withheld.*elsewhere/)
+    expect(await guard.screen(shot, {}, '### Result\n- Took a screenshot')).toMatch(/withheld.*elsewhere/)
+    // Another plugin's browser is another browser: nothing seen of it yet.
+    const two = browserGuard({ store: memoryStore({ allow: ['makerworld.com'], deny: [] }), sessionId: SESSION, plugins: ['playwright', 'pw2'] })
+    expect(await two.screen(nav, {}, page('https://makerworld.com/'))).toBeUndefined()
+    expect(await two.screen('mcp__pw2__browser_take_screenshot', {}, 'shot')).toMatch(/does not say which page/)
+  })
+
+  it('reads a blank tab only while it is the one tab: another tab can write into one it opened', async () => {
+    const { guard } = guardOf({ allow: ['makerworld.com'], deny: [] })
+    const snap = 'mcp__playwright__browser_snapshot'
+    expect(await guard.screen(snap, {}, page('about:blank'))).toBeUndefined()
+    const tabs = '### Open tabs\n- 0: [Home](https://makerworld.com/)\n- 1: (current) [](about:blank)\n'
+    expect(await guard.screen(snap, {}, `${tabs}${page('about:blank')}`)).toMatch(/withheld.*blank tab \(about:blank\) while another tab is open/)
+    expect(await guard.screen('mcp__playwright__browser_take_screenshot', {}, 'shot')).toMatch(/blank tab/)
+    // Chrome's own error page carries nothing another page wrote.
+    expect(await guard.screen(snap, {}, `${tabs}${page('chrome-error://chromewebdata/')}`)).toBeUndefined()
+  })
+
   it('judges the page the browser reports, not the one it was asked for', async () => {
     const { guard } = guardOf({ allow: ['makerworld.com'], deny: [] })
     // Asked for an allowed URL; the browser ended up elsewhere (a redirect, or a parser that read it differently).

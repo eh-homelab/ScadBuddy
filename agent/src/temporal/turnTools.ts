@@ -1,6 +1,7 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { screenedText } from '../browser/origins.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -645,9 +646,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       // the payload; their names and the text go through the same scrub.
       const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
       // A page the lists do not let the model read is withheld, its images with it, so
-      // none is kept (#982).
-      const raw = content.map((b) => (typeof b.text === 'string' ? b.text : '')).join('\n')
-      const withheld = server.screen ? await screened(server, harnessName, input, raw) : undefined
+      // none is kept (#982). It reads what a classic turn's hook reads (`screenedText`).
+      const withheld = server.screen ? await screened(server, harnessName, input, screenedText(content)) : undefined
       if (withheld !== undefined) {
         await record(result.isError ? 'error' : 'ok')
         if (result.isError) throw ApplicationFailure.nonRetryable(withheld, TOOL_ERROR)

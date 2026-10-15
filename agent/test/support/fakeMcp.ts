@@ -36,9 +36,10 @@ export type FakeMcpOptions = {
   /**
    * Playwright MCP's browser_navigate and browser_snapshot (#982): each answers with
    * the page the browser is on as Playwright MCP writes it (`- Page URL: …`). A URL in
-   * `redirects` lands on its value instead, as a server redirect would.
+   * `redirects` lands on its value instead, as a server redirect would. A navigation to
+   * a URL in `fails` lands there too, but answers as an error (`isError`), naming the page.
    */
-  browser?: { redirects?: Record<string, string> }
+  browser?: { redirects?: Record<string, string>; fails?: readonly string[] }
   /** Stateful: `initialize` issues an `mcp-session-id` (sessionIdGenerator: randomUUID) and a `DELETE` ends it. */
   sessions?: boolean
 }
@@ -51,13 +52,16 @@ export function fakePage(url: string): string {
 function buildServer(
   calls: string[],
   extraTools: readonly string[],
-  browser?: { redirects?: Record<string, string>; page: { url: string } },
+  browser?: { redirects?: Record<string, string>; fails?: readonly string[]; page: { url: string } },
 ): McpServer {
   const server = new McpServer({ name: 'fake-memory', version: '0.0.1' })
   if (browser) {
     server.registerTool('browser_navigate', { description: 'Navigate to a URL', inputSchema: { url: z.string() } }, ({ url }) => {
       calls.push(`browser_navigate:${url}`)
       browser.page.url = browser.redirects?.[url] ?? url
+      if (browser.fails?.includes(url)) {
+        return { isError: true, content: [{ type: 'text', text: `### Error\nTimeoutError: navigation timed out\n${fakePage(browser.page.url)}` }] }
+      }
       return { content: [{ type: 'text', text: fakePage(browser.page.url) }] }
     })
     server.registerTool('browser_snapshot', { description: 'Snapshot the page', inputSchema: {} }, () => {

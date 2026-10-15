@@ -1,4 +1,5 @@
 import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import { screenedText } from '../browser/origins.js'
 
 // The permission seam between the SDK and ScadBuddy's risk tiers (spec §8.1–§8.2,
 // issue #258). Every tool call is mapped to a tier and the tier to a decision:
@@ -295,10 +296,7 @@ export function makeResultScreenHook(
     hooks: [
       async (input) => {
         if (input.hook_event_name !== 'PostToolUse' || !covers(input.tool_name)) return {}
-        // The whole response, whatever its shape (blocks, `{ content }`, a string): a
-        // page named anywhere in it is read.
-        const response: unknown = input.tool_response
-        const text = typeof response === 'string' ? response : (JSON.stringify(response) ?? '')
+        const text = screenedText(input.tool_response)
         let replaced: string | undefined
         try {
           replaced = await within(screen(input.tool_name, input.tool_input, text), deadlineMs)
