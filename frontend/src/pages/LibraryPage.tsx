@@ -194,7 +194,9 @@ export function LibraryPage() {
   // linked file's.
   let wanted: Wanted | undefined
   if (byProject) {
-    if (project) wanted = { folderId: project.folders[0]!.id }
+    // The grid shows the project's first folder; the header says so when there are more.
+    const first = project?.folders[0]
+    if (first) wanted = { folderId: first.id }
   } else if (segments.length === 0) wanted = linked !== null ? { folderId: null, fileId: linked } : { folderId: null }
   else if (tree !== null) {
     const id = folderIdOf(tree, segments)
@@ -304,7 +306,8 @@ export function LibraryPage() {
     if (by === (byProject ? 'project' : 'folder')) return
     if (by === 'folder') {
       // A project's own folder is where its files are seen by folder.
-      navigate(project ? libraryPath(tree ?? [], project.folders[0]!.id) : LIBRARY_ROOT)
+      const first = project?.folders[0]
+      navigate(first ? libraryPath(tree ?? [], first.id) : LIBRARY_ROOT)
       return
     }
     const here = tree?.find((folder) => folder.id === folderId)
@@ -416,7 +419,8 @@ export function LibraryPage() {
       api.createLibraryFolder({ name, ...(parent && { parent_id: parent.id }) }),
     )
     setFolderAction(null)
-    const next = [...(tree ?? []), { id: made.id, name: made.name, parent_id: made.parent_id ?? null, depth: 0, file_count: 0 }]
+    const depth = parent ? (parent.depth ?? 0) + 1 : 0
+    const next = [...(tree ?? []), { id: made.id, name: made.name, parent_id: made.parent_id ?? null, depth, file_count: 0 }]
     setTree(next)
     navigate(libraryPath(next, made.id))
     setReload((n) => n + 1)
@@ -987,6 +991,11 @@ function WhereHeader({
                 </Link>
               </Badge>
             ))}
+            {project.folders.length > 1 && (
+              <span data-testid="library-project-shown">
+                Showing the files in {folderLabel(tree, project.folders[0]!.id)}.
+              </span>
+            )}
           </span>
         ) : (
           <span className="text-sm text-muted-foreground">{plural(projectCount, 'project')} with library folders</span>

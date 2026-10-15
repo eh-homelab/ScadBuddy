@@ -81,7 +81,8 @@ export function FolderNameDialog({
   }, [key])
 
   const name = value.trim()
-  const usable = name !== '' && !name.includes('/') && name !== renaming?.name
+  // The backend's folder `Name`: 1-255 characters, no `/` and no NUL.
+  const usable = name !== '' && name.length <= 255 && !/[/\0]/.test(name) && name !== renaming?.name
   const where = action?.kind === 'create' ? folderLabel(folders, action.folder?.id ?? null) : null
 
   function close() {
@@ -244,6 +245,9 @@ export function DeleteFolderDialog({
 
   const inside = folder ? folderAndDescendants(folders, folder.id) : new Set<number>()
   const subfolders = inside.size - 1
+  // Read as each folder's own files, not its subfolders' too, as the tree's badges show
+  // them; the folder's whole count is then their sum. Were Bambuddy's `file_count` to
+  // include subfolders, this would count those files twice.
   const files = folders.filter((row) => inside.has(row.id)).reduce((sum, row) => sum + (row.file_count ?? 0), 0)
 
   function close() {
