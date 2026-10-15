@@ -546,14 +546,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     let arrived = 0
     let both!: () => void
     const together = new Promise<void>((r) => (both = r))
+    /** What the two settling commits moved the session to: the second must move it, seeing both decisions. */
+    const moved: string[] = []
     vi.spyOn(service, 'statusRefresh').mockImplementation(async (tx, sessionId) => {
+      // Both meet here when nothing orders them; with the session locked the second settle
+      // cannot arrive until the first commits, so the first goes on alone after a wait.
       if (++arrived === 2) both()
-      await together
-      return refresh(tx, sessionId)
+      await Promise.race([together, new Promise((r) => setTimeout(r, 1_000))])
+      const out = await refresh(tx, sessionId)
+      moved.push(...out.flatMap((e) => (e.type === 'session.status' ? [e.status] : [])))
+      return out
     })
 
     await Promise.all(ids.map((id) => p.approvals.decide(browser, id, true)))
     expect(arrived).toBe(2)
+    expect(moved).toEqual(['running'])
     expect((await p.get(session.id, agentA)).status).toBe('running')
     hold()
     await turn!.done

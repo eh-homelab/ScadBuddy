@@ -750,6 +750,12 @@ export class ApprovalService {
     const traced: { span?: Span; committed?: boolean } = {}
     try {
       const approval = await this.deps.sql.begin(async (tx) => {
+        // The session row first (review of #3685): two settles of one session's approvals
+        // that overlapped each saw the other's decision as pending and neither moved the
+        // session back. Locked, the second waits for the first's commit, and its refresh
+        // reads both. Session before approval, as a turn that asks and a question's answer
+        // lock them, so the two orders never meet.
+        if (refresh) await tx`SELECT 1 FROM ai_sessions WHERE id = (SELECT session_id FROM ai_approvals WHERE id = ${id}) FOR UPDATE`
         const [row] = await tx.unsafe<Row[]>(
           `UPDATE ai_approvals
            SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
@@ -847,11 +853,6 @@ export class ApprovalService {
 
   /** `refreshStatus`'s UPDATE on `db` (the pool, or the transaction that settles an approval); the event to log. */
   private async statusRefresh(db: Sql | TransactionSql, sessionId: string): Promise<ServerEvent[]> {
-    // Two settles of one session's approvals that overlap would each see the other's decision
-    // as pending and neither move the session back (review of #3685). The row lock makes the
-    // second wait for the first's commit; its UPDATE then reads both decisions. Approvals,
-    // then session: the order `create` locks in.
-    await db`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
     const [row] = await db<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
       SET status = CASE
