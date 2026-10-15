@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -19,6 +20,10 @@ export type FakeMcp = {
   url: string
   requests: { method: string; path: string; headers: IncomingHttpHeaders }[]
   calls: string[]
+  /** Each session `DELETE` the server received (with `sessions`), by the session id it named. */
+  deletes: { sessionId: string | undefined; headers: IncomingHttpHeaders }[]
+  /** The MCP session ids the server issued (with `sessions`). */
+  issued: string[]
   close(): Promise<void>
 }
 
@@ -28,10 +33,42 @@ export type FakeMcpOptions = {
   extraTools?: string[]
   /** Answer a request yourself (redirects, 401s); return true when handled. */
   intercept?: (req: IncomingMessage, res: ServerResponse) => boolean
+  /**
+   * Playwright MCP's browser_navigate and browser_snapshot (#982): each answers with
+   * the page the browser is on as Playwright MCP writes it (`- Page URL: …`). A URL in
+   * `redirects` lands on its value instead, as a server redirect would. A navigation to
+   * a URL in `fails` lands there too, but answers as an error (`isError`), naming the page.
+   */
+  browser?: { redirects?: Record<string, string>; fails?: readonly string[] }
+  /** Stateful: `initialize` issues an `mcp-session-id` (sessionIdGenerator: randomUUID) and a `DELETE` ends it. */
+  sessions?: boolean
 }
 
-function buildServer(calls: string[], extraTools: readonly string[]): McpServer {
+/** What the fake browser shows of a page. */
+export function fakePage(url: string): string {
+  return `### Page\n- Page URL: ${url}\n- Page Title: Page at ${url}\n\n### Snapshot\nThe text of ${url}`
+}
+
+function buildServer(
+  calls: string[],
+  extraTools: readonly string[],
+  browser?: { redirects?: Record<string, string>; fails?: readonly string[]; page: { url: string } },
+): McpServer {
   const server = new McpServer({ name: 'fake-memory', version: '0.0.1' })
+  if (browser) {
+    server.registerTool('browser_navigate', { description: 'Navigate to a URL', inputSchema: { url: z.string() } }, ({ url }) => {
+      calls.push(`browser_navigate:${url}`)
+      browser.page.url = browser.redirects?.[url] ?? url
+      if (browser.fails?.includes(url)) {
+        return { isError: true, content: [{ type: 'text', text: `### Error\nTimeoutError: navigation timed out\n${fakePage(browser.page.url)}` }] }
+      }
+      return { content: [{ type: 'text', text: fakePage(browser.page.url) }] }
+    })
+    server.registerTool('browser_snapshot', { description: 'Snapshot the page', inputSchema: {} }, () => {
+      calls.push('browser_snapshot')
+      return { content: [{ type: 'text', text: fakePage(browser.page.url) }] }
+    })
+  }
   for (const name of extraTools) {
     server.registerTool(name, { description: `Extra tool ${name}`, inputSchema: { text: z.string() } }, ({ text }) => {
       calls.push(`${name}:${text}`)
@@ -69,6 +106,10 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
   const path = options.path ?? '/mcp/bank-1/'
   const requests: FakeMcp['requests'] = []
   const calls: string[] = []
+  const browser = options.browser ? { ...options.browser, page: { url: 'about:blank' } } : undefined
+  const deletes: FakeMcp['deletes'] = []
+  const issued: string[] = []
+  const live = new Map<string, StreamableHTTPServerTransport>()
   const http: Server = createServer((req, res) => {
     requests.push({ method: req.method ?? 'GET', path: req.url ?? '', headers: req.headers })
     if (options.intercept?.(req, res)) return
@@ -76,12 +117,46 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
       res.writeHead(404).end()
       return
     }
+    if (options.sessions) {
+      const header = req.headers['mcp-session-id']
+      const sessionId = typeof header === 'string' ? header : undefined
+      if (req.method === 'DELETE') deletes.push({ sessionId, headers: req.headers })
+      const held = sessionId === undefined ? undefined : live.get(sessionId)
+      if (held) {
+        held.handleRequest(req, res).catch(() => {
+          if (!res.headersSent) res.writeHead(500).end()
+        })
+        return
+      }
+      if (req.method !== 'POST' || sessionId !== undefined) {
+        res.writeHead(sessionId === undefined ? 400 : 404).end()
+        return
+      }
+      const server = buildServer(calls, options.extraTools ?? [], browser)
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: randomUUID,
+        onsessioninitialized: (id) => {
+          live.set(id, transport)
+          issued.push(id)
+        },
+        onsessionclosed: (id) => {
+          live.delete(id)
+        },
+      })
+      server
+        .connect(transport)
+        .then(() => transport.handleRequest(req, res))
+        .catch(() => {
+          if (!res.headersSent) res.writeHead(500).end()
+        })
+      return
+    }
     if (req.method !== 'POST') {
       // Stateless: no standalone SSE stream (the client treats 405 as "none").
       res.writeHead(405, { allow: 'POST' }).end()
       return
     }
-    const server = buildServer(calls, options.extraTools ?? [])
+    const server = buildServer(calls, options.extraTools ?? [], browser)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
@@ -100,6 +175,8 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
     url: `http://127.0.0.1:${port}${path}`,
     requests,
     calls,
+    deletes,
+    issued,
     close: () =>
       new Promise<void>((resolve) => {
         http.closeAllConnections()

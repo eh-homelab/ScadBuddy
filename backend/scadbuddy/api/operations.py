@@ -371,7 +371,10 @@ def _prelude(
         return None
     first = ops.kinds[kind.prelude]
     return PreludeStep(
-        kind=first.name, task_queue=ops.queues[first.queue], run_attempts=first.run_attempts
+        kind=first.name,
+        task_queue=ops.queues[first.queue],
+        run_attempts=first.run_attempts,
+        where=first.where,
     )
 
 
@@ -426,6 +429,7 @@ async def _run_operation(
         prelude=prelude,
         idempotency_key=idempotency_key,
         answer_running=kind.answers_running,
+        where=kind.where,
     )
     try:
         answer = await start_command(

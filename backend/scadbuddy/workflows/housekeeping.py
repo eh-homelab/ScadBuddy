@@ -4,8 +4,8 @@ The API process's periodic loops are two Schedules that start ``Housekeeping`` o
 ``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
 ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
 ``scadbuddy-prune-<queue>`` prunes settled render jobs (as the render service's loop
-did), sweeps old request claims and repairs and prunes the activity record every
-`PRUNE_INTERVAL`, whatever that interval. The
+did), sweeps old request claims and the files of lost slice starts, and repairs and
+prunes the activity record every `PRUNE_INTERVAL`, whatever that interval. The
 queue is served in the API process, which holds the data volume the sweeps read. Each
 sweep is best effort, as the loop's were: one that fails is logged, fails its activity
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
@@ -91,6 +91,11 @@ FLOWS_PATCH = "housekeeping-sweep-flow-runs"
 #: (`bambuddy.preview.sweep_preview_slices`). Behind its own patch, like `REAP_SWEEP`.
 PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
 PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
+#: #2715: remove what a print run's lost slice start sliced (`bambuddy.lost_slices`).
+#: Its own sweep, out of `PREVIEWS_SWEEP`, so it stays on the prune Schedule: Bambuddy
+#: keeps a finished job only 30 minutes. Behind its own patch.
+LOST_SLICES_SWEEP = "housekeeping_sweep_lost_slices"
+LOST_SLICES_PATCH = "housekeeping-sweep-lost-slices"
 #: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile
 #: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
 GIT_SWEEP = "housekeeping_maintain_models_git"
@@ -111,14 +116,17 @@ SWEEPS = (
     REAP_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
+    LOST_SLICES_SWEEP,
     GIT_SWEEP,
     ACTIVITY_SWEEP,
 )
-#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
-#: the dialog's background slices, which would otherwise pile up for good with the
-#: sweeps off (review 3c M1); and the activity rows, which every start adds to
-#: (retention and repair, spec 2026-10-09 §6).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP, ACTIVITY_SWEEP)
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
+#: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
+#: of lost slice starts, findable only while Bambuddy keeps the job (#2715); and the
+#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6).
+#: Not the dialog's background slices (`PREVIEWS_SWEEP`): they obey the sweeps' switch,
+#: so with the sweeps off they stay in Bambuddy's library.
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], LOST_SLICES_SWEEP, ACTIVITY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -133,7 +141,8 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 )
 #: The claims sweep is one delete.
 CLAIMS_TIMEOUT = timedelta(minutes=2)
-#: A few Bambuddy reads and deletes per background slice past its grace.
+#: A few Bambuddy reads and deletes per background slice past its grace, and per lost
+#: slice start.
 PREVIEWS_TIMEOUT = timedelta(minutes=5)
 #: `ModelHistory.maintain`'s `git gc` is bounded by `history.MAINTAIN_TIMEOUT` (10 min);
 #: this adds a margin for the count and the kill (#2342). Not imported: the sandbox runs
@@ -151,7 +160,7 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRUNE_TIMEOUT
     if sweep == PRUNE_SWEEPS[1]:
         return CLAIMS_TIMEOUT
-    if sweep == PREVIEWS_SWEEP:
+    if sweep in (PREVIEWS_SWEEP, LOST_SLICES_SWEEP):
         return PREVIEWS_TIMEOUT
     if sweep == GIT_SWEEP:
         return GIT_TIMEOUT
@@ -179,6 +188,8 @@ class Housekeeping:
             if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
                 continue
             if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
+                continue
+            if sweep == LOST_SLICES_SWEEP and not workflow.patched(LOST_SLICES_PATCH):
                 continue
             if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
                 continue

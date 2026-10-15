@@ -7,6 +7,7 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  PrimeTowerChoice,
   SupportsChoice,
   RackAlgorithm,
   SlotChoice,
@@ -39,6 +40,8 @@ interface RunInput {
   printSequence: PrintSequence | null
   /** #1899 — this print's supports; `null` (or absent) leaves them to the template and the process. */
   supports?: SupportsChoice | null
+  /** #3628 — this print's prime tower; `null` (or absent) leaves it to the template and the process. */
+  primeTower?: PrimeTowerChoice | null
   /** #717 — the filament profiles left on, by id. */
   filamentProfiles?: string[]
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
@@ -79,6 +82,7 @@ export function printRunBody({
   options,
   printSequence,
   supports = null,
+  primeTower = null,
   filamentProfiles = [],
   rackPosition,
   rackAlgorithm,
@@ -92,6 +96,7 @@ export function printRunBody({
   options: PrintOptions
   printSequence: PrintSequence | null
   supports?: SupportsChoice | null
+  primeTower?: PrimeTowerChoice | null
   filamentProfiles?: readonly string[]
   rackPosition: number | null
   rackAlgorithm: RackAlgorithm | null
@@ -105,7 +110,7 @@ export function printRunBody({
     all_plates: plate === 'all',
     ...(projectId === undefined ? {} : { project_id: projectId }),
     options,
-    ...sliceOverrides(printSequence, supports, filamentProfiles),
+    ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
     rack_position: rackPosition,
     rack_algorithm: rackAlgorithm,
   }
@@ -130,6 +135,7 @@ export function useRunPrint({
   options,
   printSequence,
   supports = null,
+  primeTower = null,
   filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
@@ -139,6 +145,7 @@ export function useRunPrint({
   // By value: the caller builds a new array each render.
   const profilesKey = filamentProfiles.join(',')
   const supportsKey = JSON.stringify(supports)
+  const towerKey = JSON.stringify(primeTower)
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -174,6 +181,7 @@ export function useRunPrint({
     plate,
     printSequence,
     supportsKey,
+    towerKey,
     profilesKey,
     rackPosition,
     rackAlgorithm,
@@ -232,6 +240,7 @@ export function useRunPrint({
           options,
           printSequence,
           supports,
+          primeTower,
           filamentProfiles,
           rackPosition,
           rackAlgorithm,

@@ -109,6 +109,7 @@ describe('memory activities in a durable turn', () => {
         },
         address: '127.0.0.1',
       },
+      terminate: async () => {},
       release: () => {},
     }
     return {
@@ -193,7 +194,7 @@ describe('memory activities in a durable turn', () => {
   })
 
   it('does nothing without a hindsight plugin, with memory off, or outside a durable session', async () => {
-    const none = memoryActivities(deps({ remotePlugins: async () => ({ plugins: [], problems: [], secrets: [], release: () => {} }) }))
+    const none = memoryActivities(deps({ remotePlugins: async () => ({ plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} }) }))
     expect(await env(MEMORY_RECALL_ACTIVITY).run(none[MEMORY_RECALL_ACTIVITY], { turn_id: TURN })).toEqual({ context: null })
     const off = memoryActivities(deps({ memory: false }))
     await env(MEMORY_RETAIN_ACTIVITY).run(off[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
