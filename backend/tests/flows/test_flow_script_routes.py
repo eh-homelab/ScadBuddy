@@ -14,7 +14,7 @@ from scadbuddy.api import flow_script
 from scadbuddy.api.components import getter_for
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FLOWS
-from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
+from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS
 from tests.flows.flows_support import AgentTiers
 
 
@@ -78,7 +78,7 @@ def test_the_host_functions_are_the_ones_a_script_is_checked_against(
     body = response.json()
     functions = {f["name"]: f for f in body["functions"]}
     # Every host function the check offers, and nothing it does not (the gated bodies).
-    assert list(functions) == [t.__name__ for t in SCRIPT_TOOLS]
+    assert list(functions) == [t.__name__ for t in HOST_FUNCTIONS]
     assert "approved_print" not in functions
     render = functions["render"]
     assert (
@@ -118,4 +118,4 @@ def test_an_agent_that_does_not_answer_lists_no_tools(
     body = response.json()
     assert body["tools"] == []
     assert body["tools_unavailable"] == flow_script.TOOLS_UNAVAILABLE
-    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in SCRIPT_TOOLS]
+    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in HOST_FUNCTIONS]

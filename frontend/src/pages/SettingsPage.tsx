@@ -13,6 +13,7 @@ import { AiCredentialSection } from '../components/assistant/AiCredentialSection
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
+import { BrowserOriginsSetting } from '../components/BrowserOriginsSetting'
 import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
@@ -146,7 +147,9 @@ const RETENTIONS: FieldName[] = ['print_run_retention_seconds', 'operation_reten
  * the default, shown as the placeholder. The bounds are the backend's
  * (`settings_store.py`), checked here so a bad value is not a 422.
  */
-const ACTIVITY_TTL = { min: 86400, default: 2_592_000 }
+/** The longest retention the API takes, ten years (`settings_store.RETENTION_MAX_SECONDS`). */
+const RETENTION_MAX_DAYS = 3650
+const ACTIVITY_TTL = { min: 86400, max: RETENTION_MAX_DAYS * 86400, default: 2_592_000 }
 const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
 /** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
 const FOLLOW_NOBODY = 'none'
@@ -177,7 +180,9 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
     const days = Number(raw)
-    if (!Number.isFinite(days) || days < 1) return { problem: 'Enter at least 1 day, or leave it empty to keep every one.' } satisfies Problem
+    if (!Number.isFinite(days) || days < 1 || days > RETENTION_MAX_DAYS) {
+      return { problem: `Enter 1 to ${RETENTION_MAX_DAYS} days, or leave it empty to keep every one.` } satisfies Problem
+    }
     return days * DAY_SECONDS
   }
   if (name === 'activity_follow') {
@@ -189,12 +194,10 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
   if (name === 'activity_ttl_seconds' || name === 'activity_repair_window_seconds') {
     if (raw.trim() === '') return null
     const seconds = Number(raw)
-    const { min, max } = name === 'activity_ttl_seconds' ? { ...ACTIVITY_TTL, max: Infinity } : ACTIVITY_REPAIR
+    const { min, max } = name === 'activity_ttl_seconds' ? ACTIVITY_TTL : ACTIVITY_REPAIR
     if (!Number.isFinite(seconds)) return { problem: 'Enter a number of seconds, or leave it empty for the default.' } satisfies Problem
     if (seconds < min || seconds > max) {
-      return {
-        problem: max === Infinity ? `Enter at least ${min} seconds.` : `Enter ${min} to ${max} seconds.`,
-      } satisfies Problem
+      return { problem: `Enter ${min} to ${max} seconds.` } satisfies Problem
     }
     return seconds
   }
@@ -230,7 +233,7 @@ export function SettingsPage() {
 const ASSISTANT_GROUPS = [
   { id: 'assistant-credentials', title: 'Status & credentials' },
   { id: 'assistant-browser', title: 'This browser' },
-  { id: 'assistant-tools', title: 'HTTP & camera tools' },
+  { id: 'assistant-tools', title: 'HTTP, browser & camera tools' },
   { id: 'assistant-model', title: 'Model & limits' },
   { id: 'assistant-sessions', title: 'Session mode' },
   { id: 'assistant-mcp', title: 'MCP access' },
@@ -1079,6 +1082,7 @@ function SettingsSections() {
                   id="print-run-retention"
                   type="number"
                   min="1"
+                  max={RETENTION_MAX_DAYS}
                   step="any"
                   inputMode="decimal"
                   placeholder="Forever"
@@ -1097,6 +1101,7 @@ function SettingsSections() {
                   id="operation-retention"
                   type="number"
                   min="1"
+                  max={RETENTION_MAX_DAYS}
                   step="any"
                   inputMode="decimal"
                   placeholder="Forever"
@@ -1330,6 +1335,8 @@ function SettingsSections() {
             </SubSection>
             <SubSection id="assistant-tools" title={groupTitle('assistant-tools')}>
               <HttpRequestSetting />
+              {/* #982 — where the assistant's headless browser may go; hidden without the agent's database. */}
+              <BrowserOriginsSetting />
               {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
               <PrinterCameraSetting />
             </SubSection>
@@ -1419,13 +1426,14 @@ function SettingsSections() {
                 <FieldRow
                     id="activity-ttl"
                     label="Keep activity for (seconds)"
-                    help="At least 86400 (a day). Empty is the default, 30 days."
+                    help="86400 (a day) to 315360000 (ten years). Empty is the default, 30 days."
                     error={errors.activity_ttl_seconds}
                   >
                     <Input
                       id="activity-ttl"
                       type="number"
                       min={ACTIVITY_TTL.min}
+                      max={ACTIVITY_TTL.max}
                       step={1}
                       inputMode="numeric"
                       placeholder={String(ACTIVITY_TTL.default)}

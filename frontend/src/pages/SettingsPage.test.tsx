@@ -276,7 +276,19 @@ describe('SettingsPage', () => {
 
     await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
     await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
-    expect(await screen.findByText(/at least 1 day/)).toBeInTheDocument()
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+
+  it('refuses a retention over ten years, whose prune Postgres cannot compute', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '3651')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
   })
