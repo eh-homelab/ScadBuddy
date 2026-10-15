@@ -264,7 +264,8 @@ describe('SettingsStore', () => {
 
   it('audits a failed write whose rejection is not an Error, and rethrows it as it was', async () => {
     const audit = new MemoryAudit()
-    const sql = Object.assign(() => Promise.reject('connection reset'), { json: (value: unknown) => value }) as unknown as Sql
+    const query = Object.assign(() => Promise.reject('connection reset'), { json: (value: unknown) => value })
+    const sql = Object.assign(query, { begin: (fn: (tx: typeof query) => unknown) => fn(query) }) as unknown as Sql
     const settings = new SettingsStore(sql, audit)
     await expect(settings.set('model', 'claude-sonnet-4-5')).rejects.toBe('connection reset')
     expect(audit.entries).toEqual([

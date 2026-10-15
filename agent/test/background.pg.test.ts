@@ -196,7 +196,10 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
 
   it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
     // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
-    const scripted = scriptedRunner((run) => (String(run.prompt).includes('first') ? { hang: true } : { reply: 'done again' }))
+    // Chosen by the message delivered: a warm process's `run.prompt` is its inbox, not the text.
+    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() =>
+      promptText(scripted.prompts.at(-1)!).includes('first') ? { hang: true } : { reply: 'done again' },
+    )
     const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
     const parent = (await mm.start(browser, { origin: 'chat' })).session.id
     const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
@@ -210,9 +213,9 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${parent}-${t.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
     const first = new MockActivityEnvironment({ ...info, attempt: 1 })
     const abandoned = first.run(acts.wf_run!, { taskId: t.id }).catch(() => undefined)
-    await expect.poll(() => scripted.runs.length).toBe(1)
+    await expect.poll(() => scripted.prompts.length).toBe(1)
     const [orphan] = await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions WHERE parent_id = ${parent}`
-    expect((await mm.get(orphan!.id, browser)).status).toBe('running')
+    await expect.poll(async () => (await mm.get(orphan!.id, browser)).status).toBe('running')
 
     // The retry: its script differs only so its own agent can answer.
     await db.sql`UPDATE ai_background_tasks SET spec = spec || ${db.sql.json({ body: `return await agent('second')` } as never)} WHERE id = ${t.id}`
