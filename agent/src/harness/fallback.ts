@@ -17,6 +17,7 @@ import {
   cooldownUntil,
   probeCredential,
 } from './credentialErrors.js'
+import { CONTINUE_PROMPT } from './continuePrompt.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
 // Several Claude credentials, in priority order, with fallback (#1093).
@@ -124,9 +125,7 @@ export class NoUsableCredentialError extends Error {
   }
 }
 
-/** Sent as the next credential's prompt when it resumes a turn another one started. */
-export const CONTINUE_PROMPT =
-  'The request to the model failed and was sent again with another Claude credential. Continue where you left off.'
+export { CONTINUE_PROMPT }
 
 /** Claude Code's retries of a transient failure on one credential, when there is another to fall back to. */
 export const DEFAULT_TRANSIENT_RETRIES = 2

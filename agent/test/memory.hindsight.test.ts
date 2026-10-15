@@ -16,6 +16,7 @@ import {
   hindsightTarget,
   retryQueryLength,
 } from '../src/memory/hindsight.js'
+import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -378,6 +379,33 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(String(item.content)).not.toContain('HUGE TOOL OUTPUT')
     expect(String(item.content)).not.toContain(CREDENTIAL)
     expect(logs).toEqual([])
+  })
+
+  // #3701: a turn that failed over to another credential (harness/fallback.ts) leaves in
+  // Claude Code's transcript the refused attempt's synthetic error message and the
+  // continuation prompt the next credential resumed with. Neither is conversation.
+  it("retains a failed-over turn as the user's message and the final reply only, never the failover's plumbing (#3701)", async () => {
+    const h = hooks()
+    const file = await transcript([
+      { type: 'user', timestamp: '2026-10-15T10:00:00.000Z', message: { role: 'user', content: 'What is the box width?' } },
+      {
+        type: 'assistant',
+        isApiErrorMessage: true,
+        error: 'rate_limit',
+        message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets Oct 18, 1pm (UTC)" }] },
+      },
+      { type: 'user', message: { role: 'user', content: CONTINUE_PROMPT } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: CONTINUE_PROMPT }] } },
+      { type: 'assistant', message: { model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'The box is 40 mm wide.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: 'What is the box width?', timestamp: '2026-10-15T10:00:00.000Z' },
+      { role: 'assistant', content: 'The box is 40 mm wide.' },
+    ])
   })
 
   it('does not wait for the retain: the Stop hook returns while Hindsight is still answering', async () => {

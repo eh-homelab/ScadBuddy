@@ -756,7 +756,10 @@ class ScadBuddyRunner:
                         "segment of %s continues on %s", workflow_id, credentials[i + 1].label
                     )
                     continue
-                if not final_failure(err):
+                # Every credential refused it (#3705): no retry could change that, and each
+                # one ran the refused keys again and published the notice again. Final, as a
+                # request too large is; a transient failure (5xx, network) is still retried.
+                if not final_failure(err) and not credentials_fault(err):
                     raise bounded_failure(err) from None
                 # Ends the turn with the reason, as the plugin's own final errors do.
                 return SegmentOutput(
