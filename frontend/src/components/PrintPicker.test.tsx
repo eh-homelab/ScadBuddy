@@ -148,7 +148,9 @@ async function showAdvanced() {
   await screen.findByRole('group', { name: /nozzles/i })
 }
 
-/** Every `watch` of the running test: `afterEach` waits until each request it saw has ended. */
+/** Every `watch` of the running test: `afterEach` waits until each request it saw has ended.
+ *  Only these: a request no `watch` matches (the ad-hoc `request:start` listeners below,
+ *  any route not watched) can still outlive its test. */
 const watching: { urls: string[]; ended: number }[] = []
 
 /** The matching requests' URLs and bodies as they start, in order, and how many have
@@ -183,7 +185,8 @@ afterEach(async () => {
   try {
     // The wait is `asyncUtilTimeout` (3 s, vitest.setup.ts), as for any find in a test.
     await waitFor(() => {
-      for (const seen of watching) expect(seen.ended).toBe(seen.urls.length)
+      // Names the requests still in flight (the last to start, as most end in order).
+      for (const seen of watching) expect(seen.urls.slice(seen.ended)).toEqual([])
     })
   } finally {
     // Even when a request never ends: only the test that left it fails, not every later one.
