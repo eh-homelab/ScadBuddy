@@ -277,13 +277,65 @@ export function judge(lists: CompiledLists, approved: ReadonlyMap<string, Approv
   return { kind: 'ask', origin }
 }
 
+/** Every string in `value`, a JSON object or array written in one decoded in its place, one per line. */
+function flatten(value: unknown, depth: number, out: string[]): void {
+  if (typeof value === 'string') {
+    const trimmed = value.trimStart()
+    if (depth < 8 && (trimmed.startsWith('{') || trimmed.startsWith('['))) {
+      try {
+        flatten(JSON.parse(value), depth + 1, out)
+        return
+      } catch {
+        // Not JSON: read as it is.
+      }
+    }
+    out.push(value)
+  } else if (Array.isArray(value)) {
+    for (const v of value) flatten(v, depth, out)
+  } else if (typeof value === 'object' && value !== null) {
+    for (const v of Object.values(value)) flatten(v, depth, out)
+  } else if (value !== undefined && value !== null) {
+    out.push(String(value))
+  }
+}
+
 /**
  * The text a browser result is screened as, the same in a classic turn (a PostToolUse
  * hook's `tool_response`, the content blocks) and a durable one (the MCP result's
- * `content`): the whole of it, whatever its shape, so a page named anywhere in it is read.
+ * `content`): every string in the whole of it, whatever its shape, with the untrusted
+ * envelope (and any JSON in it) decoded, so a page or a tab named anywhere in it is read
+ * as Playwright MCP wrote it.
  */
 export function screenedText(response: unknown): string {
-  return typeof response === 'string' ? response : (JSON.stringify(response) ?? '')
+  const out: string[] = []
+  flatten(response, 0, out)
+  return out.join('\n')
+}
+
+/**
+ * The URL of each tab Playwright MCP lists (`### Open tabs`, shown whenever more than
+ * one tab is open: `- <i>: [(current) ][<title>](<url>)`); undefined when no list is
+ * shown, null when one is but a line in it cannot be read unambiguously (a title or URL
+ * with `](` or a parenthesis in it), which the guard treats as a tab it may not read.
+ * Page text that forges the heading only withholds more.
+ */
+export function openTabs(text: string): string[] | undefined | null {
+  const lines = text.split(/\r\n|\r|\n/)
+  let found = false
+  const urls: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.trim() !== '### Open tabs') continue
+    found = true
+    for (i++; i < lines.length; i++) {
+      const line = lines[i]!.trim()
+      if (line === '' || line.startsWith('### ')) break
+      const m = /^- \d+:(?: \(current\))? \[(.*)\]\(([^()\s]*)\)(?: \[crashed\])?$/.exec(line)
+      if (!m || line.split('](').length !== 2) return null
+      urls.push(m[2]!)
+    }
+  }
+  if (!found) return undefined
+  return urls.length > 0 ? urls : null
 }
 
 /**
@@ -311,6 +363,22 @@ export function withheldText(judgement: Exclude<Judgement, { kind: 'allowed' }>)
     `ScadBuddy withheld this result: the browser is now on ${judgement.origin} (a redirect, a link or a new tab), which is ` +
     'not on the allow list and was not approved in this session. Nothing the page said is shown. To read it, call ' +
     'browser_navigate with that address: the user is asked first.'
+  )
+}
+
+/** What the model reads in place of a result that lists a tab the lists do not let it read (its title would show). */
+export function tabWithheldText(judgement: Exclude<Judgement, { kind: 'allowed' }> | undefined): string {
+  const why =
+    judgement === undefined
+      ? 'a tab whose line in the tab list cannot be read unambiguously'
+      : judgement.kind === 'refused'
+        ? `a tab on a page it may not read (${judgement.reason})`
+        : judgement.kind === 'denied'
+          ? `a tab on ${judgement.origin}, which the deny rule "${judgement.rule}" refuses`
+          : `a tab on ${judgement.origin}, which is not on the allow list and was not approved in this session`
+  return (
+    `ScadBuddy withheld this result: the browser has ${why}, and the tab list would show what that page wrote. ` +
+    'Nothing the page said is shown. Close that tab (browser_tabs) to read the others.'
   )
 }
 

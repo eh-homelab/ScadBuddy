@@ -6,8 +6,10 @@ import {
   compile,
   judge,
   type Judgement,
+  openTabs,
   pageUrls,
   refusalText,
+  tabWithheldText,
   unplacedText,
   withheldText,
 } from './origins.js'
@@ -28,18 +30,21 @@ import {
 //     MCP's `Page URL:` lines). A page the browser reached on its own (a redirect, a
 //     link it followed, a new tab) that is denied, or on neither list and not approved
 //     in the session, is withheld from the model: it reads a note saying where the
-//     browser is instead. Playwright MCP names the page only when the tool shows a
-//     snapshot or a tab changed since its last result (measured in @playwright/mcp
-//     0.0.82's playwright-core, `Response._build`), so a result that names none
-//     (browser_take_screenshot, browser_console_messages, browser_network_requests) is
-//     judged by the page this guard last saw that plugin's browser on, and withheld
-//     when the guard has seen none (except from the tools that show no page,
-//     NO_PAGE_TOOLS). A blank tab (about:blank) carries nothing of its own, but a page
-//     in another tab can write into one it opened, so it is read only while it is the
-//     browser's one tab (Playwright MCP lists the tabs, `### Open tabs`, whenever there
-//     is more than one). A navigation this guard sent to the user, which then ran, was
-//     approved: it is recorded (`once`), so the pages of that origin may be read in the
-//     session.
+//     browser is instead. Each result is judged only by what it says itself: nothing
+//     about the browser's page is remembered between calls, so an error, a timeout, a
+//     tab switch, a popup or a history navigation cannot leave a stale page trusted.
+//     Playwright MCP names the page only when the tool shows a snapshot or a tab
+//     changed since its last result (measured in @playwright/mcp 0.0.82's
+//     playwright-core, `Response._build`), so a result that names none
+//     (browser_take_screenshot, browser_console_messages, browser_network_requests
+//     after an unchanged page) is withheld, except from the tools that show no page
+//     (NO_PAGE_TOOLS). Every tab in the tab list (`### Open tabs`, shown whenever more
+//     than one is open) must be readable too, since the list shows each page's title;
+//     a line that cannot be read unambiguously withholds the result. A blank tab
+//     (about:blank) carries nothing of its own, but a page in another tab can write
+//     into one it opened, so it is read only while it is the browser's one tab. A
+//     navigation this guard sent to the user, which then ran, was approved: it is
+//     recorded (`once`), so the pages of that origin may be read in the session.
 
 /** What the guard needs of the store (store.ts BrowserOrigins). */
 export type BrowserOriginsAccess = {
@@ -62,8 +67,6 @@ const BROWSER_TOOL = /^browser_/
 const NAVIGATE = 'browser_navigate'
 /** Playwright MCP tools whose result carries no page content, so they need not name a page. */
 const NO_PAGE_TOOLS: ReadonlySet<string> = new Set(['browser_close', 'browser_resize', 'browser_install'])
-/** The section Playwright MCP adds when more than one tab is open; page text can forge it, which only withholds more. */
-const OPEN_TABS = '### Open tabs'
 
 /** Whether `harnessName` is a browser tool's name, without its `mcp__<plugin>__` prefix. */
 export function isBrowserTool(name: string): boolean {
@@ -84,9 +87,6 @@ function blank(url: string): boolean {
   return url === 'about:blank' || url === 'about:srcdoc'
 }
 
-/** The page(s) one plugin's browser was last seen on, and whether that was its only tab. */
-type Seen = { pages: string[]; alone: boolean }
-
 export function browserGuard(deps: {
   store: BrowserOriginsAccess
   /** The session the turn is in; none for a flow run, which has no approvals to remember. */
@@ -95,19 +95,14 @@ export function browserGuard(deps: {
   plugins: readonly string[]
 }): BrowserGuard {
   // Read as each call is judged: a durable turn adds its packages' servers after building it.
-  const browserOf = (harnessName: string): { plugin: string; tool: string } | undefined => {
+  const toolOf = (harnessName: string): string | undefined => {
     for (const name of deps.plugins) {
       const prefix = `mcp__${name}__`
-      if (harnessName.startsWith(prefix) && isBrowserTool(harnessName.slice(prefix.length))) {
-        return { plugin: name, tool: harnessName.slice(prefix.length) }
-      }
+      if (harnessName.startsWith(prefix) && isBrowserTool(harnessName.slice(prefix.length))) return harnessName.slice(prefix.length)
     }
     return undefined
   }
-  const toolOf = (harnessName: string): string | undefined => browserOf(harnessName)?.tool
   const covers = (harnessName: string) => toolOf(harnessName) !== undefined
-  /** Each plugin's browser as its last result that named a page showed it. */
-  const seen = new Map<string, Seen>()
   /** The origins this guard sent to the user: only a navigation to one of them that ran was approved. */
   const asked = new Set<string>()
   const state = async () => {
@@ -144,14 +139,12 @@ export function browserGuard(deps: {
       }
     },
     async screen(harnessName, input, text) {
-      const browser = browserOf(harnessName)
-      if (browser === undefined) return undefined
+      const tool = toolOf(harnessName)
+      if (tool === undefined) return undefined
       const named = pageUrls(text)
-      // Recorded before it is judged, so a later result that names no page is judged by this one too.
-      if (named.length > 0) seen.set(browser.plugin, { pages: named, alone: !text.includes(OPEN_TABS) })
-      else if (NO_PAGE_TOOLS.has(browser.tool)) return undefined
-      const at = seen.get(browser.plugin)
-      if (at === undefined) return unplacedText(harnessName)
+      const tabs = openTabs(text)
+      if (tabs === null) return tabWithheldText(undefined)
+      if (named.length === 0 && tabs === undefined) return NO_PAGE_TOOLS.has(tool) ? undefined : unplacedText(harnessName)
       const { lists, approved } = await state()
       // The call's own navigation ran: if this guard sent it to the user, the user approved it.
       const target = navigationTarget(input)
@@ -160,14 +153,20 @@ export function browserGuard(deps: {
         approved.set(judged.origin, approved.get(judged.origin) ?? 'once')
         if (deps.sessionId !== undefined) await deps.store.approve(deps.sessionId, judged.origin, 'once')
       }
-      for (const page of at.pages) {
+      for (const page of named) {
         if (page === CHROME_ERROR) continue
         if (blank(page)) {
-          if (at.alone) continue
+          if (tabs === undefined) continue
           return blankTabText(page)
         }
         const j: Judgement = judge(lists, approved, page, 'read')
         if (j.kind !== 'allowed') return withheldText(j)
+      }
+      for (const tab of tabs ?? []) {
+        if (tab === CHROME_ERROR) continue
+        if (blank(tab)) return blankTabText(tab)
+        const j: Judgement = judge(lists, approved, tab, 'read')
+        if (j.kind !== 'allowed') return tabWithheldText(j)
       }
       return undefined
     },

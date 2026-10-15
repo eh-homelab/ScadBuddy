@@ -87,15 +87,21 @@ can take the browser somewhere no navigation named. Playwright MCP reports the p
 on in each result (`- Page URL: …`); a result whose page is denied, or on neither list
 and not approved in the session, is replaced before the model reads it (and in the
 transcript) by a note saying where the browser is, so the page's content never reaches
-the model. Playwright MCP names the page only when the tool shows a snapshot or a tab
-changed since its last result (measured in the `playwright-core` that `@playwright/mcp`
-0.0.82 ships, `Response._build`), so a result that names none (`browser_take_screenshot`,
-`browser_console_messages`, `browser_network_requests`) is judged by the page the turn
-last saw that browser on, and is withheld when it has seen none yet (call
-`browser_snapshot` first); `browser_close`, `browser_resize` and `browser_install` show no
-page and pass. A blank tab (`about:blank`) is read only while it is the browser's one
-tab: a page in another tab can write into a tab it opened, and Playwright MCP lists the
-tabs whenever there is more than one. A browser tool's error is screened the same way:
+the model. Each result is judged only by what it says itself: nothing about the
+browser's page is remembered between calls, so an error, a timeout, a tab switch, a popup
+or a back or forward navigation never leaves a stale page trusted. Playwright MCP names
+the page only when the tool shows a snapshot or a tab changed since its last result
+(measured in the `playwright-core` that `@playwright/mcp` 0.0.82 ships,
+`Response._build`), so a result that names none is withheld: in practice
+`browser_take_screenshot`, `browser_console_messages` and `browser_network_requests` reach
+the model only when they report the page, and the agent reads a page with
+`browser_snapshot`, which always names it. `browser_close`, `browser_resize` and
+`browser_install` show no page and pass. When more than one tab is open, Playwright MCP
+lists them all with their titles (`### Open tabs`), so every tab in the list must be
+readable, or the result is withheld until the agent closes the others; a tab line that
+cannot be read unambiguously (a `](` or a parenthesis in it) withholds it too. A blank tab
+(`about:blank`) is read only while it is the browser's one tab: a page in another tab can
+write into a tab it opened. A browser tool's error is screened the same way:
 the forwarder passes it to Claude Code as the tool's result, since Claude Code hands an
 MCP error to the model through `PostToolUseFailure`, which no hook can replace (measured,
 `agent/test/browserOrigins.e2e.test.ts`). Both turns screen the same text, the whole
@@ -118,7 +124,9 @@ arrives as untrusted data: the forwarder wraps every plugin result in the envelo
 (`agent/src/plugins/forwarder.ts`).
 
 The lists judge names, not addresses: a permitted name that resolves to a private
-address is not caught by them. Nor do they judge a page's subresources and frames: an
+address is not caught by them. A page that moves itself while Playwright MCP is writing
+one result, after it captured the snapshot and before it read the page's address, is not
+seen: the result names where the page landed. Nor do they judge a page's subresources and frames: an
 allowed page's iframe from elsewhere shows in its snapshot. The boundary for that stays the network the server runs
 in (next section).
 
