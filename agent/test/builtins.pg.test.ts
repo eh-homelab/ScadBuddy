@@ -8,7 +8,7 @@ import { BUILTIN_SERVER, builtinServer, type BuiltinContext } from '../src/built
 import { TASKS_PATH } from '../src/builtins/session.js'
 import { type NestedQueries, webFetch } from '../src/builtins/web.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
-import { connectInProcess } from '../src/temporal/turnTools.js'
+import { CALL_ID_META, connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -137,6 +137,30 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect((await call('TaskList', {})).text).toBe('#2 [completed] t')
     expect((await call('TaskGet', { taskId: '9' })).text).toBe('Task not found')
     expect(await files.stat(ws, TASKS_PATH)).toBeDefined()
+  })
+
+  it('answers every Task* call with an error naming the list file when it is not a task list (#3201)', async () => {
+    for (const bad of ['{not json', '{}', '{"next":1,"tasks":{}}', '[]']) {
+      await files.write(ws, TASKS_PATH, Buffer.from(bad))
+      for (const [name, args] of [
+        ['TaskList', {}],
+        ['TaskGet', { taskId: '1' }],
+        ['TaskCreate', { subject: 's', description: 'd' }],
+        ['TaskUpdate', { taskId: '1', status: 'completed' }],
+      ] as const) {
+        expect(await call(name, args), `${name} on ${bad}`).toMatchObject({ isError: true, text: expect.stringContaining(`/workspace/${TASKS_PATH}`) })
+      }
+      expect((await files.read(ws, TASKS_PATH))!.bytes.toString()).toBe(bad)
+    }
+  })
+
+  it('creates one task for a TaskCreate its activity retries, by the call id in _meta (#3201)', async () => {
+    const create = (callId: string) =>
+      client.callTool({ name: 'TaskCreate', arguments: { subject: 's', description: 'd' }, _meta: { [CALL_ID_META]: callId } }) as Promise<{ content: Content[] }>
+    expect((await create('toolu_a')).content[0]?.text).toBe('Task #1 created successfully: s')
+    expect((await create('toolu_a')).content[0]?.text).toBe('Task #1 created successfully: s')
+    expect((await create('toolu_b')).content[0]?.text).toBe('Task #2 created successfully: s')
+    expect((await call('TaskList', {})).text).toBe('#1 [pending] s\n#2 [pending] s')
   })
 
   it('answers the built-ins with nothing to act on as a classic turn does', async () => {

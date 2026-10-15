@@ -77,6 +77,9 @@ const LIST_TIMEOUT_MS = 20_000
 export const LISTING_KEPT_MS = 30_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
+/** The key a call's `_meta` carries its tool_use id under, to a server whose `callIds` asks for it (#3201). */
+export const CALL_ID_META = 'scadbuddy/toolUseId'
+
 export type TurnServer = {
   /** Its name, as the classic turn's `mcpServers` key. */
   name: string
@@ -118,6 +121,12 @@ export type TurnServer = {
    * `TurnToolsDeps.clients`, its calls are pinned to the replica that holds the client.
    */
   keep?: { fingerprint: string; connect(): Promise<KeptConnection> }
+  /**
+   * Whether each call carries its tool_use id in `_meta` (CALL_ID_META), so a call its
+   * activity retries after a lost answer is known for the same call (#3201). Only a
+   * server of our own: a remote one is never told it.
+   */
+  callIds?: boolean
 }
 
 export type TurnServers = {
@@ -603,7 +612,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>
       let reset: string | undefined
-      const callTool = (client: Client) => client.callTool({ name: tool.name, arguments: fields }, undefined, { signal })
+      const meta = server.callIds ? { _meta: { [CALL_ID_META]: toolUseId } } : {}
+      const callTool = (client: Client) => client.callTool({ name: tool.name, arguments: fields, ...meta }, undefined, { signal })
       const target = keptTarget(deps, caller.context, server)
       try {
         if (target && keptClient) {
