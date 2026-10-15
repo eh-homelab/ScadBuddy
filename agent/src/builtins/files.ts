@@ -244,7 +244,9 @@ export const GREP_BUDGET_MS = 2_000
 // Matching runs under vm's timeout, which interrupts a RegExp mid-match (measured on
 // Node 24: `(a+)+$` on 40 a's then b, stopped after 200 ms).
 // Without multiline, ripgrep matches each line on its own, so no match crosses a newline
-// (not even \s or [^x]) and the empty "line" after a final newline never matches.
+// (not even \s or [^x]) and the empty "line" after a final newline never matches. The
+// split runs inside the vm too, so it stays under the Grep timeout; matches go
+// straight into one array.
 const MATCH_SCRIPT = `
   const out = []
   const at = (line, offset) => {
