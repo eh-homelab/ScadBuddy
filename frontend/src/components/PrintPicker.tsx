@@ -529,6 +529,8 @@ export function PrintPicker({
                 output_id: from.id,
                 part: object.part,
                 count: object.count,
+                // #3637 — each colouring of a part is its own entry: named by its colours.
+                recolour: object.recolour ?? {},
               })),
               goal: arrangeGoal,
               printer_id: printerId,

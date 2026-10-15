@@ -35,6 +35,15 @@ const arrangeObject = z
       .optional()
       .describe('Copies (of each object, with part omitted); omit for the count the source has'),
     group: z.string().max(100).optional().describe('With goal keep_together: objects of one group share a plate'),
+    recolour: z
+      .record(z.string().regex(/^#[0-9A-Fa-f]{6}$/), z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .optional()
+      .describe(
+        "These copies print in other colours (#3637): each of the object's own colours named here prints in " +
+          'the colour it maps to, as a filament slot of its own. Name the same object twice, once with ' +
+          'recolour, for the same model in two colourings on one plate. `{}` is its own colours; omit to keep ' +
+          "an arranged output's entry as it is",
+      ),
   })
   .refine((o) => (o.output_id === undefined) !== (o.library_file_id === undefined), {
     message: 'name one source: output_id or library_file_id',

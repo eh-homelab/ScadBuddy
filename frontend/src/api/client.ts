@@ -7,6 +7,7 @@ import type {
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  MeshModelCreate,
   BackgroundTask,
   DecisionCreate,
   FixApply,
@@ -907,6 +908,10 @@ export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
+
+  /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
+  createMeshModel: (body: MeshModelCreate) =>
+    command<ModelSummary>('/models/from-mesh', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
    * `extras` are the other files of a bundled model's directory (#179). `filename`

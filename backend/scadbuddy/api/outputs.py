@@ -312,6 +312,12 @@ MAX_ARRANGE_COPIES = 2000
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 
+#: A colour as a manifest states one.
+HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
+#: Swaps one object may ask for: far past the colours one object prints in.
+MAX_RECOLOURS = 64
+
+
 class ArrangeObject(BaseModel):
     """One source's object, or every object of it (#1864). The source is an output, or
     a Bambuddy library file: one ScadBuddy uploaded is read through the output it is a
@@ -330,11 +336,22 @@ class ArrangeObject(BaseModel):
     count: int | None = Field(default=None, ge=0, le=500)
     #: With `goal = keep_together`: objects sharing a group share a plate.
     group: str | None = Field(default=None, max_length=100)
+    #: These copies print in other colours (#3637): each of the object's own colours
+    #: named here (its manifest entry's `colours`) prints in the colour it maps to, and
+    #: a new colour is a filament slot of its own. `{}` is the object's own colours;
+    #: omitted is as its source has it (an arranged output's entry may be recoloured).
+    #: The same object twice, once recoloured, is the same model in two colourings.
+    recolour: dict[HexColour, HexColour] | None = Field(default=None, max_length=MAX_RECOLOURS)
 
     @model_validator(mode="after")
     def _one_source(self) -> ArrangeObject:
         if (self.output_id is None) == (self.library_file_id is None):
             raise ValueError("an object names one source: output_id or library_file_id")
+        if self.recolour is not None:
+            # Upper case, and a colour "swapped" for itself is no swap.
+            self.recolour = {
+                k.upper(): v.upper() for k, v in self.recolour.items() if k.upper() != v.upper()
+            }
         return self
 
 
@@ -458,7 +475,9 @@ def arrange_inputs(
     than on a worker (spec §10). Every library file ScadBuddy uploaded names its output
     by now (`resolve_library_files`)."""
     library = library or {}
-    manifests: dict[str, dict[str, ManifestObject]] = {}
+    # Each source's entries; an arranged output may hold one part twice, in two
+    # colourings (#3637).
+    manifests: dict[str, list[ManifestObject]] = {}
     items: list[PackItem] = []
     provenance: dict[str, ManifestObject] = {}
     # A colour list is slot order (slot N = colours[N-1]), and an arranged output's can
@@ -490,7 +509,7 @@ def arrange_inputs(
             if meta.slug not in slugs:
                 slugs.append(meta.slug)
             if source not in manifests:
-                manifests[source] = {m.part: m for m in outputs.manifest(source)}
+                manifests[source] = outputs.manifest(source)
                 if body.colours is None:
                     colours += [c for c in meta.colors if c not in colours]
         else:
@@ -499,21 +518,13 @@ def arrange_inputs(
                 raise ValueError(f"library file {file_id} reaches arrange_inputs unread")
             source = f"library:{file_id}"
             what = f"library file {file_id}"
-            manifests.setdefault(source, {m.part: m for m in library[file_id].objects})
-        if obj.part is None:
-            entries = list(manifests[source].values())
-        else:
-            entry = manifests[source].get(obj.part)
-            if entry is None:
-                raise ApiError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"{what} has no object {obj.part}",
-                )
-            entries = [entry]
+            manifests.setdefault(source, list(library[file_id].objects))
+        entries = _chosen_entries(manifests[source], obj, what)
         for entry in entries:
             count = entry.count if obj.count is None else obj.count
             if count == 0:
                 continue
+            recolour = entry.recolour if obj.recolour is None else obj.recolour
             if entry.plates > 1:
                 # The packer places objects on shared plates; one that lays out its own
                 # plates cannot be one of them, even alone.
@@ -523,7 +534,8 @@ def arrange_inputs(
                     f" own {entry.plates} plates, so it cannot be arranged; print that"
                     " output as it is",
                 )
-            items.append(PackItem(part=part_of(entry), count=count, group=obj.group))
+            item = PackItem(part=part_of(entry), count=count, group=obj.group, recolour=recolour)
+            items.append(item)
             if obj.output_id is None and source not in files:
                 # Only a file that placed something is a source (#2540).
                 files.append(source)
@@ -534,7 +546,8 @@ def arrange_inputs(
                 else entry.model_copy(update={"source_output": entry.source_output or source}),
             )
             if body.colours is None:
-                colours += [c for c in entry.colours if c not in colours]
+                printed = item.colours() if recolour else entry.colours
+                colours += [c for c in printed if c not in colours]
     if not items:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
@@ -571,6 +584,38 @@ def arrange_inputs(
         # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
         sources=[*chosen, *files],
     )
+
+
+def _chosen_entries(
+    manifest: list[ManifestObject], obj: ArrangeObject, what: str
+) -> list[ManifestObject]:
+    """The entries of ``manifest`` that ``obj`` names: every one, or its part's. A part an
+    arranged output holds in two colourings is both, unless ``obj`` says which colours
+    it wants: then the one in them, else the first, recoloured as it asks (#3637). Every
+    colour it swaps must be one the chosen entries print with."""
+    if obj.part is None:
+        entries = list(manifest)
+    else:
+        entries = [m for m in manifest if m.part == obj.part]
+        if not entries:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{what} has no object {obj.part}"
+            )
+        if obj.recolour is not None:
+            same = [m for m in entries if m.recolour == obj.recolour]
+            entries = (same or entries)[:1]
+    if obj.recolour:
+        own = {c.upper() for m in entries for c in m.colours}
+        missing = sorted(c for c in obj.recolour if c not in own)
+        if missing:
+            which = ", ".join(missing)
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"object {obj.part} of {what} does not print in {which}, so it cannot be swapped"
+                if obj.part is not None
+                else f"no object of {what} prints in {which}, so it cannot be swapped",
+            )
+    return entries
 
 
 @router.post(
