@@ -341,6 +341,60 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(panel).toBeVisible()
     await expect(dialog).toBeVisible()
   })
+
+  // #3675 — the activity drawer is a Radix Sheet, not ui/Dialog: the same #798/#1897
+  // behaviour on another mechanism (pointer events off outside a Radix modal, and its
+  // content remounting when it turns non-modal beside the panel).
+  test('opens from its button while the activity drawer is open', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/activity')
+    await page.getByTestId(/activity-row-/).first().getByRole('button').first().click()
+    const drawer = page.locator('[data-slot="sheet-content"]')
+    await expect(drawer).toBeVisible()
+
+    // A real click on the raised button: Radix turns pointer events off outside the
+    // sheet, and a press outside it closes the sheet. (Radix also hides the rest of the
+    // page from the accessibility tree while modal, hence the attribute, not the role.)
+    await page.locator('[data-modal-companion-toggle]').click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+    await expect(drawer).toBeVisible()
+    await expect(drawer).not.toHaveAttribute('aria-modal', 'true')
+
+    const drawerBox = await drawer.boundingBox()
+    const panelBox = await panel.boundingBox()
+    if (!drawerBox || !panelBox) throw new Error('not laid out')
+    expect(drawerBox.x + drawerBox.width).toBeLessThanOrEqual(panelBox.x + 1)
+
+    await composer.fill('What failed here?')
+    await expect(composer).toHaveValue('What failed here?')
+    await expect(composer).toBeFocused()
+
+    // Escape in the composer is the assistant's, not the drawer's.
+    await composer.press('Escape')
+    await expect(drawer).toBeVisible()
+  })
+
+  test('the activity drawer opened beside it leaves the chat usable', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/activity')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+
+    await page.getByTestId(/activity-row-/).first().getByRole('button').first().click()
+    const drawer = page.locator('[data-slot="sheet-content"]')
+    await expect(drawer).toBeVisible()
+    await expect(drawer).not.toHaveAttribute('aria-modal', 'true')
+
+    // A click in the chat neither closes the drawer nor is blocked by it.
+    await composer.click()
+    await composer.fill('Why did it fail?')
+    await expect(composer).toHaveValue('Why did it fail?')
+    await expect(drawer).toBeVisible()
+  })
 })
 
 // #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
