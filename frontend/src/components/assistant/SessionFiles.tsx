@@ -49,6 +49,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   const [uploading, setUploading] = useState(0)
   const [errors, setErrors] = useState<string[]>([])
   const [confirming, setConfirming] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   /** The Delete that asked for the confirm: focus goes back to it on Cancel. */
   const deleteButton = useRef<HTMLElement | null>(null)
   const [preview, setPreview] = useState<{ path: string; url: string } | null>(null)
@@ -122,7 +123,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   }
 
   async function remove(file: WorkspaceFile) {
-    setConfirming(null)
+    setDeleting(true)
     setErrors([])
     try {
       await api.deleteAiSessionFile(sessionId, file.path)
@@ -132,6 +133,9 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
       refresh()
     } catch (caught) {
       setErrors([`${file.path} was not deleted: ${why(caught)}`])
+    } finally {
+      setDeleting(false)
+      setConfirming(null)
     }
   }
 
@@ -302,7 +306,12 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
             <AlertDialogAction
               variant="destructive"
               data-agent-user-only=""
-              onClick={() => confirmingFile && void remove(confirmingFile)}
+              disabled={deleting}
+              onClick={(event) => {
+                // Open until the delete is answered, as the credential and Undo dialogs are.
+                event.preventDefault()
+                if (confirmingFile) void remove(confirmingFile)
+              }}
             >
               Delete file
             </AlertDialogAction>
