@@ -214,7 +214,7 @@ export function LibraryPage() {
       .then(setResults)
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return
-        setResults(null)
+        // The last results stay under the error: what is known (#3633).
         setSearchError(cause instanceof ApiError ? cause.detail : 'Could not search the Bambuddy library.')
       })
     return () => controller.abort()
@@ -885,7 +885,7 @@ function SearchResults({
           )}
         </p>
       )}
-      {results !== null && !error && (
+      {results !== null && (
         <ul aria-label="Search results" className="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
           {children}
         </ul>

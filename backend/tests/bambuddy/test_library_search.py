@@ -148,7 +148,12 @@ async def test_the_index_is_one_read_kept_fresh_then_answered_stale_while_it_is_
     replaced = await index.snapshot("bambuddy", connect)
     assert replaced is not first
 
-    # Fresh: a read that started after the request, even while one is kept.
+    # Fresh: a read that started at most 2 s before the request; one that close is shared,
+    # so repeated fresh searches never stack whole-library reads.
+    clock.now += 1
+    assert await index.snapshot("bambuddy", connect, fresh=True) is replaced
+    assert files.call_count == 2
+    clock.now += 2
     fresh = await index.snapshot("bambuddy", connect, fresh=True)
     assert fresh is not replaced
     assert files.call_count == 3

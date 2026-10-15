@@ -6,7 +6,9 @@ files, 466 folders) it is 1.3 MB and 1.6-2.9 s, with the folder tree another 0.6
 (#3633). So one such read, with the tree, is kept and searched in memory. It is fresh for
 :data:`FRESH` seconds; after that, for up to :data:`STALE` seconds, a search is answered
 from it at once while one read in the background replaces it. ``fresh`` asks for a read
-that started after the request did, as after ScadBuddy's own write. Bambuddy stays the
+that started at most :data:`SHARED` seconds before the request did, as after ScadBuddy's
+own write: requests that close together share one read rather than stack whole-library
+reads on Bambuddy. Bambuddy stays the
 source of truth: nothing is kept past :data:`STALE`, nor across a restart.
 """
 
@@ -25,6 +27,8 @@ from scadbuddy.bambuddy.models import LibraryListRow
 
 FRESH = 30.0
 STALE = 600.0
+#: How long before a ``fresh`` request a read may have started and still answer it.
+SHARED = 2.0
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +50,12 @@ class LibraryIndex:
         *,
         fresh: float = FRESH,
         stale: float = STALE,
+        shared: float = SHARED,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fresh = fresh
         self._stale = stale
+        self._shared = shared
         self._clock = clock
         self._kept: dict[str, LibrarySnapshot] = {}
         self._reading: dict[str, tuple[float, asyncio.Task[LibrarySnapshot]]] = {}
@@ -68,8 +74,11 @@ class LibraryIndex:
             if age < self._stale:
                 self._read(source, connect, since=kept.read_at)
                 return kept
+        since = now - self._shared if fresh else now
+        if kept is not None and kept.read_at >= since:
+            return kept
         # Shielded: one caller going away does not cancel the read the others wait on.
-        return await asyncio.shield(self._read(source, connect, since=now))
+        return await asyncio.shield(self._read(source, connect, since=since))
 
     def _read(
         self, source: str, connect: Connect, *, since: float

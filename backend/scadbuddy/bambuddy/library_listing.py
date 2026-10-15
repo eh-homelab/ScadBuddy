@@ -120,7 +120,8 @@ async def list_library(
 #: The most files one search answers; ``total`` says how many matched.
 SEARCH_LIMIT = 100
 
-#: What separates words in a file or folder name, besides spaces (``3D_Name_Keychains``).
+#: What separates words in a file or folder name: spaces and ``_ - . ( ) [ ]``
+#: (``3D_Name_Keychains``).
 _SEPARATORS = re.compile(r"[\s_\-.()\[\]]+")
 
 
@@ -153,7 +154,7 @@ def search_library(
     limit: int = SEARCH_LIMIT,
 ) -> LibrarySearch:
     """The files whose name, or the path of the folder they are in, holds every word of
-    ``query``, whatever the case or separator (#3630): ``dino keychain`` finds
+    ``query``, whatever the case or separator (:data:`_SEPARATORS`; #3630): ``dino keychain`` finds
     ``Dinosaur_Keychain (ScadBuddy).3mf`` and every file under ``3D Name Keychains``.
     Files whose own name holds more of the words come first, then by name."""
     terms = _words(query).split()

@@ -187,9 +187,35 @@ def test_a_search_finds_files_in_every_folder_from_one_kept_read(client: TestCli
     assert {tuple(hit["folder_path"]) for hit in found["files"]} == {("Supplies", "Storage")}
     assert "Desiccant_Box.stl" in [hit["filename"] for hit in again["files"]]
 
+    # ``fresh`` shares a read that started within 2 s of it (`test_library_search` pins
+    # the read it starts past that), so a burst of fresh searches is one read.
     client.get("/api/v1/print/library/search", params={"q": "pods", "fresh": "true"})
 
-    assert files.call_count == 2
+    assert files.call_count == 1
+
+
+@respx.mock
+def test_a_search_answers_as_the_listing_does_when_bambuddy_is_unset_or_down(
+    client: TestClient,
+) -> None:
+    """The search's read runs in a shielded task; its problem is still the listing's."""
+    unset_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    unset_listing = client.get("/api/v1/print/library")
+    assert (unset_search.status_code, unset_search.json()["type"]) == (
+        unset_listing.status_code,
+        unset_listing.json()["type"],
+    )
+    assert unset_search.status_code == 409
+
+    configure(client)
+    respx.get(f"{API}/library/folders").mock(side_effect=httpx.ConnectError("refused"))
+    respx.get(f"{API}/library/files/").mock(side_effect=httpx.ConnectError("refused"))
+
+    down_search = client.get("/api/v1/print/library/search", params={"q": "pods"})
+    down_listing = client.get("/api/v1/print/library")
+
+    assert down_search.status_code == down_listing.status_code == 502
+    assert down_search.json()["type"] == down_listing.json()["type"]
 
 
 @respx.mock

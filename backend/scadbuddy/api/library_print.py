@@ -167,14 +167,15 @@ async def get_library_search(
     fresh: bool = False,
 ) -> LibrarySearch:
     """The files whose name, or the path of their folder, holds every word of ``q``,
-    whatever the case or separator (#3630); each names its ``folder_path``. Without
-    ``all`` only unsliced 3MFs, as the listing; ``hidden`` counts the matches only ``all``
-    lists. At most 100 files, ``total`` how many matched.
+    whatever the case or a separator ``_ - . ( ) [ ]`` (#3630); each names its
+    ``folder_path``. Without ``all`` only unsliced 3MFs, as the listing; ``hidden``
+    counts the matches only ``all`` lists. At most 100 files, ``total`` how many
+    matched.
 
     Bambuddy has no search, so its whole library is read at once and kept in this
     process: answered from it for 30 s, and for 10 minutes after while one read
     replaces it in the background. ``fresh`` waits for a read that started after the
-    request did, as the page asks after its own changes."""
+    request did (or within 2 s before it), as the page asks after its own changes."""
     settings = store.load()
     config = BambuddyConfig.from_settings(settings)
     source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"

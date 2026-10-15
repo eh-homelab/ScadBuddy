@@ -332,6 +332,23 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('searchbox', { name: 'Search the library' })).toHaveValue('bag clip')
   })
 
+  it('keeps the last results under an error, with Retry (#3630, #3633)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=headphone' })
+    await screen.findByTestId('library-file-121')
+    server.use(
+      http.get('/api/v1/print/library/search', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/bambuddy-unavailable', title: 'Bad Gateway', status: 502, detail: 'could not reach Bambuddy to list every library file: ConnectError' },
+          { status: 502 },
+        ),
+      ),
+    )
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), 's')
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not reach Bambuddy')
+    expect(screen.getByTestId('library-file-121')).toBeInTheDocument()
+    expect(screen.getByTestId('library-search-retry')).toBeInTheDocument()
+  })
+
   it('prints a search result from its card (#3630)', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library?q=lamp' })
     await user.click(await screen.findByTestId('library-print-130'))

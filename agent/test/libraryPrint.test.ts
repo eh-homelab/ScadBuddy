@@ -320,6 +320,8 @@ describe('the library routes', () => {
     const result = firstText(await tool('search_library').execute({ query: 'dino' }, ctx()))
     expect(query).toBe('?q=dino')
     expect(result).toEqual(found)
+    await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
+    expect(query).toBe('?q=dino&fresh=true')
   })
 })
 
