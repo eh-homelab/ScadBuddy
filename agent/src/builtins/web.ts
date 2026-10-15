@@ -1,5 +1,6 @@
 import TurndownService from 'turndown'
 import type { AuditActor, AuditSink } from '../audit/log.js'
+import { NoUsableCredentialError } from '../harness/fallback.js'
 import { exchange, requestProblem } from '../harness/httpRequest.js'
 import { assertHttpUrl, type Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
@@ -135,7 +136,13 @@ export async function webFetch(ctx: WebContext, input: WebFetchInput): Promise<B
   const offset = Math.max(0, input.offset ?? 0)
   const text = got.markdown.slice(offset, offset + PAGE_CHARS)
   const end = offset + text.length
-  let answer = await ctx.nested.ask(fetchPrompt(text, input.prompt, got.finalUrl), ctx.signal)
+  let answer: string
+  try {
+    answer = await ctx.nested.ask(fetchPrompt(text, input.prompt, got.finalUrl), ctx.signal)
+  } catch (err) {
+    if (err instanceof NoUsableCredentialError) return error(`WebFetch cannot run: ${err.message}`)
+    throw err
+  }
   if (end < got.markdown.length) {
     answer += `\n\n[The page continues past character ${end} of ${got.markdown.length}: call WebFetch again with offset ${end} to read on.]`
   }
