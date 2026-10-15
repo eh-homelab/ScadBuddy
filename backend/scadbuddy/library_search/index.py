@@ -71,6 +71,8 @@ class LibraryIndex:
         #: The one read waiting for the read in flight to end, per source: every request
         #: too new for the read in flight joins it, so a burst is one more read, not many.
         self._queued: dict[str, asyncio.Task[LibrarySnapshot]] = {}
+        #: The source last asked for: a read of an older one, landing late, is not kept.
+        self._latest: str | None = None
 
     async def snapshot(
         self, source: str, connect: Connect, *, fresh: bool = False
@@ -78,6 +80,7 @@ class LibraryIndex:
         """The library of ``source`` (a Bambuddy and the key it is read with): what is
         kept while it is fresh, or stale with a read under way; else a read's answer."""
         now = self._clock()
+        self._latest = source
         kept = self._kept.get(source)
         if kept is not None and not fresh:
             age = now - kept.read_at
@@ -109,21 +112,33 @@ class LibraryIndex:
         if reading is not None:
             queued = self._queued.get(source)
             if queued is None:
-                queued = asyncio.ensure_future(self._after(source, connect, reading[1]))
+                queued = asyncio.ensure_future(
+                    self._after(source, connect, reading[1], queued_at=self._clock())
+                )
                 queued.add_done_callback(_log_failure)
                 self._queued[source] = queued
             return queued
         return self._start(source, connect)
 
     async def _after(
-        self, source: str, connect: Connect, before: asyncio.Task[LibrarySnapshot]
+        self,
+        source: str,
+        connect: Connect,
+        before: asyncio.Task[LibrarySnapshot],
+        *,
+        queued_at: float,
     ) -> LibrarySnapshot:
-        """A read that starts once ``before`` ends: after every request that joined it."""
+        """A read that starts once ``before`` ends: after every request that joined it.
+        A read another request started meanwhile, after this one was queued, answers
+        them all instead of a second read at once."""
         try:
             await asyncio.wait([before])
         finally:
             if self._queued.get(source) is asyncio.current_task():
                 del self._queued[source]
+        reading = self._reading.get(source)
+        if reading is not None and reading[0] >= queued_at:
+            return await reading[1]
         return await self._start(source, connect)
 
     def _start(self, source: str, connect: Connect) -> asyncio.Task[LibrarySnapshot]:
@@ -148,8 +163,9 @@ class LibraryIndex:
                 del self._reading[source]
         snapshot = LibrarySnapshot(folders=folder_views(tree), files=files, read_at=started)
         kept = self._kept.get(source)
-        # A read that began before the one kept is older than it, and is not kept.
-        if kept is None or kept.read_at <= started:
+        # A read that began before the one kept is older than it, and is not kept; nor is
+        # one of a source no longer asked for (a URL or key changed while it ran).
+        if source == self._latest and (kept is None or kept.read_at <= started):
             # One Bambuddy at a time: a changed URL or key drops what the old one had.
             self._kept = {source: snapshot}
         self._failed.pop(source, None)
