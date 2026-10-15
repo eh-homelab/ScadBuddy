@@ -75,6 +75,11 @@ import {
 // build current then (D4: the workflow is AUTO_UPGRADE, and a change to this function
 // goes behind `patched()` with test/fixtures/agent_session_histories/ replaying).
 //
+// A message sent once the turn's end is written (the row is idle, so DurableTurns could
+// claim it) is taken while the workflow is still closing the turn, and runs as the next
+// turn in this run; an `end` that lands while the last handlers finish ends the session
+// there, after any message taken before it.
+//
 // Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
 // queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
@@ -101,6 +106,8 @@ const openInputUpdate = defineUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPU
 
 /** `gate.settings` read as each turn starts (Task 5.3). */
 const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
+/** An `end` that lands while the last handlers finish ends the session there (Task 5.3). */
+const END_WHILE_FINISHING_PATCH = 'agent-session-end-while-finishing'
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -155,8 +162,10 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   let turn: TurnStart | undefined = start.turn ?? undefined
   // From a message's acceptance until its turn's end is written.
   let inTurn = turn !== undefined
-  // From the turn's `session.finish_turn` until it is closed: a call can no longer park.
+  // From the turn's `session.finish_turn` until it is closed: its end is written, so a message
+  // may be taken (it runs next) and an interrupt is the next message's.
   let closing = false
+  let interruptNext = false
   let interrupted: string | undefined = start.interrupted ?? undefined
   let ended = false
   let home: string | undefined = start.host_queue ?? undefined
@@ -190,7 +199,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     },
     {
       validator: (_m: Message) => {
-        if (inTurn || message !== undefined) throw busy()
+        if (message !== undefined || (inTurn && !closing)) throw busy()
         if (ended) throw ApplicationFailure.nonRetryable('the session was marked done', 'ended')
       },
     },
@@ -200,6 +209,11 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   })
   setHandler(interruptSignal, () => {
     if (!inTurn) return
+    // The turn's end is written: the Stop is for the message taken meanwhile, if any.
+    if (closing) {
+      if (message !== undefined) interruptNext = true
+      return
+    }
     interrupted = INTERRUPTED
     // Before the activity starts the flag alone stops the turn; once it runs, the cancel does.
     running?.cancel()
@@ -345,6 +359,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     const reason = interrupted ?? THE_TURN_ENDED
     await gate.cancelAll(reason)
     await gate.settle(reason)
+    // Once this is written the row is idle, and a send may come before it returns.
     closing = true
     await finish[SESSION_FINISH_ACTIVITY]!({
       sessionId: start.session_id,
@@ -381,16 +396,24 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     await closeTurn(current, await runTurn(current, continuation))
     turn = undefined
     continuation = undefined
-    interrupted = undefined
+    interrupted = interruptNext ? INTERRUPTED : undefined
+    interruptNext = false
     closing = false
-    inTurn = false
-    if (ended) {
+    // A message taken while the turn closed is the next turn's (it runs below, before an `end`).
+    inTurn = message !== undefined
+    if (ended && message === undefined) {
       await releaseHome()
       await condition(allHandlersFinished)
       return
     }
     if (message === undefined) {
       await condition(allHandlersFinished)
+      // An `end` while the handlers finished: the session ends here, never in a new run.
+      if (message === undefined && ended && patched(END_WHILE_FINISHING_PATCH)) {
+        await releaseHome()
+        await condition(allHandlersFinished)
+        return
+      }
       if (message === undefined) {
         const next: SessionStart = { ...start, ...(home ? { host_queue: home } : {}) }
         delete next.turn

@@ -1,4 +1,4 @@
-import { type Client, WithStartWorkflowOperation, WorkflowUpdateFailedError } from '@temporalio/client'
+import { type Client, WithStartWorkflowOperation, WorkflowUpdateFailedError, WorkflowUpdateStage } from '@temporalio/client'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
 import { historyFromJSON, historyToJSON } from '@temporalio/common/lib/proto-utils.js'
@@ -342,6 +342,119 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     }
     await send(env.client, id, message('t1'))
     await poll(() => finished.map((f) => f.outcome), ['budget_exhausted'])
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  /** The history's event types of one run. */
+  const eventTypes = async (id: string, runId?: string) =>
+    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string }[] }).events.map((e) => e.eventType)
+
+  /**
+   * A turn whose call is still being opened when the turn ends (its describe_call held), so
+   * `open_input` is the handler the workflow waits on after the turn's end; once the call is
+   * opened the handler cancels its entry (the turn is over), and that resolve_input is held.
+   * Resolves once the handler is in that resolve_input, the turn's end written.
+   */
+  async function lateOpen(id: string): Promise<{ turnRun: string; releaseResolve: () => void }> {
+    const describing = held()
+    const resolving = held()
+    describeHold = describing.promise
+    resolveHold = resolving.promise
+    runTurn = async (input) => {
+      // Accepted while the turn runs: its validator passes; the handler then waits on describe_call.
+      await env.client.workflow.getHandle(sessionWorkflowId(input.sessionId)).startUpdate(OPEN_INPUT_UPDATE, {
+        args: [{ turn_id: input.turnId, call: { id: 'toolu_late', name: 'print_output', input: { output_id: 'o1' } } } satisfies OpenInputArgs],
+        waitForStage: WorkflowUpdateStage.ACCEPTED,
+      })
+      return { status: 'done', hostQueue: '' }
+    }
+    await send(env.client, id, message('t1'))
+    const turnRun = await runIdOf(id)
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    await poll(() => described, 1)
+    describing.release()
+    await poll(() => resolved.length, 1)
+    expect(resolved[0]).toMatchObject({ requestId: `durable:${id}:${turnRun}:toolu_late`, outcome: 'cancelled', reason: 'the turn ended' })
+    runTurn = async () => ({ status: 'done', hostQueue: '' })
+    return { turnRun, releaseResolve: resolving.release }
+  }
+
+  /** The run that is running now, once it has completed or continued as new: what the session did after its handlers finished. */
+  async function afterHandlers(id: string, turnRun: string) {
+    await expect
+      .poll(async () => {
+        const d = await handleOf(id).describe()
+        return d.runId !== turnRun || d.status.name !== 'RUNNING'
+      }, { timeout: 20_000 })
+      .toBe(true)
+    const d = await handleOf(id).describe()
+    return { runId: d.runId, status: d.status.name }
+  }
+
+  it('an `end` while a handler finishes after the turn completes the session there: no new run, no new turn', async () => {
+    const id = randomUUID()
+    const { turnRun, releaseResolve } = await lateOpen(id)
+    await handleOf(id).signal('end')
+    expect(await eventTypes(id, turnRun)).toContain('EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED')
+    releaseResolve()
+    expect(await afterHandlers(id, turnRun)).toEqual({ runId: turnRun, status: 'COMPLETED' })
+    expect(await eventTypes(id, turnRun)).not.toContain('EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW')
+    expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+    expect(finished.map((f) => f.turnId)).toEqual(['t1'])
+    expect(released).toEqual([id])
+  })
+
+  it('a message taken before that `end` still runs first, in the same run', async () => {
+    const id = randomUUID()
+    const { turnRun, releaseResolve } = await lateOpen(id)
+    expect(await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2', 'then this')] })).toEqual({ accepted: true, turn_id: 't2' })
+    await handleOf(id).signal('end')
+    releaseResolve()
+    expect(await afterHandlers(id, turnRun)).toEqual({ runId: turnRun, status: 'COMPLETED' })
+    expect(turns.map((t) => t.message?.text)).toEqual(['hello', 'then this'])
+    expect(finished.map((f) => f.turnId)).toEqual(['t1', 't2'])
+    expect(await eventTypes(id, turnRun)).not.toContain('EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW')
+  })
+
+  it('takes a message sent once the turn`s end is written, before the workflow closes the turn, and runs it next', async () => {
+    const id = randomUUID()
+    const closing = held()
+    finish = async (args) => {
+      finished.push(args)
+      // The row is idle from here (session.finish_turn has written it); the workflow has not closed the turn.
+      if (args.turnId === 't1') await closing.promise
+      return true
+    }
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    expect(await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2', 'right after')] })).toEqual({ accepted: true, turn_id: 't2' })
+    closing.release()
+    await poll(() => finished.map((f) => f.turnId), ['t1', 't2'])
+    expect(turns.map((t) => t.message?.text)).toEqual(['hello', 'right after'])
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  it('a Stop while the turn closes is for the message taken meanwhile: it never runs, and the session goes on idle', async () => {
+    const id = randomUUID()
+    const closing = held()
+    finish = async (args) => {
+      finished.push(args)
+      if (args.turnId === 't1') await closing.promise
+      return true
+    }
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2', 'stopped')] })
+    await handleOf(id).signal('interrupt', { reason: 'stop' })
+    closing.release()
+    await poll(() => finished.map((f) => `${f.turnId} ${f.outcome}`), ['t1 done', 't2 interrupted'])
+    expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+    await poll(async () => handleOf(id).query(TURN_QUERY), null)
+    await send(env.client, id, message('t3', 'runs'))
+    await poll(() => finished.map((f) => f.turnId), ['t1', 't2', 't3'])
+    expect(turns.map((t) => t.message?.text)).toEqual(['hello', 'runs'])
     await handleOf(id).signal('end')
     await handleOf(id).result()
   })

@@ -11,8 +11,9 @@ import { SESSION_FINISH_ACTIVITY } from './names.js'
 // closing events when its activity built them (`tail`, worded here), else built here, as the
 // `session.result` with the lineage's spend and budget, the error when the turn did not
 // end well, and the final `session.status`, in the transaction that sets the status. It
-// writes only while the session is still running a turn, so a retried activity writes
-// nothing twice.
+// writes only while the session is still running this turn, so a retried activity writes
+// nothing twice, and never over the next turn: once the row is idle a send may claim it
+// (DurableTurns.send) before the workflow has heard this activity's answer.
 
 const RUNNING = ['running', 'waiting_approval', 'waiting_input']
 const usd = (amount: number): string => `$${amount.toFixed(2)}`
@@ -40,10 +41,10 @@ export function sessionFinishActivities(sql: Sql, events: EventLog) {
       const written = await sql.begin(async (tx) => {
         const [row] = await tx.unsafe<{ turns: number; budget: string; spent: string | null }[]>(
           `SELECT ai_sessions.turns, ${POOL_BUDGET} AS budget, ${POOL_COST} AS spent
-           FROM ai_sessions WHERE id = $1 AND status = ANY($2) FOR UPDATE`,
-          [sessionId, RUNNING],
+           FROM ai_sessions WHERE id = $1 AND status = ANY($2) AND durable_turn_id::text = $3 FOR UPDATE`,
+          [sessionId, RUNNING, args.turnId],
         )
-        // Written already, or the session is gone.
+        // Written already, the next turn has the row, or the session is gone.
         if (!row) return undefined
         const spent = Number(row.spent ?? 0)
         const budget = Number(row.budget)
