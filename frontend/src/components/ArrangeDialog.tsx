@@ -290,6 +290,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [swaps, setSwaps] = useState<Record<string, Record<string, string>>>({})
   /** #3637 — copies added in other colours, each under the row it copies. */
   const [variants, setVariants] = useState<Variant[]>([])
+  /** #3638 — the model this press made for the file, named when a later step fails. */
+  const madeHome = useRef<string | null>(null)
   /** The row whose colour editor is open. */
   const [editing, setEditing] = useState<string | null>(null)
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
@@ -540,17 +542,30 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           let slug = filing && choices.includes(filing) ? filing : choices[0]
           if (!slug) throw new Error('Nothing to arrange.')
           let made: ModelSummary | undefined
+          madeHome.current = null
           if (slug === NEW_HOME && homeFile) {
             // #3638 — the file's own model, made once: arranging it again files there too.
             setProgress(`Making a model for ${homeFile.filename}…`)
-            made = await within(() =>
-              api.createMeshModel({
-                name: freeName(stemOf(homeFile.filename), models ?? [], `Library file ${homeFile.id}`),
-                description: `Made from ${homeFile.filename} in the Bambuddy library, to keep its arranged plates.`,
-                library_file_id: homeFile.id,
-              }),
-            )
+            // The slug is guessed here; a model the list did not show (or a name the
+            // guess gets wrong) is a 409, and the next free name is tried.
+            const taken = [...(models ?? [])]
+            for (let attempt = 0; made === undefined; attempt += 1) {
+              const name = freeName(stemOf(homeFile.filename), taken, `Library file ${homeFile.id}`)
+              try {
+                made = await within(() =>
+                  api.createMeshModel({
+                    name,
+                    description: `Made from ${homeFile.filename} in the Bambuddy library, to keep its arranged plates.`,
+                    library_file_id: homeFile.id,
+                  }),
+                )
+              } catch (cause) {
+                if (!(cause instanceof ApiError && cause.status === 409) || attempt >= 4) throw cause
+                taken.push({ slug: slugOf(name) } as ModelSummary)
+              }
+            }
             const added = made
+            madeHome.current = added.name
             setModels((known) => [...(known ?? []), added])
             setFiling(added.slug)
             slug = added.slug
@@ -565,7 +580,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 {
                   ...own,
                   count: countOf(key, object.count),
-                  ...(twice || Object.keys(recolour).length > 0 ? { recolour } : {}),
+                  // Sent whenever it was touched, or the entry has one: omitted, the
+                  // API keeps the entry's, so a colour put back would print swapped.
+                  ...(twice || key in swaps || Object.keys(object.recolour ?? {}).length > 0
+                    ? { recolour }
+                    : {}),
                 },
                 ...copiesOf(key).map((copy) => ({ ...own, count: countOf(copy.key, 1), recolour: swaps[copy.key] ?? {} })),
               ]
@@ -630,7 +649,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         setAsking(true)
         return
       }
-      setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      const why = cause instanceof ApiError ? cause.detail : (cause as Error).message
+      // #3638 — a model made for the file stays: the next Arrange files there.
+      const kept = madeHome.current
+      setError(kept ? `${why} The model ${kept} was made for this file and is kept.` : why)
       // The save's key is kept only when its save may have started (no answer, or a start
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
@@ -764,7 +786,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 <button
                   type="button"
                   onClick={() => addCopy(row.key)}
-                  disabled={busy}
+                  disabled={busy || asking}
                   aria-label={`Add a copy of ${row.label} in other colours`}
                   className="self-start text-[12px] text-accent hover:underline disabled:opacity-50"
                 >

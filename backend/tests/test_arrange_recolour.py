@@ -221,7 +221,10 @@ def test_a_swap_the_sources_disagree_on_states_no_material() -> None:
         provenance={part.piece_key: entry},
     )
     assert _materials(req) == {GREEN: "PLA", BLACK: "PETG"}
-    assert [m.recolour for m in manifest_of(req)] == [{GREEN: MAGENTA}, {BLACK: MAGENTA}]
+    entries = manifest_of(req)
+    assert [m.recolour for m in entries] == [{GREEN: MAGENTA}, {BLACK: MAGENTA}]
+    # Each copy says why the file states no material for magenta.
+    assert all(any(MAGENTA in note for note in m.notes) for m in entries)
 
 
 def _library(file_id: int = 42) -> dict[int, LibraryObjects]:

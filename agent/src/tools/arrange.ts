@@ -42,7 +42,8 @@ const arrangeObject = z
         "These copies print in other colours (#3637): each of the object's own colours named here prints in " +
           'the colour it maps to, as a filament slot of its own. Name the same object twice, once with ' +
           'recolour, for the same model in two colourings on one plate. `{}` is its own colours; omit to keep ' +
-          "an arranged output's entry as it is",
+          "an arranged output's entry as it is. A part an output holds in two colourings is picked by these " +
+          'colours; matching neither, the first entry is taken (its count, with count omitted) and recoloured',
       ),
   })
   .refine((o) => (o.output_id === undefined) !== (o.library_file_id === undefined), {

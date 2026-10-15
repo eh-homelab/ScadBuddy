@@ -341,6 +341,9 @@ class ArrangeObject(BaseModel):
     #: a new colour is a filament slot of its own. `{}` is the object's own colours;
     #: omitted is as its source has it (an arranged output's entry may be recoloured).
     #: The same object twice, once recoloured, is the same model in two colourings.
+    #: A part an arranged output holds in two colourings is picked by these colours;
+    #: when they match neither entry, the first is taken (its count when `count` is
+    #: omitted) and recoloured as asked.
     recolour: dict[HexColour, HexColour] | None = Field(default=None, max_length=MAX_RECOLOURS)
 
     @model_validator(mode="after")

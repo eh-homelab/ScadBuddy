@@ -301,6 +301,40 @@ describe('ArrangeDialog: a copy in other colours (#3637)', () => {
     expect(screen.queryByLabelText(`Copies of ${copy}`)).not.toBeInTheDocument()
   })
 
+  it("puts a recoloured output row back in its own colours, and says so to the API", async () => {
+    const entry = first.manifest![0]!
+    const own = entry.colours[0]!.toUpperCase()
+    const once: Output = { ...first, id: '5'.repeat(32), manifest: [{ ...entry, count: 1, recolour: { [own]: '#FF00FF' } }] }
+    addMockOutput(once)
+    const onArranged = vi.fn()
+    const { user } = renderPage(<ArrangeDialog open sources={fromOutputs([once])} onClose={vi.fn()} onArranged={onArranged} />)
+    const label = 'wall (other colours) — Reagan'
+    await screen.findByLabelText(`Copies of ${label}`)
+    await user.click(screen.getByRole('button', { name: 'Change colours' }))
+    await user.click(screen.getByRole('button', { name: `Keep ${own}` }))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()?.objects).toEqual([{ output_id: once.id, part: entry.part, count: 1, recolour: {} }])
+  })
+
+  it('tries the next name when the one guessed for the new model is taken', async () => {
+    let calls = 0
+    server.use(
+      http.post('/api/v1/models/from-mesh', () => {
+        calls += 1
+        if (calls === 1) return problem(409, 'Conflict', "a model named 'clara-s-wand' already exists")
+        return HttpResponse.json({ ...fixtures.models[0]!, slug: 'clara-s-wand-2', name: "Clara's Wand 2" }, { status: 201 })
+      }),
+    )
+    const onArranged = vi.fn()
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />)
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveDisplayValue("A new model: Clara's Wand"))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(calls).toBe(2)
+    expect(lastArrangeRequest()).toMatchObject({ slug: 'clara-s-wand-2' })
+  })
+
   it("lists an arranged output's recoloured copies as their own row and keeps their colours", async () => {
     const entry = first.manifest![0]!
     const swap = { [entry.colours[0]!.toUpperCase()]: '#FF00FF' }

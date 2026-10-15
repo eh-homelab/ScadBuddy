@@ -158,13 +158,22 @@ def manifest_of(req: OutputRequest) -> list[ManifestObject]:
             counts[key] += 1
             swaps.setdefault(key, swap)
     named = {entry.part: entry.piece for entry in req.bom if entry.part}
+    conflicting = _stated_materials(req)[1] if any(swaps.values()) else set()
     by_piece: dict[str, list[tuple[str, str]]] = {}
     for key in counts:
         by_piece.setdefault(key[0], []).append(key)
     objects: list[ManifestObject] = []
     for part in req.parts:
         for key in by_piece.get(part.piece_key, []):
-            objects.append(_manifest_entry(req, part, counts[key], swaps[key], named))
+            entry = _manifest_entry(req, part, counts[key], swaps[key], named)
+            unknown = sorted({c for c in swaps[key].values() if c in conflicting})
+            if unknown:
+                # Said where the copies are, so the person knows why the slicer asks (#3637).
+                entry.notes.append(
+                    f"{', '.join(unknown)}: the colours swapped to it are different materials,"
+                    " so the file states no material for it"
+                )
+            objects.append(entry)
     return objects
 
 
@@ -216,7 +225,13 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
 
 
 def _materials(req: OutputRequest) -> dict[str, str]:
-    """Each colour's material as the arranged objects' sources state it. Only a library
+    """Each colour's material as `_stated_materials` finds it, the conflicting left out."""
+    return _stated_materials(req)[0]
+
+
+def _stated_materials(req: OutputRequest) -> tuple[dict[str, str], set[str]]:
+    """Each colour's material, and the colours whose sources disagree. Each colour's
+    material is as the arranged objects' sources state it. Only a library
     file states any. A render's colour has a material only when a library object
     shares its slot, since one slot is one filament. A colour two sources
     give different materials is unknown too: one slot prints both parts, and picking
@@ -240,7 +255,7 @@ def _materials(req: OutputRequest) -> dict[str, str]:
             for old, new in placed.recolour.items():
                 if old.upper() in stated:
                     state(new, stated[old.upper()])
-    return {c: m for c, m in materials.items() if c not in conflicting}
+    return {c: m for c, m in materials.items() if c not in conflicting}, conflicting
 
 
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
