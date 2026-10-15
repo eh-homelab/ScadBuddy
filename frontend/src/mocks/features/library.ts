@@ -16,6 +16,7 @@ import type {
   LibraryMoveResult,
   LibraryRenameResult,
   LibraryRestoreResult,
+  LibrarySearch,
   ModelPrintChoices,
   OutputPlate,
   PrintRun,
@@ -146,6 +147,37 @@ function pngResponse() {
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
+/** The backend's `search_library` (#3630): every word in the name or the folder path. */
+function searchFiles(query: string, all: boolean): LibrarySearch {
+  const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
+  const terms = words(query).split(' ').filter(Boolean)
+  const pathOf = (id: number | null | undefined): string[] => {
+    const folder = libraryFolders.find((row) => row.id === id)
+    return folder ? [...pathOf(folder.parent_id), folder.name] : []
+  }
+  const matched = terms.length === 0
+    ? []
+    : listedFiles().filter((file) => {
+        const name = words(file.filename)
+        const where = words(pathOf(file.folder_id).join(' '))
+        return terms.every((term) => name.includes(term) || where.includes(term))
+      })
+  const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
+  const inName = (file: LibraryEntry) => terms.filter((term) => words(file.filename).includes(term)).length
+  shown.sort((a, b) => inName(b) - inName(a) || a.filename.localeCompare(b.filename))
+  return {
+    query,
+    all,
+    files: shown.slice(0, 100).map((file) => ({
+      ...file,
+      output_id: mockLibraryOutput(file.id) ?? null,
+      folder_path: pathOf(file.folder_id),
+    })),
+    total: shown.length,
+    hidden: matched.length - shown.length,
+  }
+}
+
 export const handlers = [
   // #2349 — names by id; a file the mock library does not have is `name: null`.
   http.get(`${base}/print/library/names`, ({ request }) => {
@@ -156,6 +188,11 @@ export const handlers = [
         return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
       }) satisfies LibraryFileName[],
     )
+  }),
+
+  http.get(`${base}/print/library/search`, ({ request }) => {
+    const search = new URL(request.url).searchParams
+    return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
   }),
 
   http.get(`${base}/print/library`, ({ request }) => {

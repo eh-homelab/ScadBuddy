@@ -240,6 +240,9 @@ class MonitorActivities:
                 kill()
                 await proc.wait()
                 return {"end": {"outcome": "too_many"}, "events": events}
+            # What the command left running in the background goes with it (#2888): a child
+            # whose output went elsewhere holds no pipe open, so nothing else would stop it.
+            kill()
             end: dict[str, Any] = (
                 {"outcome": "exited", "code": code}
                 if code >= 0

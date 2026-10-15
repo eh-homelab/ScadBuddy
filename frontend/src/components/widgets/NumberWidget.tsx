@@ -1,5 +1,5 @@
 import type { Param } from '../../api/types'
-import { rangeProblem } from '../../lib/params'
+import { paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { NumberInput } from './NumberInput'
 
@@ -17,7 +17,7 @@ export function NumberWidget({
   const error = rangeProblem(param, value)
 
   return (
-    <Field id={id} label={param.caption ?? param.name} name={param.name} error={error}>
+    <Field id={id} label={paramLabel(param)} name={param.name} error={error}>
       <NumberInput
         id={id}
         value={value}

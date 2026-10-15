@@ -7,6 +7,7 @@ import { MediaPicker, type PickerItem, type PickerSection } from '../media/Media
 import { mediaIdOf, mediaPickerItems } from '../media/pickerItems'
 import { Button } from '../ui/Button'
 import { Field } from './Field'
+import { paramLabel } from '../../lib/params'
 
 const ASSET_ID = /^[0-9a-f]{64}$/
 
@@ -46,7 +47,7 @@ export function FileWidget({
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
-  const label = param.caption ?? param.name
+  const label = paramLabel(param)
   const accept = param.accept ?? []
   const samples = param.samples ?? []
   const input = useRef<HTMLInputElement>(null)

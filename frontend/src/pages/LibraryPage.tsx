@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useId, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type {
@@ -9,6 +9,7 @@ import type {
   LibraryListing,
   LibraryMoveResult,
   LibraryRenameResult,
+  LibrarySearch,
 } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
@@ -25,7 +26,8 @@ import { traceAction } from '../lib/traceAction'
 import { modelPath } from '../lib/deeplink'
 import { useAdvanced } from '../lib/advanced'
 import { formatBytes } from '../lib/format'
-import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
+import { folderIdOf, folderSegments, libraryPath, libraryPathOf } from '../lib/libraryPath'
+import { nameParts, shortName } from '../lib/libraryNames'
 import { folderLabel } from '../lib/libraryTransfer'
 import { NARROW_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 
@@ -82,6 +84,9 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  // #3630 — the search, kept in the URL so Back returns to its results.
+  const query = search.get('q') ?? ''
+  const searching = query.trim() !== ''
 
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
@@ -92,16 +97,25 @@ export function LibraryPage() {
   // Where focus goes back once a folder is chosen and the tree folds away (#3315).
   const foldersToggle = useRef<HTMLButtonElement>(null)
   const [listing, setListing] = useState<LibraryListing | null>(null)
+  // #3633 — each folder's last listing, shown at once when it is opened again while it
+  // is read afresh. Emptied by a reload, which follows a change made here.
+  const listed = useRef(new Map<string, LibraryListing>())
+  const listedReload = useRef(0)
+  const [results, setResults] = useState<LibrarySearch | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [slow, setSlow] = useState(false)
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
   // reopening the dialog on a fresh copy of the file, which then reads everything
   // twice (#2361). While a listing is read again (Advanced, a reload) there is none on
   // screen, so the last one's answer holds; else the file alone is read meanwhile (#2822).
   const [listedPrint, setListedPrint] = useState<number | null>(null)
+  // While searching, the files on screen are the results, which a print link may name.
+  const onScreen = searching ? results : listing
   const seenPrint =
-    listing === null
+    onScreen === null
       ? listedPrint
-      : printParam !== null && (listing.files ?? []).some((file) => file.id === printParam)
+      : printParam !== null && (onScreen.files ?? []).some((file) => file.id === printParam)
         ? printParam
         : null
   if (seenPrint !== listedPrint) setListedPrint(seenPrint)
@@ -142,8 +156,17 @@ export function LibraryPage() {
     if (ask === null) return
     const key = `${wantedKey ?? 'tree'}|${advanced}|${reload}`
     if (loaded.current.has(key)) return
+    if (listedReload.current !== reload) {
+      listedReload.current = reload
+      listed.current.clear()
+    }
     setError(null)
-    if (wantedKey !== null) setListing(null)
+    // Only folders are kept: a bare `?file=` link (`file:<id>`) never matches, on purpose.
+    // Its folder is what the answer says, and the link then moves to that folder's path,
+    // whose key is kept from then on.
+    if (wantedKey !== null) setListing(listed.current.get(`${wantedKey}|${advanced}`) ?? null)
+    setSlow(false)
+    const slowTimer = window.setTimeout(() => setSlow(true), SLOW_MS)
     api
       .listLibrary({ folderId: ask.folderId, fileId: ask.fileId, all: advanced })
       .then((next) => {
@@ -151,6 +174,7 @@ export function LibraryPage() {
         setTree(next.folders ?? [])
         if (wantedKey === null) return
         loaded.current = new Set([key, `folder:${next.folder_id ?? null}|${advanced}|${reload}`])
+        listed.current.set(`folder:${next.folder_id ?? null}|${advanced}`, next)
         setListing(next)
         if (ask.fileId !== undefined && (next.folder_id ?? null) !== null) {
           // The linked file's folder becomes the path, in place of the bare link.
@@ -162,19 +186,65 @@ export function LibraryPage() {
       })
       .catch((cause: unknown) => {
         if (!live) return
-        setListing(null)
+        // A folder's last listing, if one is on screen, stays: what is known (#3633).
+        if (wantedKey === null) setListing(null)
         setError(cause instanceof ApiError ? cause.detail : 'Could not read the Bambuddy library.')
       })
+      .finally(() => window.clearTimeout(slowTimer))
     return () => {
       live = false
+      window.clearTimeout(slowTimer)
     }
     // `wanted` and `location.search` are read through `wantedKey` and when the answer lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantedKey, missing, advanced, reload])
 
+  // #3630 — the search's results; the last ones stay on screen while the next are read.
+  // A search after a change made here reads the library afresh, not the copy kept: every
+  // search asks for it until one such answer has arrived, so typing on does not lose it.
+  const searchedReload = useRef(0)
+  useEffect(() => {
+    if (!searching) {
+      setResults(null)
+      setSearchError(null)
+      return
+    }
+    const controller = new AbortController()
+    const fresh = searchedReload.current !== reload
+    setSearchError(null)
+    api
+      .searchLibrary({ q: query, all: advanced, fresh }, controller.signal)
+      .then((found) => {
+        if (controller.signal.aborted) return
+        if (fresh) searchedReload.current = reload
+        setResults(found)
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return
+        // The last results stay under the error: what is known (#3633).
+        setSearchError(cause instanceof ApiError ? cause.detail : 'Could not search the Bambuddy library.')
+      })
+    return () => controller.abort()
+  }, [searching, query, advanced, reload])
+
   function selectFolder(id: number | null) {
     const path = libraryPath(tree ?? [], id)
     if (path !== location.pathname || location.search !== '') navigate(path)
+  }
+
+  /** The search as typed, into the URL: a first search is a step Back undoes, the rest replace it. */
+  function setQuery(text: string) {
+    setSearch(
+      (now) => {
+        const next = new URLSearchParams(now)
+        if (text.trim() === '') next.delete('q')
+        else next.set('q', text)
+        next.delete('file')
+        next.delete('print')
+        return next
+      },
+      { replace: searching },
+    )
   }
 
   /** Opens or closes a file's print dialog, as a URL Back returns from. */
@@ -262,9 +332,22 @@ export function LibraryPage() {
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
   // #2671 — a sliced file prints, but has no objects to arrange.
+  // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
+  // a change to this filter, or to what the server calls `printable`, changes that too.
   const printable = picked.filter((file) => file.printable && !file.sliced)
-  const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
+  const printing =
+    printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
+  // #3631 — the folder's own subfolders, shown beside its files: a folder of folders is
+  // not empty. The top level's are the tree itself, and listed here only when it holds no
+  // files, so its files stay first on a phone.
+  const subfolders =
+    tree === null ||
+    listing === null ||
+    (listing.folder_id ?? null) !== folderId ||
+    (folderId === null && (listing.files ?? []).length > 0)
+      ? []
+      : tree.filter((folder) => (folder.parent_id ?? null) === folderId)
 
   // A linked file is scrolled to once it is listed.
   const scrolled = useRef<string | null>(null)
@@ -278,6 +361,18 @@ export function LibraryPage() {
     card.scrollIntoView?.({ block: 'center' })
   }, [fileParam, listing])
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
+
+  /** What every card does: the same on a folder's files and on search results. */
+  const cardActions = (file: LibraryEntry) => ({
+    highlighted: file.id === fileParam,
+    picked: isPicked(file),
+    actionsDisabled: tree === null,
+    onPick: () => togglePicked(file),
+    onPrint: () => openPrint(file),
+    onRename: () => setRenaming(file),
+    onTransfer: (mode: TransferMode) => setTransfer({ mode, files: [file] }),
+    onDelete: () => setConfirming([file]),
+  })
 
   return (
     <div className="h-full overflow-y-auto">
@@ -319,6 +414,7 @@ export function LibraryPage() {
         </nav>
 
         <section className="min-w-0 flex-1 space-y-4">
+          <SearchBox query={query} onSearch={setQuery} />
           <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <h1 className="text-[15px] text-ink">Library</h1>
             <Button
@@ -331,6 +427,14 @@ export function LibraryPage() {
             >
               Arrange selected ({printable.length})
             </Button>
+            {/* #2286 — a ticked file Arrange cannot take is said, not silently dropped. */}
+            {picked.length > printable.length && (
+              <span role="note" className="text-[12px] text-muted">
+                {`${picked.length - printable.length} selected ${
+                  picked.length - printable.length === 1 ? 'file' : 'files'
+                } can't be arranged: only unsliced 3MF and STL files can.`}
+              </span>
+            )}
             <Button
               size="sm"
               data-testid="library-copy-selected"
@@ -397,9 +501,13 @@ export function LibraryPage() {
               </Link>
             </p>
           )}
-          {error && (
-            <p role="alert" className="text-[13px] text-warn">
+          {error && !searching && (
+            <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn">
               {error}
+              {/* #3633 — a read that timed out can be tried again in place. */}
+              <Button size="sm" data-testid="library-retry" onClick={() => setReload((n) => n + 1)}>
+                Retry
+              </Button>
             </p>
           )}
           {arranged && (
@@ -414,102 +522,63 @@ export function LibraryPage() {
           {arranged && (
             <ArrangedNext output={arranged.output} sent={arrangedSent} onPrint={() => setPrintArranged(true)} />
           )}
-          {!listing && !error && !missing && (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Spinner /> Reading the Bambuddy library
-            </p>
-          )}
-          {linkedMissing && (
-            <p className="text-[13px] text-muted">
-              File #{fileParam} is not listed here{advanced ? '' : '. It may be listed under Advanced'}.
-            </p>
-          )}
-          {listing && files.length === 0 && (
-            <p className="text-[13px] text-muted">No files here{hidden > 0 ? '' : ' yet'}.</p>
-          )}
-          {!advanced && hidden > 0 && (
-            <p className="sb-num text-[12px] text-faint">{hidden} more under Advanced.</p>
-          )}
 
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
-            {files.map((file) => {
-              const highlighted = file.id === fileParam
-              return (
-                <li
+          {searching ? (
+            <SearchResults
+              query={query}
+              results={results}
+              error={searchError}
+              advanced={advanced}
+              onRetry={() => setReload((n) => n + 1)}
+            >
+              {(results?.files ?? []).map((file) => (
+                <FileCard
                   key={file.id}
-                  data-testid={`library-file-${file.id}`}
-                  aria-current={highlighted ? 'true' : undefined}
-                  className={`flex min-w-0 flex-col gap-2 rounded-[8px] border bg-surface-2 p-2 ${
-                    highlighted ? 'border-accent ring-2 ring-accent/40' : 'border-line'
-                  }`}
-                >
-                  {file.has_thumbnail ? (
-                    <img
-                      src={api.libraryThumbnailUrl(file.id)}
-                      alt=""
-                      loading="lazy"
-                      className="aspect-square w-full rounded-[4px] object-contain"
-                    />
-                  ) : (
-                    <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
-                  )}
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${file.filename}`}
-                      checked={isPicked(file)}
-                      onChange={() => togglePicked(file)}
-                    />
-                    <MiddleTruncated name={file.filename} />
-                  </div>
-                  <FileFacts file={file} />
-                  {file.printable ? (
-                    <Button
-                      variant="primary"
-                      data-testid={`library-print-${file.id}`}
-                      aria-label={`Print ${file.filename}`}
-                      onClick={() => openPrint(file)}
+                  file={file}
+                  where={
+                    <Link
+                      to={`${libraryPathOf(file.folder_path ?? [])}?file=${file.id}`}
+                      data-testid={`library-result-folder-${file.id}`}
+                      className="block truncate text-[12px] text-accent hover:underline"
+                      title={folderPathText(file.folder_path ?? [])}
                     >
-                      Print
-                    </Button>
-                  ) : (
-                    <p className="text-[12px] text-faint">ScadBuddy cannot print this file type.</p>
-                  )}
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    {file.printable ? (
-                      // #1755 — the file's own print history, as a template has its Prints tab.
-                      <Link
-                        to={libraryPrintsPath(file.id)}
-                        aria-label={`Prints of ${file.filename}`}
-                        className="text-muted hover:text-ink"
-                      >
-                        Prints
-                      </Link>
-                    ) : (
-                      <span />
-                    )}
-                    <span className="flex items-center gap-1">
-                      <FileActions
-                        file={file}
-                        disabled={tree === null}
-                        onRename={() => setRenaming(file)}
-                        onTransfer={(mode) => setTransfer({ mode, files: [file] })}
-                      />
-                      <button
-                        type="button"
-                        data-testid={`library-delete-${file.id}`}
-                        aria-label={`Delete ${file.filename}`}
-                        onClick={() => setConfirming([file])}
-                        className="rounded px-1 text-muted hover:text-warn"
-                      >
-                        Delete
-                      </button>
-                    </span>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                      In {folderPathText(file.folder_path ?? [])}
+                    </Link>
+                  }
+                  {...cardActions(file)}
+                />
+              ))}
+            </SearchResults>
+          ) : (
+            <>
+              {!listing && !error && !missing && (
+                <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted">
+                  <Spinner /> Reading the Bambuddy library
+                  {slow && <span className="basis-full text-[12px] text-faint">Bambuddy is slow to answer. You can search meanwhile.</span>}
+                </p>
+              )}
+              {linkedMissing && (
+                <p className="text-[13px] text-muted">
+                  File #{fileParam} is not listed here{advanced ? '' : '. It may be listed under Advanced'}.
+                </p>
+              )}
+              {subfolders.length > 0 && tree && (
+                <Subfolders folders={subfolders} tree={tree} onSelect={selectFolder} />
+              )}
+              {listing && files.length === 0 && subfolders.length === 0 && (
+                <p className="text-[13px] text-muted">No files here{hidden > 0 ? '' : ' yet'}.</p>
+              )}
+              {!advanced && hidden > 0 && (
+                <p className="sb-num text-[12px] text-faint">{hidden} more under Advanced.</p>
+              )}
+
+              <ul aria-label="Files" className="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
+                {files.map((file) => (
+                  <FileCard key={file.id} file={file} {...cardActions(file)} />
+                ))}
+              </ul>
+            </>
+          )}
         </section>
 
         <PrintPicker
@@ -736,26 +805,301 @@ function DoneToast({ done, onDismiss }: { done: Done; onDismiss: () => void }) {
   )
 }
 
-/** The last characters of a name's stem that stay when it is cut, with its extension. */
-const KEPT_TAIL = 8
+/** How long a listing is read before the page says Bambuddy is slow (#3633). */
+const SLOW_MS = 4000
+/** How long typing pauses before the search is run (#3630). */
+const SEARCH_DEBOUNCE_MS = 250
+/** The subfolders shown before "Show all" (#3631). */
+const FOLDERS_SHOWN = 12
+
+function folderPathText(names: string[]): string {
+  return names.length === 0 ? 'Top level' : names.join(' / ')
+}
+
+/** #3630 — one box that finds a file by name in every folder. */
+function SearchBox({ query, onSearch }: { query: string; onSearch: (text: string) => void }) {
+  const [typed, setTyped] = useState(query)
+  // Back or a link changes the query under the box: the box follows it.
+  const [shown, setShown] = useState(query)
+  if (shown !== query) {
+    setShown(query)
+    setTyped(query)
+  }
+  const search = useEffectEvent((text: string) => onSearch(text))
+  useEffect(() => {
+    if (typed === shown) return
+    const timer = window.setTimeout(() => search(typed), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [typed, shown])
+  return (
+    <form
+      role="search"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (typed !== shown) onSearch(typed)
+      }}
+      className="relative"
+    >
+      <input
+        type="search"
+        aria-label="Search the library"
+        data-testid="library-search"
+        placeholder="Search every folder by file name"
+        value={typed}
+        onChange={(event) => setTyped(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && typed !== '') {
+            event.preventDefault()
+            setTyped('')
+            onSearch('')
+          }
+        }}
+        className="w-full rounded-md border border-line-strong bg-surface-2 px-3 py-2 text-[14px] text-ink placeholder:text-faint focus-visible:border-accent focus-visible:outline-none"
+      />
+    </form>
+  )
+}
+
+/** #3630 — what a search found, with the cards it is given. */
+function SearchResults({
+  query,
+  results,
+  error,
+  advanced,
+  onRetry,
+  children,
+}: {
+  query: string
+  results: LibrarySearch | null
+  error: string | null
+  advanced: boolean
+  onRetry: () => void
+  children: ReactNode
+}) {
+  const current = results !== null && results.query === query && results.all === advanced
+  return (
+    <div className="space-y-3" aria-busy={!current && !error}>
+      {error ? (
+        <p role="alert" className="flex flex-wrap items-center gap-2 text-[13px] text-warn">
+          {error}
+          <Button size="sm" data-testid="library-search-retry" onClick={onRetry}>
+            Retry
+          </Button>
+        </p>
+      ) : !current ? (
+        <p role="status" className="flex items-center gap-2 text-[13px] text-muted">
+          <Spinner /> Searching every folder
+        </p>
+      ) : (
+        <p role="status" data-testid="library-search-summary" className="text-[13px] text-ink">
+          {!results.total
+            ? `No files match “${query}”.`
+            : results.total > (results.files ?? []).length
+              ? `The first ${(results.files ?? []).length} of ${results.total} files that match “${query}”.`
+              : `${plural(results.total, 'file')} ${results.total === 1 ? 'matches' : 'match'} “${query}”.`}
+          {!advanced && (results.hidden ?? 0) > 0 && (
+            <span className="sb-num ml-1 text-[12px] text-faint">{results.hidden} more under Advanced.</span>
+          )}
+        </p>
+      )}
+      {results !== null && (
+        <ul aria-label="Search results" className="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
+          {children}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/** #3631 — a folder's subfolders in the main pane: a folder of folders is not empty. */
+function Subfolders({
+  folders,
+  tree,
+  onSelect,
+}: {
+  folders: LibraryFolderView[]
+  tree: LibraryFolderView[]
+  onSelect: (id: number) => void
+}) {
+  const [all, setAll] = useState(false)
+  const shown = all ? folders : folders.slice(0, FOLDERS_SHOWN)
+  const inside = (id: number) => tree.filter((folder) => folder.parent_id === id).length
+  return (
+    <section aria-labelledby="library-subfolders" className="space-y-2">
+      <h2 id="library-subfolders" className="text-[12px] text-faint">
+        {plural(folders.length, 'folder')}
+      </h2>
+      <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(200px,100%),1fr))] gap-2">
+        {shown.map((folder) => {
+          const subfolders = inside(folder.id)
+          const facts = [
+            folder.file_count ? plural(folder.file_count, 'file') : null,
+            subfolders ? plural(subfolders, 'folder') : null,
+          ].filter(Boolean)
+          return (
+            <li key={folder.id}>
+              <button
+                type="button"
+                data-testid={`library-subfolder-${folder.id}`}
+                onClick={() => onSelect(folder.id)}
+                className="flex w-full min-w-0 items-center gap-2 rounded-[8px] border border-line bg-surface-2 px-3 py-2 text-left hover:border-line-strong"
+              >
+                <svg aria-hidden viewBox="0 0 16 16" className="size-4 shrink-0 text-faint">
+                  <path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="none" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] text-ink">{folder.name}</span>
+                  <span className="sb-num block text-[11px] text-faint">{facts.join(', ') || 'Empty'}</span>
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+      {folders.length > FOLDERS_SHOWN && (
+        <Button size="sm" variant="ghost" onClick={() => setAll((now) => !now)}>
+          {all ? 'Show fewer folders' : `Show all ${folders.length} folders`}
+        </Button>
+      )}
+    </section>
+  )
+}
+
+interface FileCardProps {
+  file: LibraryEntry
+  /** Where the file is, on a search result. */
+  where?: ReactNode
+  highlighted: boolean
+  picked: boolean
+  actionsDisabled: boolean
+  onPick: () => void
+  onPrint: () => void
+  onRename: () => void
+  onTransfer: (mode: TransferMode) => void
+  onDelete: () => void
+}
+
+function FileCard({
+  file,
+  where,
+  highlighted,
+  picked,
+  actionsDisabled,
+  onPick,
+  onPrint,
+  onRename,
+  onTransfer,
+  onDelete,
+}: FileCardProps) {
+  return (
+    <li
+      data-testid={`library-file-${file.id}`}
+      aria-current={highlighted ? 'true' : undefined}
+      className={`flex min-w-0 flex-col gap-2 rounded-[8px] border bg-surface-2 p-2 ${
+        highlighted ? 'border-accent ring-2 ring-accent/40' : 'border-line'
+      }`}
+    >
+      {file.has_thumbnail ? (
+        <img
+          src={api.libraryThumbnailUrl(file.id)}
+          alt=""
+          loading="lazy"
+          className="aspect-square w-full rounded-[4px] object-contain"
+        />
+      ) : (
+        <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
+      )}
+      <div className="flex min-w-0 items-start gap-1.5">
+        <input
+          type="checkbox"
+          aria-label={`Select ${file.filename}`}
+          checked={picked}
+          onChange={onPick}
+          className="mt-[3px]"
+        />
+        <FileName file={file} />
+      </div>
+      {where}
+      <FileFacts file={file} />
+      {file.printable ? (
+        <Button
+          variant="primary"
+          data-testid={`library-print-${file.id}`}
+          aria-label={`Print ${file.filename}`}
+          onClick={onPrint}
+        >
+          Print
+        </Button>
+      ) : (
+        <p className="text-[12px] text-faint">ScadBuddy cannot print this file type.</p>
+      )}
+      <div className="flex items-center justify-between gap-2 text-[12px]">
+        {file.printable ? (
+          // #1755 — the file's own print history, as a template has its Prints tab.
+          <Link to={libraryPrintsPath(file.id)} aria-label={`Prints of ${file.filename}`} className="text-muted hover:text-ink">
+            Prints
+          </Link>
+        ) : (
+          <span />
+        )}
+        <span className="flex items-center gap-1">
+          <FileActions file={file} disabled={actionsDisabled} onRename={onRename} onTransfer={onTransfer} />
+          <button
+            type="button"
+            data-testid={`library-delete-${file.id}`}
+            aria-label={`Delete ${file.filename}`}
+            onClick={onDelete}
+            className="rounded px-1 text-muted hover:text-warn"
+          >
+            Delete
+          </button>
+        </span>
+      </div>
+    </li>
+  )
+}
 
 /**
- * #935 — a long name cut in the middle, not at the end. Generated names share a long
- * prefix (`bag-clip-3155628dc2bb…`), so cutting the end hides the only part that differs.
- * CSS has no middle ellipsis: the head truncates and the tail never shrinks.
+ * #3634 — a card's name on up to two lines, cut in the middle only past that, at word
+ * breaks (#935: generated names share a long prefix, so the end must show). What
+ * ScadBuddy adds to a name, ` (ScadBuddy)` and ` (2)`, and a sliced file's
+ * `.gcode.3mf` are badges, so the part that tells two cards apart is never what is cut.
  */
-function MiddleTruncated({ name }: { name: string }) {
-  // The extension is found from the end: a dot early in a name (`v1.2_shelf….3mf`) is
-  // part of the stem, and must not pull the whole name into the tail that never shrinks.
-  const sliced = name.toLowerCase().endsWith('.gcode.3mf') ? name.length - '.gcode.3mf'.length : -1
-  const last = name.lastIndexOf('.')
-  const dot = sliced > 0 ? sliced : last > 0 ? last : name.length
-  const split = Math.max(0, dot - KEPT_TAIL)
+function FileName({ file }: { file: LibraryEntry }) {
+  const parts = nameParts(file.filename)
+  const shown = shortName(parts.stem)
+  const badges = [
+    file.sliced ? 'Sliced' : null,
+    parts.scadbuddy ? 'ScadBuddy copy' : null,
+    parts.copy !== null ? `Copy ${parts.copy}` : null,
+    !file.sliced && parts.extension !== '' && parts.extension !== '3mf' ? parts.extension.toUpperCase() : null,
+  ].filter((badge) => badge !== null)
   return (
-    <p className="flex min-w-0 text-[13px] text-ink" title={name}>
-      <span className="truncate">{name.slice(0, split)}</span>
-      <span className="shrink-0 whitespace-pre">{name.slice(split)}</span>
-    </p>
+    <div className="min-w-0 flex-1" title={file.filename}>
+      <p
+        data-testid={`library-name-${file.id}`}
+        className={`line-clamp-2 text-[13px] text-ink ${
+          // A cut name fills both lines, so its tail is never what the clamp hides.
+          shown === parts.stem ? '[overflow-wrap:anywhere]' : 'break-all'
+        }`}
+      >
+        {shown}
+      </p>
+      {badges.length > 0 && (
+        <p className="mt-1 flex flex-wrap gap-1">
+          {badges.map((badge) => (
+            <span
+              key={badge}
+              className={`rounded-full border px-1.5 text-[10px] leading-4 ${
+                badge === 'Sliced' ? 'border-accent/60 text-accent' : 'border-line-strong text-muted'
+              }`}
+            >
+              {badge}
+            </span>
+          ))}
+        </p>
+      )}
+    </div>
   )
 }
 

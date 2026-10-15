@@ -1,6 +1,7 @@
 import { constants } from 'node:fs'
 import { access, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
+import { isUuid } from './uuid.js'
 import { claudeConfigDir, pluginCacheDir, scratchDir, type HarnessPaths } from './options.js'
 
 // The deployment mounts an emptyDir (Kubernetes) or tmpfs (the CI smoke test)
@@ -16,12 +17,7 @@ export class StateDirError extends Error {
   override name = 'StateDirError'
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/** A canonical 8-4-4-4-12 hex UUID: every session id (and so directory name) is one. */
-export function isUuid(value: string): boolean {
-  return UUID.test(value)
-}
+export { isUuid }
 
 /**
  * A session's own working directory (#300, spec §6): `work/sessions/<id>`.

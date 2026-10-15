@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState, type ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
-import { Dialog } from './Dialog'
+import { Dialog } from '.'
 
 /** A page with a button that opens the dialog, and a control after it. */
 function Page({ children, description }: { children?: ReactNode; description?: string }) {

@@ -52,6 +52,35 @@ describe('a monitor command', () => {
     })
   }, 20_000)
 
+  // #2888: a child the command backgrounds with its output elsewhere keeps no pipe open, so
+  // the command's exit ends the watch while it runs on: the process group goes on a normal
+  // exit too. Read from /proc, as a killed child the reaper has not collected yet is a zombie.
+  it('kills what the command left running in the background when it exits normally (#2888)', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'monitor-'))
+    const end = await runCommand({
+      command: 'sleep 1000 >/dev/null 2>&1 & echo $! > child; exit 0',
+      cwd,
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+      onEvent: collect().onEvent,
+    })
+    const pid = Number(await readFile(path.join(cwd, 'child'), 'utf8'))
+    const running = async () => {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '')
+      return stat !== '' && stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) !== 'Z'
+    }
+    try {
+      expect(end).toEqual({ outcome: 'exited', code: 0 })
+      await expect.poll(running, { timeout: 5000 }).toBe(false)
+    } finally {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // gone
+      }
+    }
+  })
+
   it('ends failed, killing the command, when an event cannot be recorded', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'monitor-'))
     const end = await runCommand({

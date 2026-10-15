@@ -35,6 +35,16 @@ const arrangeObject = z
       .optional()
       .describe('Copies (of each object, with part omitted); omit for the count the source has'),
     group: z.string().max(100).optional().describe('With goal keep_together: objects of one group share a plate'),
+    recolour: z
+      .record(z.string().regex(/^#[0-9A-Fa-f]{6}$/), z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .optional()
+      .describe(
+        "These copies print in other colours (#3637): each of the object's own colours named here prints in " +
+          'the colour it maps to, as a filament slot of its own. Name the same object twice, once with ' +
+          'recolour, for the same model in two colourings on one plate. `{}` is its own colours; omit to keep ' +
+          "an arranged output's entry as it is. A part an output holds in two colourings is picked by these " +
+          'colours; matching neither, the first entry is taken (its count, with count omitted) and recoloured',
+      ),
   })
   .refine((o) => (o.output_id === undefined) !== (o.library_file_id === undefined), {
     message: 'name one source: output_id or library_file_id',
@@ -57,7 +67,9 @@ export const arrangeTools: Tool[] = [
       'twice (an output and its library file, say) are placed twice. `goal` picks the layout; ' +
       '`printer_id` packs for that printer\'s plate (omit for the configured one); `filament_plan` is the ' +
       "same spool-per-slot plan print_output takes, slots numbered by `colours` (omit for the first source's " +
-      "colours, then any the others add). The result is filed under `slug`, one of the outputs' templates " +
+      "colours, then any the others add, and any colour a recolour brings; a source colour every copy swaps " +
+      'away is left out, so with recolour and filament_plan, send colours too). ' +
+      "The result is filed under `slug`, one of the outputs' templates " +
       "(omit for the first object's); with a library file ScadBuddy did not make among them, it may be any template, and with library files alone it is required. Waits for the job; if it outlasts the wait, the still-running job " +
       'is returned: poll it with get_render_job, then save_output under its slug. An output saved before ' +
       'Arrange existed is refused: the user re-renders it from Arrange in History. A part painted in ' +
