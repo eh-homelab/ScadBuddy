@@ -25,6 +25,8 @@ type PrintRunRequest struct {
 	options PrintOptionsable
 	// The plate_id property
 	plate_id *int32
+	// The prime_tower property
+	prime_tower PrimeTowerChoiceable
 	// The print_sequence property
 	print_sequence PrintRunRequest_PrintRunRequest_print_sequenceable
 	// The printer_id property
@@ -820,6 +822,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["prime_tower"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrimeTowerChoiceFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrimeTower(val.(PrimeTowerChoiceable))
+		}
+		return nil
+	}
 	res["print_sequence"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_print_sequenceFromDiscriminatorValue)
 		if err != nil {
@@ -917,6 +929,12 @@ func (m *PrintRunRequest) GetPlateId() *int32 {
 	return m.plate_id
 }
 
+// GetPrimeTower gets the prime_tower property value. The prime_tower property
+// returns a PrimeTowerChoiceable when successful
+func (m *PrintRunRequest) GetPrimeTower() PrimeTowerChoiceable {
+	return m.prime_tower
+}
+
 // GetPrinterId gets the printer_id property value. The printer_id property
 // returns a PrintRunRequest_PrintRunRequest_printer_idable when successful
 func (m *PrintRunRequest) GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable {
@@ -999,6 +1017,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteInt32Value("plate_id", m.GetPlateId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("prime_tower", m.GetPrimeTower())
 		if err != nil {
 			return err
 		}
@@ -1094,6 +1118,11 @@ func (m *PrintRunRequest) SetPlateId(value *int32) {
 	m.plate_id = value
 }
 
+// SetPrimeTower sets the prime_tower property value. The prime_tower property
+func (m *PrintRunRequest) SetPrimeTower(value PrimeTowerChoiceable) {
+	m.prime_tower = value
+}
+
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *PrintRunRequest) SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable) {
 	m.printer_id = value
@@ -1139,6 +1168,7 @@ type PrintRunRequestable interface {
 	GetFilamentProfiles() []string
 	GetOptions() PrintOptionsable
 	GetPlateId() *int32
+	GetPrimeTower() PrimeTowerChoiceable
 	GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable
 	GetPrintSequence() PrintRunRequest_PrintRunRequest_print_sequenceable
 	GetProjectId() PrintRunRequest_PrintRunRequest_project_idable
@@ -1153,6 +1183,7 @@ type PrintRunRequestable interface {
 	SetFilamentProfiles(value []string)
 	SetOptions(value PrintOptionsable)
 	SetPlateId(value *int32)
+	SetPrimeTower(value PrimeTowerChoiceable)
 	SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable)
 	SetPrintSequence(value PrintRunRequest_PrintRunRequest_print_sequenceable)
 	SetProjectId(value PrintRunRequest_PrintRunRequest_project_idable)

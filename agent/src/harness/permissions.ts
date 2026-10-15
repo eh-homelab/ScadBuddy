@@ -1,4 +1,5 @@
 import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import { screenedText } from '../browser/origins.js'
 
 // The permission seam between the SDK and ScadBuddy's risk tiers (spec §8.1–§8.2,
 // issue #258). Every tool call is mapped to a tier and the tier to a decision:
@@ -19,11 +20,12 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 // Without a gate (a bare harness run) needs_approval is a DENY whose message
 // says the action needs approval, so an outward tool can never run unattended.
 //
-// Before the tier, an optional InputGuard may judge a call by its arguments.
-// It may:
+// Before the tier, an optional InputGuard may judge a call by its arguments
+// (the headless browser's navigation lists, #982, browser/guard.ts). It may:
 //   - DENY it: that holds at every tier and is never parked for approval;
 //   - make it OUTWARD for this input, whatever the tool's own tier, so it
 //     parks for approval like any outward call;
+//   - ALLOW it for this input: an outward tool runs at `write`, unasked;
 //   - REWRITE its input: the call is then allowed at its tier and canUseTool
 //     hands the SDK the new input as `updatedInput`, which the tool runs with
 //     (sdk.d.ts, 0.3.283 and 0.3.287, `PermissionResult`). The hook passes such
@@ -75,11 +77,59 @@ export type GuardVerdict =
   | { deny: string }
   /** Outward for this input: needs a human approval, whatever the tool's tier. */
   | { outward: string }
+  /** Needs no approval for this input: an outward tool runs at `write`. The text says why, for logs. */
+  | { allow: string }
   /** Allowed at the tool's tier, run with this input instead. */
   | { input: Record<string, unknown> }
 
 /** Judges a call by its INPUT (see the header). */
-export type InputGuard = (toolName: string, input: unknown) => GuardVerdict | undefined
+export type InputGuard = (toolName: string, input: unknown) => GuardVerdict | undefined | Promise<GuardVerdict | undefined>
+
+/**
+ * How long a guard or a result screen may take. Past it the call is denied, or its
+ * result withheld: a slow database must never let a call or a page through. Below
+ * SCREEN_HOOK_TIMEOUT_S, so ours decides before Claude Code's hook deadline would.
+ */
+export const GUARD_DEADLINE_MS = 20_000
+/** The screen hook's own timeout, in seconds (HookCallbackMatcher `timeout`). */
+export const SCREEN_HOOK_TIMEOUT_S = 60
+
+/** `work`, or a rejection once `ms` have passed. */
+export async function within<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The guard's verdict; a guard that fails or does not answer in time denies the call (fail closed). */
+export async function judgeInput(
+  guard: InputGuard | undefined,
+  toolName: string,
+  input: unknown,
+  deadlineMs = GUARD_DEADLINE_MS,
+): Promise<GuardVerdict | undefined> {
+  if (!guard) return undefined
+  try {
+    return await within(Promise.resolve(guard(toolName, input)), deadlineMs)
+  } catch (err) {
+    return { deny: `${toolName} was not run: its input could not be checked (${describeError(err)}).` }
+  }
+}
+
+/** A tier after the guard's verdict: `allow` lowers outward to write, `outward` raises any tier. */
+export function tierAfter(tier: RiskTier, verdict: GuardVerdict | undefined): RiskTier {
+  if (verdict && 'outward' in verdict) return 'outward'
+  if (verdict && 'allow' in verdict && tier === 'outward') return 'write'
+  return tier
+}
 
 export type ToolDecision =
   /** `input`, when set, is what the tool runs with instead of its own. */
@@ -87,11 +137,12 @@ export type ToolDecision =
   | { decision: 'needs_approval'; tier: RiskTier; reason: string }
   | { decision: 'deny'; tier: RiskTier; reason: string }
 
-export function decide(toolName: string, tierOf: TierResolver, input?: unknown, guard?: InputGuard): ToolDecision {
-  const tier = tierOf(toolName, input) ?? 'outward'
-  const verdict = guard?.(toolName, input)
-  if (verdict && 'deny' in verdict) return { decision: 'deny', tier, reason: verdict.deny }
+/** `verdict` is the InputGuard's on this call (judgeInput), already awaited. */
+export function decide(toolName: string, tierOf: TierResolver, input?: unknown, verdict?: GuardVerdict): ToolDecision {
+  const own = tierOf(toolName, input) ?? 'outward'
+  if (verdict && 'deny' in verdict) return { decision: 'deny', tier: own, reason: verdict.deny }
   if (verdict && 'outward' in verdict) return { decision: 'needs_approval', tier: 'outward', reason: verdict.outward }
+  const tier = tierAfter(own, verdict)
   if (tier === 'read' || tier === 'write') {
     return verdict && 'input' in verdict ? { decision: 'allow', tier, input: verdict.input } : { decision: 'allow', tier }
   }
@@ -157,7 +208,7 @@ export function makeCanUseTool(
   guard?: InputGuard,
 ): CanUseTool {
   return async (toolName, input, options): Promise<PermissionResult> => {
-    const decision = decide(toolName, tierOf, input, guard)
+    const decision = decide(toolName, tierOf, input, await judgeInput(guard, toolName, input))
     onDecision?.(toolName, decision)
     // The SDK passes the input to the tool from `updatedInput` when set; an
     // allowed call gets its own input back unchanged, unless the guard rewrote it.
@@ -194,29 +245,68 @@ export function makePreToolUseHook(
 ): HookCallbackMatcher {
   return {
     hooks: [
-      (input) => {
-        if (input.hook_event_name !== 'PreToolUse') return Promise.resolve({})
-        const decision = decide(input.tool_name, tierOf, input.tool_input, guard)
-        if (decision.decision === 'allow') return Promise.resolve({})
+      async (input) => {
+        if (input.hook_event_name !== 'PreToolUse') return {}
+        const decision = decide(input.tool_name, tierOf, input.tool_input, await judgeInput(guard, input.tool_name, input.tool_input))
+        if (decision.decision === 'allow') return {}
         if (decision.decision === 'needs_approval' && gate) {
           // Force the prompt; canUseTool parks the call and reports the decision.
-          return Promise.resolve({
+          return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse' as const,
               permissionDecision: 'ask' as const,
               permissionDecisionReason: decision.reason,
             },
-          })
+          }
         }
         onDecision?.(input.tool_name, decision)
-        return Promise.resolve({
+        return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,
             permissionDecision: 'deny' as const,
             permissionDecisionReason:
               decision.decision === 'deny' ? decision.reason : noGateMessage(decision.reason),
           },
-        })
+        }
+      },
+    ],
+  }
+}
+
+/**
+ * Rewrites what a tool's result tells the model (#982: a headless-browser page the
+ * lists do not let it read): `screen` gets the call and its result's text and returns
+ * the text to show instead, or undefined to leave the result alone. Claude Code hands a
+ * PostToolUse hook an MCP tool's result as its content blocks, and
+ * `updatedMCPToolOutput` set to blocks replaces them, both in what the model reads and
+ * in the transcript (measured on Claude Code 2.1.296: test/browserOrigins.e2e.test.ts).
+ * A screen that fails withholds the result (fail closed).
+ */
+export type ResultScreen = (toolName: string, input: unknown, text: string) => Promise<string | undefined>
+
+export function makeResultScreenHook(
+  screen: ResultScreen,
+  covers: (toolName: string) => boolean,
+  deadlineMs = GUARD_DEADLINE_MS,
+): HookCallbackMatcher {
+  return {
+    // Longer than our own deadline, so a slow screen withholds rather than Claude Code
+    // giving up on the hook and passing the result on.
+    timeout: SCREEN_HOOK_TIMEOUT_S,
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name !== 'PostToolUse' || !covers(input.tool_name)) return {}
+        const text = screenedText(input.tool_response)
+        let replaced: string | undefined
+        try {
+          replaced = await within(screen(input.tool_name, input.tool_input, text), deadlineMs)
+        } catch (err) {
+          replaced = `ScadBuddy withheld this result: the page it came from could not be checked (${describeError(err)}).`
+        }
+        if (replaced === undefined) return {}
+        return {
+          hookSpecificOutput: { hookEventName: 'PostToolUse' as const, updatedMCPToolOutput: [{ type: 'text', text: replaced }] },
+        }
       },
     ],
   }

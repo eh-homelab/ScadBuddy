@@ -21,6 +21,7 @@ import {
   type DecisionListener,
   makeCanUseTool,
   makePreToolUseHook,
+  makeResultScreenHook,
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
@@ -29,6 +30,7 @@ import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, typ
 import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
 import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import type { BrowserGuard } from '../browser/guard.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
@@ -178,6 +180,12 @@ export type HarnessRun = {
   remotePlugins?: HarnessPlugin[]
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
+  /**
+   * The headless browser's navigation lists (#982, browser/guard.ts): the input guard
+   * on the remote plugins' `browser_*` calls, and a PostToolUse hook that withholds a
+   * page the browser reached that the lists do not let the model read.
+   */
+  browser?: BrowserGuard
   /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts): raised tiers, applied over every other tier
@@ -394,7 +402,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       return tier === undefined ? undefined : policy.tierOf(name, tier)
     }
   }
-  const permission = makeCanUseTool(tierOf, run.onDecision, gate)
+  const browser = run.browser
+  const guard = browser ? (name: string, input: unknown) => browser.check(name, input) : undefined
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
   const abort = new AbortController()
   const options: Options = {
     ...base,
@@ -414,12 +424,15 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       mergeHooks(
         {
           PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate),
+            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
             // Claude Code's own WebFetch, which an allowed package may be given, fetches
             // where the agent's egress check does not reach; this checks it first.
             webFetchEgressHook(run.resolve),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],
+          ...(browser
+            ? { PostToolUse: [makeResultScreenHook((name, input, text) => browser.screen(name, input, text), browser.covers)] }
+            : {}),
         },
         run.memoryHooks,
       ),
