@@ -29,7 +29,9 @@ FOLDERS = [
 ]
 
 
-def row(file_id: int, filename: str, folder_id: int | None, file_type: str = "3mf") -> LibraryListRow:
+def row(
+    file_id: int, filename: str, folder_id: int | None, file_type: str = "3mf"
+) -> LibraryListRow:
     return LibraryListRow(id=file_id, filename=filename, file_type=file_type, folder_id=folder_id)
 
 
@@ -158,15 +160,15 @@ async def test_the_index_is_one_read_kept_fresh_then_answered_stale_while_it_is_
 
 
 async def test_a_failed_read_raises_to_the_search_that_waits_for_it() -> None:
-    class Down(Exception):
+    class DownError(Exception):
         pass
 
     @asynccontextmanager
     async def connect() -> AsyncIterator[BambuddyClient]:
-        raise Down
+        raise DownError
         yield  # pragma: no cover
 
     index = LibraryIndex()
 
-    with pytest.raises(Down):
+    with pytest.raises(DownError):
         await index.snapshot("bambuddy", connect)
