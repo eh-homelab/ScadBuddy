@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
-import type { ArrangeRequest, LibraryEntry, LibraryFileObjects, ModelSummary, Output } from '../api/types'
+import type {
+  ArrangeObject,
+  ArrangeRequest,
+  LibraryEntry,
+  LibraryFileObjects,
+  ModelSummary,
+  Output,
+} from '../api/types'
 import {
   backfillFailures,
   backfillIds,
@@ -24,6 +31,7 @@ import { shortId } from '../lib/format'
 import { traceAction, type Within } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
+import { CopyColours } from './CopyColours'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -36,12 +44,52 @@ type Props = {
   onArranged: (arranged: Arranged) => void
 }
 
-/** Each object of each output that has them, as a row with its key. */
+/**
+ * Each object of each output that has them, as a row with its key. #3637 — an arranged
+ * output may hold one part twice, once in other colours: each colouring is a row.
+ */
 function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
-    (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
+    (output.manifest ?? []).map((object) => ({
+      output,
+      object,
+      key: `${output.id}:${object.part}:${JSON.stringify(object.recolour ?? {})}`,
+    })),
   )
 }
+
+/** #3638 — what "File under" offers for a new model made from the arranged library file. */
+const NEW_HOME = ':new-model'
+
+/** A library file's name without its extension: the new model's name (#3638). */
+function stemOf(filename: string): string {
+  return filename.replace(/\.(3mf|stl)$/i, '').trim()
+}
+
+/**
+ * What a model named `name` is filed as: a copy of the backend's
+ * `scadbuddy/library/slugs.py` `slugify` (lower case, each run of other characters one
+ * `-`, none at the ends). Change both together; `ArrangeDialog.test.tsx` pins a case.
+ */
+function slugOf(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+}
+
+/** `stem`, or `stem 2`, `stem 3`…: the first name whose slug no model has. */
+function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): string {
+  const base = slugOf(stem) ? stem : fallback
+  const taken = new Set(models.map((model) => model.slug))
+  for (let n = 1; ; n += 1) {
+    const name = n === 1 ? base : `${base} ${n}`
+    if (!taken.has(slugOf(name))) return name
+  }
+}
+
+/** #3637 — a copy added to a row, in other colours. */
+type Variant = { key: string; base: string }
 
 /** "A", "A and B", "A, B and C". */
 function listed(names: string[]): string {
@@ -121,6 +169,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * with a library file in it may be filed under (#2284).
    */
   const [models, setModels] = useState<ModelSummary[] | null>(null)
+  /** #3638 — the model list could not be read: whether the file has a model is unknown. */
+  const [modelsFailed, setModelsFailed] = useState(false)
+  /** The same, for the open effect, which runs on `open` alone. */
+  const modelsFailedRef = useRef(false)
+  modelsFailedRef.current = modelsFailed
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
@@ -181,11 +234,27 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   // A library file ScadBuddy did not make belongs to no template: with one in the mix the
   // result may be filed under any template the user picks, its outputs' first (#2284).
   const anyTemplate = fileRows.length > 0
+  // #3638 — library files alone are no model's: filed by default under the first file's
+  // own model, the one made from it before or a new one, never an unrelated template.
+  const homeFile = ownTemplates.length === 0 ? fileRows[0]?.file : undefined
+  const home = homeFile
+    ? models?.find((model) => model.mesh_source?.kind === 'bambuddy_library' && model.mesh_source.file_id === homeFile.id)
+    : undefined
   const templates = anyTemplate
-    ? [...new Set([...ownTemplates, ...(models ?? []).map((model) => model.slug)])]
+    ? [
+        ...new Set([
+          // Never a new model when the list failed: the file may have one already.
+          ...(homeFile && (home || !modelsFailed) ? [home?.slug ?? NEW_HOME] : []),
+          ...ownTemplates,
+          ...(models ?? []).map((model) => model.slug),
+        ]),
+      ]
     : ownTemplates
   /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
-  const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
+  const modelName = (slug: string) =>
+    slug === NEW_HOME && homeFile
+      ? `A new model: ${stemOf(homeFile.filename) || homeFile.filename}`
+      : (models?.find((model) => model.slug === slug)?.name ?? slug)
   /** Each output's object names, worked out once per render rather than once per row. */
   const names = new Map<string, Map<string, string>>()
   const namesOf = (output: Output) => {
@@ -217,6 +286,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     ])
   const defaultName = nameOf(outputs.filter((o) => unusable.includes(o) || withRows([o], removed).length > 0))
   const [counts, setCounts] = useState<Record<string, number>>({})
+  /** #3637 — each row's colours swapped, by row key; a row not here prints as its source. */
+  const [swaps, setSwaps] = useState<Record<string, Record<string, string>>>({})
+  /** #3637 — copies added in other colours, each under the row it copies. */
+  const [variants, setVariants] = useState<Variant[]>([])
+  /** #3638 — the model this press made for the file, named when a later step fails. */
+  const madeHome = useRef<string | null>(null)
+  /** The row whose colour editor is open. */
+  const [editing, setEditing] = useState<string | null>(null)
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -250,6 +327,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [retryable, setRetryable] = useState(false)
 
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
+  const copiesOf = (base: string) => variants.filter((variant) => variant.base === base)
+  /** #3637 — a copy of `base` in other colours, its editor open to pick them. */
+  function addCopy(base: string) {
+    const key = `${base}#${Date.now().toString(36)}${variants.length}`
+    setVariants((now) => [...now, { key, base }])
+    setEditing(key)
+  }
 
   // Read the output behind each library file once, whoever added it.
   const toRead = [
@@ -288,10 +372,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     let live = true
     api
       .listModels()
-      .then((found) => live && setModels(found))
+      .then((found) => {
+        if (!live) return
+        setModels(found)
+        setModelsFailed(false)
+      })
       // #2541 — deliberate: a failed list costs only names. "File under" then offers the
       // outputs' own templates by slug, and the saved line says no name (`savedNote`).
-      .catch(() => live && setModels([]))
+      .catch(() => {
+        if (!live) return
+        setModels([])
+        setModelsFailed(true)
+      })
     return () => {
       live = false
     }
@@ -325,7 +417,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       setAdded([])
       setAdding(null)
       setFiling(null)
+      setSwaps({})
+      setVariants([])
+      setEditing(null)
       setRemoved([])
+      // #3638 — a model list that failed is read again, as a failed file read is.
+      if (modelsFailedRef.current) setModels(null)
       // A read that failed (a network error, say) is tried again.
       readAgain()
       return
@@ -442,22 +539,72 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           // With a library file in the mix, any template picked from every one (#1863, #2284).
           const kept = templatesOf(withRows(usable, removed))
           const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
-          const slug = filing && choices.includes(filing) ? filing : choices[0]
+          let slug = filing && choices.includes(filing) ? filing : choices[0]
           if (!slug) throw new Error('Nothing to arrange.')
+          let made: ModelSummary | undefined
+          madeHome.current = null
+          if (slug === NEW_HOME && homeFile) {
+            // #3638 — the file's own model, made once: arranging it again files there too.
+            setProgress(`Making a model for ${homeFile.filename}…`)
+            // The slug is guessed here; a model the list did not show (or a name the
+            // guess gets wrong) is a 409, and the next free name is tried.
+            const first = freeName(stemOf(homeFile.filename), models ?? [], `Library file ${homeFile.id}`)
+            for (let attempt = 0; made === undefined; attempt += 1) {
+              // Refused as taken (a model the list did not show): the server's own check,
+              // so the next try numbers the name on rather than guessing slugs again.
+              const name = attempt === 0 ? first : `${first} ${attempt + 1}`
+              try {
+                made = await within(() =>
+                  api.createMeshModel({
+                    name,
+                    description: `Made from ${homeFile.filename} in the Bambuddy library, to keep its arranged plates.`,
+                    library_file_id: homeFile.id,
+                  }),
+                )
+              } catch (cause) {
+                if (!(cause instanceof ApiError && cause.status === 409) || attempt >= 4) throw cause
+              }
+            }
+            const added = made
+            madeHome.current = added.name
+            setModels((known) => [...(known ?? []), added])
+            setFiling(added.slug)
+            slug = added.slug
+          }
+          const objects = (rowsFor: typeof rows): ArrangeObject[] =>
+            rowsFor.flatMap(({ output, object, key }) => {
+              const own = { output_id: output.id, part: object.part }
+              const recolour = swaps[key] ?? object.recolour ?? {}
+              // A part the output holds twice, in two colourings, is named by its colours.
+              const twice = (output.manifest ?? []).filter((entry) => entry.part === object.part).length > 1
+              return [
+                {
+                  ...own,
+                  count: countOf(key, object.count),
+                  // Sent whenever it was touched, or the entry has one: omitted, the
+                  // API keeps the entry's, so a colour put back would print swapped.
+                  ...(twice || key in swaps || Object.keys(object.recolour ?? {}).length > 0
+                    ? { recolour }
+                    : {}),
+                },
+                ...copiesOf(key).map((copy) => ({ ...own, count: countOf(copy.key, 1), recolour: swaps[copy.key] ?? {} })),
+              ]
+            })
           const body: ArrangeRequest = {
             objects: [
-              ...rowsOf(usable)
-                .filter((row) => !removed.includes(row.key))
-                .map(({ output, object, key }) => ({
-                  output_id: output.id,
-                  part: object.part,
-                  count: countOf(key, object.count),
-                })),
-              ...fileRows.map(({ file, object, key }) => ({
-                library_file_id: file.id,
-                part: object.part,
-                count: countOf(key, object.count),
-              })),
+              ...objects(rowsOf(usable).filter((row) => !removed.includes(row.key))),
+              ...fileRows.flatMap(({ file, object, key }) => {
+                const own = { library_file_id: file.id, part: object.part }
+                const swapped = swaps[key]
+                return [
+                  {
+                    ...own,
+                    count: countOf(key, object.count),
+                    ...(swapped && Object.keys(swapped).length > 0 ? { recolour: swapped } : {}),
+                  },
+                  ...copiesOf(key).map((copy) => ({ ...own, count: countOf(copy.key, 1), recolour: swaps[copy.key] ?? {} })),
+                ]
+              }),
             ],
             goal,
             name: name.trim() || nameOf(withRows(usable, removed)) || null,
@@ -487,7 +634,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           // History, but this dialog no longer acts on it.
           if (controller.signal.aborted) return
           // Only a name the model list gave: a slug is not a name (#2541).
-          const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
+          const filedUnder = [...(models ?? []), ...(made ? [made] : [])].find(
+            (model) => model.slug === arranged.output.slug,
+          )?.name
           const filed = filedUnder ? { ...arranged, filedUnder } : arranged
           span.setAttribute('scadbuddy.output_id', arranged.output.id)
           onArranged(skipped ? { ...filed, skipped } : filed)
@@ -501,7 +650,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         setAsking(true)
         return
       }
-      setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      const why = cause instanceof ApiError ? cause.detail : (cause as Error).message
+      // #3638 — a model made for the file stays: the next Arrange files there.
+      const kept = madeHome.current
+      setError(kept ? `${why} The model ${kept} was made for this file and is kept.` : why)
       // The save's key is kept only when its save may have started (no answer, or a start
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
@@ -543,6 +695,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
               busy ||
               asking ||
               reading.length > 0 ||
+              // #3638 — which model is the file's own is known only once the list is read.
+              (homeFile !== undefined && models === null) ||
               (anyTemplate && templates.length === 0) ||
               (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
             }
@@ -577,40 +731,69 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         {reading.length > 0 && (
           <p className="text-[12px] text-faint">{`Reading ${listed(reading.map((f) => f.filename))}…`}</p>
         )}
-        <ul className="flex flex-col gap-1.5">
+        <ul className="flex flex-col gap-2.5">
           {[
             ...rows.map(({ output, object, key }) => ({
               key,
-              label: `${namesOf(output).get(object.part) ?? object.bom_piece ?? object.file} — ${outputName(output)}`,
+              label: `${namesOf(output).get(object.part) ?? object.bom_piece ?? object.file}${
+                Object.keys(object.recolour ?? {}).length > 0 ? ' (other colours)' : ''
+              } — ${outputName(output)}`,
               count: object.count,
+              colours: object.colours,
+              recolour: swaps[key] ?? object.recolour ?? {},
             })),
             ...fileRows.map(({ file, object, key }) => ({
               key,
               label: `${object.name} — ${file.filename}`,
               count: object.count,
+              colours: object.colours,
+              recolour: swaps[key] ?? {},
             })),
-          ].map(({ key, label, count }) => (
-            <li key={key} className="flex items-center justify-between gap-2 text-[13px]">
-              <span className="min-w-0 flex-1">{label}</span>
-              <input
-                type="number"
-                min={0}
-                max={500}
-                aria-label={`Copies of ${label}`}
-                value={countOf(key, count)}
-                onChange={(event) => setCounts({ ...counts, [key]: Math.max(0, Number(event.target.value) || 0) })}
-                className="sb-field sb-num w-20"
+          ].map((row) => (
+            <li key={row.key} className="flex flex-col gap-1.5">
+              <ArrangeRow
+                label={row.label}
+                count={countOf(row.key, row.count)}
+                onCount={(next) => setCounts({ ...counts, [row.key]: next })}
+                colours={row.colours}
+                recolour={row.recolour}
+                editing={editing === row.key}
+                onEdit={() => setEditing(editing === row.key ? null : row.key)}
+                onRecolour={(next) => setSwaps({ ...swaps, [row.key]: next })}
+                // #2286 — out of this arrange, without setting its copies to 0.
+                onRemove={() => setRemoved((now) => [...now, row.key])}
+                locked={busy || asking}
               />
-              {/* #2286 — out of this arrange, without setting its copies to 0. */}
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={`Remove ${label}`}
-                disabled={busy || asking}
-                onClick={() => setRemoved((now) => [...now, key])}
-              >
-                Remove
-              </Button>
+              {copiesOf(row.key).map((copy, index) => {
+                const label = `${row.label}, copy ${index + 1} in other colours`
+                return (
+                  <div key={copy.key} className="ml-4 border-l-2 border-line pl-3">
+                    <ArrangeRow
+                      label={label}
+                      count={countOf(copy.key, 1)}
+                      onCount={(next) => setCounts({ ...counts, [copy.key]: next })}
+                      colours={row.colours}
+                      recolour={swaps[copy.key] ?? {}}
+                      editing={editing === copy.key}
+                      onEdit={() => setEditing(editing === copy.key ? null : copy.key)}
+                      onRecolour={(next) => setSwaps({ ...swaps, [copy.key]: next })}
+                      onRemove={() => setVariants((now) => now.filter((v) => v.key !== copy.key))}
+                      locked={busy || asking}
+                    />
+                  </div>
+                )
+              })}
+              {row.colours.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => addCopy(row.key)}
+                  disabled={busy || asking}
+                  aria-label={`Add a copy of ${row.label} in other colours`}
+                  className="self-start text-[12px] text-accent hover:underline disabled:opacity-50"
+                >
+                  + Add a copy in other colours
+                </button>
+              )}
             </li>
           ))}
           {/* #2285 — an output that needs a re-render is listed too, not only named in the note. */}
@@ -672,6 +855,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             }}
             onCancel={() => setAdding(null)}
           />
+        )}
+        {homeFile && !home && modelsFailed && (
+          <p role="status" className="text-[12px] text-warn">
+            ScadBuddy could not read its models, so it cannot tell where this file's arrangements go. Close
+            Arrange and open it again to retry.
+          </p>
         )}
         {/* Shown whenever there is a choice, a library file in the mix too (#2284). */}
         {(templates.length > 1 || anyTemplate) && templates.length > 0 && (
@@ -754,5 +943,63 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         )}
       </div>
     </Dialog>
+  )
+}
+
+/** One Arrange row: what it is, how many copies, and the colours they print in (#3637). */
+function ArrangeRow({
+  label,
+  count,
+  onCount,
+  colours,
+  recolour,
+  editing,
+  onEdit,
+  onRecolour,
+  onRemove,
+  locked = false,
+}: {
+  label: string
+  count: number
+  onCount: (next: number) => void
+  colours: string[]
+  recolour: Record<string, string>
+  editing: boolean
+  onEdit: () => void
+  onRecolour: (next: Record<string, string>) => void
+  onRemove?: () => void
+  /** Busy or asking: Remove shows, disabled, so the row does not shift. */
+  locked?: boolean
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2 text-[13px]">
+        <span>{label}</span>
+        <span className="flex items-center gap-2">
+          {onRemove && (
+            <Button size="sm" variant="ghost" aria-label={`Remove ${label}`} disabled={locked} onClick={onRemove}>
+              Remove
+            </Button>
+          )}
+          <input
+            type="number"
+            min={0}
+            max={500}
+            aria-label={`Copies of ${label}`}
+            value={count}
+            onChange={(event) => onCount(Math.max(0, Number(event.target.value) || 0))}
+            className="sb-field sb-num w-20"
+          />
+        </span>
+      </div>
+      <CopyColours
+        label={label}
+        colours={colours}
+        recolour={recolour}
+        open={editing}
+        onToggle={onEdit}
+        onChange={onRecolour}
+      />
+    </div>
   )
 }

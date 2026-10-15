@@ -577,11 +577,23 @@ export function PrintPicker({
                 output_id: from.id,
                 part: object.part,
                 count: object.count,
+                // #3637 — each colouring of a part is its own entry: named by its colours.
+                recolour: object.recolour ?? {},
               })),
               goal: arrangeGoal,
               printer_id: printerId,
               filament_plan: { slots: plan, force_colour_match: false },
-              colours: from.colors ?? [],
+              // #3637 — every colour a recoloured copy prints in has its slot, whether
+              // or not this output's `colors` already lists it.
+              colours: [
+                ...new Set([
+                  // Upper case on both sides, as the API compares them: one colour, one slot.
+                  ...(from.colors ?? []).map((c) => c.toUpperCase()),
+                  ...(from.manifest ?? []).flatMap((object) =>
+                    Object.values(object.recolour ?? {}).map((c) => c.toUpperCase()),
+                  ),
+                ]),
+              ],
               name: arrangedName(from.name),
             },
             { signal: controller.signal, within },

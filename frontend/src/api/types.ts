@@ -69,6 +69,10 @@ export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
 export type ArrangeRequest = Schemas['ArrangeRequest']
+/** #3637 — one object of an arrange, maybe in other colours. */
+export type ArrangeObject = Schemas['ArrangeObject']
+/** #2146 — open a library file or an output as an editable mesh model. */
+export type MeshModelCreate = Schemas['MeshModelCreate']
 export type ManifestObject = Schemas['ManifestObject']
 /** #902 — the re-render queued to give an output saved before Arrange its objects. */
 export type BackfillState = Schemas['BackfillState']
