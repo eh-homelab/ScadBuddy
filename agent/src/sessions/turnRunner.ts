@@ -229,6 +229,7 @@ export class TurnRunner {
     builtinTools: 'builtinTools',
     ownPlugin: 'ownPlugin',
     remotePlugins: 'plugins',
+    browser: 'plugins', // judges the remote plugins' browser_* calls; reads the lists and approvals per call
     memoryHooks: 'slot',
     traceHooks: 'slot',
     stderr: 'spawn', // a constant sink (fingerprint rule)
