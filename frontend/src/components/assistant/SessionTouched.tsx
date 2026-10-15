@@ -130,13 +130,18 @@ function describe(e: Entry, deletes: ReadonlyMap<string, number>): { name: strin
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
 /** The summary's buckets, in the order the line names them; anything else is an "other change". */
-const BUCKETS: ReadonlyArray<{ one: string; many: string; holds: (e: Entry) => boolean }> = [
+// `runsOnly` is true when the session recorded no queue item, so its print runs are its prints.
+const BUCKETS: ReadonlyArray<{ one: string; many: string; holds: (e: Entry, runsOnly: boolean) => boolean }> = [
   { one: 'new model', many: 'new models', holds: (e) => e.type === 'model' && e.actions[0] === 'created' },
   { one: 'model deleted', many: 'models deleted', holds: (e) => e.type === 'model' && e.actions.at(-1) === 'deleted' },
   { one: 'preset saved', many: 'presets saved', holds: (e) => e.type === 'preset' && e.actions.at(-1) !== 'deleted' },
   { one: 'render', many: 'renders', holds: (e) => e.type === 'render_job' },
   { one: 'output saved', many: 'outputs saved', holds: (e) => e.type === 'output' && e.actions[0] === 'created' },
-  { one: 'print queued', many: 'prints queued', holds: (e) => e.type === 'print' && e.actions[0] === 'created' },
+  {
+    one: 'print queued',
+    many: 'prints queued',
+    holds: (e, runsOnly) => (e.type === 'print' || (runsOnly && e.type === 'print_run')) && e.actions[0] === 'created',
+  },
 ]
 
 /**
@@ -162,9 +167,7 @@ function summary(all: readonly Entry[]): string {
   if (unnamed) parts.push(count(unnamed, 'other new version', 'other new versions'))
   const runsOnly = !all.some((e) => e.type === 'print')
   for (const { one, many, holds } of BUCKETS) {
-    const items = all.filter(
-      (e) => !counted.has(e) && (holds(e) || (one === 'print queued' && runsOnly && e.type === 'print_run')),
-    )
+    const items = all.filter((e) => !counted.has(e) && holds(e, runsOnly))
     if (items.length > 0) parts.push(count(items.length, one, many))
     for (const e of items) counted.add(e)
   }
@@ -180,6 +183,8 @@ interface Undo {
   before: string
   /** The version the session's last change made, where it names one. */
   last: string | null
+  /** Whether a revision's parent was not the session's previous one: someone else edited in between. */
+  interleaved: boolean
 }
 
 /**
@@ -193,17 +198,20 @@ interface Undo {
 function undoable(rows: readonly SessionResource[]): Undo[] {
   const first = new Map<string, string | null>()
   const last = new Map<string, string | null>()
+  const interleaved = new Set<string>()
   const skip = new Set<string>()
   for (const r of rows) {
     if (r.type === 'model' && r.id !== null && (r.action !== 'modified' || !first.has(r.id))) skip.add(r.id)
     if (r.type === 'revision' && r.model) {
       if (!first.has(r.model)) first.set(r.model, r.before)
+      else if (r.before !== null && r.before !== last.get(r.model)) interleaved.add(r.model)
       last.set(r.model, r.after ?? r.id)
     }
   }
   const out: Undo[] = []
   for (const [model, before] of first) {
-    if (before !== null && !skip.has(model)) out.push({ model, before, last: last.get(model) ?? null })
+    if (before === null || skip.has(model)) continue
+    out.push({ model, before, last: last.get(model) ?? null, interleaved: interleaved.has(model) })
   }
   return out
 }
@@ -215,10 +223,10 @@ function undoable(rows: readonly SessionResource[]): Undo[] {
  */
 async function undoState(u: Undo): Promise<{ same: boolean; movedOn: boolean }> {
   const current = (await api.getModel(u.model)).version ?? null
-  if (current === null) return { same: false, movedOn: false }
+  if (current === null) return { same: false, movedOn: u.interleaved }
   if (current === u.before) return { same: true, movedOn: false }
   const diff = await api.getVersionDiff(u.model, current, u.before)
-  return { same: diff.patch.trim() === '', movedOn: u.last !== null && current !== u.last }
+  return { same: diff.patch.trim() === '', movedOn: u.interleaved || (u.last !== null && current !== u.last) }
 }
 
 /** "Undo changes to <model>": restores the version before the session, after a confirm. */
@@ -287,8 +295,14 @@ function UndoModel({ undo, onDone }: { undo: Undo; onDone: () => void }) {
         </p>
         {state.data?.movedOn && (
           <p className="mt-3 text-[13px] text-warn">
-            It has been changed since this chat. Those later changes are undone too, and also stay
-            in its history.
+            It was also changed outside this chat after the chat started. Those changes are undone
+            too, and also stay in its history.
+          </p>
+        )}
+        {state.error && (
+          <p className="mt-3 text-[13px] text-muted">
+            Could not check whether it was changed outside this chat. If it was, those changes are
+            undone too.
           </p>
         )}
         {error && (

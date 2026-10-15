@@ -343,8 +343,9 @@ describe('SessionTouched', () => {
     renderPage(<SessionTouched sessionId="sess-back" />)
     await screen.findByRole('group', { name: 'Revisions' })
     await vi.waitFor(() => expect(reads).toHaveBeenCalledWith('gone-back', restored, before))
+    const call = reads.mock.calls.findIndex(([slug]) => slug === 'gone-back')
     await act(async () => {
-      await reads.mock.results[0]!.value
+      await reads.mock.results[call]!.value
     })
     expect(screen.queryByRole('button', { name: /Undo changes/ })).toBeNull()
     reads.mockRestore()
@@ -361,7 +362,36 @@ describe('SessionTouched', () => {
     )
     renderPage(<SessionTouched sessionId="sess-moved" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    expect(await screen.findByRole('dialog')).toHaveTextContent('It has been changed since this chat.')
+    expect(await screen.findByRole('dialog')).toHaveTextContent('It was also changed outside this chat')
+  })
+
+  it('warns when the model was changed between two of the session’s own versions', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-between', [
+      row({ type: 'revision', id: 'a'.repeat(40), after: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+      // Its parent is not the session's previous version: someone else edited in between.
+      row({ type: 'revision', id: 'c'.repeat(40), after: 'c'.repeat(40), model: 'bin', before: 'e'.repeat(40), tool: 'apply_patch' }),
+    ])
+    server.use(
+      http.get('/api/v1/models/:slug', () => HttpResponse.json({ slug: 'bin', version: 'c'.repeat(40) })),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => HttpResponse.json({ patch: '-a\n+b\n' })),
+    )
+    renderPage(<SessionTouched sessionId="sess-between" />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent('It was also changed outside this chat')
+  })
+
+  it('still offers the undo when the model cannot be read, saying it could not check', async () => {
+    const user = userEvent.setup()
+    setSessionResources('sess-unread', [
+      row({ type: 'revision', id: 'a'.repeat(40), model: 'bin', before: 'b'.repeat(40), tool: 'apply_patch' }),
+    ])
+    server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    renderPage(<SessionTouched sessionId="sess-unread" />)
+    await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Could not check whether it was changed outside this chat.')
+    expect(dialog).not.toHaveTextContent('It was also changed outside this chat')
   })
 
   it('counts a new version of no known model in the summary', async () => {
