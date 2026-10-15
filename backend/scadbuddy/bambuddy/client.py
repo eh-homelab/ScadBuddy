@@ -945,22 +945,32 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
-    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
+    async def library_listing(
+        self, *, folder_id: int | None, every_folder: bool = False
+    ) -> list[LibraryListRow]:
         """``GET /library/files/`` — one folder's files, or the root's without one
         (``include_root`` defaults to true). One read, however many files: Bambuddy
-        does not paginate it."""
+        does not paginate it. ``every_folder`` (without ``folder_id``) is every file in
+        the library, ``include_root=false`` (#3630)."""
         what = (
-            "list the library files"
+            "list every library file"
+            if every_folder
+            else "list the library files"
             if folder_id is None
             else f"list the files of library folder {folder_id}"
         )
+        params: dict[str, Any] | None = None
+        if folder_id is not None:
+            params = {"folder_id": folder_id}
+        elif every_folder:
+            params = {"include_root": "false"}
         response = await self._send(
             "GET",
             "/library/files/",
             scope=Scope.MANAGE_LIBRARY,
             operation="library.listing",
             what=what,
-            params={"folder_id": folder_id} if folder_id is not None else None,
+            params=params,
         )
         return [LibraryListRow.model_validate(row) for row in self._rows(response, what=what)]
 

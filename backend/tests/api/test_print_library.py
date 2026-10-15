@@ -166,6 +166,33 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
 
 
 @respx.mock
+def test_a_search_finds_files_in_every_folder_from_one_kept_read(client: TestClient) -> None:
+    """#3630: the whole library in one read, kept; ``fresh`` reads it again."""
+    configure(client)
+    files = listing_routes(recording("library-files-folder.json"))
+
+    found = client.get("/api/v1/print/library/search", params={"q": "dry pods"}).json()
+    again = client.get(
+        "/api/v1/print/library/search", params={"q": "desiccant", "all": "true"}
+    ).json()
+
+    assert files.call_count == 1
+    assert files.calls.last.request.url.params["include_root"] == "false"
+    assert [hit["filename"] for hit in found["files"]] == [
+        "AMS_2_Pro_Dry_Pods_-_ABS.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PETG.3mf",
+        "AMS_2_Pro_Dry_Pods_-_PLA.3mf",
+    ]
+    assert found["hidden"] == 1  # the sliced Dry Pods file, only under Advanced
+    assert {tuple(hit["folder_path"]) for hit in found["files"]} == {("Supplies", "Storage")}
+    assert "Desiccant_Box.stl" in [hit["filename"] for hit in again["files"]]
+
+    client.get("/api/v1/print/library/search", params={"q": "pods", "fresh": "true"})
+
+    assert files.call_count == 2
+
+
+@respx.mock
 def test_a_file_scadbuddy_uploaded_names_its_output(
     client: TestClient, app: FastAPI, model: str
 ) -> None:

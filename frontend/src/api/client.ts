@@ -53,6 +53,7 @@ import type {
   LibraryCopyResult,
   LibraryDeleteResult,
   LibraryListing,
+  LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
   LibraryRestoreResult,
@@ -1731,6 +1732,14 @@ export const api = {
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
+  },
+
+  /** #3630 — library files whose name or folder holds every word, from every folder. */
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+    const search = new URLSearchParams({ q: query.q })
+    if (query.all) search.set('all', 'true')
+    if (query.fresh) search.set('fresh', 'true')
+    return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
   },
 
   /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
@@ -49,10 +50,15 @@ from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plai
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyConfig, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
-from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
+from scadbuddy.bambuddy.library_listing import (
+    LibraryListing,
+    LibrarySearch,
+    list_library,
+    search_library,
+)
 from scadbuddy.bambuddy.library_view import (
     SPOOL_DIRNAME,
     NotViewableError,
@@ -101,6 +107,7 @@ from scadbuddy.library.library_write_operations import (
     LibraryFolderUpdate,
 )
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from scadbuddy.library_search.component import LibraryIndexDep
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -145,6 +152,38 @@ async def get_library(
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+@router.get(
+    "/search", response_model=LibrarySearch, summary="Find library files by name, in every folder"
+)
+async def get_library_search(
+    store: SettingsStoreDep,
+    index: LibraryIndexDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    q: Annotated[str, Query(max_length=200)],
+    show_all: Annotated[bool, Query(alias="all")] = False,
+    fresh: bool = False,
+) -> LibrarySearch:
+    """The files whose name, or the path of their folder, holds every word of ``q``,
+    whatever the case or separator (#3630); each names its ``folder_path``. Without
+    ``all`` only unsliced 3MFs, as the listing; ``hidden`` counts the matches only ``all``
+    lists. At most 100 files, ``total`` how many matched.
+
+    Bambuddy has no search, so its whole library is read at once and kept in this
+    process: answered from it for 30 s, and for 10 minutes after while one read
+    replaces it in the background. ``fresh`` waits for a read that started after the
+    request did, as the page asks after its own changes."""
+    settings = store.load()
+    config = BambuddyConfig.from_settings(settings)
+    source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
+    snapshot = await index.snapshot(source, partial(client_for, settings), fresh=fresh)
+    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all)
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
+    for entry in found.files:
+        entry.output_id = made.get(entry.id)
+    return found
 
 
 @router.post(
