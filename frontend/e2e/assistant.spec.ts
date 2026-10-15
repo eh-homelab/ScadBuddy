@@ -229,7 +229,7 @@ test.describe('assistant panel (#256)', () => {
     await expect(touched.getByText('1 new version of gridfinity-bin, 1 preset saved')).toBeVisible()
 
     await touched.getByRole('button', { name: 'Undo changes to gridfinity-bin' }).click()
-    const dialog = page.getByRole('dialog', { name: "Undo this chat's changes to gridfinity-bin?" })
+    const dialog = page.getByRole('alertdialog', { name: "Undo this chat's changes to gridfinity-bin?" })
     await dialog.getByRole('button', { name: 'Undo changes' }).click()
     await expect(touched.getByRole('status')).toHaveText('gridfinity-bin is back to how it was before this chat.')
   })
@@ -257,7 +257,8 @@ test.describe('assistant panel (#256)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
     const forks = sessions.getByRole('list', { name: 'Forks of Tune the gridfinity bin' })
-    await forks.getByRole('button', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
+    await forks.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' }).click()
+    await page.getByRole('menuitem', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
     const title = sessions.getByRole('textbox', { name: 'Chat title' })
     await title.fill('Bin, taller')
     await title.press('Enter')
@@ -343,7 +344,7 @@ test.describe('the assistant beside a dialog (#798)', () => {
   })
 })
 
-// #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
+// #795 — a fork's row, and its actions menu (#3673), fit the panel at phone width.
 test.describe('the session switcher at 390 px (#795)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
   test.use({ viewport: { width: 390, height: 844 } })
@@ -359,14 +360,20 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
 
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    const actions = sessions.getByRole('button', { name: 'Actions for Tune the gridfinity bin (fork)' })
+    const row = (await actions.boundingBox())!
+    expect(row.x + row.width).toBeLessThanOrEqual(390)
+    await actions.click()
     for (const name of [
       'Rename Tune the gridfinity bin (fork)',
       'Mark Tune the gridfinity bin (fork) done',
       'Archive Tune the gridfinity bin (fork)',
     ]) {
-      const box = (await sessions.getByRole('button', { name }).boundingBox())!
+      const box = (await page.getByRole('menuitem', { name }).boundingBox())!
+      expect(box.x, name).toBeGreaterThanOrEqual(0)
       expect(box.x + box.width, name).toBeLessThanOrEqual(390)
     }
+    await page.keyboard.press('Escape')
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
   })
 
@@ -383,16 +390,17 @@ test.describe('the session switcher at 390 px (#795)', () => {
     await panel.getByRole('button', { name: 'Sessions (2)' }).click()
     const sessions = panel.getByRole('navigation', { name: 'Sessions' })
 
-    await sessions.getByRole('button', { name: `Archive ${OWN}` }).click()
+    await sessions.getByRole('button', { name: `Actions for ${OWN}` }).click()
+    await page.getByRole('menuitem', { name: `Archive ${OWN}` }).click()
     await expect(panel.getByRole('button', { name: 'Sessions (1)' })).toBeVisible()
-    await expect(sessions.getByRole('button', { name: `Rename ${OWN}` })).toHaveCount(0)
+    await expect(sessions.getByRole('button', { name: `Actions for ${OWN}` })).toHaveCount(0)
     const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
     await expect(composer).toBeDisabled()
 
     await panel.getByRole('button', { name: 'New chat' }).click()
     await expect(composer).toBeEnabled()
     await panel.getByRole('button', { name: 'Sessions (1)' }).click()
-    await sessions.getByRole('button', { name: 'Archived' }).click()
+    await sessions.getByRole('tab', { name: 'Archived' }).click()
     const archived = sessions.getByRole('list', { name: 'Archived chats' })
     for (const name of [`Open ${OWN}`, `Unarchive ${OWN}`]) {
       const box = (await archived.getByRole('button', { name }).boundingBox())!
