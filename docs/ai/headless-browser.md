@@ -123,6 +123,20 @@ chat's other writes are. Page content still
 arrives as untrusted data: the forwarder wraps every plugin result in the envelope
 (`agent/src/plugins/forwarder.ts`).
 
+**The lists are not the network boundary.** The browser runs in its own pod
+(Microsoft's server, run as shipped), and the agent reaches it only over MCP: it cannot
+route or abort the browser's own requests (`context.route`, CDP `Fetch`), so it never
+sees a redirect hop, a subframe, a popup's `window.open`, or a page's fetches as they
+happen. What the agent enforces is what the model asks for and what the model reads: a
+navigation is refused or parked before it is sent, and every result is withheld unless
+the pages and tabs Playwright MCP reports in it are readable, judged deny-by-default
+(an unknown scheme, a URL not written as the browser writes it, or a result whose
+structure cannot be read unambiguously is withheld). What the browser can reach, and so
+what a page can make it request, is decided by the egress policy of the pod it runs in
+(next section). Playwright MCP's own `--allowed-origins` / `--blocked-origins` run inside
+the browser but do not apply to redirects (measured on `@playwright/mcp` 0.0.82), so they
+are not that boundary either.
+
 The lists judge names, not addresses: a permitted name that resolves to a private
 address is not caught by them. A page that moves itself while Playwright MCP is writing
 one result, after it captured the snapshot and before it read the page's address, is not

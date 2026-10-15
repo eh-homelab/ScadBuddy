@@ -334,7 +334,8 @@ export function openTabs(text: string): string[] | undefined | null {
       urls.push(m[2]!)
     }
   }
-  if (!found) return undefined
+  // A list the decoding left escaped, or a heading not on a line of its own, is one this cannot read.
+  if (!found) return text.includes('### Open tabs') ? null : undefined
   return urls.length > 0 ? urls : null
 }
 
