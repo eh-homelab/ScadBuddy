@@ -633,7 +633,11 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `printer_camera_enabled`, on unless stored
+  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  through `PUT /api/v1/ai/settings/browser-origins`
+  ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
+  `printer_camera_enabled`, on unless stored
   `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
   session) is refused before the backend is asked, which Settings → Printer camera writes
   through `PUT /api/v1/ai/settings/printer-camera`
@@ -953,6 +957,9 @@ unknown name fails the call with the list there is; `isolation: 'worktree'` fail
 the call as `EnterWorktree` does, the workspace being no git repository. Each result is
 journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
 activity after its worker died, and `resumeFromRunId`, answer the calls already made.
+Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
+(interrupts and marks done) the ones an earlier attempt left open and no journal row names,
+since a worker that died never ran its agents' cleanup (#3395).
 The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
 which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.

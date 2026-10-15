@@ -21,7 +21,7 @@ from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_operations
-from scadbuddy.workflows.problems import OPERATION_LOST
+from scadbuddy.workflows.problems import operation_lost
 from tests.support.temporal import DownClient, temporal_client
 
 pytestmark = pytest.mark.requires_postgres
@@ -181,12 +181,47 @@ async def test_running_executions_names_each_running_rows_execution(
     running = await insert(store, "a", key="k1", run="w1")
     await insert(store, "b", key="k2", run="w2")
     await store.finish("b", result={})
-    assert await store.running_executions(timedelta(0)) == [(running.id, "op-reprint-k1", "w1")]
+    assert await store.running_executions(timedelta(0)) == [
+        (running.id, "op-reprint-k1", "w1", "reprint")
+    ]
     assert await store.running_executions(timedelta(hours=1)) == []
 
 
+async def test_a_lost_operation_says_what_its_kind_says_to_check(store: OperationStore) -> None:
+    """#1174: a lost library operation points at the model, not Bambuddy; by the row's
+    own kind, not one read back out of its workflow ID (this one names another)."""
+    async with temporal_client() as client:
+        handle = await client.start_workflow(
+            "Operation",
+            "x",
+            id=f"op-send-model_upload-{uuid.uuid4().hex[:8]}",
+            task_queue=f"unserved-{uuid.uuid4().hex[:8]}",
+        )
+        await handle.terminate("an operator ended it")
+        await store.insert(
+            "lost",
+            kind="model_upload",
+            subject="m",
+            operation_key="lost",
+            request={},
+            workflow_id=handle.id,
+            workflow_run_id=handle.result_run_id or "",
+            retention=None,
+        )
+        ended = await reconcile_lost_operations(
+            client,
+            store,
+            older_than=timedelta(0),
+            where={"model_upload": "the model and its libraries"},
+        )
+    assert ended == 1
+    lost = await store.get("lost")
+    assert lost is not None and lost.error is not None
+    assert "Check the model and its libraries before" in lost.error.detail
+
+
 async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
-    store: OperationStore,
+    store: OperationStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review #1063 1: an execution terminated after ``op_insert`` never runs
     ``op_finish``; its row ends ``failed``, not ``running`` forever. One still running,
@@ -216,9 +251,17 @@ async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
                 retention=None,
             )
         await insert(store, "gone", key="gone", run=str(uuid.uuid4()))
+        get = store.get
+
+        async def no_read_per_row(op_id: str) -> Operation | None:
+            raise AssertionError(f"read {op_id} again for its kind (#2997 review)")
+
+        # Each row's kind comes with the sweep's one read.
+        monkeypatch.setattr(store, "get", no_read_per_row)
         try:
             ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
         finally:
+            monkeypatch.setattr(store, "get", get)
             await live.terminate("test over")
             await reset.terminate("test over")
     assert ended == 2
@@ -226,7 +269,8 @@ async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
     assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
     killed_op = await store.get("killed")
     assert killed_op is not None and killed_op.status == "failed"
-    assert killed_op.error == OPERATION_LOST
+    # No `where` given: a kind it names nothing for says Bambuddy.
+    assert killed_op.error == operation_lost("Bambuddy")
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
 
 

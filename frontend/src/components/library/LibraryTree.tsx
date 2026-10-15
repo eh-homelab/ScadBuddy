@@ -51,11 +51,12 @@ export function LibraryTree({
   const hasChildren = (id: number) => (children.get(id)?.length ?? 0) > 0
 
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
-  // The selected folder's ancestors open whenever it changes, as a deep link or Back
-  // lands on it; whatever else was opened stays open.
+  // The selected folder and its ancestors open whenever it changes, as a deep link or
+  // Back lands on it, so its subfolders show too (#3631); whatever else was opened stays
+  // open.
   const selectedChain = ancestry(folders, selected)
-    .slice(0, -1)
     .map((folder) => folder.id)
+    .filter(hasChildren)
     .join(',')
   useEffect(() => {
     if (selectedChain === '') return

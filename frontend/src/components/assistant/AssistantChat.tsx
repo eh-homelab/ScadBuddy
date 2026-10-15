@@ -789,6 +789,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             key={active.id}
             sessionId={active.id}
             refreshKey={`${active.status}:${finishedTools}`}
+            working={active.status !== 'idle' && active.status !== 'done' && active.status !== 'failed'}
           />
         </section>
       )}

@@ -81,6 +81,11 @@ logger = logging.getLogger(__name__)
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
+#: The longest retention (``print_run_retention_seconds``, ``operation_retention_seconds``,
+#: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
+#: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
+RETENTION_MAX_SECONDS = 3650 * 86400.0
+
 #: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
 #: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
 #: which the environment's value does not override.
@@ -283,6 +288,17 @@ class StoredSettings(BambuddyIds):
     #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
 
+    @field_validator(
+        "print_run_retention_seconds",
+        "operation_retention_seconds",
+        "activity_ttl_seconds",
+    )
+    @classmethod
+    def _bounded_retention(cls, value: float | None) -> float | None:
+        """A retention stored before :data:`RETENTION_MAX_SECONDS` was enforced is read
+        as the maximum, so it cannot fail every prune (or every insert that prunes)."""
+        return None if value is None else min(value, RETENTION_MAX_SECONDS)
+
     @field_validator("printer_rack_algorithms", mode="before")
     @classmethod
     def _known_rack_algorithms(cls, value: Any) -> Any:
@@ -388,9 +404,13 @@ class SettingsPatch(BaseModel):
     display_unit: DisplayUnit | None = None
     #: At least a day, past the repeat window: a pruned row would turn a retry of a print
     #: (or an operation) that succeeded into a second one (review #1061).
-    print_run_retention_seconds: float | None = Field(default=None, ge=86400)
-    operation_retention_seconds: float | None = Field(default=None, ge=86400)
-    activity_ttl_seconds: float | None = Field(default=None, ge=86400)
+    print_run_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    operation_retention_seconds: float | None = Field(
+        default=None, ge=86400, le=RETENTION_MAX_SECONDS
+    )
+    activity_ttl_seconds: float | None = Field(default=None, ge=86400, le=RETENTION_MAX_SECONDS)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
     activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
         default=None, max_length=50

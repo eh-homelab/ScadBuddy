@@ -4,8 +4,11 @@ command, run where its Bash runs, with its events written for the agent's workfl
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -121,6 +124,36 @@ async def test_a_command_that_closes_its_output_still_expires(
     result = await asyncio.wait_for(acts.bg_monitor_command({"taskId": "ab12cd34"}), 10)
     assert result == {"end": {"outcome": "expired"}, "events": 1}
     assert time.monotonic() - started < 5
+
+
+async def test_kills_what_the_command_left_running_when_it_exits_normally(
+    tmp_path: Any, signals: list[str]
+) -> None:
+    """#2888: a child backgrounded with its output elsewhere holds no pipe open, so the
+    command's exit ends the watch while it runs on: the process group goes on a normal exit
+    too. Read from /proc, as a killed child the reaper has not collected is a zombie."""
+    events: list[str] = []
+    cmd = "sleep 1000 >/dev/null 2>&1 & echo $! > child; exit 0"
+    acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 10_000}, events)
+    result = await acts.bg_monitor_command({"taskId": "ab12cd34"})
+    pid = int((tmp_path / "child").read_text())
+
+    def running() -> bool:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except FileNotFoundError:
+            return False
+        return stat[stat.rindex(")") + 2] != "Z"
+
+    try:
+        assert result == {"end": {"outcome": "exited", "code": 0}, "events": 0}
+        deadline = time.monotonic() + 5
+        while running() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert not running()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
 
 
 async def test_a_character_split_across_two_reads_is_kept_whole(

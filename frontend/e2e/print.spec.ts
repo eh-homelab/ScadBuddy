@@ -123,6 +123,29 @@ test.describe('print dialog', () => {
     await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
   })
 
+  // #3628 — a multi-colour print with the prime tower on and "No sparse layers".
+  test('turns the prime tower on with No sparse layers in Advanced, and prints with them', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await expect(dialog.getByLabel('Prime tower')).toHaveCount(0)
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    const tower = dialog.getByLabel('Prime tower')
+    await tower.selectOption('off')
+    await expect(dialog.getByRole('checkbox', { name: /No sparse layers/ })).toHaveCount(0)
+    await expect(dialog.getByText(/Without a tower/)).toBeVisible()
+    await tower.selectOption('on')
+    const noSparse = dialog.getByRole('checkbox', { name: /No sparse layers/ })
+    await noSparse.uncheck()
+    await noSparse.check()
+
+    const run = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/run'))
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    expect((await run).postDataJSON()).toMatchObject({
+      prime_tower: { enabled: true, no_sparse_layers: true },
+    })
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
   // #1723 — at phone width, Advanced on and then off again must leave every control
   // reachable: nothing past the screen's edge, and Print on screen, with the choices kept.
   test('stays usable at phone width with Advanced on, and after it is switched off', async ({ page }) => {
