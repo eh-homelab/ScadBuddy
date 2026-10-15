@@ -100,6 +100,15 @@ function supportsPhrase(
   )
 }
 
+function towerPhrase(tower: { enabled: boolean; no_sparse_layers?: boolean } | undefined): string {
+  if (tower === undefined) return ''
+  if (!tower.enabled) return ', without a prime tower'
+  return (
+    ', with a prime tower' +
+    (tower.no_sparse_layers === true ? ' (no sparse layers)' : tower.no_sparse_layers === false ? ' (sparse layers too)' : '')
+  )
+}
+
 /** The folder a library move or copy names, in its approval line (#2670). */
 function folderName(folderId: number | undefined, folderPath: string | undefined): string {
   if (folderId !== undefined) return `library folder ${folderId}`
@@ -893,6 +902,21 @@ export const printTools: Tool[] = [
           'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
             "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
         ),
+      prime_tower: z
+        .object({
+          enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
+          no_sparse_layers: z
+            .boolean()
+            .optional()
+            .describe(
+              "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
+            ),
+        })
+        .optional()
+        .describe(
+          "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
+            'else the process (on whenever a plate uses more than one filament).',
+        ),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -918,6 +942,7 @@ export const printTools: Tool[] = [
         `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
         `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
         `${supportsPhrase(args.supports)}` +
+        `${towerPhrase(args.prime_tower)}` +
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
@@ -1014,6 +1039,8 @@ export const printTools: Tool[] = [
                       : { on_build_plate_only: args.supports.on_build_plate_only }),
                   },
             }),
+        // As given: the backend drops No sparse layers with the tower off (#3648 review).
+        ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
       const started = await reattach(

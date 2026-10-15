@@ -111,6 +111,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await left()).toEqual(['memory/other'])
     })
 
+    it("at start, ends a row recorded a microsecond before the start mark (#3691)", async () => {
+      // In one transaction now() is constant: the row is 1 µs before the mark, in its millisecond.
+      const mark = await db.sql.begin(async (tx) => {
+        await tx`INSERT INTO ai_plugin_sessions (plugin_id, upstream_session_id, replica, created_at)
+                 VALUES ('memory', 'just-before', 'me', now() - interval '1 microsecond')`
+        return startMark(tx as never)
+      })
+      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(1)
+      expect(await left()).toEqual([])
+    })
+
     it("at start, keeps a row this incarnation recorded after the start mark", async () => {
       await row('memory', 'before', 'me')
       const mark = await startMark(db.sql)
