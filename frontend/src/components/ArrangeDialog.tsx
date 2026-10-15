@@ -79,7 +79,7 @@ function slugOf(name: string): string {
 }
 
 /** `stem`, or `stem 2`, `stem 3`…: the first name whose slug no model has. */
-function freeName(stem: string, models: ModelSummary[], fallback: string): string {
+function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): string {
   const base = slugOf(stem) ? stem : fallback
   const taken = new Set(models.map((model) => model.slug))
   for (let n = 1; ; n += 1) {
@@ -548,7 +548,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             setProgress(`Making a model for ${homeFile.filename}…`)
             // The slug is guessed here; a model the list did not show (or a name the
             // guess gets wrong) is a 409, and the next free name is tried.
-            const taken = [...(models ?? [])]
+            const taken: Pick<ModelSummary, 'slug'>[] = [...(models ?? [])]
             for (let attempt = 0; made === undefined; attempt += 1) {
               const name = freeName(stemOf(homeFile.filename), taken, `Library file ${homeFile.id}`)
               try {
@@ -561,7 +561,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 )
               } catch (cause) {
                 if (!(cause instanceof ApiError && cause.status === 409) || attempt >= 4) throw cause
-                taken.push({ slug: slugOf(name) } as ModelSummary)
+                taken.push({ slug: slugOf(name) })
               }
             }
             const added = made

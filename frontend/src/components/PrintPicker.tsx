@@ -572,7 +572,14 @@ export function PrintPicker({
               goal: arrangeGoal,
               printer_id: printerId,
               filament_plan: { slots: plan, force_colour_match: false },
-              colours: from.colors ?? [],
+              // #3637 — every colour a recoloured copy prints in has its slot, whether
+              // or not this output's `colors` already lists it.
+              colours: [
+                ...new Set([
+                  ...(from.colors ?? []),
+                  ...(from.manifest ?? []).flatMap((object) => Object.values(object.recolour ?? {})),
+                ]),
+              ],
               name: arrangedName(from.name),
             },
             { signal: controller.signal, within },
