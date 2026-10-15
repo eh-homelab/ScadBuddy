@@ -265,6 +265,8 @@ function toResult(result: BuiltinResult): CallToolResult {
 
 /** `context` whose web work also stops when the call's caller gives up on it (its request timed out or was cancelled, #3199). */
 function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext {
+  // A context with no web work (a test's of only the background built-ins) has nothing to stop.
+  if (!(context.web as WebContext | undefined)) return context
   return { ...context, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
 }
 
