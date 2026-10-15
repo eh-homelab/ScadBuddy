@@ -129,6 +129,13 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
     options.signal.addEventListener('abort', onAbort, { once: true })
     child.on('error', (err) => kill({ outcome: 'failed', reason: err.message }))
     child.on('close', (code, signal) => {
+      // What the command left running in the background goes with it (#2888): a child whose
+      // output went elsewhere holds no pipe open, so nothing else would ever stop it.
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        // gone already
+      }
       clearTimeout(expiry)
       if (timer) clearTimeout(timer)
       flush()

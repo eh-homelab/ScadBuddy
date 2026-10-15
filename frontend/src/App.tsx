@@ -24,6 +24,12 @@ const SettingsPage = lazy(async () => ({ default: (await import('./pages/Setting
 const VersionsPage = lazy(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
 const WorkflowRunPage = lazy(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
 const WorkflowsPage = lazy(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
+// #3653 — the component gallery, in the mocked build only: a production bundle has neither
+// the route nor the chunk.
+const UiGalleryPage =
+  import.meta.env.VITE_MOCK_API === '1'
+    ? lazy(async () => ({ default: (await import('./pages/UiGalleryPage')).UiGalleryPage }))
+    : null
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor. A flow's page
@@ -95,6 +101,7 @@ export function App() {
         <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        {UiGalleryPage && <Route path="ui-gallery" element={<UiGalleryPage />} />}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

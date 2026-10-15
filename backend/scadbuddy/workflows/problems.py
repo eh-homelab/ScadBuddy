@@ -11,12 +11,18 @@ from scadbuddy.workflows.print_models import FAILED, REFUSED, SLICE_LOST
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
+
+
 #: An unexpected failure of an operation's effect (review #1063 second review 1): a crash
 #: or timeout may come after Bambuddy took the write, so it may have been done.
-OPERATION_UNEXPECTED_RUNNING_DETAIL = (
-    "ScadBuddy failed unexpectedly while doing this, so it may have been done. "
-    "Check Bambuddy before trying again; ScadBuddy's logs say what failed."
-)
+def operation_unexpected_running_detail(where: str) -> str:
+    """``where``: what to check, the kind's (``OperationKind.where``, #1174)."""
+    return (
+        "ScadBuddy failed unexpectedly while doing this, so it may have been done. "
+        f"Check {where} before trying again; ScadBuddy's logs say what failed."
+    )
+
+
 #: An operation's check that timed out as an activity (#2065): its own budget
 #: (``CHECK_BUDGET_SECONDS``) answers a slow check as a refusal, so this is the worker
 #: not answering at all, not the check being slow. Nothing was written.
@@ -31,26 +37,32 @@ OPERATION_CANCELLED = PrintRunError(
     title="Conflict",
     detail="This was cancelled before it started. Nothing was done; try again.",
 )
+
+
 #: An operation cancelled while its effect ran (review #1063 2): the effect may have
-#: reached Bambuddy before the cancel did.
-OPERATION_CANCELLED_RUNNING = PrintRunError(
-    status=409,
-    title="Conflict",
-    detail=(
-        "This was cancelled while it was running, so it may have been done. "
-        "Check Bambuddy before trying again."
-    ),
-)
+#: happened before the cancel did. ``where`` is what to check, the kind's (#1174).
+def operation_cancelled_running(where: str) -> PrintRunError:
+    return PrintRunError(
+        status=409,
+        title="Conflict",
+        detail=(
+            "This was cancelled while it was running, so it may have been done. "
+            f"Check {where} before trying again."
+        ),
+    )
+
+
 #: An operation whose execution ended without recording an outcome (review #1063 1):
 #: terminated in the Temporal UI, say. Its effect may or may not have happened.
-OPERATION_LOST = PrintRunError(
-    status=500,
-    title="Internal Server Error",
-    detail=(
-        "ScadBuddy stopped running this before it recorded how it ended, so it may have "
-        "been done. Check Bambuddy before trying again."
-    ),
-)
+def operation_lost(where: str) -> PrintRunError:
+    return PrintRunError(
+        status=500,
+        title="Internal Server Error",
+        detail=(
+            "ScadBuddy stopped running this before it recorded how it ended, so it may "
+            f"have been done. Check {where} before trying again."
+        ),
+    )
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
