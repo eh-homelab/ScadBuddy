@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKMessage, SDKResultMessage, SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import { vi } from 'vitest'
 import type { Credential } from '../../src/credentials.js'
@@ -32,6 +32,8 @@ export type WarmHarnessOptions = {
   sql?: (sql: Sql) => Sql
   /** Runs at each model request, before the fake replies. */
   onRequest?: () => Promise<void>
+  /** Runs at each transcript append the process hands over, before it is written. */
+  beforeAppend?: (key: SessionKey, entries: SessionStoreEntry[]) => Promise<void>
   log?: (message: string) => void
 }
 
@@ -43,6 +45,15 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
   const paths = await tempPaths()
   await ensureStateDirs(paths)
   const store = new PostgresSessionStore(db.db.sql, { keys: testPayloadKeys(db.db.sql) })
+  const beforeAppend = options.beforeAppend
+  const sessionStore: SessionStore = beforeAppend
+    ? Object.assign(Object.create(store) as PostgresSessionStore, {
+        append: async (key: SessionKey, entries: SessionStoreEntry[]) => {
+          await beforeAppend(key, entries)
+          await store.append(key, entries)
+        },
+      })
+    : store
   const spawns: Spawned[] = []
   const warm = new WarmSessions({
     sql: options.sql ? options.sql(db.db.sql) : db.db.sql,
@@ -79,7 +90,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
   const assembled = (change: Partial<FingerprintParts> = {}): AssembledTurn => ({
     run: {
       paths,
-      sessionStore: store,
+      sessionStore,
       maxTurns: 5,
       model: MODEL,
       spawnClaudeCodeProcess: (o) => {
