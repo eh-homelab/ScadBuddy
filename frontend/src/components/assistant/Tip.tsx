@@ -3,29 +3,31 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 
 /**
  * #3673 — the assistant's hover and focus hints, in place of `title`: a tooltip on the one
- * element it wraps. `wrap` puts a focusable span around it, for a disabled button, which
- * takes no pointer or focus events of its own and would never show its hint (why it is
- * disabled). Its own provider, so the panel and the Settings sections work outside the
+ * element it wraps. `wrap` puts a span around it, for a button that can be disabled, which
+ * then takes no pointer or focus events of its own and would never show its hint (why it
+ * is disabled): the span is focusable while `wrap` is true. Passed at all, the span is
+ * there for good, so a button whose disabled state flips is never remounted and keeps
+ * focus (review of #3721). Its own provider, so the panel and the Settings sections work outside the
  * app shell's (tests, the ui gallery).
  */
 export function Tip({
   content,
   children,
   side,
-  wrap = false,
+  wrap,
 }: {
   content: ReactNode
   children: ReactElement
   side?: 'top' | 'right' | 'bottom' | 'left'
-  wrap?: boolean
+  wrap?: boolean | undefined
 }) {
   if (content === undefined || content === null || content === '') return children
   return (
     <TooltipProvider delayDuration={400}>
       <Tooltip>
         <TooltipTrigger asChild>
-          {wrap ? (
-            <span tabIndex={0} className="inline-flex rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          {wrap !== undefined ? (
+            <span tabIndex={wrap ? 0 : undefined} className="inline-flex rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
               {children}
             </span>
           ) : (
