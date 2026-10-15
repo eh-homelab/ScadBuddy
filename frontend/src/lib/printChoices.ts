@@ -2,6 +2,7 @@ import type {
   ChoicesView,
   NozzleChoice,
   PresetRef,
+  PrimeTowerChoice,
   PrintChoices,
   PrintRunRequest,
   PrintSequence,
@@ -51,8 +52,8 @@ export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
 
 /**
  * The request fields, beside the plan and the choices, that change what a run slices
- * (#2825): the print sequence, the supports (#1899) and the filament profiles left on
- * (#717), which the backend folds into the process overrides. The check, the background
+ * (#2825): the print sequence, the supports (#1899), the filament profiles left on
+ * (#717) and the prime tower (#3628), which the backend folds into the process overrides. The check, the background
  * slice and the run all send these, from here, so the slice the dialog reuses is the one
  * the run would make.
  */
@@ -60,10 +61,12 @@ export function sliceOverrides(
   printSequence: PrintSequence | null,
   supports: SupportsChoice | null = null,
   filamentProfiles: readonly string[] = [],
-): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles'> {
+  primeTower: PrimeTowerChoice | null = null,
+): Pick<PrintRunRequest, 'print_sequence' | 'supports' | 'filament_profiles' | 'prime_tower'> {
   return {
     ...(printSequence === null ? {} : { print_sequence: printSequence }),
     ...(supports === null ? {} : { supports }),
     ...(filamentProfiles.length === 0 ? {} : { filament_profiles: [...filamentProfiles] }),
+    ...(primeTower === null ? {} : { prime_tower: primeTower }),
   }
 }

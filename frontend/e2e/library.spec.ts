@@ -156,6 +156,28 @@ test.describe('library', () => {
     await expect(page.getByRole('button', { name: /^Folder: Spec/ })).toHaveAttribute('aria-expanded', 'false')
   })
 
+  // #3637, #3638 — one file twice on a plate, a copy in other colours, filed under the
+  // file's own model rather than an unrelated one.
+  test('arranges a file twice in two colourings, filed under its own model', async ({ page }) => {
+    await page.goto('/library/MakerWorld')
+    await page.getByRole('checkbox', { name: "Select Clara's Wand.3mf" }).check()
+    await page.getByRole('button', { name: 'Arrange selected (1)' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Arrange' })
+    const wand = "Wand — Clara's Wand.3mf"
+    await expect(dialog.getByLabel(`Copies of ${wand}`)).toHaveValue('1')
+    await expect(dialog.getByLabel('File under').locator('option:checked')).toHaveText("A new model: Clara's Wand")
+
+    await dialog.getByRole('button', { name: `Add a copy of ${wand} in other colours` }).click()
+    const copy = `${wand}, copy 1 in other colours`
+    await dialog.getByLabel(`#7B1FA2 of ${copy} prints in`).fill('#ff00ff')
+    await expect(dialog.getByRole('img', { name: `${copy} prints in #FF00FF, #FFD54F` })).toBeVisible()
+    await dialog.getByRole('button', { name: 'Arrange', exact: true }).click()
+
+    const done = page.getByRole('status', { name: 'Arranged' })
+    await expect(done).toContainText("in Clara's Wand's history.")
+    await expect(page.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/clara-s-wand/history')
+  })
+
   test('shows the tree beside the files on a wide screen, with no picker', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/library')
