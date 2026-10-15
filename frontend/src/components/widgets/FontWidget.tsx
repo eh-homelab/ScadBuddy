@@ -5,6 +5,7 @@ import { cssFontFamily, formatFontValue, parseFontValue, preferredStyle } from '
 import { forgetGlyphAnswers, useMissingGlyphs } from '../../lib/useMissingGlyphs'
 import { Field } from './Field'
 import { FontPicker } from './FontPicker'
+import { paramLabel } from '../../lib/params'
 
 /**
  * OpenSCAD font values look like `Liberation Sans:style=Bold`. Browse opens the Google
@@ -53,7 +54,7 @@ export function FontWidget({
     message: string
   } | null>(null)
 
-  const label = param.caption ?? param.name
+  const label = paramLabel(param)
   const { family, style } = parseFontValue(value)
   // #2358 — characters of the model's text this font has no glyph for: the render
   // leaves them out without a word. Not asked while the family is not installed, which

@@ -109,7 +109,7 @@ export type AttemptOutcome =
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
   /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
-  candidates(): Promise<PooledCredential[]>
+  candidates(options?: { includeCooling?: boolean }): Promise<PooledCredential[]>
   /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
@@ -166,6 +166,13 @@ export type FallbackOptions = {
    * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
    */
   onAttempt?: () => void
+  /**
+   * The SDK session every attempt runs in, when the caller fixes it: a warm
+   * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
+   * a turn it serves after its first sees no init message. A failed attempt
+   * is then continued there as one that reported an init is.
+   */
+  session?: string
 }
 
 /**
@@ -334,7 +341,7 @@ export async function* runWithFallback(
     /** The retry this attempt was stopped at. */
     let refused: FailureEvidence | undefined
     let progressed = false
-    let sessionSeen: string | undefined
+    let sessionSeen: string | undefined = options.session
     let model: string | undefined
     let thrown: unknown
     try {
@@ -366,7 +373,9 @@ export async function* runWithFallback(
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
             // (sdk.mjs 0.3.283 and 0.3.287), so a retry or two may still go
             // out in that grace; they are refused like the first and cost
-            // nothing.
+            // nothing. On a warm process (sessions/warmTurn.ts) the abort
+            // lets the live process end on its own first, so the return()
+            // waits up to warm.ts DRAIN_MS before the next attempt.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
           }
@@ -532,8 +541,12 @@ export class CredentialPool implements CredentialSource {
     this.log = options.log ?? ((line) => console.warn(line))
   }
 
-  /** Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none. */
-  async candidates(): Promise<PooledCredential[]> {
+  /**
+   * Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none.
+   * `includeCooling` also lists a rate-limited one (the warm resync looks for the credential a process
+   * runs on, which a cooldown does not end); a disabled one is never listed.
+   */
+  async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
     const kek = this.kek
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
     // One SELECT for every row, its state, epoch and sealed secret together:
@@ -542,7 +555,7 @@ export class CredentialPool implements CredentialSource {
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {
-      if (c.status !== 'active' || !credential) continue
+      if (!credential || (c.status !== 'active' && !(options.includeCooling && c.status === 'cooling_down'))) continue
       out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))

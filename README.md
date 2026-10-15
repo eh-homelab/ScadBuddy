@@ -299,7 +299,9 @@ on shutdown.
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
-  the app.
+  the app. Alert on `scadbuddy_render_project_retries_total` rising, not on its log
+  line: a job's row write is retried without limit, and the warning is logged only at
+  the 12th attempt and every 100th after, hours apart once the backoff is capped.
 
 **Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
 backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
