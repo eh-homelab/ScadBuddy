@@ -118,25 +118,25 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
           <table aria-label="Grant rules" className="w-full text-left text-[12.5px]">
             <thead className="text-muted-foreground">
               <tr>
-                <th className="py-1 font-normal">#</th>
-                <th className="py-1 font-normal">Rule</th>
-                <th className="py-1 font-normal">Bounds</th>
-                <th className="py-1 font-normal">Used</th>
+                <th className="py-1 pr-3 font-normal">#</th>
+                <th className="py-1 pr-3 font-normal">Rule</th>
+                <th className="py-1 pr-3 font-normal">Bounds</th>
+                <th className="py-1 pr-3 font-normal">Used</th>
               </tr>
             </thead>
             <tbody>
               {rules.map((rule, i) => (
                 <tr key={i} className="border-t align-top">
-                  <td className="py-1">{i + 1}</td>
-                  <td className="py-1 font-mono">{rule.fn === 'tool' ? `tool: ${rule.tool ?? ''}` : rule.fn}</td>
-                  <td className="py-1">
+                  <td className="py-1 pr-3">{i + 1}</td>
+                  <td className="py-1 pr-3 font-mono">{rule.fn === 'tool' ? `tool: ${rule.tool ?? ''}` : rule.fn}</td>
+                  <td className="py-1 pr-3">
                     {isUnbounded(rule) ? (
                       <span className="text-destructive">{unboundedText(rule)}</span>
                     ) : (
                       bounds(rule).map((b) => <span key={b} className="block">{b}</span>)
                     )}
                   </td>
-                  <td className="py-1">
+                  <td className="py-1 pr-3">
                     {usage(rule, grant.used[String(i)]).map((u) => (
                       <span key={u} className="block">
                         {u}
@@ -152,19 +152,19 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
           <table aria-label="Grant uses" className="w-full text-left text-[12.5px]">
             <thead className="text-muted-foreground">
               <tr>
-                <th className="py-1 font-normal">Time</th>
-                <th className="py-1 font-normal">Call</th>
-                <th className="py-1 font-normal">Tool</th>
-                <th className="py-1 font-normal">Session</th>
+                <th className="py-1 pr-3 font-normal">Time</th>
+                <th className="py-1 pr-3 font-normal">Call</th>
+                <th className="py-1 pr-3 font-normal">Tool</th>
+                <th className="py-1 pr-3 font-normal">Session</th>
               </tr>
             </thead>
             <tbody>
               {grant.uses.map((use) => (
                 <tr key={use.request_id} className="border-t">
-                  <td className="py-1">{when(use.created_at)}</td>
-                  <td className="py-1 font-mono">{use.fn}</td>
-                  <td className="py-1 font-mono">{use.tool ?? '—'}</td>
-                  <td className="py-1 font-mono">{use.session_id ?? '—'}</td>
+                  <td className="py-1 pr-3">{when(use.created_at)}</td>
+                  <td className="py-1 pr-3 font-mono">{use.fn}</td>
+                  <td className="py-1 pr-3 font-mono">{use.tool ?? '—'}</td>
+                  <td className="py-1 pr-3 font-mono">{use.session_id ?? '—'}</td>
                 </tr>
               ))}
             </tbody>

@@ -519,21 +519,21 @@ function Steps({ steps }: { steps: FlowStep[] }) {
       <table aria-label="Steps" className="w-full text-left text-[12.5px]">
         <thead className="text-muted-foreground">
           <tr>
-            <th className="py-1 font-normal">#</th>
-            <th className="py-1 font-normal">Call</th>
-            <th className="py-1 font-normal">Status</th>
-            <th className="py-1 font-normal">Started</th>
-            <th className="py-1 font-normal">Duration</th>
+            <th className="py-1 pr-3 font-normal">#</th>
+            <th className="py-1 pr-3 font-normal">Call</th>
+            <th className="py-1 pr-3 font-normal">Status</th>
+            <th className="py-1 pr-3 font-normal">Started</th>
+            <th className="py-1 pr-3 font-normal">Duration</th>
           </tr>
         </thead>
         <tbody>
           {steps.map((step) => (
             <tr key={step.call_id} className="border-t">
-              <td className="py-1">{step.seq}</td>
-              <td className="py-1 font-mono">{step.fn}</td>
-              <td className="py-1">{step.error ? `${step.status} (${step.error})` : step.status}</td>
-              <td className="py-1">{new Date(step.started_at).toLocaleString()}</td>
-              <td className="py-1">
+              <td className="py-1 pr-3">{step.seq}</td>
+              <td className="py-1 pr-3 font-mono">{step.fn}</td>
+              <td className="py-1 pr-3">{step.error ? `${step.status} (${step.error})` : step.status}</td>
+              <td className="py-1 pr-3">{new Date(step.started_at).toLocaleString()}</td>
+              <td className="py-1 pr-3">
                 {step.ended_at
                   ? formatDuration((new Date(step.ended_at).getTime() - new Date(step.started_at).getTime()) / 1000)
                   : '—'}
