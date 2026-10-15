@@ -215,7 +215,7 @@ describe('settings tools', () => {
       ok: true,
       result: { saved: false },
     })
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     expect(put).not.toHaveBeenCalled()
 
     const bad = await bridge.call('set_field', { field: 'display_unit', value: 'cubits' })

@@ -2,7 +2,15 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError, api } from '../../api/client'
 import type { InstalledLibrary, LibraryCheck, LibraryUser, ModelSummary } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { ChevronRightIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { ChoiceSelect, LoadingLines } from './form'
 import { Spinner } from '../ui/Spinner'
 
 /**
@@ -65,57 +73,47 @@ export function LibraryUpgrade() {
 
   if (libraries.error) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-sm text-warn">
         {libraries.error.message}
       </p>
     )
   }
   if (libraries.loading) {
-    return (
-      <p className="flex items-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading libraries
-      </p>
-    )
+    return <LoadingLines label="Loading libraries" lines={['h-8 w-48', 'h-8 w-40']} />
   }
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <label htmlFor={selectId} className="block text-[13px]">
+        <div className="grid gap-1.5">
+          <Label htmlFor={selectId} className="font-normal">
             Library
-          </label>
-          <select
+          </Label>
+          <ChoiceSelect
             id={selectId}
             value={library}
-            onChange={(event) => choose(event.target.value)}
+            onValueChange={choose}
             disabled={busy}
-            className="sb-field mt-1.5 w-48"
-          >
-            <option value="">Choose a library</option>
-            {names.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
+            choices={[{ value: '', label: 'Choose a library' }, ...names.map((name) => ({ value: name, label: name }))]}
+            className="w-48"
+          />
         </div>
-        <div>
-          <label htmlFor={refId} className="block text-[13px]">
+        <div className="grid gap-1.5">
+          <Label htmlFor={refId} className="font-normal">
             Candidate ref
-          </label>
-          <input
+          </Label>
+          <Input
             id={refId}
             value={ref}
             placeholder="A tag or branch"
             onChange={(event) => setRef(event.target.value)}
             disabled={!library || moving}
-            className="sb-field sb-num mt-1.5 w-40"
+            className="sb-num w-40"
           />
         </div>
       </div>
       {models.error && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-sm text-warn">
           Could not read the models, so rows show slugs: {models.error.message}
         </p>
       )}
@@ -241,27 +239,24 @@ function LibraryUsers({
 
   if (users.error) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-sm text-warn">
         {users.error.message}
       </p>
     )
   }
   if (users.loading || !users.data) {
-    return (
-      <p className="flex items-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading the models that pin {library}
-      </p>
-    )
+    return <LoadingLines label={`Loading the models that pin ${library}`} lines={['h-12 w-full', 'h-12 w-full']} />
   }
   const rows = users.data
   if (rows.length === 0) {
-    return <p className="text-[13px] text-muted">No model pins {library}.</p>
+    return <p className="text-sm text-muted-foreground">No model pins {library}.</p>
   }
   const count = rows.filter((row) => ticked.has(row.slug)).length
 
   return (
     <div className="space-y-3">
-      <ul aria-label={`Models that pin ${library}`} className="divide-y divide-line rounded-[6px] border border-line">
+      <Card size="sm" className="py-0">
+      <ul aria-label={`Models that pin ${library}`} className="divide-y">
         {rows.map((user) => (
           <UserRow
             key={user.slug}
@@ -278,9 +273,9 @@ function LibraryUsers({
           />
         ))}
       </ul>
-      <div className="flex items-center gap-2">
+      </Card>
+      <div className="flex flex-wrap items-center gap-2">
         <Button
-          variant="primary"
           onClick={() => void move(rows)}
           disabled={busy || count === 0 || !candidate}
           aria-busy={moving}
@@ -289,7 +284,7 @@ function LibraryUsers({
           {count === 1 ? 'Move 1 model' : `Move ${count} models`}
           {candidate && ` to ${candidate}`}
         </Button>
-        <p className="text-[12px] text-muted">Each model is re-pinned from its own URL, as its own revision.</p>
+        <p className="text-xs text-muted-foreground">Each model is re-pinned from its own URL, as its own revision.</p>
       </div>
     </div>
   )
@@ -332,38 +327,38 @@ function UserRow({
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2.5">
           {!builtin && !invalid && (
-            <input
-              type="checkbox"
+            <Checkbox
               checked={ticked}
-              onChange={(event) => onTick(event.target.checked)}
+              onCheckedChange={(next) => onTick(next === true)}
               disabled={moving}
               aria-label={`Move ${name}`}
-              className="mt-1"
+              className="mt-0.5"
             />
           )}
           <div className="min-w-0">
-            <span className="text-[13px] font-medium">{name}</span>
+            <span className="text-sm font-medium">{name}</span>
             {model && model.name !== user.slug && (
               <span className="sb-num ml-2 text-[11px] text-faint">{user.slug}</span>
             )}
             {invalid ? (
-              <p className="mt-0.5 text-[12px] text-warn">
+              <p className="mt-0.5 text-xs text-warn">
                 Invalid: this model's entry cannot be read as a pin, so it cannot be moved. Fix it from the model's
                 Libraries.
               </p>
             ) : (
-              <p className="mt-0.5 text-[12px] text-muted">
+              <p className="mt-0.5 text-xs text-muted-foreground">
                 Pinned to <span className="sb-num">{ref}</span> at <span className="sb-num">{short(commit ?? '')}</span>
               </p>
             )}
             {builtin && (
-              <p className="mt-0.5 text-[12px] text-muted">Built-in: it can be checked, but not re-pinned.</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Built-in: it can be checked, but not re-pinned.</p>
             )}
           </div>
         </div>
         {!invalid && (
           <Button
             size="sm"
+            variant="outline"
             onClick={onCheck}
             disabled={busy || !candidate}
             aria-busy={check?.running === true}
@@ -375,23 +370,23 @@ function UserRow({
       </div>
       {check && !check.running && check.ref === candidate && <CheckResult check={check} />}
       {check && !check.running && check.ref !== candidate && (
-        <p className="mt-2 text-[12px] text-muted" data-testid="library-check-stale">
+        <p className="mt-2 text-xs text-muted-foreground" data-testid="library-check-stale">
           Checked at <span className="sb-num">{check.ref}</span>, not{' '}
           {candidate ? <span className="sb-num">{candidate}</span> : 'the candidate'}; check again.
         </p>
       )}
       {move?.running && (
-        <p className="mt-2 flex items-center gap-2 text-[12px] text-muted">
+        <p className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
           <Spinner /> Re-pinning
         </p>
       )}
       {moved && (
-        <p className="mt-2 text-[12px] text-ok" data-testid="library-moved">
+        <p className="mt-2 text-xs text-ok" data-testid="library-moved">
           Moved to <span className="sb-num">{moved.ref}</span> at <span className="sb-num">{short(moved.commit)}</span>
         </p>
       )}
       {move && !move.running && move.error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
+        <p role="alert" className="mt-2 text-xs text-warn">
           Not moved: {move.error}
         </p>
       )}
@@ -403,7 +398,7 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
   const { result, error } = check
   if (error !== undefined) {
     return (
-      <p role="alert" className="mt-2 text-[12px] text-warn">
+      <p role="alert" className="mt-2 text-xs text-warn">
         Check failed: {error}
       </p>
     )
@@ -417,9 +412,9 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
   const diagnostics = result.diagnostics ?? []
   const log = result.log_tail ?? []
   return (
-    <div className="mt-2 text-[12px]" data-testid="library-check">
+    <div className="mt-2 text-xs" data-testid="library-check">
       {!result.checked ? (
-        <p className="text-muted">Not checked at {at}: no OpenSCAD was available to ask.</p>
+        <p className="text-muted-foreground">Not checked at {at}: no OpenSCAD was available to ask.</p>
       ) : result.ok ? (
         <p className="text-ok">
           Parses at {at}
@@ -433,7 +428,7 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
       {diagnostics.length > 0 && (
         <ul aria-label="Diagnostics" className="mt-1 space-y-0.5">
           {diagnostics.map((diagnostic, index) => (
-            <li key={index} className={diagnostic.severity === 'error' ? 'text-warn' : 'text-muted'}>
+            <li key={index} className={diagnostic.severity === 'error' ? 'text-warn' : 'text-muted-foreground'}>
               {diagnostic.file && (
                 <span className="sb-num">
                   {diagnostic.file}
@@ -445,15 +440,26 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
           ))}
         </ul>
       )}
-      {log.length > 0 && (
-        <details className="mt-1">
-          <summary className="cursor-pointer text-muted">OpenSCAD log</summary>
-          <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-[6px] bg-surface-2 p-2 text-[11px] whitespace-pre-wrap">
-            {log.join('\n')}
-          </pre>
-        </details>
-      )}
+      {log.length > 0 && <LogFold log={log} />}
     </div>
+  )
+}
+
+/** The OpenSCAD log of a check, folded until asked for. */
+function LogFold({ log }: { log: readonly string[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="mt-1">
+      <CollapsibleTrigger className="inline-flex min-h-6 items-center gap-1 text-muted-foreground hover:text-foreground">
+        <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
+        OpenSCAD log
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount hidden={!open}>
+        <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-md bg-ui-muted p-2 text-[11px] whitespace-pre-wrap">
+          {log.join('\n')}
+        </pre>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -492,10 +498,10 @@ function UnusedCheckouts({ installed, onRemoved }: { installed: readonly Install
 
   return (
     <section aria-labelledby={headingId} className="space-y-2">
-      <h3 id={headingId} className="text-[13px] font-medium">
+      <h3 id={headingId} className="text-sm font-medium">
         Checkouts no model uses
       </h3>
-      <p className="text-[12px] text-muted">
+      <p className="text-xs text-muted-foreground">
         Unpinning a library keeps its checkout on the volume. Remove the ones nothing pins any more.
       </p>
       <ul aria-labelledby={headingId} className="space-y-1">
@@ -503,12 +509,13 @@ function UnusedCheckouts({ installed, onRemoved }: { installed: readonly Install
           const key = `${row.name}@${row.commit}`
           const label = `${row.name} ${short(row.commit)}`
           return (
-            <li key={key} aria-label={label} className="flex flex-wrap items-center gap-3 text-[13px]">
+            <li key={key} aria-label={label} className="flex flex-wrap items-center gap-3 text-sm">
               <span>
-                {row.name} <span className="sb-num text-muted">{short(row.commit)}</span>
+                {row.name} <span className="sb-num text-muted-foreground">{short(row.commit)}</span>
               </span>
               <Button
                 size="sm"
+                variant="outline"
                 onClick={() => void remove(row)}
                 disabled={removing !== null}
                 aria-busy={removing === key}

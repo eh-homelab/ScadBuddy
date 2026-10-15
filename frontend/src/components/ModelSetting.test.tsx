@@ -27,11 +27,15 @@ describe('ModelSetting (#1917)', () => {
     expect(await api.getModelSetting()).toEqual({ model: null })
   })
 
-  it('offers the model aliases', async () => {
-    renderPage(<ModelSetting />)
-    await screen.findByRole('combobox', { name: LABEL })
-    const values = [...document.querySelectorAll('#assistant-model-options option')].map((o) => o.getAttribute('value'))
-    expect(values).toEqual(expect.arrayContaining(['opus', 'sonnet', 'haiku']))
+  it('offers the model aliases, and a picked one fills the field', async () => {
+    const { user } = renderPage(<ModelSetting />)
+    const input = await screen.findByRole('combobox', { name: LABEL })
+    await user.click(screen.getByRole('button', { name: 'Model aliases' }))
+    const names = (await screen.findAllByRole('option')).map((option) => option.textContent)
+    expect(names).toEqual(['opuslatest opus', 'sonnetlatest sonnet', 'haikulatest haiku'])
+    await user.click(screen.getByRole('option', { name: /^sonnet/ }))
+    expect(input).toHaveValue('sonnet')
+    expect(screen.queryByRole('option')).toBeNull()
   })
 
   it('is for the user only: an agent cannot pick its own model', async () => {
