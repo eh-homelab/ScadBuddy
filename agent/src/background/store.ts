@@ -211,6 +211,22 @@ export class BackgroundTaskStore {
     return row ? { result: row.result.value, ok: row.ok } : undefined
   }
 
+  /** Records a child chat a Workflow's run started (#3395). */
+  async recordChild(taskId: string, childId: string): Promise<void> {
+    await this.#sql`INSERT INTO ai_workflow_children (task_id, child_id) VALUES (${taskId}, ${childId}) ON CONFLICT DO NOTHING`
+  }
+
+  /** The child chats a Workflow's earlier attempts left open: not done, and named by no journal row. */
+  async openChildren(taskId: string): Promise<string[]> {
+    const rows = await this.#sql<{ child_id: string }[]>`
+      SELECT c.child_id FROM ai_workflow_children c
+        JOIN ai_sessions s ON s.id = c.child_id AND s.status <> 'done'
+       WHERE c.task_id = ${taskId}
+         AND NOT EXISTS (SELECT 1 FROM ai_workflow_calls w WHERE w.task_id = c.task_id AND w.child_id = c.child_id)
+       ORDER BY c.created_at`
+    return rows.map((r) => r.child_id)
+  }
+
   /** Records one agent() result in a Workflow's journal; a second write of the same call keeps the first. */
   async journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
     await this.#sql`

@@ -46,6 +46,10 @@ export function ancestry(folders: LibraryFolderView[], id: number | null): Libra
 
 /** The page's path for folder `id` (the top level for `null`). */
 export function libraryPath(folders: LibraryFolderView[], id: number | null): string {
-  const names = ancestry(folders, id).map((folder) => encodeURIComponent(folder.name))
-  return names.length === 0 ? LIBRARY_ROOT : `${LIBRARY_ROOT}/${names.join('/')}`
+  return libraryPathOf(ancestry(folders, id).map((folder) => folder.name))
+}
+
+/** The page's path for the folder these names lead to, from the top. */
+export function libraryPathOf(names: string[]): string {
+  return names.length === 0 ? LIBRARY_ROOT : `${LIBRARY_ROOT}/${names.map(encodeURIComponent).join('/')}`
 }

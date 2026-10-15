@@ -18,7 +18,6 @@ import { InMemoryTokenStore } from './support/memoryTokens.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import type { HarnessRun } from '../src/harness/run.js'
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { createBackendClient } from '../src/api/backend.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { BACKEND } from './helpers/mcp.js'
@@ -86,7 +85,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     ) {
       const tokens = new InMemoryTokenStore()
       const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
-      const { runner, runs } = scriptedRunner(turns)
+      const { runner, runs, prompts } = scriptedRunner(turns)
       const principals: TurnPrincipal[] = []
       const sessions = manager({
         sql: db.sql,
@@ -119,7 +118,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const principal = principalFor(record.id, tier)
         return { client, call, token, principal, owner: ownerOf(principal) }
       }
-      return { ...t, sessions, runs, principals, publisher, bus, hub, agent }
+      return { ...t, sessions, runs, prompts, principals, publisher, bus, hub, agent }
     }
 
     it('starts a session from MCP, watches it, hands it to the browser user, who continues it', async () => {
@@ -168,15 +167,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const backend = createBackendClient(BACKEND, () =>
         Promise.resolve(new Response(new Uint8Array(PNG), { headers: { 'content-type': 'image/png' } })),
       )
-      const { agent, runs } = await setup(undefined, { backend })
+      const { agent, prompts } = await setup(undefined, { backend })
       const a = await agent('write')
       const started = ok<{ turn: { finished: boolean } }>(
         await a.call('sessions_start', { prompt: 'what is this?', images: [{ kind: 'output_thumbnail', output_id: OUT }], wait_seconds: 10 }),
       )
       expect(started.turn).toMatchObject({ finished: true })
-      const messages: SDKUserMessage[] = []
-      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
-      const content = messages[0]!.message.content as { type: string }[]
+      const content = prompts[0]!.message.content as { type: string }[]
       expect(content.map((c) => c.type)).toEqual(['image', 'text'])
       // Images need the prompt they go with.
       expect(errorText(await a.call('sessions_start', { images: [{ kind: 'output_thumbnail', output_id: OUT }] }))).toMatch(/images/)
@@ -193,7 +190,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // Says it is a PNG; its bytes say otherwise.
         return Promise.resolve(new Response('<svg/>', { headers: { 'content-type': 'image/png' } }))
       })
-      const { agent, runs } = await setup(undefined, { backend })
+      const { agent, runs, prompts } = await setup(undefined, { backend })
       const a = await agent('write')
       const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'pics' }))
 
@@ -207,9 +204,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
       expect(sent.turn).toMatchObject({ finished: true })
       expect(runs).toHaveLength(1)
-      const messages: SDKUserMessage[] = []
-      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
-      const content = messages[0]!.message.content as { type: string; source?: { data: string; media_type: string } }[]
+      const content = prompts[0]!.message.content as { type: string; source?: { data: string; media_type: string } }[]
       expect(content.map((c) => c.type)).toEqual(['image', 'text'])
       expect(content[0]!.source).toMatchObject({ media_type: 'image/png', data: PNG.toString('base64') })
 
@@ -246,7 +241,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
       const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString('base64')
       const store = new AttachmentStore(db.sql)
-      const { agent, runs } = await setup(undefined, { attachments: store })
+      const { agent, runs, prompts } = await setup(undefined, { attachments: store })
       const a = await agent('write')
       const b = await agent('write')
       const image = {
@@ -276,9 +271,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         }),
       )
       expect(sent.turn).toMatchObject({ finished: true })
-      const messages: SDKUserMessage[] = []
-      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
-      const content = messages[0]!.message.content as { type: string; source?: { data: string } }[]
+      const content = prompts[0]!.message.content as { type: string; source?: { data: string } }[]
       expect(content[0]!.source).toMatchObject({ data: PNG })
       const left = (await db.sql`SELECT id FROM ai_attachments`).map((r) => r.id as string).sort()
       expect(left).toEqual([theirs.id, browsers.id].sort())

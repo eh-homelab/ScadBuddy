@@ -12,6 +12,7 @@ import {
   extrudersIn,
   colourHex,
   outOfRange,
+  paramLabel,
   rangeProblem,
 } from './params'
 
@@ -270,5 +271,26 @@ describe('rangeProblem (#921)', () => {
     const values = defaultValues(keychainSchema)
     expect(outOfRange(keychainSchema, values)).toBeUndefined()
     expect(outOfRange(keychainSchema, { ...values, text_size: 500 })?.name).toBe('text_size')
+  })
+})
+
+// #3287 — one rule for a parameter's label: an empty caption is no caption.
+describe('paramLabel', () => {
+  const blank: Param = { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: '', min: 8, max: 40 }
+
+  it('is the caption, or the name when the caption is missing or empty', () => {
+    expect(paramLabel({ name: 'text_size', caption: 'Letter height' })).toBe('Letter height')
+    expect(paramLabel({ name: 'text_size', caption: null })).toBe('text_size')
+    expect(paramLabel({ name: 'text_size', caption: '' })).toBe('text_size')
+  })
+
+  it('is what every message and the change list say for an empty caption', () => {
+    expect(rangeProblem(blank, 500)).toBe('text_size must be between 8 and 40.')
+    const colour: Param = { group: 'Colours', name: 'base_color', type: 'color', initial: '#FF1493', caption: '' }
+    expect(rangeProblem(colour, 'red-ish')).toBe('base_color must be a colour: a hex such as #FF8800, or a name such as red.')
+    const schema: CustomizerSchema = { parameters: [blank] } as unknown as CustomizerSchema
+    expect(diffFromDefaults(schema, { text_size: 20 })).toEqual([
+      { name: 'text_size', caption: 'text_size', value: 20, initial: 14 },
+    ])
   })
 })

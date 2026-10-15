@@ -1,6 +1,7 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, type PermissionResult, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { callContext } from './callContext.js'
+import { ANSWER_MAX, OPTIONS_MAX, OPTIONS_MIN, PREVIEW_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX } from '../gate/limits.js'
 import { ATTENTION_DESCRIPTION, ATTENTION_TOOL_NAME, ATTENTION_TOOL_SHAPE, type AttentionSpec, attentionHandler } from './attention.js'
 
 // Structured questions for the user (#940): multiple choice, and a draft to
@@ -41,13 +42,7 @@ export function isQuestionTool(name: string): boolean {
 }
 
 /** Claude Code's own limits (sdk-tools.d.ts `AskUserQuestionInput`), and caps on what the panel shows. */
-export const QUESTIONS_MAX = 4
-export const OPTIONS_MIN = 2
-export const OPTIONS_MAX = 4
-export const QUESTION_TEXT_MAX = 2_000
-export const PREVIEW_MAX = 20_000
-/** The longest answer the user may type ("Other", or an edited draft). */
-export const ANSWER_MAX = 20_000
+export { ANSWER_MAX, OPTIONS_MAX, OPTIONS_MIN, PREVIEW_MAX, QUESTION_TEXT_MAX, QUESTIONS_MAX }
 
 const OptionSchema = z.object({
   label: z.string().min(1).max(200),

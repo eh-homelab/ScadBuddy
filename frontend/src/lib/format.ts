@@ -1,6 +1,11 @@
 import type { BoundingBox, ParamValue } from '../api/types'
 import { length, type DisplayUnit } from './units'
 
+/** An id as the UI shows one with no name: its first 8 characters. */
+export function shortId(id: string): string {
+  return id.slice(0, 8)
+}
+
 export function formatBbox(bbox: BoundingBox, unit: DisplayUnit = 'mm'): string {
   const [x, y, z] = bbox.size
   return `${length(x, unit)} × ${length(y, unit)} × ${length(z, unit)} ${unit}`
