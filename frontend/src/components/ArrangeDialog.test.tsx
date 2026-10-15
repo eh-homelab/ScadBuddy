@@ -335,6 +335,27 @@ describe('ArrangeDialog: a copy in other colours (#3637)', () => {
     expect(lastArrangeRequest()).toMatchObject({ slug: 'clara-s-wand-2' })
   })
 
+  it('counts a taken name on from its base: "Name Keychain 2" is retried as "Name Keychain 3"', async () => {
+    // `name-keychain` is a model already, so the first try is "Name Keychain 2"; the
+    // server says that is taken too.
+    const names: string[] = []
+    server.use(
+      http.post('/api/v1/models/from-mesh', async ({ request }) => {
+        const { name } = (await request.json()) as { name: string }
+        names.push(name)
+        if (names.length === 1) return problem(409, 'Conflict', "a model named 'name-keychain-2' already exists")
+        return HttpResponse.json({ ...fixtures.models[0]!, slug: 'name-keychain-3', name }, { status: 201 })
+      }),
+    )
+    const onArranged = vi.fn()
+    const taken = { ...wand, filename: 'Name Keychain.3mf' }
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={onArranged} />)
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveDisplayValue('A new model: Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(names).toEqual(['Name Keychain 2', 'Name Keychain 3'])
+  })
+
   it("lists an arranged output's recoloured copies as their own row and keeps their colours", async () => {
     const entry = first.manifest![0]!
     const swap = { [entry.colours[0]!.toUpperCase()]: '#FF00FF' }
