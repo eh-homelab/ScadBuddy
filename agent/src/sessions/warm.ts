@@ -131,7 +131,14 @@ export class WarmBusyError extends Error {
  * measured against the fake endpoint, test/warm.pg.test.ts), and another
  * process's write can land between two of its own, or between an own write's
  * id and its row (store.ts reserves ids first), so no single tail read can
- * tell; the rows past `since` can.
+ * tell; the rows past `since` can. Not seen: a write whose id was reserved
+ * before the spawn read `since` but whose row commits only after it, which
+ * the resumed process may not have loaded either.
+ *
+ * `own` holds every main-transcript uuid of the process's life, and each check
+ * sends it whole: it cannot be cut at a row id, since a row below one already
+ * seen may still commit. It is bounded by the process's life, which ends at
+ * the idle expiry (`idleMs`) or the first recycle.
  */
 class MirroredTranscript {
   readonly store: SessionStore
@@ -158,6 +165,8 @@ class MirroredTranscript {
   ) {
     this.since = since
     const append = (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
+      // Taken as the process's own as it is handed over, before it lands: an append
+      // that never lands leaves a uuid no row has, which no check can match.
       if ((key.subpath ?? '') === '') {
         for (const entry of entries) if (typeof entry.uuid === 'string') this.own.add(entry.uuid)
       }

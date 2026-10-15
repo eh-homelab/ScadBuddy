@@ -167,13 +167,17 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
   }, 60_000)
 
   it('recycles when another write landed just before one of its own', async () => {
-    // Once turn two's model call starts, another process writes right before this
+    // Once a turn's model call starts, another process writes right before this
     // one's next main-transcript write goes in: after anything this process could
     // read first, so its own write is the tail again.
     let next = false
     let armed = false
-    let wrote!: () => void
-    const written = new Promise<void>((resolve) => (wrote = resolve))
+    let wrote = () => {}
+    /** The other write, in the next turn: resolves once it is in. */
+    const arm = () => {
+      next = true
+      return new Promise<void>((resolve) => (wrote = resolve))
+    }
     h = await warmHarness(db, {
       onRequest: async () => {
         if (next) [next, armed] = [false, true]
@@ -187,12 +191,22 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
     })
     const id = h.newSession()
     const one = await h.turn(id, h.assembled(), 1)
-    next = true
+    let written = arm()
     const two = await h.turn(id, h.assembled(), 1 - one.result.total_cost_usd)
     expect(two.outcome).toBe('hit')
     await written
     const three = await h.turn(id, h.assembled(), 1 - two.result.total_cost_usd)
     expect(three).toMatchObject({ outcome: 'recycle', reason: 'tail' })
+
+    // The new process passes a check (four), and only then does another write land.
+    const four = await h.turn(id, h.assembled(), 1 - three.result.total_cost_usd)
+    expect(four.outcome).toBe('hit')
+    written = arm()
+    const five = await h.turn(id, h.assembled(), 1 - four.result.total_cost_usd)
+    expect(five.outcome).toBe('hit')
+    await written
+    const six = await h.turn(id, h.assembled(), 1 - five.result.total_cost_usd)
+    expect(six).toMatchObject({ outcome: 'recycle', reason: 'tail' })
   }, 60_000)
 
   it('recycles when the remaining budget moved', async () => {
