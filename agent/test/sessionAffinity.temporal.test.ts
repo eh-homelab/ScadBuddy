@@ -40,6 +40,7 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { dumpWorkflow } from './support/workflowDump.js'
 
 // Session affinity (unified runtime spec 2026-10-13 §5.2, plan Task 5.2) end to end: AgentSession
 // on a Temporal dev server, two replicas (A, B), each with its own manager, warm cache, shared
@@ -128,6 +129,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   let runtimeSettings: typeof RUNTIME_DEFAULTS
   /** This test's own, in each replica's identity: its session host and pinned queues are its alone. */
   let tag: string
+  /** The turns this test started, and how each `done` stands: what a failed test's dump shows (#3693). */
+  let watched: { id: string; label: string; state: string }[]
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -160,8 +163,11 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     runtimeSettings = RUNTIME_DEFAULTS
     script = () => ({ text: 'ok' })
     tag = randomUUID().slice(0, 8)
+    watched = []
   })
-  afterEach(async () => {
+  afterEach(async ({ task }) => {
+    // A test that failed, its timeout included: where each session waits (#3693), before it is terminated.
+    if (task.result?.state === 'fail') await dumpSessions(task.name)
     // This test's sessions end with it: an open one would go on asking for a home on the shared
     // `agent-tools`, where the next test's replicas answer (its own queues are named apart, that
     // one cannot be: the workflow names it).
@@ -178,6 +184,40 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
   })
+
+  /** Every session of this test's schema: its workflow (dumpWorkflow), its row, and the test's own view (the replicas' counters, each turn's `done`). */
+  async function dumpSessions(name: string): Promise<void> {
+    const lines = [`=== ${name}: where it waits (#3693), at ${new Date().toISOString()}`]
+    for (const r of replicas) {
+      lines.push(
+        `replica ${r.identity}: acquired=${r.acquired} referred=${r.referred} refused=${r.refused} spawned=${r.spawned} frozen=${r.frozen} placements=${r.turnHost.active} warm=${r.m.warm.size()}`,
+      )
+    }
+    lines.push(`slow tool: called=${slowCalls} returned=${slowReturned}; model requests=${fake.messageCalls().length}`)
+    for (const w of watched) lines.push(`turn ${w.label} (session ${w.id}): done ${w.state}`)
+    for (const row of await db.sql<Record<string, unknown>[]>`
+      SELECT id, status, durable_turn_id, turn_attempt, turn_mark, cost_usd, turns FROM ai_sessions ORDER BY created_at`) {
+      lines.push(`row ${JSON.stringify(row)}`)
+      lines.push(await dumpWorkflow(env.client, sessionWorkflowId(String(row.id))))
+      const events = await replicas[0]?.m.events.read(String(row.id), 0, 10_000)
+      if (events) lines.push(`session events: ${events.map((e) => e.event.type).join(', ')}`)
+    }
+    console.error(lines.join('\n'))
+  }
+  /** Follows a turn's `done` for the dump. */
+  function watch<T>(id: string, label: string, done: Promise<T>): Promise<T> {
+    const w = { id, label, state: 'pending' }
+    watched.push(w)
+    done.then(
+      (end) => {
+        w.state = `resolved ${JSON.stringify(end).slice(0, 300)}`
+      },
+      (err: unknown) => {
+        w.state = `rejected ${String(err).slice(0, 300)}`
+      },
+    )
+    return done
+  }
 
   /** Whether a worker polls `queue` (1 workflow, 2 activity) now. */
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
@@ -363,6 +403,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   async function startOn(r: Replica, prompt: string) {
     const started = await r.m.start(browser, { origin: 'chat', prompt })
     expect(started.modeFallback).toBeUndefined()
+    void watch(started.session.id, prompt, started.turn!.done)
     return { id: started.session.id, turn: started.turn! }
   }
 
@@ -389,6 +430,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     await settled(id)
     const second = await a.m.send(id, browser, 'second')
+    void watch(id, 'second', second.done)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(a.acquired).toBe(1)
     // One Claude Code for both turns: the second was a warm hit.
@@ -525,6 +567,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     await settled(id)
     const began = performance.now()
     const second = await b.m.send(id, browser, 'second')
+    void watch(id, 'second', second.done)
     const run = await runningRun(id)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     // The first try waited its 5 s on A's queue, then acquire ran again, on B (measured on the
@@ -867,6 +910,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     await settled(id)
     const second = await a.m.send(id, browser, 'second')
+    void watch(id, 'second', second.done)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     // A process per turn, none kept.
     expect(a.spawned).toBe(2)
@@ -887,6 +931,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     await settled(id)
     expect(a.turnHost.active).toBe(1)
     const second = await a.m.send(id, browser, 'again')
+    void watch(id, 'again', second.done)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(await said(a, id, 'WarmBusy')).toBe(false)
   })
