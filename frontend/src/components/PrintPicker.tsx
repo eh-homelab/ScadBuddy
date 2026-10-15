@@ -576,8 +576,11 @@ export function PrintPicker({
               // or not this output's `colors` already lists it.
               colours: [
                 ...new Set([
-                  ...(from.colors ?? []),
-                  ...(from.manifest ?? []).flatMap((object) => Object.values(object.recolour ?? {})),
+                  // Upper case on both sides, as the API compares them: one colour, one slot.
+                  ...(from.colors ?? []).map((c) => c.toUpperCase()),
+                  ...(from.manifest ?? []).flatMap((object) =>
+                    Object.values(object.recolour ?? {}).map((c) => c.toUpperCase()),
+                  ),
                 ]),
               ],
               name: arrangedName(from.name),

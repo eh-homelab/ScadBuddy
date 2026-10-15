@@ -10,7 +10,7 @@ import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
-import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
+import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { startTracing } from '../lib/tracing'
@@ -504,6 +504,35 @@ describe('PrintPicker', () => {
     expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
     // The dialog now reads the new output: its plates are asked for by the new id.
     await screen.findByTestId('filament-slot-1')
+  })
+
+  it('re-arranges a recoloured output with a slot for every colour it prints in (#3637)', async () => {
+    const entry = output.manifest![0]!
+    const own = entry.colours[0]!.toUpperCase()
+    const recoloured: Output = {
+      ...output,
+      id: '4'.repeat(32),
+      // Its colours in lower case, and without the colour a copy was swapped to.
+      colors: (output.colors ?? []).map((c) => c.toLowerCase()),
+      manifest: [
+        { ...entry, count: 1, recolour: {} },
+        { ...entry, count: 1, recolour: { [own]: '#FF00FF' } },
+      ],
+    }
+    addMockOutput(recoloured)
+    const { user } = renderPage(
+      <PrintPicker open source={{ kind: 'output', output: recoloured }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    expect(lastArrangeRequest()).toMatchObject({
+      colours: [...(output.colors ?? []).map((c) => c.toUpperCase()), '#FF00FF'],
+      objects: [
+        { output_id: recoloured.id, part: entry.part, count: 1, recolour: {} },
+        { output_id: recoloured.id, part: entry.part, count: 1, recolour: { [own]: '#FF00FF' } },
+      ],
+    })
   })
 
   it('re-arranges as one traced action, the save in the arrange’s trace (#2292)', async () => {
