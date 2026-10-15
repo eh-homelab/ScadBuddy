@@ -933,7 +933,8 @@ describe('CustomizePage', () => {
     await user.click(screen.getByRole('button', { name: 'Install Roboto' }))
 
     await waitFor(() => expect(typeface).not.toHaveAttribute('aria-invalid'), { timeout: 4000 })
-    expect(renders.length).toBeGreaterThan(before)
+    // The field clears as the render starts; its request can land a moment after.
+    await waitFor(() => expect(renders.length).toBeGreaterThan(before), { timeout: 4000 })
     expect(screen.queryByRole('button', { name: 'Install Roboto' })).not.toBeInTheDocument()
   }, 20000)
 
