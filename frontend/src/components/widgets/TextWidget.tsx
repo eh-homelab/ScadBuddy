@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { Param } from '../../api/types'
-import { textLength } from '../../lib/params'
+import { paramLabel, textLength } from '../../lib/params'
 import { Field } from './Field'
 
 /**
@@ -71,7 +71,7 @@ export function TextWidget({
     ) : undefined
 
   return (
-    <Field id={id} label={param.caption ?? param.name} name={param.name} readout={readout}>
+    <Field id={id} label={paramLabel(param)} name={param.name} readout={readout}>
       <input
         ref={input}
         id={id}

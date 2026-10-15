@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { FilamentProfile, PrintChoices, ProfilePreview, SlotChoice, SpoolOption } from '../api/types'
 
@@ -47,6 +47,7 @@ export function useFilamentProfiles({
   const [previews, setPreviews] = useState<Record<string, ProfilePreview>>({})
   const [previewFailed, setPreviewFailed] = useState(false)
   const [off, setOff] = useState<ReadonlySet<string>>(new Set())
+  const reset = useCallback(() => setOff((current) => (current.size === 0 ? current : new Set())), [])
 
   useEffect(() => {
     let live = true
@@ -112,5 +113,8 @@ export function useFilamentProfiles({
         else next.add(id)
         return next
       }),
+    /** Every profile back on: a switch-off is for one output, as the print sequence and
+     * supports are (#2804 review). Stable, so the dialog's reset effect can call it. */
+    reset,
   }
 }
