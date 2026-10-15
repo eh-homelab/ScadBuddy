@@ -66,7 +66,11 @@ function stemOf(filename: string): string {
   return filename.replace(/\.(3mf|stl)$/i, '').trim()
 }
 
-/** As the backend's `slugify`: what a model named `name` is filed as. */
+/**
+ * What a model named `name` is filed as: a copy of the backend's
+ * `scadbuddy/library/slugs.py` `slugify` (lower case, each run of other characters one
+ * `-`, none at the ends). Change both together; `ArrangeDialog.test.tsx` pins a case.
+ */
 function slugOf(name: string): string {
   return name
     .toLowerCase()
@@ -165,6 +169,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * with a library file in it may be filed under (#2284).
    */
   const [models, setModels] = useState<ModelSummary[] | null>(null)
+  /** #3638 — the model list could not be read: whether the file has a model is unknown. */
+  const [modelsFailed, setModelsFailed] = useState(false)
+  /** The same, for the open effect, which runs on `open` alone. */
+  const modelsFailedRef = useRef(false)
+  modelsFailedRef.current = modelsFailed
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
@@ -234,7 +243,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const templates = anyTemplate
     ? [
         ...new Set([
-          ...(homeFile ? [home?.slug ?? NEW_HOME] : []),
+          // Never a new model when the list failed: the file may have one already.
+          ...(homeFile && (home || !modelsFailed) ? [home?.slug ?? NEW_HOME] : []),
           ...ownTemplates,
           ...(models ?? []).map((model) => model.slug),
         ]),
@@ -360,10 +370,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     let live = true
     api
       .listModels()
-      .then((found) => live && setModels(found))
+      .then((found) => {
+        if (!live) return
+        setModels(found)
+        setModelsFailed(false)
+      })
       // #2541 — deliberate: a failed list costs only names. "File under" then offers the
       // outputs' own templates by slug, and the saved line says no name (`savedNote`).
-      .catch(() => live && setModels([]))
+      .catch(() => {
+        if (!live) return
+        setModels([])
+        setModelsFailed(true)
+      })
     return () => {
       live = false
     }
@@ -401,6 +419,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       setVariants([])
       setEditing(null)
       setRemoved([])
+      // #3638 — a model list that failed is read again, as a failed file read is.
+      if (modelsFailedRef.current) setModels(null)
       // A read that failed (a network error, say) is tried again.
       readAgain()
       return
@@ -733,7 +753,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                       editing={editing === copy.key}
                       onEdit={() => setEditing(editing === copy.key ? null : copy.key)}
                       onRecolour={(next) => setSwaps({ ...swaps, [copy.key]: next })}
-                      onRemove={() => setVariants((now) => now.filter((v) => v.key !== copy.key))}
+                      onRemove={
+                        busy || asking ? undefined : () => setVariants((now) => now.filter((v) => v.key !== copy.key))
+                      }
                     />
                   </div>
                 )
@@ -810,6 +832,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             }}
             onCancel={() => setAdding(null)}
           />
+        )}
+        {homeFile && !home && modelsFailed && (
+          <p role="status" className="text-[12px] text-warn">
+            ScadBuddy could not read its models, so it cannot tell where this file's arrangements go. Close
+            Arrange and open it again to retry.
+          </p>
         )}
         {/* Shown whenever there is a choice, a library file in the mix too (#2284). */}
         {(templates.length > 1 || anyTemplate) && templates.length > 0 && (

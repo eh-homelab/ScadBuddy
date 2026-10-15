@@ -294,3 +294,14 @@ async def test_an_arranged_outputs_colourings_are_chosen_by_their_colours(tmp_pa
     plain = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=entry.part, recolour={})])
     _, inputs = arrange_inputs(store, plain, plate_model=None)
     assert [(i.count, i.recolour) for i in inputs.items] == [(1, {})]
+
+
+async def test_a_colour_every_copy_swaps_away_takes_no_slot(tmp_path: Path) -> None:
+    paths, meta, written = await saved_output(tmp_path, count=1)
+    [entry] = written.manifest
+    own = entry.colours[0].upper()
+    body = ArrangeRequest(
+        objects=[ArrangeObject(output_id=meta.id, part=entry.part, recolour={own: MAGENTA})]
+    )
+    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    assert MAGENTA in inputs.colours and own not in [c.upper() for c in inputs.colours]

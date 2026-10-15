@@ -158,9 +158,12 @@ def manifest_of(req: OutputRequest) -> list[ManifestObject]:
             counts[key] += 1
             swaps.setdefault(key, swap)
     named = {entry.part: entry.piece for entry in req.bom if entry.part}
+    by_piece: dict[str, list[tuple[str, str]]] = {}
+    for key in counts:
+        by_piece.setdefault(key[0], []).append(key)
     objects: list[ManifestObject] = []
     for part in req.parts:
-        for key in [k for k in counts if k[0] == part.piece_key]:
+        for key in by_piece.get(part.piece_key, []):
             objects.append(_manifest_entry(req, part, counts[key], swaps[key], named))
     return objects
 

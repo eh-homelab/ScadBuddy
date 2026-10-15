@@ -221,6 +221,26 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
     create.mockRestore()
   })
 
+  it('offers no new model when the model list could not be read', async () => {
+    server.use(http.get('/api/v1/models', () => problem(503, 'Service Unavailable', 'try again')))
+    renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    expect(await screen.findByText(/could not read its models/)).toBeVisible()
+    expect(screen.queryByRole('option', { name: /A new model/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
+  })
+
+  it('names a new model as the API would file it, past a name already taken', async () => {
+    const create = vi.spyOn(api, 'createMeshModel')
+    const taken = { ...wand, filename: 'Name Keychain.3mf' }
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    const filing = await screen.findByLabelText('File under')
+    await waitFor(() => expect(filing).toHaveDisplayValue('A new model: Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    // `name-keychain` is a model already, so the new one is "Name Keychain 2".
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Name Keychain 2' })))
+    create.mockRestore()
+  })
+
   it('still files under an existing model when one is picked', async () => {
     const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
     const filing = await screen.findByLabelText('File under')

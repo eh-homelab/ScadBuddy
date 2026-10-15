@@ -552,6 +552,12 @@ def arrange_inputs(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
         )
+    if body.colours is None:
+        # A source's colour every copy swapped away prints nowhere: no slot for it
+        # (#3637). A slot no part used before keeps its place, as it always has.
+        drawn = {c.upper() for item in items for c in item.colours()}
+        gone = {c for item in items for c in item.recolour} - drawn
+        colours = [c for c in colours if c.upper() not in gone]
     try:
         _check_copies(sum(item.count for item in items))
     except ValueError as too_many:
