@@ -237,11 +237,21 @@ What changes for each session operation:
 | Claude Code process | one per turn | one per segment | one per session, kept warm between turns |
 | Transcript | `ai_session_entries` (plaintext) | workflow state (sealed by codec) | `ai_session_entries`, sealed under the session's data key (§6.2) |
 | Tool calls | in-process | each an activity on `agent-tools` | in-process, inside the turn activity |
-| Parallel tool calls | yes | no (one paused call per run) | yes |
+| Parallel tool calls | yes | no (one paused call per run) | yes; parallel outward calls park one after another (below) |
 | Parks | `ai_approvals`/`ai_questions`, in-memory wait | workflow entries, `ai_pending_input` | workflow entries, `ai_pending_input`; the activity holds, then releases (§5.4) |
 | Restart mid-turn | turn ends, `interrupted` | segment retried | activity retried on another replica, resumed (§5.5) |
 | Fork | yes | refused | yes |
 | Subagents | in-process, full tool set | loopback MCP, own tools only | in-process, full tool set |
+
+Parallel outward calls park one after another, each on an entry of its own. Claude Code 2.1.296
+calls `canUseTool` for the second call of an assistant message only after the first has run.
+Measured on the unified runtime's branch (Task 5.3) with `agent/test/sessionPark.temporal.test.ts`
+("two outward calls in one assistant message each park on an entry of their own"): the fake
+endpoint returns two `tool_use` blocks of an in-process outward tool in one message. The event log
+then reads `tool.call, tool.call, approval.required` with one entry. The second `approval.required`
+appears only after the first is approved and its `tool.result` is logged. The workflow and the turn's
+holds allow entries side by side (one per request id; `agent/test/agentSession.temporal.test.ts`, "two
+calls of one turn park side by side"), so a call the CLI does check in parallel parks alongside.
 
 ## 5. The session workflow and the turn activity
 
