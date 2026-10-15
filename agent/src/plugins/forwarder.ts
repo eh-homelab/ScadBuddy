@@ -9,6 +9,7 @@ import {
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { pinnedFetch, pinnedRequestOptions, requestFor } from '../http/pinned.js'
+import { isBrowserTool } from '../browser/guard.js'
 import { markUntrustedContent, wrapUntrustedText } from '../safety/untrusted.js'
 import {
   type CheckedPlugin,
@@ -267,11 +268,19 @@ export function rewriteMessages(payload: unknown, rewrites: Rewrites, route: Pic
     if (raw === undefined) return m
     const tool = `mcp__${route.plugin.name}__${harnessToolName(raw)}`
     const source = pluginSource(route.plugin)
+    // A browser tool's error is passed as its result (#982): Claude Code hands an MCP
+    // error to the model through PostToolUseFailure, which no hook can replace, so the
+    // browser guard's screen (browser/guard.ts) would never see a page in it. The text
+    // still says it failed (Playwright MCP's `### Error`).
+    const browser = isBrowserTool(harnessToolName(raw))
     if (isRecord(m.result) && Array.isArray(m.result.content)) {
-      return { ...m, result: { ...m.result, content: markUntrustedContent(m.result.content, tool, source) } }
+      const content = markUntrustedContent(m.result.content, tool, source)
+      return { ...m, result: { ...m.result, content, ...(browser && m.result.isError === true ? { isError: false } : {}) } }
     }
     if (isRecord(m.error) && typeof m.error.message === 'string') {
-      return { ...m, error: { ...m.error, message: wrapUntrustedText(tool, source, m.error.message) } }
+      const message = wrapUntrustedText(tool, source, m.error.message)
+      if (browser) return { jsonrpc: m.jsonrpc, id: m.id, result: { content: [{ type: 'text', text: message }] } }
+      return { ...m, error: { ...m.error, message } }
     }
     return m
   }

@@ -48,6 +48,8 @@ import type { PostgresSessionStore } from './store.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
+import { browserGuard } from '../browser/guard.js'
+import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 
@@ -175,6 +177,7 @@ export class TurnRunner {
     'maxBudgetUsd',
     'maxRetries',
     'tierOf',
+    'browser',
     'builtInPolicy',
     'approvalGate',
     'questionGate',
@@ -226,6 +229,7 @@ export class TurnRunner {
     builtinTools: 'builtinTools',
     ownPlugin: 'ownPlugin',
     remotePlugins: 'plugins',
+    browser: 'plugins', // judges the remote plugins' browser_* calls; reads the lists and approvals per call
     memoryHooks: 'slot',
     traceHooks: 'slot',
     stderr: 'spawn', // a constant sink (fingerprint rule)
@@ -428,6 +432,12 @@ export class TurnRunner {
         maxTurns: session.maxTurns,
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
         tierOf,
+        // The headless browser's lists (#982): every remote plugin's browser_* calls.
+        browser: browserGuard({
+          store: new BrowserOrigins(this.deps.sql, this.deps.settings),
+          sessionId: id,
+          plugins: remotePlugins.map((p) => p.name),
+        }),
         ...(builtIn ? { builtInPolicy: builtIn } : {}),
         approvalGate: (request) => {
           const turn = slot.current

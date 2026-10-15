@@ -60,6 +60,8 @@ export type VersionDiff = Schemas['VersionDiff']
 export type Job = Schemas['JobStatus']
 /** #1899 — a print's own support structures, over the template's `print_settings`. */
 export type SupportsChoice = Schemas['SupportsChoice']
+/** #3628 — a print's own prime tower, over the template's `print_settings`. */
+export type PrimeTowerChoice = Schemas['PrimeTowerChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
@@ -67,6 +69,10 @@ export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
 export type ArrangeRequest = Schemas['ArrangeRequest']
+/** #3637 — one object of an arrange, maybe in other colours. */
+export type ArrangeObject = Schemas['ArrangeObject']
+/** #2146 — open a library file or an output as an editable mesh model. */
+export type MeshModelCreate = Schemas['MeshModelCreate']
 export type ManifestObject = Schemas['ManifestObject']
 /** #902 — the re-render queued to give an output saved before Arrange its objects. */
 export type BackfillState = Schemas['BackfillState']
@@ -359,6 +365,27 @@ export interface Problem {
  */
 export interface HttpRequestSetting {
   enabled: boolean
+}
+
+/** #982 — an origin the user let one chat's headless browser open (`once`: one navigation, `session`: the chat). */
+export interface ApprovedBrowserOrigin {
+  session_id: string
+  title: string
+  origin: string
+  scope: 'once' | 'session'
+  approved_at: string
+}
+
+/**
+ * #982 — the headless browser's lists (`GET/PUT /api/v1/ai/settings/browser-origins`,
+ * agent `src/routes/browserOrigins.ts`): rules are an origin, a host, `*.host` or an
+ * address range; deny wins over allow, and an origin on neither list asks the user.
+ */
+export interface BrowserOriginsSetting {
+  allow: string[]
+  deny: string[]
+  defaults: { allow: string[]; deny: string[] }
+  approved: ApprovedBrowserOrigin[]
 }
 
 /**
