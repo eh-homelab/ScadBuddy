@@ -89,7 +89,9 @@ each fact on the pinned image.
 
 The full reverse-engineered format, geometry semantics, 3MF layout and HTTP API are
 in **the format reference**, `docs/makerworld/make-my-sign.md`, with captured example
-documents under `docs/makerworld/examples/`. These are the facts the design depends on:
+documents under `docs/makerworld/examples/`; the layer every MakerLab tool shares (the
+make record, the API, the 3MF writer, the nesting of one tool's document in another's)
+and its comparison with ScadBuddy is `docs/makerworld/makerlab-protocol.md`. These are the facts the design depends on:
 
 - **A project is one JSON document.** Every autosave sends `PUT
   /api/v1/creation-service/my/make/<id>` with `{"content": "<JSON string>"}`. The
