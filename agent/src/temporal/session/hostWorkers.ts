@@ -1,7 +1,7 @@
 import type { DataConverter } from '@temporalio/common'
 import type { WorkerOptions } from '@temporalio/worker'
 import { TASK_QUEUE } from '../names.js'
-import { AgentWorker } from '../worker.js'
+import { AgentWorker, workerIdentity } from '../worker.js'
 import { sessionHostQueue } from './names.js'
 
 // A replica's own queues (spec 2026-10-13 §5.2), two workers that stop together:
@@ -43,6 +43,8 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
   const common = {
     address: options.address,
     namespace: options.namespace,
+    // Polled as this replica, so a poller listing names it (affinity.ts `liveHostQueues`).
+    identity: workerIdentity(options.identity),
     ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
     ...(options.shutdownGraceMs !== undefined ? { shutdownGraceMs: options.shutdownGraceMs } : {}),
   }

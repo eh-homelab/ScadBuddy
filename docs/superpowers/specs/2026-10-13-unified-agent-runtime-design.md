@@ -310,7 +310,7 @@ lack them (§2.3).
 | `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10). A reservation is not evicted for `RESERVATION_HOLD_MS` (30 s), while its turn is still on its way. At 0 every session is admitted and each turn runs cold | worker |
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
-| `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, never on a home the turn was lost on (`exclude`), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
+| `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, naming the homes the turn was lost on (`exclude`: a lost home that is asked refers the turn to the other live replicas, and takes it only when none can; the last placement names none), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
 | `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends (handoff, archive and forget end it). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
 
 - **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
@@ -338,19 +338,36 @@ lack them (§2.3).
     failed worker's queue.
 - **Recovery is a workflow loop**, at most 3 cycles per turn.
   - **A lost home** (a `ScheduleToStart` or `Heartbeat` timeout) or a
-    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, excluding
-    every home this turn was lost on, then run `session_turn` on the new home with
+    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, naming
+    every home this turn was lost on (`exclude`), then run `session_turn` on the new home with
     `continuation: {kind: 'restarted'}`. That resumes from the checkpoint, the sealed
     transcript (§5.5, §6.2). The acquire is inside the cycle: one that fails past its own
     retries costs a cycle, as a lost home does.
+  - **Exclusion is a preference, not a ban.** A replica in `exclude` that is asked answers a
+    referral: itself as home, and `elsewhere`, the other live replicas that could take the
+    turn (the session host queues whose replica's `agent-tools` worker and own
+    `agent-sessions.<hostname>` worker both polled within 70 s: `liveHostQueues`, from
+    DescribeTaskQueue; each worker polls as `<pid>@<hostname>`). The workflow asks each of
+    those first, `acquire_worker` on that replica's own session host queue (5 s to start,
+    one attempt), and the first to reserve a place is home; when none answers, or none was
+    named, the lost home is the home again. The last of the three placements names no
+    exclusion at all. A refusal in place of the referral would need its retry to reach
+    another replica, which the shared queue does not promise (a retry goes to whichever
+    poller is next, and that can be the same replica ten times over); and a ban would never
+    lift where the lost home is the only one there is: a container restarted in place keeps
+    its hostname, and a lone replica whose heartbeat stalled is the only poller there is, so
+    every placement would be refused and the turn would fail after three minutes.
   - **A `StartToClose` timeout** is the turn's wall clock (D5), not a lost home: the turn is
     over, and placing it again could triple its spend. It ends idle with the error
     `turn_max_seconds`, as classic's `error_max_turns` does, and never re-acquires.
   - **Placements are fenced.** Each placement carries an attempt id (the run id and the
     cycle), which `session_turn` writes to `ai_sessions.turn_attempt` as it claims the turn.
     A placement the workflow gave up on may still run (a stalled heartbeat on a live
-    replica). Each of its event and transcript appends checks `turn_attempt` in the
-    append's own transaction, so none lands once another placement has claimed the turn.
+    replica). Each of its event and transcript appends, and each store of a tool result's
+    images, checks `turn_attempt` and `durable_turn_id` in the write's own transaction, so
+    none lands once another placement has claimed the turn or the turn has ended (the
+    attempt id is the run's and the cycle's, so the next turn's first placement in the same
+    run carries the same one).
     It also checks the row every second and is cut off once another placement holds it or
     the turn is no longer the row's: its process is closed. Its spend is never fenced: its
     requests are its own, so writing them cannot count anything twice, and the budget holds
@@ -375,8 +392,9 @@ lack them (§2.3).
   - `acquire_worker` is registered on the shared `agent-tools` worker, only on a replica
     that also runs the session host worker.
   - `session_turn` and `release_worker` are registered only on a second per-host worker,
-    on `agent-sessions.<hostname>`. The `agent-tools.<hostname>` worker and its limit do not
-    change.
+    on `agent-sessions.<hostname>`, and `acquire_worker` there too, for a turn another
+    replica (one it was lost on) refers here. The `agent-tools.<hostname>` worker and its
+    limit do not change.
   - The session host worker's `maxConcurrentActivityTaskExecutions` is the largest
     `warm_max_per_replica` the setting allows (32) plus 2 for releases. It is fixed when the
     worker starts, while the setting may change at run time; the warm cache's `reserve`

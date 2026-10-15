@@ -58,7 +58,7 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
-import { acquireActivities, releaseActivities } from './temporal/session/affinity.js'
+import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
@@ -74,7 +74,7 @@ import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
-import { AgentWorker } from './temporal/worker.js'
+import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
@@ -586,12 +586,29 @@ const sessionHosting = turnHost && sessions && operationStore && turnToolDeps ? 
  * for releases. The warm cache's `reserve` is what holds a replica to its setting.
  */
 const SESSION_HOST_SLOTS = RUNTIME_BOUNDS.warm_max_per_replica.max + 2
+// Routes start commands, and reach durable sessions' gates, through a lazy client: a
+// Temporal that is down answers 503. acquire_worker lists the live session hosts with it.
+const temporalClient = temporal
+  ? new Client({
+      connection: Connection.lazy({ address: temporal.address }),
+      namespace: config.temporalNamespace,
+      ...(dataConverter ? { dataConverter } : {}),
+    })
+  : undefined
+// A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
+// the session host queue for a turn another replica (one it was lost on) refers here.
+const sessionAcquire =
+  sessionHosting && temporalClient
+    ? acquireActivities({ warm: sessionHosting.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity(), liveHosts: () => liveHostQueues(temporalClient) })
+    : undefined
 
 const temporalWorker =
   temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
+        // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
+        identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(DURABLE_TOOLS, {
             services: toolServices,
@@ -610,8 +627,7 @@ const temporalWorker =
           // AgentSession's gate writers and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
-          // A place in this replica's warm cache, and its session host queue (§5.2).
-          ...(sessionHosting ? acquireActivities({ warm: sessionHosting.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity() }) : {}),
+          ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
@@ -673,7 +689,7 @@ const hostWorkers =
         ...(sessionHosting
           ? {
               sessions: {
-                activities: { ...sessionTurnActivity(sessionHosting.turnHost), ...releaseActivities(sessionHosting.warm) },
+                activities: { ...sessionTurnActivity(sessionHosting.turnHost), ...releaseActivities(sessionHosting.warm), ...(sessionAcquire ?? {}) },
                 // `warm_max_per_replica` may be raised while the replica runs; the slots cannot be.
                 slots: SESSION_HOST_SLOTS,
                 // The turns' own drain and abort wait (TurnHost.stop), so the worker never cuts one first.
@@ -685,15 +701,6 @@ const hostWorkers =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
-// Routes start commands, and reach durable sessions' gates, through a lazy client: a
-// Temporal that is down answers 503.
-const temporalClient = temporal
-  ? new Client({
-      connection: Connection.lazy({ address: temporal.address }),
-      namespace: config.temporalNamespace,
-      ...(dataConverter ? { dataConverter } : {}),
-    })
-  : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's

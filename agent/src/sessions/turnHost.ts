@@ -77,8 +77,8 @@ export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
   core: TurnCoreDeps
   sql: Sql
-  /** The message's images, by the names DurableTurns.send stored them under. */
-  images: Pick<SessionBlobs, 'get'>
+  /** The message's images, by the names DurableTurns.send stored them under; and a tool result's, stored under the fence. */
+  images: Pick<SessionBlobs, 'get' | 'putIf'>
   /** This replica's session host queue (`agent-sessions.<identity>`), what each result names. */
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
@@ -195,11 +195,15 @@ export class TurnHost {
       return why !== undefined && why !== 'shutdown'
     }
     const spend = new Spend(sql, id)
-    /** This placement still holds its turn: checked, row locked, in each write's own transaction. */
+    /**
+     * This placement still holds its turn: checked, row locked, in each write's own transaction.
+     * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
+     * turn's first placement in the same run carries this one's, and the turn ended leaves it.
+     */
     const holds = async (tx: TransactionSql, lock: 'share' | 'update') => {
       const rows = lock === 'share'
-        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} FOR SHARE`
-        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} FOR UPDATE`
+        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR SHARE`
+        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR UPDATE`
       return rows.length > 0
     }
     const events = this.#deps.core.events
@@ -227,7 +231,8 @@ export class TurnHost {
         if (message.type === 'stream_event' && message.event.type === 'message_stop') spend.flush(core.runningUsd())
       },
       mayWrite: () => !fenced(),
-      // Its events only while this placement holds the turn, checked with the append.
+      // A tool result's images, and its events, only while this placement holds the turn, checked with the write.
+      storeImages: (images) => this.#deps.images.putIf(id, images, (tx) => holds(tx, 'share')),
       appendEvents: async (batch) => {
         const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
         if (written) events.committed(id, batch, written)

@@ -171,7 +171,8 @@ export type DurableTurnsDeps = {
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
 /** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
-function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
+/** A protobuf timestamp (a poller's `lastAccessTime`) as epoch milliseconds; 0 when absent. */
+export function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
   return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
 }
 

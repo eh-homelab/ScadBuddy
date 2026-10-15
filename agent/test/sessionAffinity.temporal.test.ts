@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@temporalio/activity'
@@ -20,9 +21,10 @@ import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
+import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
+import type { AcquireInput } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
   SESSION_QUEUE,
@@ -31,7 +33,7 @@ import {
   sessionHostQueue,
 } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
-import { AgentWorker } from '../src/temporal/worker.js'
+import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -46,8 +48,12 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 // acquire_worker is decided by which replicas' agent-tools workers run.
 //
 // Timing: everything waits on a condition (a latch, the event log, the history), except where a
-// Temporal timeout is what is tested: the 5 s schedule-to-start of a dead home, and the 20 s
-// heartbeat of a replica that stopped answering.
+// Temporal timeout is what is tested: the 5 s schedule-to-start of a dead home, the 20 s
+// heartbeat of a replica that stopped answering, and the 5 s time cap. Those run on the dev
+// server's own timers (wall time), which is why the suite is not on the time-skipping test
+// environment: its activities are real Claude Code turns, which that environment does not skip
+// over, and the workflow needs the dev server's Updates and worker deployments. The waits here
+// (`pollUntil`, a `setTimeout` loop; the latches) are on Node's monotonic timers.
 
 let cliMissing: string | undefined
 try {
@@ -80,8 +86,9 @@ const conversation = (r: RecordedRequest) => JSON.stringify(r.body?.messages ?? 
 type Replica = {
   name: string
   m: SessionManager
-  /** acquire_worker answers, and NoCapacity refusals, on this replica. */
+  /** acquire_worker answers on this replica: places taken, referrals to other replicas (the turn was lost here), NoCapacity refusals. */
   acquired: number
+  referred: number
   refused: number
   /** Claude Code processes spawned. */
   spawned: number
@@ -112,6 +119,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   /** The stub tool's calls that have answered. */
   let slowReturned: number
   let slowGate: Promise<void>
+  /** What a call with this `q` waits on instead (two turns held apart). */
+  let slowGates: Map<string, Promise<void>>
   /** What `session_settings` answers each turn (the runtime settings, §5.2). */
   let runtimeSettings: typeof RUNTIME_DEFAULTS
 
@@ -142,6 +151,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     slowCalls = 0
     slowReturned = 0
     slowGate = Promise.resolve()
+    slowGates = new Map()
     runtimeSettings = RUNTIME_DEFAULTS
     script = () => ({ text: 'ok' })
   })
@@ -160,9 +170,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 30_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 
   /** The stub tool: counts its calls and answers once `slowGate` lets it. */
-  const slow = tool('slow', 'Does something slowly', { q: z.string() }, async () => {
+  const slow = tool('slow', 'Does something slowly', { q: z.string() }, async ({ q }) => {
     slowCalls++
-    await slowGate
+    await (slowGates.get(q) ?? slowGate)
     slowReturned++
     return { content: [{ type: 'text', text: 'slow done' }] }
   })
@@ -191,7 +201,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     const hostQueue = sessionHostQueue(name)
-    const r = { name, acquired: 0, refused: 0, spawned: 0, frozen: false, drainMs: options.drainMs ?? 1_000 } as Replica
+    const r = { name, acquired: 0, referred: 0, refused: 0, spawned: 0, frozen: false, drainMs: options.drainMs ?? 1_000 } as Replica
     r.m = manager({
       sql: pool.sql,
       paths,
@@ -224,22 +234,36 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       hostQueue,
       ...(options.fenceMs ? { fenceMs: options.fenceMs } : {}),
     })
-    const acquire = acquireActivities({ warm: r.m.warm, hostQueue, identity: name })[ACQUIRE_WORKER_ACTIVITY]
+    const acquire = acquireActivities({
+      warm: r.m.warm,
+      hostQueue,
+      identity: name,
+      // The real listing (the pollers' identities), cut to this test's replicas: the dev server
+      // still lists the earlier tests' pollers as fresh for a minute after their workers stopped.
+      liveHosts: async () => {
+        const live = await liveHostQueues(env.client)
+        return new Set([...live].filter((queue) => replicas.some((other) => sessionHostQueue(other.name) === queue)))
+      },
+    })[ACQUIRE_WORKER_ACTIVITY]
+    /** acquire_worker here, counted: a place taken, a referral to other replicas, or a refusal. */
+    const counted = async (input: AcquireInput) => {
+      try {
+        const answer = await acquire(input)
+        if (answer.elsewhere?.length) r.referred++
+        else r.acquired++
+        return answer
+      } catch (err) {
+        r.refused++
+        throw err
+      }
+    }
     r.tools = AgentWorker.start({
       address: env.address,
       namespace: 'default',
       taskQueue: TASK_QUEUE,
+      identity: workerIdentity(name),
       activities: {
-        [ACQUIRE_WORKER_ACTIVITY]: async (input: { sessionId: string }) => {
-          try {
-            const answer = await acquire(input)
-            r.acquired++
-            return answer
-          } catch (err) {
-            r.refused++
-            throw err
-          }
-        },
+        [ACQUIRE_WORKER_ACTIVITY]: counted,
         ...sessionFinishActivities(pool.sql, r.m.events),
       },
       shutdownGraceMs: 1_000,
@@ -260,6 +284,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
             ...(options.deaf ? { cancelled: () => new AbortController().signal } : {}),
           }),
           ...releaseActivities(r.m.warm),
+          // Asked here directly when another replica refers the turn.
+          [ACQUIRE_WORKER_ACTIVITY]: counted,
         },
         slots: options.slots ?? 10,
         // As main.ts: past the turns' own drain and abort wait.
@@ -472,12 +498,13 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(a.m.warm.size()).toBe(0)
     const b = await replica('b')
     await settled(id)
-    const began = Date.now()
+    const began = performance.now()
     const second = await b.m.send(id, browser, 'second')
     const run = await runningRun(id)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    // The first try waited its 5 s on A's queue, then acquire ran again, on B.
-    expect(Date.now() - began).toBeGreaterThanOrEqual(5_000)
+    // The first try waited its 5 s on A's queue, then acquire ran again, on B (measured on the
+    // monotonic clock: the server's timer is the thing under test, not the host's wall clock).
+    expect(performance.now() - began).toBeGreaterThanOrEqual(5_000)
     const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_SCHEDULE_TO_START'])
     expect(a.acquired + b.acquired).toBe(2)
@@ -556,14 +583,17 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const a = await replica('a', { deaf })
     const { id, turn } = await startOn(a, 'do the slow thing')
     await pollUntil(() => slowCalls, 1)
+    // B is up before A stalls: the turn has another replica to go to, so A, if asked, refers it there.
+    const b = await replica('b')
     // A's heartbeat stalls; A itself (its process, its agent-tools worker) stays up.
     a.frozen = true
-    // The heartbeat times out and acquire runs again: A refuses the turn it lost.
-    await pollUntil(() => a.refused >= 1, true, 60_000)
+    // The heartbeat times out and acquire runs again: B takes the turn, never A.
+    await pollUntil(() => b.acquired, 1, 60_000)
     expect(a.acquired).toBe(1)
-    const b = await replica('b')
+    expect(a.refused).toBe(0)
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(b.acquired).toBe(1)
+    expect(a.acquired).toBe(1)
     // A saw B's placement on the row and cut itself off: its process is gone.
     await pollUntil(() => a.turnHost.active, 0)
     expect(a.m.warm.size()).toBe(0)
@@ -595,10 +625,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const a = await replica('a', { deaf: true, fenceMs: 3_600_000 })
     const { id, turn } = await startOn(a, 'do the slow thing')
     await pollUntil(() => slowCalls, 1)
-    a.frozen = true
-    await pollUntil(() => a.refused >= 1, true, 60_000)
-    await a.tools.stop()
+    // B answers the acquire once A's heartbeat stalls: A's agent-tools worker is gone by then.
     const b = await replica('b')
+    await a.tools.stop()
+    a.frozen = true
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     await settled(id)
     expect(b.acquired).toBe(1)
@@ -619,6 +649,110 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect({ events: (await a.m.events.read(id, 0, 10_000)).length, entries: await entries() }).toEqual(before)
   })
 
+  it('a replica restarted in place takes its lost turn back: the one home there is, lost on, is a home still', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a', { drainMs: 1_000 })
+    const { id, turn } = await startOn(a, 'outlast the restart')
+    await pollUntil(() => slowCalls, 1)
+    // SIGTERM, then the same container again: its workers stop (the turn, still running past
+    // the grace, is cut and fails ShuttingDown) and new ones start under the same identity, so
+    // under the same queue names, which the turn was just lost on.
+    replicas.splice(replicas.indexOf(a), 1)
+    await stopReplica(a)
+    const again = await replica('a')
+    // No other replica can take the turn: the restarted one is asked, and takes it.
+    await pollUntil(() => again.acquired, 1, 60_000)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(again.refused + again.referred).toBe(0)
+    // Resumed, not re-sent: the prompt had landed before the restart.
+    const resumed = fake.messageCalls().at(-1)!
+    expect(conversation(resumed)).toContain(RESTARTED_PROMPT)
+    expect(userTurns(resumed, 'outlast the restart')).toBe(1)
+    expect(slowCalls).toBe(1)
+    expect(again.spawned).toBe(1)
+    hold.release()
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+  })
+
+  it('a lone replica whose heartbeat stalled takes its own turn back, its stalled placement cut first', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
+    await pollUntil(() => slowCalls, 1)
+    a.frozen = true
+    // The heartbeat times out and acquire runs again, with A excluded: A is the only replica
+    // there is, so A is asked and takes it.
+    await pollUntil(() => a.acquired, 2, 60_000)
+    a.frozen = false
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(a.refused + a.referred).toBe(0)
+    const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+    expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_HEARTBEAT'])
+    // The new placement cut the stalled one (`replaced`) and resumed on a process of its own.
+    const resumed = fake.messageCalls().at(-1)!
+    expect(conversation(resumed)).toContain(RESTARTED_PROMPT)
+    expect(slowCalls).toBe(1)
+    expect(a.spawned).toBe(2)
+    await pollUntil(() => a.turnHost.active, 0)
+    hold.release()
+    await pollUntil(() => slowReturned, 1)
+    expect(await said(a, id, 'slow done')).toBe(false)
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+  })
+
+  it('a stale placement of a turn that ended cannot write while the next turn runs under the same attempt id (the fence checks the turn)', async () => {
+    const one = latch()
+    const two = latch()
+    slowGates.set('one', one.promise).set('two', two.promise)
+    script = (r) => {
+      const c = conversation(r)
+      if (c.includes('slow done')) return { text: c.includes('turn two') ? 'late from B' : 'late from A' }
+      return { toolUse: { name: 'mcp__stub__slow', input: { q: c.includes('turn two') ? 'two' : 'one' } } }
+    }
+    runtimeSettings = { ...RUNTIME_DEFAULTS, turn_max_seconds: 5 }
+    // A never hears turn 1 end: deaf to its activity's cancel, and its row check never comes round.
+    const a = await replica('a', { deaf: true, fenceMs: 3_600_000 })
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    await pollUntil(() => slowCalls, 1)
+    // Turn 1 ends at its time cap, never moved: A stays home, and A's placement keeps running.
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    expect(a.turnHost.active).toBe(1)
+    const [row] = await db.sql<{ turn_attempt: string }[]>`SELECT turn_attempt FROM ai_sessions WHERE id = ${id}`
+    const attempt = row!.turn_attempt
+    expect(attempt).toMatch(/:0$/)
+    // Turn 2 in the same run carries the same attempt id (`<run id>:0`): the workflow places it so
+    // when its message arrives as turn 1 closes, which no test can time, so it is placed here as
+    // the workflow would, on B, with session_turn claiming the row as it does.
+    const turnId2 = randomUUID()
+    await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${turnId2}, updated_at = now() WHERE id = ${id}`
+    const b = await replica('b')
+    const running = b.turnHost.run(
+      { sessionId: id, turnId: turnId2, attempt, message: { turn_id: turnId2, author: browser, text: 'turn two', images: [], system_append: null } },
+      { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
+    )
+    await pollUntil(() => slowCalls, 2)
+    // While B runs turn 2: A's call answers, and A carries on: its tool result, a model request, its reply.
+    one.release()
+    await pollUntil(() => a.turnHost.active, 0)
+    expect(fake.messageCalls().filter((r) => conversation(r).includes('slow done'))).toHaveLength(1)
+    // None of A's writes landed: no event, no transcript entry.
+    expect(await said(b, id, 'late from A')).toBe(false)
+    expect(await said(b, id, 'slow done')).toBe(false)
+    const late = await db.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM ai_session_entries WHERE session_id = ${id} AND entry LIKE '%late from A%'`
+    expect(Number(late[0]!.n)).toBe(0)
+    two.release()
+    expect(await running).toMatchObject({ status: 'done' })
+    expect(await said(b, id, 'late from B')).toBe(true)
+  })
+
   it('warm_max_per_replica 0: a turn is admitted and runs cold to its end (I2)', async () => {
     const a = await replica('a', { maxEntries: 0 })
     const { id, turn } = await startOn(a, 'first')
@@ -637,8 +771,11 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   it('a send right after a turn cut at turn_max_seconds runs: the cut placement still here goes first, never WarmBusy (I3)', async () => {
     script = (r) => (conversation(r).includes('again') ? { text: 'ok' } : { hang: true })
     runtimeSettings = { ...RUNTIME_DEFAULTS, turn_max_seconds: 5 }
-    // Beats far apart: the cut placement's activity hears of its timeout only well after the next send.
-    const a = await replica('a', { heartbeatMs: 15_000 })
+    // The cut placement hears of its turn's end neither from its activity's cancel (deaf: the
+    // SDK flushes a throttled beat at 16 s, which the server answers NotFound) nor from the row
+    // (its check never comes round), so the `replaced` cut is what frees its process. Beats far
+    // apart too: the 5 s time cap ends the activity long before the 20 s heartbeat timeout could.
+    const a = await replica('a', { deaf: true, heartbeatMs: 60_000, fenceMs: 3_600_000 })
     const { id, turn } = await startOn(a, 'take too long')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     await settled(id)

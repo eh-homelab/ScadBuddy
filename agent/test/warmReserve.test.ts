@@ -13,6 +13,8 @@ import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from '.
 // reservation, never one running a turn, and refuses only when every one runs a turn.
 
 const credential = { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test' }
+/** acquire_worker's listing of the live session hosts, where the test has one replica and no turn was lost. */
+const alone = () => Promise.resolve(new Set(['agent-sessions.r']))
 
 function assembly(): AssembledTurn {
   return {
@@ -111,7 +113,7 @@ describe('WarmSessions.reserve and release', () => {
   it('warm_max_per_replica 0 admits every session: its turns run cold', async () => {
     const { warm, spawned, running } = cache(0)
     expect(warm.reserve('a')).toBe('reserved')
-    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r' })[ACQUIRE_WORKER_ACTIVITY]
+    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: alone })[ACQUIRE_WORKER_ACTIVITY]
     await expect(acquire({ sessionId: 'b' })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
     // The turn's process is spawned, and closed once the turn leaves it.
     const turn = await running('a')
@@ -120,11 +122,28 @@ describe('WarmSessions.reserve and release', () => {
     expect(warm.size()).toBe(0)
   })
 
-  it('refuses a session whose turn was lost here (exclude), so its retry lands elsewhere', async () => {
-    const { warm } = cache(2)
-    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r' })[ACQUIRE_WORKER_ACTIVITY]
-    await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.r'] })).rejects.toMatchObject({ type: NO_CAPACITY, nonRetryable: false })
-    await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.other'] })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
+  it('a session whose turn was lost here (exclude) is referred to the other live replicas, and taken when there are none', async () => {
+    const { warm } = cache(8)
+    const reserved: string[] = []
+    const reserving = { reserve: (id: string) => (reserved.push(id), warm.reserve(id)) }
+    const acquire = (live: string[]) => acquireActivities({ warm: reserving, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: () => Promise.resolve(new Set(live)) })[ACQUIRE_WORKER_ACTIVITY]
+    const here = { hostQueue: 'agent-sessions.r', identity: 'r' }
+    // Another replica polls: a referral there, and no place reserved here for a turn that is leaving.
+    await expect(acquire(['agent-sessions.r', 'agent-sessions.other'])({ sessionId: 'a', exclude: ['agent-sessions.r'] })).resolves.toEqual({ ...here, elsewhere: ['agent-sessions.other'] })
+    expect(reserved).toEqual([])
+    // A home the turn was lost on elsewhere does not count against this one.
+    await expect(acquire(['agent-sessions.r', 'agent-sessions.other'])({ sessionId: 'a', exclude: ['agent-sessions.other'] })).resolves.toEqual(here)
+    // A preference, not a ban: with no other replica (a restart in place keeps the queue's name;
+    // a lone replica whose heartbeat stalled), or only ones the turn was lost on too, this one takes it.
+    await expect(acquire(['agent-sessions.r'])({ sessionId: 'b', exclude: ['agent-sessions.r'] })).resolves.toEqual(here)
+    await expect(acquire([])({ sessionId: 'c', exclude: ['agent-sessions.r'] })).resolves.toEqual(here)
+    await expect(acquire(['agent-sessions.r', 'agent-sessions.other'])({ sessionId: 'd', exclude: ['agent-sessions.r', 'agent-sessions.other'] })).resolves.toEqual(here)
+    expect(reserved).toEqual(['a', 'b', 'c', 'd'])
+    // Who polls is unknown (Temporal did not answer): the attempt fails and is retried, where another replica may answer.
+    const unknown = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: () => Promise.reject(new Error('describe failed')) })[ACQUIRE_WORKER_ACTIVITY]
+    await expect(unknown({ sessionId: 'e', exclude: ['agent-sessions.r'] })).rejects.toThrow('describe failed')
+    // Not excluded: nobody is asked who polls.
+    await expect(unknown({ sessionId: 'e' })).resolves.toEqual(here)
   })
 
   it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {
@@ -161,7 +180,7 @@ describe('WarmSessions.reserve and release', () => {
     expect(spawned.get('one')?.closed()).toBe(false)
     expect(spawned.get('two')?.closed()).toBe(false)
     // As acquire_worker says it: retryable NoCapacity, so another replica may answer.
-    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r' })[ACQUIRE_WORKER_ACTIVITY]
+    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r', liveHosts: alone })[ACQUIRE_WORKER_ACTIVITY]
     await expect(acquire({ sessionId: 'three' })).rejects.toMatchObject({ type: NO_CAPACITY, nonRetryable: false })
     two.left()
     await expect(acquire({ sessionId: 'three' })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })

@@ -16,10 +16,22 @@ import { TASK_QUEUE } from './names.js'
 
 export type TemporalHealth = 'connecting' | 'ok' | 'unavailable'
 
+/**
+ * The identity a replica's workers poll under: `<pid>@<replica>`, the SDK's own default shape
+ * (`<pid>@<hostname>`), which plugins/pluginSessions.ts `pollingReplicas` and
+ * temporal/session/affinity.ts `liveHostQueues` read the replica back out of. Set explicitly so
+ * tests may run several replicas in one process.
+ */
+export const workerIdentity = (replica: string): string => `${process.pid}@${replica}`
+/** The replica behind a poller's identity (`workerIdentity`). */
+export const replicaOfIdentity = (identity: string): string => identity.replace(/^\d+@/, '')
+
 export type AgentWorkerOptions = {
   address: string
   namespace: string
   taskQueue?: string
+  /** What the worker polls as (`workerIdentity`); the SDK's `<pid>@<hostname>` when omitted. */
+  identity?: string
   activities: NonNullable<WorkerOptions['activities']>
   /** The AgentOperation workflow: the build's bundle, or its source in tests. */
   workflows?: Pick<WorkerOptions, 'workflowBundle' | 'workflowsPath'>
@@ -127,6 +139,7 @@ export class AgentWorker {
           connection,
           namespace: options.namespace,
           taskQueue: options.taskQueue ?? TASK_QUEUE,
+          ...(options.identity !== undefined ? { identity: options.identity } : {}),
           activities: options.activities,
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),

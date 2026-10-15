@@ -71,11 +71,12 @@ import {
 // Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
 // queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
-// again: acquire on the shared `agent-tools` (never one of the homes it was lost on), then the
-// turn on the new home, resumed from its transcript (`restarted`), at most PLACEMENTS times. Each
-// placement carries its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never moves it. On `end` the
-// workflow releases its place on `home`. Parks (§5.4) are Task 5.3's: a turn that ends
-// `released` is failed here.
+// again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
+// replica can take it, and the last placement unrestricted), then the turn on the new home,
+// resumed from its transcript (`restarted`), at most PLACEMENTS times. Each placement carries
+// its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
+// moves it. On `end` the workflow releases its place on `home`. Parks (§5.4) are Task 5.3's: a
+// turn that ends `released` is failed here.
 
 const SHORT = '30s'
 /** How many times one turn is placed on a worker (§5.2 "Recovery"). */
@@ -190,22 +191,37 @@ export async function AgentSession(start: SessionStart): Promise<void> {
 
   /**
    * The turn on the session's home, acquired first when there is none; placed again when its
-   * worker is lost (`movesWorker`), never on that worker's queue (the affinity guide).
+   * worker is lost (`movesWorker`), on another worker's queue where there is one (the affinity
+   * guide): the homes it was lost on are a preference against, not a ban (affinity.ts), and the
+   * last placement names none, so a lone replica, restarted in place, still takes its turn back.
    */
   async function placeTurn(input: SessionTurnInput, settings: RuntimeSettings): Promise<SessionTurnResult> {
     let continuation = input.continuation
     let last: unknown
-    /** The homes this turn was lost on: acquire_worker never places it there again. */
+    /** The homes this turn was lost on: acquire_worker places it elsewhere while it can. */
     const lost: string[] = []
     for (let cycle = 0; cycle < PLACEMENTS; cycle++) {
       const { continuation: _previous, ...rest } = input
       try {
         // Inside the try: a replica that refuses (NoCapacity past its retries) costs a placement, as a lost one does.
         if (!home) {
-          const acquired = (await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId, ...(lost.length ? { exclude: [...lost] } : {}) } satisfies AcquireInput)) as {
+          const exclude = cycle < PLACEMENTS - 1 && lost.length ? { exclude: [...lost] } : {}
+          const acquired = (await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId, ...exclude } satisfies AcquireInput)) as {
             hostQueue: string
+            elsewhere?: string[]
           }
           home = acquired.hostQueue
+          // A home the turn was lost on answered, naming the replicas that could take it instead:
+          // the first to reserve a place (acquire_worker on its own queue) is home; else it is.
+          for (const queue of acquired.elsewhere ?? []) {
+            const there = proxyActivities<Activities>({ taskQueue: queue, scheduleToStartTimeout: '5s', startToCloseTimeout: SHORT, retry: { maximumAttempts: 1 } })
+            try {
+              home = ((await there[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId } satisfies AcquireInput)) as { hostQueue: string }).hostQueue
+              break
+            } catch (err) {
+              if (isCancellation(err)) throw err
+            }
+          }
         }
         const onHome = proxyActivities<Activities>({
           taskQueue: home,

@@ -10,7 +10,7 @@ import type { QuestionGate } from '../harness/questions.js'
 import { redact } from '../secrets.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { WaitForTab } from '../tools/registry.js'
-import type { SessionBlobs } from './blobs.js'
+import type { SessionBlobs, SessionImage } from './blobs.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, TurnOutcome, TurnPrincipal } from './manager.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -85,6 +85,8 @@ export type CoreTurnArgs = {
    * only while it holds its turn, checked in the append's transaction). False when refused.
    */
   appendEvents?: (events: ServerEvent[]) => Promise<boolean>
+  /** How a tool result's images are stored, when not `deps.blobs.put` (the same placement's hold, checked in the store's transaction). False when refused. */
+  storeImages?: (images: SessionImage[]) => Promise<boolean>
 }
 
 /** How the turn's stream ended. */
@@ -192,7 +194,10 @@ export class CoreTurn {
       const images = mapper.takeImages()
       if (images.length && mayWrite()) {
         try {
-          await deps.blobs.put(id, images)
+          if (this.#args.storeImages) {
+            // Refused (the placement no longer holds its turn): the events go without them, and are refused the same way.
+            if (!(await this.#args.storeImages(images))) events = events.map((e) => (e.type === 'tool.result' && e.images ? withoutImages(e) : e))
+          } else await deps.blobs.put(id, images)
         } catch (err) {
           deps.stderr?.(`session ${id}: could not store a tool result's images: ${describe(err)}\n`)
           events = events.map((e) => (e.type === 'tool.result' && e.images ? withoutImages(e) : e))
