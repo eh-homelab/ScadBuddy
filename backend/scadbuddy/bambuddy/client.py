@@ -87,6 +87,9 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
+#: The largest camera frame read into memory: a JPEG of a printer's camera is well
+#: under a megabyte, so past this Bambuddy is answering something else (#1006).
+MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
@@ -205,6 +208,12 @@ def _call_span(
     if detached:
         return detached_span(name, kind=SpanKind.CLIENT, attributes=attributes)
     return span(name, kind=SpanKind.CLIENT, attributes=attributes)
+
+
+class BambuddyAnswerError(ApiError):
+    """What Bambuddy's answer did wrong, found while reading it inside
+    :meth:`BambuddyClient.stream`'s ``async with`` (a frame over its cap): it fails the
+    call's span, as a refusal does. Any other error the reader raises leaves it alone."""
 
 
 @dataclass(frozen=True)
@@ -370,15 +379,24 @@ class BambuddyClient:
         """
         what = f"capture the camera of printer {printer_id}"
         token = await self._camera_token(what=what)
-        response = await self._send(
-            "GET",
+        frame = bytearray()
+        async with self.stream(
             f"/printers/{printer_id}/camera/snapshot",
-            scope=Scope.READ_STATUS,
             operation="printers.camera.snapshot",
             what=what,
             params={"token": token},
-        )
-        return response.content
+            # Nothing sends a Range here, so a 416 is no seek: map it, never a "frame".
+            pass_416=False,
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                frame += chunk
+                if len(frame) > MAX_CAMERA_FRAME_BYTES:
+                    raise BambuddyAnswerError(
+                        status.HTTP_502_BAD_GATEWAY,
+                        f"Bambuddy's frame was over {MAX_CAMERA_FRAME_BYTES} bytes when asked"
+                        f" to {what}",
+                    )
+        return bytes(frame)
 
     @asynccontextmanager
     async def camera_stream(
@@ -817,22 +835,30 @@ class BambuddyClient:
         what: str,
         range_header: str | None = None,
         if_range: str | None = None,
+        params: Mapping[str, str] | None = None,
+        pass_416: bool = True,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
         ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
         a seek with a ``206`` and only those bytes. The response is open for the
-        duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
+        duration of the ``async with``. Read it with ``aiter_raw`` to pass the bytes on
+        as Bambuddy sent them (the media proxy keeps its ``Content-Encoding``), or with
+        ``aiter_bytes`` where the caller counts or uses the decoded bytes, as the camera
+        frame's cap does. A failure is mapped
         as every other call's is, once its (small) body has been read, except a ``416``:
         that is the answer to a seek past the end, and its ``Content-Range`` carries the
-        length the media element needs, so it is passed through.
+        length the media element needs, so it is passed through. ``pass_416=False`` maps
+        it as any refusal, for a caller that sends no ``Range`` (#3397).
         """
         headers = dict(self._headers)
         if range_header is not None:
             headers["Range"] = range_header
         if if_range is not None:
             headers["If-Range"] = if_range
-        request = self._http.build_request("GET", self.config.url(path), headers=headers)
+        request = self._http.build_request(
+            "GET", self.config.url(path), headers=headers, params=params
+        )
         # The span fails only on what Bambuddy did: an error the consumer raises inside
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         # A transport error there is the body's read failing, which is Bambuddy's.
@@ -845,7 +871,7 @@ class BambuddyClient:
                 raise map_transport(error, what=what) from error
             current.set_attribute("http.response.status_code", response.status_code)
             try:
-                if not response.is_success and response.status_code != 416:
+                if not response.is_success and (response.status_code != 416 or not pass_416):
                     await response.aread()
                     raise map_response(response, scope=Scope.READ_STATUS, what=what)
                 try:
@@ -853,6 +879,8 @@ class BambuddyClient:
                 except httpx.HTTPError as error:
                     logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
                     raise map_transport(error, what=what) from error
+                except BambuddyAnswerError:
+                    raise
                 except Exception as error:
                     consumer_error = error
             finally:

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { enterWorktree } from '../builtins/session.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import type { SessionManager } from '../sessions/manager.js'
+import { SessionError, type SessionManager } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
 import { type AgentOptions, framedTask } from './workflowScript.js'
 
@@ -60,11 +60,20 @@ export type AgentRun = {
   prompt: string
   opts: AgentOptions
   signal: AbortSignal
+  /** Told each child chat's id as soon as it is started, before its agent runs (#3395). */
+  onChild?: (childId: string) => Promise<void>
 }
 
 export type AgentResult = { ok: boolean; result: unknown; childId?: string; error?: string }
 
-export type WorkflowAgents = { run(call: AgentRun): Promise<AgentResult> }
+export type WorkflowAgents = {
+  run(call: AgentRun): Promise<AgentResult>
+  /** Ends a child chat an earlier attempt of the run left open: its turn interrupted, the chat marked done (#3395). */
+  end(childId: string, owner: Owner): Promise<void>
+}
+
+/** How long `end` keeps trying to mark a child done while its turn still holds a claim: past a dead replica's lease. */
+const END_WAIT_MS = 2 * 60_000
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/
@@ -136,6 +145,7 @@ export function managerAgents(
       const settings = await chatSettings(call.opts, types)
       if (typeof settings === 'string') return { ok: false, result: null, error: settings }
       const child = await manager.startChild(call.sessionId, call.owner, { title: `${call.workflow} · ${label}`, tags: ['workflow'], agent: settings })
+      await call.onChild?.(child.id)
       const check = call.opts.schema ? validator(call.opts.schema) : undefined
       const stop = () => void manager.interrupt(child.id, call.owner).catch(() => {})
       call.signal.addEventListener('abort', stop, { once: true })
@@ -173,6 +183,20 @@ export function managerAgents(
       } finally {
         call.signal.removeEventListener('abort', stop)
         await manager.edits.update(child.id, call.owner, { done: true }).catch(() => {})
+      }
+    },
+
+    async end(childId, owner) {
+      await manager.interrupt(childId, owner).catch(() => {})
+      // A turn the dead attempt's replica ran keeps its claim until its lease lapses and it is freed.
+      for (const deadline = Date.now() + END_WAIT_MS; ; ) {
+        try {
+          await manager.edits.update(childId, owner, { done: true })
+          return
+        } catch (err) {
+          if (!(err instanceof SessionError) || err.code !== 'busy' || Date.now() > deadline) return
+          await new Promise((r) => setTimeout(r, 1000))
+        }
       }
     },
   }

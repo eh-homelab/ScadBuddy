@@ -149,6 +149,11 @@ interface Props {
    * output. A library file has none of ScadBuddy's.
    */
   printSettings?: Record<string, string> | undefined
+  /**
+   * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
+   * the print waits in Bambuddy's queue rather than starting. It can be unticked.
+   */
+  queue?: boolean
 }
 
 export function PrintPicker({
@@ -159,6 +164,7 @@ export function PrintPicker({
   onPrinterModel,
   project,
   printSettings,
+  queue = false,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
@@ -264,6 +270,35 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
+  // Memoised: it is a dependency of the run and of the background analysis.
+  // Seeded only while it was never chosen. `null` is the user handing it back to the
+  // remembered value or Bambuddy's ("the default"): sent as no override at all.
+  const sentOptions = useMemo(() => {
+    if (!queue) return options
+    const { manual_start: start, ...rest } = options
+    if (start === undefined) return { ...rest, manual_start: true }
+    return start === null ? rest : options
+  }, [queue, options])
+  /**
+   * #2786 review — the disclosure's edits, kept as the user's own: it builds each edit
+   * from the value it shows, which in a Queue carries the seed. The seed passing back
+   * through is not a choice; Queue's start dropped from what it showed is "the default".
+   */
+  const editOptions = (next: PrintOptions) => {
+    if (!queue) return setOptions(next)
+    const { manual_start: start, ...rest } = next
+    if (start === undefined) return setOptions({ ...rest, manual_start: null })
+    // A `true` while never chosen is the seed passing back through, not a choice. The
+    // select already shows Yes then, so picking Yes fires nothing either: to remember
+    // Yes, the user picks No and then Yes, and that one is kept.
+    setOptions(start === true && options.manual_start === undefined ? rest : next)
+  }
+  /** What Remember saves: the user's edits, never Queue's seed or an unset. */
+  const rememberOptions = useMemo(() => {
+    const { manual_start: start, ...rest } = options
+    return start === null || start === undefined ? rest : options
+  }, [options])
   /**
    * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
    * never remembered (until #1754 decides remembered choices by subject).
@@ -430,7 +465,7 @@ export function PrintPicker({
     planChanged,
     copies,
     projectId,
-    options,
+    options: sentOptions,
     printSequence,
     supports,
     filamentProfiles: filamentProfiles.active,
@@ -479,12 +514,14 @@ export function PrintPicker({
   // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange
   // made of it, which keeps the dialog's settings.
   const { sourceKey: currentKey } = picker
+  const { reset: resetProfiles } = filamentProfiles
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
-  }, [currentKey, carry])
+    resetProfiles()
+  }, [currentKey, carry, resetProfiles])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
   async function rearrange(backfill: boolean) {
@@ -606,7 +643,7 @@ export function PrintPicker({
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
           copies: effectiveCopies,
-          options,
+          options: sentOptions,
         }
       : null
 
@@ -746,6 +783,7 @@ export function PrintPicker({
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
+    filamentProfiles.reset()
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -761,7 +799,7 @@ export function PrintPicker({
   return (
     <Dialog
       open={open}
-      title="Print"
+      title={queue ? 'Queue' : 'Print'}
       description={
         result || unanswered !== null
           ? undefined
@@ -820,7 +858,7 @@ export function PrintPicker({
               {...USER_ONLY}
             >
               {running && <Spinner />}
-              Print
+              {queue ? 'Queue' : 'Print'}
             </Button>
           </>
         )
@@ -1175,10 +1213,11 @@ export function PrintPicker({
                       <PrintOptionsDisclosure
                         subject={subject}
                         printerId={printerId}
-                        value={copies === null ? options : { ...options, quantity: copies }}
+                        value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
+                        toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
                         onChange={({ quantity, ...rest }) => {
                           setCopies(quantity ?? null)
-                          setOptions(rest)
+                          editOptions(rest)
                         }}
                       />
 

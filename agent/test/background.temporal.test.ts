@@ -71,6 +71,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
             await new Promise((r) => setTimeout(r, 20))
             return agentAnswer(call.prompt)
           },
+          end: async () => {},
         },
         send: async (_t, prompt) => {
           const answer = answers.shift() ?? { result: 'sent' }

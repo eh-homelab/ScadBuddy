@@ -325,6 +325,8 @@ export function LibraryPage() {
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
   // #2671 — a sliced file prints, but has no objects to arrange.
+  // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
+  // a change to this filter, or to what the server calls `printable`, changes that too.
   const printable = picked.filter((file) => file.printable && !file.sliced)
   const printing =
     printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
@@ -418,6 +420,14 @@ export function LibraryPage() {
             >
               Arrange selected ({printable.length})
             </Button>
+            {/* #2286 — a ticked file Arrange cannot take is said, not silently dropped. */}
+            {picked.length > printable.length && (
+              <span role="note" className="text-[12px] text-muted">
+                {`${picked.length - printable.length} selected ${
+                  picked.length - printable.length === 1 ? 'file' : 'files'
+                } can't be arranged: only unsliced 3MF and STL files can.`}
+              </span>
+            )}
             <Button
               size="sm"
               data-testid="library-copy-selected"

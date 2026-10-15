@@ -816,6 +816,10 @@ describe('the page slot', () => {
     // container around the textarea, and no overflow-hidden to clip a long error.
     expect(alert).toHaveClass('max-h-[30vh]')
     expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
+    // And the textarea shrinks to fit too, scrolling inside itself, rather than spilling
+    // out of the 30vh box over the template where 30vh is under its 4 rows.
+    expect(saved).toHaveClass('min-h-0')
+    expect(saved).not.toHaveClass('shrink-0')
     for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
       expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
     }

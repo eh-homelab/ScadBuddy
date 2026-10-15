@@ -398,6 +398,18 @@ export interface SessionLimits {
 }
 
 /**
+ * The session runtime settings (`GET/PUT /api/v1/ai/settings/session-runtime`, agent
+ * `src/routes/sessionRuntime.ts`): how long a parked call is held, the warm process
+ * cache's size (0: every turn is cold) and idle time, and the most a turn may run.
+ */
+export interface SessionRuntime {
+  park_hold_seconds: number
+  warm_max_per_replica: number
+  warm_idle_seconds: number
+  turn_max_seconds: number
+}
+
+/**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
  * agent `src/routes/renderLimits.ts`). Past a concurrency limit a render waits for a slot,
  * up to the tool's own wait; a call is refused past 100 waiting per caller, or past

@@ -277,6 +277,7 @@ describe('turn tools in a durable session', () => {
       ],
       problems: [],
       secrets: [],
+      terminate: async () => {},
       release: () => {},
     }
     const { servers } = await turnServers({ remotePlugins: async () => forwarded })({

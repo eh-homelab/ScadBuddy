@@ -4,6 +4,7 @@ import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
@@ -18,7 +19,7 @@ import { SessionFiles } from '../src/workspace/store.js'
 import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -193,9 +194,43 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
   })
 
+  it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
+    // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
+    // Chosen by the message delivered: a warm process's `run.prompt` is its inbox, not the text.
+    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() =>
+      promptText(scripted.prompts.at(-1)!).includes('first') ? { hang: true } : { reply: 'done again' },
+    )
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
+    const t = (await store.create({
+      sessionId: parent,
+      kind: 'workflow',
+      description: 'retry',
+      spec: { name: 'retry', description: 'retry', body: `return await agent('first')`, scriptPath: '/workspace/_claude/workflows/retry-wf_x.js' },
+      createdBy: browser,
+    }))!
+    const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${parent}-${t.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
+    const first = new MockActivityEnvironment({ ...info, attempt: 1 })
+    const abandoned = first.run(acts.wf_run!, { taskId: t.id }).catch(() => undefined)
+    await expect.poll(() => scripted.prompts.length).toBe(1)
+    const [orphan] = await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions WHERE parent_id = ${parent}`
+    await expect.poll(async () => (await mm.get(orphan!.id, browser)).status).toBe('running')
+
+    // The retry: its script differs only so its own agent can answer.
+    await db.sql`UPDATE ai_background_tasks SET spec = spec || ${db.sql.json({ body: `return await agent('second')` } as never)} WHERE id = ${t.id}`
+    const out = await new MockActivityEnvironment({ ...info, attempt: 2 }).run(acts.wf_run!, { taskId: t.id })
+    expect(out).toMatchObject({ status: 'completed', result: 'done again' })
+    expect((await mm.get(orphan!.id, browser)).status).toBe('done')
+    first.cancel()
+    await abandoned
+    mm.abortAll()
+  }, 60_000)
+
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
-    const scripted = scriptedRunner((run) => {
-      const prompt = String(run.prompt)
+    // The turn's message, as the warm process was sent it (scriptedRunner's `prompts`).
+    const scripted: ReturnType<typeof scriptedRunner> = scriptedRunner(() => {
+      const prompt = promptText(scripted.prompts.at(-1)!)
       if (prompt.includes('give n')) return { reply: 'not json' }
       if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
       return { reply: 'hello from the agent' }
@@ -211,11 +246,11 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const [row] = await db.sql<{ root: string }[]>`SELECT budget_root_id AS root FROM ai_sessions WHERE id = ${child.id}`
     expect(row!.root).toBe(parent)
     // Claude Code's frame and instructions reach the child's turn.
-    expect(scripted.runs[0]!.prompt).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
+    expect(promptText(scripted.prompts[0]!)).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
     const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
     const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
     expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
-    expect(scripted.runs.at(-1)!.prompt).toMatch(/^Your reply did not match the schema:/)
+    expect(promptText(scripted.prompts.at(-1)!)).toMatch(/^Your reply did not match the schema:/)
 
     // Its options act as Claude Code's: the chat's own model, effort and subagent definition.
     const typed = managerAgents(mm, { agentTypes: async () => ['model-author', 'print-analyst'] })
@@ -401,6 +436,38 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
       SELECT cost_usd, unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
     expect(Number(row!.cost_usd)).toBeCloseTo(0.06)
     expect(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
+    classic.abortAll()
+  })
+
+  it("recycles the next turn's warm process for its budget after WebFetch spend, and logs why (#3597)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let spend: ((cost: number) => Promise<void>) | undefined
+    let fetches = 1
+    const logs: string[] = []
+    const scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.01 }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // Only the first turn's WebFetch makes a nested query; the warm process's cap never saw it.
+      run: (run) =>
+        (async function* () {
+          if (fetches-- > 0) await spend!(0.05)
+          yield* scripted.runner(run)
+        })(),
+      nestedQueries: (deps) => {
+        spend = deps.spent
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      warm: { log: (m) => logs.push(m) },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    expect(await (await classic.send(session.id, browser, 'fetch it')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await (await classic.send(session.id, browser, 'again')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(logs).toContainEqual(expect.stringMatching(/closed session .*'s process: recycled: budget/))
     classic.abortAll()
   })
 

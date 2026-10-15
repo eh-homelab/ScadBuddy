@@ -5,12 +5,13 @@
 // so no callback in it may hold one turn's state. TurnRunner (turnRunner.ts)
 // assembles callbacks that read `slot.current` instead: the approval and
 // question gates, the memory and trace hooks, the in-process servers' turn
-// context and tab wait, and the http tool's turn id and abort signal. Today
-// each turn has its own query and its own slot, set before the query starts
-// and never cleared, so a hook fired after the result still reaches that
-// turn; when to clear a slot between the turns of one process is for Phase 2
-// (warm processes) to decide. A callback that fires with no turn in the slot
-// fails closed.
+// context and tab wait, and the http tool's turn id and abort signal. A warm
+// process (warm.ts) serves many turns: each sets the slot before it pushes its
+// prompt and clears it once it has finished, its events written (manager.ts
+// `runTurn`), so a hook Claude Code fires after that, between turns, finds no
+// turn and fails closed. A retain the Stop hook started before the result
+// goes on without the slot (memory/hindsight.ts: fire-and-forget, with the
+// turn's own closures).
 
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
 import type { TurnAuditor } from '../audit/turn.js'
