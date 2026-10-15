@@ -532,37 +532,37 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
   return (
     <li aria-label={`Built-in plugin ${pkg.name}`}>
       <Card size="sm">
-      <CardContent>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{pkg.name}</span>
-        {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
-        <Badge tone="muted">Built in</Badge>
-        {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
-      </div>
-      {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
-      <BuiltInParts review={pkg.review} />
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-        <dt className="text-muted-foreground">Source</dt>
-        <dd>
-          Ships with ScadBuddy · <span className="sb-num break-all">{pkg.source.path}</span>
-        </dd>
-      </dl>
-      <ReviewFold>
-        <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
-      </ReviewFold>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
-          {busy && <Spinner />}
-          {pkg.enabled ? 'Disable' : 'Enable'}
-        </Button>
-        <p className="text-xs text-muted-foreground">Built in: it cannot be removed or re-pinned.</p>
-      </div>
-      {error && (
-        <p role="alert" className="mt-2 text-xs text-warn">
-          {error}
-        </p>
-      )}
-      </CardContent>
+        <CardContent>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{pkg.name}</span>
+            {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
+            <Badge tone="muted">Built in</Badge>
+            {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
+          </div>
+          {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
+          <BuiltInParts review={pkg.review} />
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted-foreground">Source</dt>
+            <dd>
+              Ships with ScadBuddy · <span className="sb-num break-all">{pkg.source.path}</span>
+            </dd>
+          </dl>
+          <ReviewFold>
+            <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
+          </ReviewFold>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
+              {busy && <Spinner />}
+              {pkg.enabled ? 'Disable' : 'Enable'}
+            </Button>
+            <p className="text-xs text-muted-foreground">Built in: it cannot be removed or re-pinned.</p>
+          </div>
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-warn">
+              {error}
+            </p>
+          )}
+        </CardContent>
       </Card>
     </li>
   )
@@ -604,165 +604,165 @@ function PackageCard({
   return (
     <li aria-label={`Plugin package ${pkg.name}`}>
       <Card size="sm">
-      <CardContent>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{pkg.name}</span>
-        {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
-        {pkg.enabled ? (
-          <Badge tone="ok">Enabled</Badge>
-        ) : pkg.approved ? (
-          <Badge tone="muted">Approved, disabled</Badge>
-        ) : (
-          <Badge tone="warn">Awaiting approval</Badge>
-        )}
-        {pkg.approved && pkg.allow_refused && <Badge tone="warn">Unvetted code allowed</Badge>}
-        {pkg.pending && <Badge tone="warn">Re-pin awaiting approval</Badge>}
-        {shadowed && <Badge tone="warn">Not loaded</Badge>}
-      </div>
-      {shadowed && (
-        <p role="note" className="mt-1 text-xs text-warn">
-          &ldquo;{pkg.name}&rdquo; is built in, so this installed copy is never loaded. Remove it.
-        </p>
-      )}
-      {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-        <dt className="text-muted-foreground">Source</dt>
-        <dd className="break-all">
-          <ExternalLink href={source.url}>{source.url}</ExternalLink>
-          {source.kind === 'git' && source.path && <span className="sb-num"> · {source.path}</span>}
-          {source.kind === 'marketplace' && <span className="sb-num"> · entry {source.entry}</span>}
-          <span className="sb-num text-muted-foreground"> @ {source.ref}</span>
-        </dd>
-        <dt className="text-muted-foreground">Commit</dt>
-        <dd className="sb-num break-all">{pkg.commit_sha}</dd>
-        <dt className="text-muted-foreground">Content hash</dt>
-        <dd className="sb-num break-all">{pkg.content_hash}</dd>
-      </dl>
-
-      <ReviewFold defaultOpen={!pkg.approved}>
-        <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
-      </ReviewFold>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {!pkg.approved && !shadowed && (
-          <Button size="sm" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
-            Approve…
-          </Button>
-        )}
-        {pkg.approved && !shadowed && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              void act('enable', async () => onChange(await aiPlugins.setPackageEnabled(pkg.name, !pkg.enabled)))
-            }
-            disabled={busy !== null}
-            aria-busy={busy === 'enable'}
-            {...USER_ONLY}
-          >
-            {busy === 'enable' && <Spinner />}
-            {pkg.enabled ? 'Disable' : 'Enable'}
-          </Button>
-        )}
-        <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
-          Remove
-        </Button>
-      </div>
-
-      {shadowed ? null : pkg.pending ? (
-        <div className="mt-3 rounded-lg bg-primary/8 p-3 ring-1 ring-primary/40" aria-label="Pending re-pin">
-          <p className="text-xs">
-            Re-pin to <span className="sb-num">{pkg.pending.ref}</span> at{' '}
-            <span className="sb-num break-all">{pkg.pending.commit_sha}</span>. The current pin keeps loading until you
-            approve this one.
-          </p>
-          <div className="mt-2">
-            <MovedNotice pkg={pkg} />
+        <CardContent>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{pkg.name}</span>
+            {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
+            {pkg.enabled ? (
+              <Badge tone="ok">Enabled</Badge>
+            ) : pkg.approved ? (
+              <Badge tone="muted">Approved, disabled</Badge>
+            ) : (
+              <Badge tone="warn">Awaiting approval</Badge>
+            )}
+            {pkg.approved && pkg.allow_refused && <Badge tone="warn">Unvetted code allowed</Badge>}
+            {pkg.pending && <Badge tone="warn">Re-pin awaiting approval</Badge>}
+            {shadowed && <Badge tone="warn">Not loaded</Badge>}
           </div>
-          <div className="mt-2">
-            <Diff diff={pkg.pending.diff} />
-          </div>
-          <div className="mt-2 flex gap-2">
-            <Button size="sm" onClick={() => onApprove({ pkg, pending: true })} {...USER_ONLY}>
-              Approve re-pin…
+          {shadowed && (
+            <p role="note" className="mt-1 text-xs text-warn">
+              &ldquo;{pkg.name}&rdquo; is built in, so this installed copy is never loaded. Remove it.
+            </p>
+          )}
+          {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted-foreground">Source</dt>
+            <dd className="break-all">
+              <ExternalLink href={source.url}>{source.url}</ExternalLink>
+              {source.kind === 'git' && source.path && <span className="sb-num"> · {source.path}</span>}
+              {source.kind === 'marketplace' && <span className="sb-num"> · entry {source.entry}</span>}
+              <span className="sb-num text-muted-foreground"> @ {source.ref}</span>
+            </dd>
+            <dt className="text-muted-foreground">Commit</dt>
+            <dd className="sb-num break-all">{pkg.commit_sha}</dd>
+            <dt className="text-muted-foreground">Content hash</dt>
+            <dd className="sb-num break-all">{pkg.content_hash}</dd>
+          </dl>
+
+          <ReviewFold defaultOpen={!pkg.approved}>
+            <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
+          </ReviewFold>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {!pkg.approved && !shadowed && (
+              <Button size="sm" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
+                Approve…
+              </Button>
+            )}
+            {pkg.approved && !shadowed && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  void act('enable', async () => onChange(await aiPlugins.setPackageEnabled(pkg.name, !pkg.enabled)))
+                }
+                disabled={busy !== null}
+                aria-busy={busy === 'enable'}
+                {...USER_ONLY}
+              >
+                {busy === 'enable' && <Spinner />}
+                {pkg.enabled ? 'Disable' : 'Enable'}
+              </Button>
+            )}
+            <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
+              Remove
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void act('discard', async () => onChange(await aiPlugins.discardRepin(pkg.name)))}
-              disabled={busy !== null}
+          </div>
+
+          {shadowed ? null : pkg.pending ? (
+            <div className="mt-3 rounded-lg bg-primary/8 p-3 ring-1 ring-primary/40" aria-label="Pending re-pin">
+              <p className="text-xs">
+                Re-pin to <span className="sb-num">{pkg.pending.ref}</span> at{' '}
+                <span className="sb-num break-all">{pkg.pending.commit_sha}</span>. The current pin keeps loading until you
+                approve this one.
+              </p>
+              <div className="mt-2">
+                <MovedNotice pkg={pkg} />
+              </div>
+              <div className="mt-2">
+                <Diff diff={pkg.pending.diff} />
+              </div>
+              <div className="mt-2 flex gap-2">
+                <Button size="sm" onClick={() => onApprove({ pkg, pending: true })} {...USER_ONLY}>
+                  Approve re-pin…
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void act('discard', async () => onChange(await aiPlugins.discardRepin(pkg.name)))}
+                  disabled={busy !== null}
+                  {...USER_ONLY}
+                >
+                  Discard re-pin
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <form
+              className="mt-3 flex items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void act('repin', async () => onChange(await aiPlugins.repinPackage(pkg.name, repinRef.trim() || undefined)))
+              }}
               {...USER_ONLY}
             >
-              Discard re-pin
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <form
-          className="mt-3 flex items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault()
-            void act('repin', async () => onChange(await aiPlugins.repinPackage(pkg.name, repinRef.trim() || undefined)))
-          }}
-          {...USER_ONLY}
-        >
-          <div className="grow">
-            <Label htmlFor={`repin-${pkg.name}`} className="mb-1.5 text-xs font-normal text-muted-foreground">
-              Re-pin to branch, tag or commit
-            </Label>
-            <Input
-              id={`repin-${pkg.name}`}
-              value={repinRef}
-              onChange={(event) => setRepinRef(event.target.value)}
-              placeholder={source.ref}
-              className="sb-num"
-            />
-          </div>
-          <Button size="sm" variant="outline" type="submit" disabled={busy !== null} aria-busy={busy === 'repin'} {...USER_ONLY}>
-            {busy === 'repin' && <Spinner />}
-            Fetch re-pin
-          </Button>
-        </form>
-      )}
+              <div className="grow">
+                <Label htmlFor={`repin-${pkg.name}`} className="mb-1.5 text-xs font-normal text-muted-foreground">
+                  Re-pin to branch, tag or commit
+                </Label>
+                <Input
+                  id={`repin-${pkg.name}`}
+                  value={repinRef}
+                  onChange={(event) => setRepinRef(event.target.value)}
+                  placeholder={source.ref}
+                  className="sb-num"
+                />
+              </div>
+              <Button size="sm" variant="outline" type="submit" disabled={busy !== null} aria-busy={busy === 'repin'} {...USER_ONLY}>
+                {busy === 'repin' && <Spinner />}
+                Fetch re-pin
+              </Button>
+            </form>
+          )}
 
-      {error && (
-        <p role="alert" className="mt-2 text-xs text-warn">
-          {error}
-        </p>
-      )}
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-warn">
+              {error}
+            </p>
+          )}
 
-      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{`Remove ${pkg.name}?`}</AlertDialogTitle>
-            <AlertDialogDescription>
-              Its pin is deleted and its cached files are removed. Installing it again needs a new review. Sessions
-              stop loading it from their next turn.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            {/* Not an AlertDialogAction: the dialog closes once the delete is done. */}
-            <Button
-              variant="destructive"
-              disabled={busy === 'delete'}
-              aria-busy={busy === 'delete'}
-              onClick={() =>
-                void act('delete', async () => {
-                  await aiPlugins.deletePackage(pkg.name)
-                  setConfirmDelete(false)
-                  onRemoved(pkg.name)
-                })
-              }
-              {...USER_ONLY}
-            >
-              {busy === 'delete' && <Spinner />}
-              Remove package
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      </CardContent>
+          <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{`Remove ${pkg.name}?`}</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Its pin is deleted and its cached files are removed. Installing it again needs a new review. Sessions
+                  stop loading it from their next turn.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                {/* Not an AlertDialogAction: the dialog closes once the delete is done. */}
+                <Button
+                  variant="destructive"
+                  disabled={busy === 'delete'}
+                  aria-busy={busy === 'delete'}
+                  onClick={() =>
+                    void act('delete', async () => {
+                      await aiPlugins.deletePackage(pkg.name)
+                      setConfirmDelete(false)
+                      onRemoved(pkg.name)
+                    })
+                  }
+                  {...USER_ONLY}
+                >
+                  {busy === 'delete' && <Spinner />}
+                  Remove package
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </CardContent>
       </Card>
     </li>
   )

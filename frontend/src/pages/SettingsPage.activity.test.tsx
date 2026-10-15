@@ -118,4 +118,23 @@ describe('SettingsPage activity settings', () => {
     expect(details).not.toBe(screen.getByLabelText('Notify me about activity from').closest(fold))
     expect(details).toContainElement(screen.getByLabelText('Repair activity rows from the last (seconds)'))
   })
+
+  it('opens the fold when a save refuses a field folded inside it (#3671)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await loaded()
+    const toggle = screen.getByRole('button', { name: 'Advanced: activity retention' })
+    const ttl = screen.getByLabelText('Keep activity for (seconds)')
+
+    await user.click(toggle)
+    await user.type(ttl, '3600')
+    await user.click(toggle)
+    expect(ttl).not.toBeVisible()
+
+    await user.click(save())
+    expect(await screen.findByText('Enter 86400 to 315360000 seconds.')).toBeVisible()
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(ttl).toBeVisible()
+    expect(put).not.toHaveBeenCalled()
+  })
 })

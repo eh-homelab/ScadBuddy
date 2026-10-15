@@ -47,7 +47,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { ChevronRightIcon } from 'lucide-react'
-import { ChoiceSelect, SwitchField } from '../components/settings/form'
+import { ChoiceSelect, SwitchField, TipProvider } from '../components/settings/form'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { NEW_TAB } from '../lib/embed'
@@ -224,7 +224,9 @@ function isProblem(value: unknown): value is Problem {
 export function SettingsPage() {
   return (
     <SettingsCollapseProvider>
-      <SettingsSections />
+      <TipProvider>
+        <SettingsSections />
+      </TipProvider>
     </SettingsCollapseProvider>
   )
 }

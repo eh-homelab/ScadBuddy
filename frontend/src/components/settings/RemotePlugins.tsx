@@ -187,48 +187,48 @@ function BuiltInCard({ set, onChange }: { set: BuiltInToolSet; onChange: (set: B
   return (
     <li aria-label={`Built-in tools ${set.name}`}>
       <Card size="sm">
-      <CardContent>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{set.name}</span>
-        <Badge variant="outline" className="text-muted-foreground">
-          Built in
-        </Badge>
-        <Badge variant="outline" className={set.enabled ? 'border-ok/40 bg-ok/10 text-ok' : 'text-muted-foreground'}>
-          {set.enabled ? 'Enabled' : 'Disabled'}
-        </Badge>
-      </div>
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-        <dt className="text-muted-foreground">Tools</dt>
-        <dd className="sb-num">
-          {set.tool_prefix}* ({set.tools.length}
-          {raised > 0 && `, ${raised} raised`}
-          {set.disabled_tools.length > 0 && `, ${set.disabled_tools.length} disabled`})
-        </dd>
-      </dl>
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <CollapsibleTrigger asChild>
-            <Button size="sm" variant="outline">
-              {open ? 'Hide tools' : 'Review tools'}
-            </Button>
-          </CollapsibleTrigger>
-          {set.switchable && (
-            <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
-              {set.enabled ? 'Disable' : 'Enable'}
-            </Button>
+        <CardContent>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{set.name}</span>
+            <Badge variant="outline" className="text-muted-foreground">
+              Built in
+            </Badge>
+            <Badge variant="outline" className={set.enabled ? 'border-ok/40 bg-ok/10 text-ok' : 'text-muted-foreground'}>
+              {set.enabled ? 'Enabled' : 'Disabled'}
+            </Badge>
+          </div>
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted-foreground">Tools</dt>
+            <dd className="sb-num">
+              {set.tool_prefix}* ({set.tools.length}
+              {raised > 0 && `, ${raised} raised`}
+              {set.disabled_tools.length > 0 && `, ${set.disabled_tools.length} disabled`})
+            </dd>
+          </dl>
+          <Collapsible open={open} onOpenChange={setOpen}>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <CollapsibleTrigger asChild>
+                <Button size="sm" variant="outline">
+                  {open ? 'Hide tools' : 'Review tools'}
+                </Button>
+              </CollapsibleTrigger>
+              {set.switchable && (
+                <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
+                  {set.enabled ? 'Disable' : 'Enable'}
+                </Button>
+              )}
+            </div>
+            <CollapsibleContent>
+              {/* Keyed by what is stored, so a newer copy of the set resets the table. */}
+              <BuiltInToolTable key={JSON.stringify([set.tool_tiers, set.disabled_tools])} set={set} onSaved={onChange} />
+            </CollapsibleContent>
+          </Collapsible>
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-warn">
+              {error}
+            </p>
           )}
-        </div>
-        <CollapsibleContent>
-          {/* Keyed by what is stored, so a newer copy of the set resets the table. */}
-          <BuiltInToolTable key={JSON.stringify([set.tool_tiers, set.disabled_tools])} set={set} onSaved={onChange} />
-        </CollapsibleContent>
-      </Collapsible>
-      {error && (
-        <p role="alert" className="mt-2 text-xs text-warn">
-          {error}
-        </p>
-      )}
-      </CardContent>
+        </CardContent>
       </Card>
     </li>
   )
@@ -454,128 +454,128 @@ function RemoteCard({
   return (
     <li aria-label={`Plugin endpoint ${plugin.name}`}>
       <Card size="sm">
-      <CardContent>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{plugin.name}</span>
-        <Badge variant="outline" className={plugin.enabled ? 'border-ok/40 bg-ok/10 text-ok' : 'text-muted-foreground'}>
-          {plugin.enabled ? 'Enabled' : 'Disabled'}
-        </Badge>
-        {!plugin.usable && (
-          <Badge variant="outline" className="h-auto border-warn/40 bg-warn/10 whitespace-normal text-warn">
-            Secret sealed with another key; save it again
-          </Badge>
-        )}
-      </div>
-      {plugin.problem && (
-        <p role="alert" className="mt-1 text-xs text-warn">
-          Not loaded: {plugin.problem}
-        </p>
-      )}
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-        <dt className="text-muted-foreground">Endpoint</dt>
-        <dd className="sb-num break-all">{plugin.url}</dd>
-        <dt className="text-muted-foreground">Auth</dt>
-        <dd className="sb-num">{plugin.auth ? `${plugin.auth.header}: …${plugin.auth.last4}` : 'None'}</dd>
-        <dt className="text-muted-foreground">Tools</dt>
-        <dd className="sb-num">{plugin.tool_prefix}*</dd>
-      </dl>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() =>
-            void act('test', async () => {
-              setTest(await aiPlugins.testRemote(plugin.name))
-              setReviewOpen(true)
-            })
-          }
-          disabled={busy !== null}
-          aria-busy={busy === 'test'}
-          {...USER_ONLY}
-        >
-          {busy === 'test' && <Spinner />}
-          Test connection
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() =>
-            void act('enable', async () => onChange(await aiPlugins.updateRemote(plugin.name, { enabled: !plugin.enabled })))
-          }
-          disabled={busy !== null}
-          {...USER_ONLY}
-        >
-          {plugin.enabled ? 'Disable' : 'Enable'}
-        </Button>
-        <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
-          Remove
-        </Button>
-      </div>
-      {test && (
-        <div className="mt-2 text-xs">
-          {test.ok ? (
-            // Folded, not unmounted: tiers changed and not yet saved are kept.
-            <Fold
-              open={reviewOpen}
-              onOpenChange={setReviewOpen}
-              summary={
-                <span role="status" className="text-ok">
-                  {testSummary(test)}
-                </span>
-              }
-            >
-              <ToolReview
-                plugin={plugin}
-                test={test}
-                onSaved={(saved) => {
-                  onChange(saved)
-                  setReviewOpen(false)
-                }}
-              />
-            </Fold>
-          ) : (
-            <p role="status" className="text-warn">
-              {testSummary(test)}
+        <CardContent>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">{plugin.name}</span>
+            <Badge variant="outline" className={plugin.enabled ? 'border-ok/40 bg-ok/10 text-ok' : 'text-muted-foreground'}>
+              {plugin.enabled ? 'Enabled' : 'Disabled'}
+            </Badge>
+            {!plugin.usable && (
+              <Badge variant="outline" className="h-auto border-warn/40 bg-warn/10 whitespace-normal text-warn">
+                Secret sealed with another key; save it again
+              </Badge>
+            )}
+          </div>
+          {plugin.problem && (
+            <p role="alert" className="mt-1 text-xs text-warn">
+              Not loaded: {plugin.problem}
             </p>
           )}
-        </div>
-      )}
-      {error && (
-        <p role="alert" className="mt-2 text-xs text-warn">
-          {error}
-        </p>
-      )}
-      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{`Remove ${plugin.name}?`}</AlertDialogTitle>
-            <AlertDialogDescription>
-              The endpoint and its stored secret are deleted. Sessions stop using its tools from their next turn.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            {/* Not an AlertDialogAction: the dialog closes once the delete is done. */}
+          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted-foreground">Endpoint</dt>
+            <dd className="sb-num break-all">{plugin.url}</dd>
+            <dt className="text-muted-foreground">Auth</dt>
+            <dd className="sb-num">{plugin.auth ? `${plugin.auth.header}: …${plugin.auth.last4}` : 'None'}</dd>
+            <dt className="text-muted-foreground">Tools</dt>
+            <dd className="sb-num">{plugin.tool_prefix}*</dd>
+          </dl>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button
-              variant="destructive"
-              disabled={busy === 'delete'}
-              aria-busy={busy === 'delete'}
+              size="sm"
+              variant="outline"
               onClick={() =>
-                void act('delete', async () => {
-                  await aiPlugins.deleteRemote(plugin.name)
-                  setConfirmDelete(false)
-                  onRemoved(plugin.name)
+                void act('test', async () => {
+                  setTest(await aiPlugins.testRemote(plugin.name))
+                  setReviewOpen(true)
                 })
               }
+              disabled={busy !== null}
+              aria-busy={busy === 'test'}
               {...USER_ONLY}
             >
-              {busy === 'delete' && <Spinner />}
-              Remove endpoint
+              {busy === 'test' && <Spinner />}
+              Test connection
             </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      </CardContent>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void act('enable', async () => onChange(await aiPlugins.updateRemote(plugin.name, { enabled: !plugin.enabled })))
+              }
+              disabled={busy !== null}
+              {...USER_ONLY}
+            >
+              {plugin.enabled ? 'Disable' : 'Enable'}
+            </Button>
+            <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
+              Remove
+            </Button>
+          </div>
+          {test && (
+            <div className="mt-2 text-xs">
+              {test.ok ? (
+                // Folded, not unmounted: tiers changed and not yet saved are kept.
+                <Fold
+                  open={reviewOpen}
+                  onOpenChange={setReviewOpen}
+                  summary={
+                    <span role="status" className="text-ok">
+                      {testSummary(test)}
+                    </span>
+                  }
+                >
+                  <ToolReview
+                    plugin={plugin}
+                    test={test}
+                    onSaved={(saved) => {
+                      onChange(saved)
+                      setReviewOpen(false)
+                    }}
+                  />
+                </Fold>
+              ) : (
+                <p role="status" className="text-warn">
+                  {testSummary(test)}
+                </p>
+              )}
+            </div>
+          )}
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-warn">
+              {error}
+            </p>
+          )}
+          <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{`Remove ${plugin.name}?`}</AlertDialogTitle>
+                <AlertDialogDescription>
+                  The endpoint and its stored secret are deleted. Sessions stop using its tools from their next turn.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                {/* Not an AlertDialogAction: the dialog closes once the delete is done. */}
+                <Button
+                  variant="destructive"
+                  disabled={busy === 'delete'}
+                  aria-busy={busy === 'delete'}
+                  onClick={() =>
+                    void act('delete', async () => {
+                      await aiPlugins.deleteRemote(plugin.name)
+                      setConfirmDelete(false)
+                      onRemoved(plugin.name)
+                    })
+                  }
+                  {...USER_ONLY}
+                >
+                  {busy === 'delete' && <Spinner />}
+                  Remove endpoint
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </CardContent>
       </Card>
     </li>
   )

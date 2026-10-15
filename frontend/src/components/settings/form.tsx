@@ -1,9 +1,9 @@
-import { useId, useState, type ComponentProps, type ReactElement, type ReactNode } from 'react'
+import { createContext, useContext, useId, useState, type ComponentProps, type ReactElement, type ReactNode } from 'react'
 import { ChevronsUpDownIcon } from 'lucide-react'
 import { USER_ONLY } from '../../agent/dom'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader } from '@/components/ui/card'
-import { Command, CommandItem, CommandList } from '@/components/ui/command'
+import { Command, CommandEmpty, CommandItem, CommandList } from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group'
 import { Label } from '@/components/ui/label'
@@ -191,13 +191,16 @@ export function ChoiceSelect({
   'aria-describedby'?: string
 }) {
   const wrap = (raw: string) => (raw === '' ? EMPTY : raw)
+  // A value the choices do not (yet) name, such as a saved printer while the printers
+  // load or after they failed to: offered as itself, so the trigger still shows it.
+  const offered = value === '' || choices.some((choice) => choice.value === value) ? choices : [...choices, { value, label: value }]
   return (
     <Select value={wrap(value)} onValueChange={(next) => onValueChange(next === EMPTY ? '' : next)} disabled={disabled}>
       <SelectTrigger id={id} size={size} className={cn('w-full max-w-full', className)} {...aria}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent position="popper">
-        {choices.map((choice) => (
+        {offered.map((choice) => (
           <SelectItem key={choice.value} value={wrap(choice.value)} disabled={choice.disabled}>
             {choice.label}
           </SelectItem>
@@ -207,19 +210,33 @@ export function ChoiceSelect({
   )
 }
 
+const SharedTips = createContext(false)
+
 /**
- * A tooltip on a focusable trigger. Its own provider, so a setting rendered outside the
- * app shell (a test, a story) still has one.
+ * One tooltip provider for a page's tips, so moving from one to the next shows it at once
+ * rather than waiting the delay again.
  */
-export function Tip({ content, children }: { content: ReactNode; children: ReactElement }) {
+export function TipProvider({ children }: { children: ReactNode }) {
   return (
     <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>{children}</TooltipTrigger>
-        <TooltipContent>{content}</TooltipContent>
-      </Tooltip>
+      <SharedTips.Provider value>{children}</SharedTips.Provider>
     </TooltipProvider>
   )
+}
+
+/**
+ * A tooltip on a focusable trigger. Under a `TipProvider` it shares that one; on its own
+ * (a setting rendered outside Settings: a test, a story) it brings its own.
+ */
+export function Tip({ content, children }: { content: ReactNode; children: ReactElement }) {
+  const shared = useContext(SharedTips)
+  const tip = (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent>{content}</TooltipContent>
+    </Tooltip>
+  )
+  return shared ? tip : <TooltipProvider>{tip}</TooltipProvider>
 }
 
 export type Suggestion = { value: string; label?: ReactNode }
@@ -247,6 +264,13 @@ export function SuggestInput({
   className?: string
 } & ComponentProps<'input'>) {
   const [open, setOpen] = useState(false)
+  // Narrowed by what is typed, as a `<datalist>` was; a value that is one of them (just
+  // picked, or saved) lists them all, so another can be picked.
+  const typed = String(props.value ?? '').trim().toLowerCase()
+  const shown =
+    typed === '' || suggestions.some((suggestion) => suggestion.value.toLowerCase() === typed)
+      ? suggestions
+      : suggestions.filter((suggestion) => suggestion.value.toLowerCase().includes(typed))
   return (
     <Popover
       open={open}
@@ -269,9 +293,10 @@ export function SuggestInput({
         </InputGroup>
       </PopoverAnchor>
       <PopoverContent align="start" className="w-(--radix-popover-trigger-width) min-w-56 p-0">
-        <Command label={suggestionsLabel}>
+        <Command label={suggestionsLabel} shouldFilter={false}>
           <CommandList>
-            {suggestions.map((suggestion) => (
+            <CommandEmpty>No suggestion matches.</CommandEmpty>
+            {shown.map((suggestion) => (
               <CommandItem
                 key={suggestion.value}
                 value={suggestion.value}
