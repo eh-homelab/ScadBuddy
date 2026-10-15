@@ -919,3 +919,41 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 		})
 	}
 }
+
+func TestARenameThatChangesTheTypeSendsTheFileAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.file(11, "x.3mf", 4, []byte("old"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if !lib.deleted[10] || !lib.deleted[11] {
+			t.Fatalf("deleted %v", lib.deleted)
+		}
+		var sent []api.File
+		for _, f := range lib.files {
+			sent = append(sent, f)
+		}
+		if len(sent) != 1 || sent[0].ID == 10 || sent[0].Name != "x.3mf" || sent[0].FolderID != 4 || string(lib.data[sent[0].ID]) != "model" {
+			t.Fatalf("%+v", sent)
+		}
+	})
+	if got := names(t, top); !slices.Equal(got, []string{"x.3mf"}) {
+		t.Fatalf("%v", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestFileTypes(t *testing.T) {
+	for name, want := range map[string]string{"a.3mf": "3mf", "A.3MF.tmp": "tmp", "b.gcode.3mf": "gcode.3mf", "c.STL": "stl", "noext": ""} {
+		if got := fileType(name); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+}

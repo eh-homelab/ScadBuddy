@@ -3,7 +3,10 @@ package fsys
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -250,18 +253,26 @@ const renameNoReplace = 0x1
 // renameStored renames a stored file f, then deletes what it replaced: a stored file
 // t, or a queued save q and the stored files that save replaced.
 func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir, newName string, t api.File, isFile bool, q *entry) syscall.Errno {
-	newN, folder := changes(f.Name, newName, d.id, to.id)
-	got, err := d.tree.lib.UpdateFile(ctx, f.ID, newN, folder)
-	if err != nil {
-		return failed("rename", err, "file", f.ID)
+	var got api.File
+	if fileType(f.Name) != fileType(newName) {
+		var errno syscall.Errno
+		if got, errno = d.retype(ctx, f, to.id, newName); errno != 0 {
+			return errno
+		}
+	} else {
+		newN, folder := changes(f.Name, newName, d.id, to.id)
+		var err error
+		if got, err = d.tree.lib.UpdateFile(ctx, f.ID, newN, folder); err != nil {
+			return failed("rename", err, "file", f.ID)
+		}
+		d.tree.moved(f.ID, got.Name, got.FolderID)
+		d.tree.rebase(f.ID, got.Name, got.FolderID)
 	}
-	d.tree.moved(f.ID, got.Name, got.FolderID)
-	d.tree.rebase(f.ID, got.Name, got.FolderID)
 	if child := d.GetChild(name); child != nil {
 		if n, ok := child.Operations().(*file); ok {
 			// The answer has no size or times: keep the file's.
 			if cur := n.current(); cur.ID == f.ID {
-				cur.Name, cur.FolderID = got.Name, got.FolderID
+				cur.ID, cur.Name, cur.FolderID = got.ID, got.Name, got.FolderID
 				n.set(cur)
 			}
 		}
@@ -464,3 +475,43 @@ func (n *file) Setxattr(context.Context, string, []byte, uint32) syscall.Errno {
 }
 
 func (n *file) Removexattr(context.Context, string) syscall.Errno { return n.tree.refused() }
+
+// fileType is what Bambuddy types a file by, its name's extension ("gcode.3mf" for a
+// sliced 3MF), lower-cased.
+func fileType(name string) string {
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".gcode.3mf") {
+		return "gcode.3mf"
+	}
+	return strings.TrimPrefix(filepath.Ext(lower), ".")
+}
+
+// retype renames f to name in folder by uploading its contents under the new name and
+// deleting f. Bambuddy types a file (and makes its thumbnail) from the name it is
+// uploaded under, and a rename keeps both, so an app that saves to "x.3mf.tmp" and
+// renames it to "x.3mf" would leave a file Bambuddy cannot print.
+func (d *dir) retype(ctx context.Context, f api.File, folder int, name string) (api.File, syscall.Errno) {
+	fh, err := d.tree.cache.open(ctx, d.tree.lib, f, "")
+	if err != nil {
+		return api.File{}, failed("rename: read", err, "file", f.ID)
+	}
+	got, err := d.tree.lib.Upload(ctx, folder, name, api.NewKey(), fh)
+	_ = fh.Close()
+	if err != nil {
+		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+	}
+	got.Size, got.Created = f.Size, f.Created
+	if got.FolderID == 0 {
+		got.FolderID = folder
+	}
+	if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+		d.tree.cache.drop(f.ID)
+	}
+	d.tree.unremember(f.ID)
+	d.tree.remember(got)
+	if err := d.tree.lib.DeleteFiles(ctx, f.ID); err != nil {
+		slog.Error("rename: the file was sent again under its new name, but the old one remains beside it", "file", f.ID, "new", got.ID, "err", err)
+		return api.File{}, syscall.EIO
+	}
+	return got, 0
+}
