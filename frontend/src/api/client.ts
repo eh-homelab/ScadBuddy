@@ -1358,6 +1358,10 @@ export const api = {
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
     command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {

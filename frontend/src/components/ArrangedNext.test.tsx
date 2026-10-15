@@ -29,17 +29,37 @@ describe('ArrangedNext (#2287)', () => {
 
   it('downloads the 3MF through downloadBlob when embedded, not a plain link', async () => {
     let loaded: Blob | undefined
-    vi.mocked(downloadBlob).mockImplementation(async (load) => {
+    let saved: string | undefined
+    vi.mocked(downloadBlob).mockImplementation(async (load, filename) => {
       loaded = await load()
+      saved = typeof filename === 'function' ? filename() : filename
     })
     const { user } = renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
     expect(screen.queryByRole('link', { name: 'Download' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Download' }))
-    await waitFor(() =>
-      expect(downloadBlob).toHaveBeenCalledWith(expect.any(Function), `${output.slug}-${output.id}.3mf`),
-    )
     await waitFor(() => expect(loaded).toBeInstanceOf(Blob))
+    // No name from the server: its slug and id.
+    expect(saved).toBe(`${output.slug}-${output.id}.3mf`)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('saves the 3MF under the name the server gives it (#2786 review)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/model.3mf', () =>
+        HttpResponse.arrayBuffer(new ArrayBuffer(4), {
+          headers: { 'Content-Disposition': `attachment; filename*=utf-8''name-keychain-r%C3%A9agan.3mf` },
+        }),
+      ),
+    )
+    let saved: string | undefined
+    vi.mocked(downloadBlob).mockImplementation(async (load, filename) => {
+      await load()
+      saved = typeof filename === 'function' ? filename() : filename
+    })
+    const { user } = renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    // One rule for every download of an output: the server's `download_filename`.
+    await waitFor(() => expect(saved).toBe('name-keychain-réagan.3mf'))
   })
 
   it('says the plates are unavailable when they cannot be read, rather than showing none (#2754 review)', async () => {
