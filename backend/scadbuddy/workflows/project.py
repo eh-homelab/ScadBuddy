@@ -42,7 +42,7 @@ _ACTIVITY = timedelta(seconds=8)
 
 
 class RunFlow(BaseModel):
-    """A flow script to run once, with its inputs (#2483). Both are in the run's history
+    """A flow script to run once, with its inputs (#2483). They are in the run's history
     (sealed, as every payload of the run is), so a Reset replays the same values."""
 
     script: str
@@ -50,6 +50,9 @@ class RunFlow(BaseModel):
     inputs_schema: dict[str, Any] | None = None
     #: The run's inputs, checked against the schema and its defaults filled in.
     inputs: dict[str, Any] | None = None
+    #: The event a trigger fired this run on, as the fire recorded it (#2666): what
+    #: `trigger()` returns. Data only; None for a run started by hand or on a schedule.
+    event: dict[str, Any] | None = None
 
 
 class FlowStart(BaseModel):
@@ -127,8 +130,10 @@ class ProjectWorkflow:
                 "this run has a script already", type="AlreadyExecuted", non_retryable=True
             )
         self._executed = True
-        if message.inputs_schema is not None:
-            self._flow = run_flow_tool(self._runner, message.inputs_schema, message.inputs)
+        if message.inputs_schema is not None or message.event is not None:
+            self._flow = run_flow_tool(
+                self._runner, message.inputs_schema, message.inputs, message.event
+            )
         info = workflow.info()
         start = self._start
         await workflow.execute_activity(
