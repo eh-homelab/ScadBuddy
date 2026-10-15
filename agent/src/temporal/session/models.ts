@@ -39,6 +39,15 @@ export type Continuation =
   | { kind: 'restarted' }
   | { kind: 'parked'; calls: { requestId: string; toolUseId: string; tool: string; input: unknown; resolution: Resolution }[] }
 
+/** The `open_input` Update's argument (spec §5.4): a call of the running turn that parks. */
+export type OpenInputArgs = { turn_id: string; call: { id: string; name: string; input: unknown } }
+
+/**
+ * Its answer: the entry's request id, and, for a call settled at once with no entry to wait
+ * on (a read turn tool, a run grant, the flow's refusal, a malformed question), how it ended.
+ */
+export type OpenInputAnswer = { request_id: string; resolution?: Resolution }
+
 export type SessionStart = {
   session_id: string
   creator: Owner

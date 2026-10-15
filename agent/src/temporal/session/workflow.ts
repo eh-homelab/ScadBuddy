@@ -10,6 +10,7 @@ import {
   defineSignal,
   defineUpdate,
   isCancellation,
+  patched,
   proxyActivities,
   proxyLocalActivities,
   setHandler,
@@ -30,6 +31,8 @@ import {
   INTERRUPTED,
   MESSAGE_MAX,
   type Message,
+  type OpenInputAnswer,
+  type OpenInputArgs,
   type SendAnswer,
   type SessionStart,
   type SessionTurnInput,
@@ -41,6 +44,7 @@ import {
 import {
   ACQUIRE_WORKER_ACTIVITY,
   NO_CAPACITY,
+  OPEN_INPUT_UPDATE,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -60,10 +64,13 @@ import {
 //   interrupt, end (Signals)                         <- interrupt, end
 //   turn (Query)                                     <- turn
 //
-// Not here: `fork_point` (forking an AgentSession session is refused until phase 6),
-// `segment_context` (no segment runner) and Task 5.3's `open_input`/`owner_changed`.
+//   open_input (Update, a call of the running turn)  <- new (§5.4): SessionGate.open
 //
-// The loop: wait for a message or `end`; read the runtime settings; run `session_turn`;
+// Not here: `fork_point` (forking an AgentSession session is refused until phase 6),
+// `segment_context` (no segment runner) and `owner_changed` (Task 5.6).
+//
+// The loop: wait for a message or `end`; read the runtime settings and the gate's
+// (`gate.settings`, so a Settings change reaches the next turn); run `session_turn`;
 // write the turn's end (`session.finish_turn`); continue as new, so every turn runs the
 // build current then (D4: the workflow is AUTO_UPGRADE, and a change to this function
 // goes behind `patched()` with test/fixtures/agent_session_histories/ replaying).
@@ -75,8 +82,11 @@ import {
 // replica can take it, and the last placement unrestricted), then the turn on the new home,
 // resumed from its transcript (`restarted`), at most PLACEMENTS times. Each placement carries
 // its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
-// moves it. On `end` the workflow releases its place on `home`. Parks (§5.4) are Task 5.3's: a
-// turn that ends `released` is failed here.
+// moves it. On `end` the workflow releases its place on `home`.
+//
+// Parks (§5.4): the turn's activity sends `open_input` for each call it parks, and holds
+// while the entry is answered here (`respond`), times out or is cancelled; the answer
+// reaches it as the entry's row in ai_input_responses. A release (Task 5.4) is failed here.
 
 const SHORT = '30s'
 /** How many times one turn is placed on a worker (§5.2 "Recovery"). */
@@ -87,6 +97,11 @@ const sendUpdate = defineUpdate<SendAnswer, [Message]>(SEND_MESSAGE_UPDATE)
 const interruptSignal = defineSignal<[{ reason?: string }?]>(INTERRUPT_SIGNAL)
 const endSignal = defineSignal<[unknown?]>(END_SIGNAL)
 const turnQuery = defineQuery<string | null>(TURN_QUERY)
+const openInputUpdate = defineUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE)
+
+/** `gate.settings` read as each turn starts (Task 5.3). */
+const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
+const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
 
@@ -140,6 +155,8 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   let turn: TurnStart | undefined = start.turn ?? undefined
   // From a message's acceptance until its turn's end is written.
   let inTurn = turn !== undefined
+  // From the turn's `session.finish_turn` until it is closed: a call can no longer park.
+  let closing = false
   let interrupted: string | undefined = start.interrupted ?? undefined
   let ended = false
   let home: string | undefined = start.host_queue ?? undefined
@@ -188,6 +205,22 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     running?.cancel()
   })
   setHandler(turnQuery, () => turn?.turn_id ?? message?.turn_id ?? null)
+  setHandler(
+    openInputUpdate,
+    async ({ turn_id, call }: OpenInputArgs): Promise<OpenInputAnswer> => {
+      const requestId = await gate.open({ id: call.id, name: call.name, input: call.input })
+      // Settled at once: no entry waits, and the activity is told how.
+      if (!gate.isParked(requestId)) return { request_id: requestId, resolution: await gate.resolution(requestId) }
+      // The turn ended while its call was being opened (closeTurn saw no entry): nothing waits on it.
+      if (turn?.turn_id !== turn_id || closing) await gate.cancel(requestId, THE_TURN_ENDED)
+      return { request_id: requestId }
+    },
+    {
+      validator: ({ turn_id }: OpenInputArgs) => {
+        if (turn?.turn_id !== turn_id || closing) throw ApplicationFailure.nonRetryable(`turn ${String(turn_id)} is not running`, 'stale')
+      },
+    },
+  )
 
   /**
    * The turn on the session's home, acquired first when there is none; placed again when its
@@ -274,6 +307,8 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     const sent = message
     message = undefined
     const settings = await local[SESSION_SETTINGS_ACTIVITY]()
+    // The entries' timers as Settings has them now (Python's gate_settings).
+    if (patched(GATE_SETTINGS_PATCH)) await gate.loadSettings()
     if (interrupted !== undefined) return { outcome: 'interrupted' }
     const input: SessionTurnInput = {
       sessionId: start.session_id,
@@ -307,9 +342,10 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   }
 
   async function closeTurn(current: TurnStart, result: TurnEnd): Promise<void> {
-    const reason = interrupted ?? 'the turn ended'
+    const reason = interrupted ?? THE_TURN_ENDED
     await gate.cancelAll(reason)
     await gate.settle(reason)
+    closing = true
     await finish[SESSION_FINISH_ACTIVITY]!({
       sessionId: start.session_id,
       turnId: current.turn_id,
@@ -346,6 +382,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     turn = undefined
     continuation = undefined
     interrupted = undefined
+    closing = false
     inTurn = false
     if (ended) {
       await releaseHome()

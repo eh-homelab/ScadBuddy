@@ -521,7 +521,17 @@ if (database) {
 // `agent-sessions.<identity>`, beside HOST_QUEUE (temporal/session/hostWorkers.ts says why), on
 // this replica's warm processes. `acquire_worker` on agent-tools hands it out.
 const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
-const turnHost = temporal && sessions ? new TurnHost({ core: sessions.turnCore, sql: temporal.sql, images: new SessionBlobs(temporal.sql), hostQueue: SESSION_HOST_QUEUE }) : undefined
+// A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
+const turnHost =
+  temporal && sessions
+    ? new TurnHost({
+        core: sessions.turnCore,
+        sql: temporal.sql,
+        images: new SessionBlobs(temporal.sql),
+        hostQueue: SESSION_HOST_QUEUE,
+        ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
+      })
+    : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -673,7 +683,7 @@ const temporalWorker =
             ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
-          // AgentSession's gate writers and its turn end (unified runtime §5.1, flagged off until phase 6).
+          // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           ...(sessionAcquire ?? {}),
@@ -744,7 +754,7 @@ const hostWorkers =
         ...(sessionHosting
           ? {
               sessions: {
-                activities: { ...sessionTurnActivity(sessionHosting.turnHost), ...releaseActivities(sessionHosting.warm), ...(sessionAcquire ?? {}) },
+                activities: { ...sessionTurnActivity(sessionHosting.turnHost, temporalClient ? { client: temporalClient } : {}), ...releaseActivities(sessionHosting.warm), ...(sessionAcquire ?? {}) },
                 // `warm_max_per_replica` may be raised while the replica runs; the slots cannot be.
                 slots: SESSION_HOST_SLOTS,
                 // The turns' own drain and abort wait (TurnHost.stop), so the worker never cuts one first.

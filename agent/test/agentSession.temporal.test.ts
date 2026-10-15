@@ -15,9 +15,11 @@ import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manag
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
-import type { FinishTurnInput, Message, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
+import type { FinishTurnInput, Message, OpenInputArgs, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
+  OPEN_INPUT_UPDATE,
+  SESSION_GATE_ACTIVITIES as GATE,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -72,6 +74,11 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let settingsRead: number
   let acquired: number
   let released: string[]
+  /** The gate's activities (stubs): what describe_call and resolve_input wait on, and what each was sent. */
+  let describeHold: Promise<void>
+  let resolveHold: Promise<void>
+  let described: number
+  let resolved: unknown[]
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -96,6 +103,19 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
             return { hostQueue: HOST, identity: 'agent-session-test' }
           },
           [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput) => finish(args),
+          // The gate's (temporal/session/gateActivities.ts), as stubs: no rows.
+          [GATE.settings]: async () => ({ approvalExpiryS: 600, questionExpiryS: 3600 }),
+          [GATE.describe]: async () => {
+            described++
+            await describeHold
+            return { summary: 'a call', input_hash: 'a'.repeat(64) }
+          },
+          [GATE.open]: async () => true,
+          [GATE.resolve]: async (args: unknown) => {
+            resolved.push(args)
+            await resolveHold
+            return true
+          },
         },
         {},
       ),
@@ -127,6 +147,10 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     settingsRead = 0
     acquired = 0
     released = []
+    describeHold = Promise.resolve()
+    resolveHold = Promise.resolve()
+    described = 0
+    resolved = []
     settings = async () => {
       settingsRead++
       return RUNTIME_DEFAULTS
@@ -318,6 +342,19 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     }
     await send(env.client, id, message('t1'))
     await poll(() => finished.map((f) => f.outcome), ['budget_exhausted'])
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  it('refuses open_input for a turn that is not running, `stale`', async () => {
+    const id = randomUUID()
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.length, 1)
+    const refused = await handleOf(id)
+      .executeUpdate(OPEN_INPUT_UPDATE, { args: [{ turn_id: 't1', call: { id: 'toolu_x', name: 'print_output', input: {} } } satisfies OpenInputArgs] })
+      .catch((err: unknown) => err)
+    expect(((refused as WorkflowUpdateFailedError).cause as ApplicationFailure).type).toBe('stale')
+    expect(described).toBe(0)
     await handleOf(id).signal('end')
     await handleOf(id).result()
   })

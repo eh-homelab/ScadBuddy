@@ -3,13 +3,18 @@ import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import type { Sql, TransactionSql } from 'postgres'
 import { turnCostEntry } from '../audit/turn.js'
-import type { SessionTurnInput, SessionTurnResult } from '../temporal/session/models.js'
+import { redact } from '../gate/entry.js'
+import { refusal } from '../gate/refusal.js'
+import { INPUT_CHANNEL } from '../gate/store.js'
+import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
+import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
+import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult } from '../temporal/session/models.js'
 import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, type TurnOutcome } from './manager.js'
 import { scrubForLog } from './sdkEvents.js'
-import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnTally } from './turnCore.js'
+import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
@@ -37,8 +42,18 @@ import type { WarmEntry } from './warm.js'
 // A `restarted` continuation (§5.5) is decided from the transcript, not from the workflow's
 // word: the first placement marks the main transcript's last entry (`turn_mark`), and a later
 // one resumes with RESTARTED_PROMPT only when a user entry landed after it (the message went
-// in, and Claude Code wrote it); otherwise it sends the message itself. Parks (§5.4) are Task
-// 5.3's: until then an outward call, a question or a tab wait is refused with NO_PARKS.
+// in, and Claude Code wrote it); otherwise it sends the message itself.
+//
+// Parks (§5.4, "Open" and "Hold"). An outward call (canUseTool) or an AskUserQuestion (the
+// question gate) is opened through the session's own workflow, the Update `open_input`
+// (TurnControl.openInput), which records the entry and writes its row; the turn then holds,
+// its process warm, until the entry's response row is in ai_input_responses, woken by
+// `NOTIFY scadbuddy_input` (gate/store.ts, sent as the row commits) and polled every
+// INPUT_POLL_MS besides. The row decides the call: an approved one runs in the turn as a
+// classic call does; any other end is what the model reads, in the gate's words
+// (gate/refusal.ts). Calls in one assistant message park side by side, each on its own
+// entry. The hold's end and the release (park_hold_seconds) are Task 5.4's; an attention
+// request and a browser call's tab wait still read NO_PARKS.
 //
 // A shutdown (`stop`) gives the running turns their grace, then cuts the rest: only those fail
 // with the retryable ShuttingDown, which places the turn on another replica; a turn that ended
@@ -46,8 +61,12 @@ import type { WarmEntry } from './warm.js'
 
 export const RESTARTED_PROMPT =
   'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
-/** What a call that would park reads until the workflow can hold it (Task 5.3). */
+/** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
+/** How often a held call reads its entry's response row besides the NOTIFY (approvals/service.ts's waiter's 1 s). */
+export const INPUT_POLL_MS = 1_000
+/** The gate's question tool (gate/entry.ts ASK_USER): AskUserQuestion and the subagents' ask_user park as it. */
+const GATE_ASK = 'ask_user'
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -62,6 +81,8 @@ export type TurnControl = {
   cancelled: AbortSignal
   /** Read when `cancelled` fires. */
   cancelReason: () => CancelReason
+  /** The Update `open_input` on the session's workflow (§5.4): how a call parks. Absent, every park reads NO_PARKS. */
+  openInput?: (args: OpenInputArgs) => Promise<OpenInputAnswer>
 }
 
 /** Why a placement was cut off: another holds the row, the turn ended, a newer one here, the shutdown. */
@@ -83,9 +104,35 @@ export type TurnHostDeps = {
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
   fenceMs?: number
+  /** LISTEN on a channel (events/pgListener.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
+  listen?: (channel: string, onNotify: (payload: string) => void) => void
+  /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
+  inputPollMs?: number
 }
 
+/** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
+type Response = { outcome: string; response: { answers?: unknown } | null; reason: string | null; responder: { kind?: string } | null }
+
 type Running = { attempt: string; cut: (why: Cut) => void; done: Promise<void> }
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** A question as the panel's card shows it: every string with the turn's secrets redacted (gate/entry.ts `redact`). */
+function cardOf(q: UserQuestion, secrets: readonly string[]): UserQuestion {
+  return {
+    ...q,
+    question: redact(q.question, secrets),
+    header: redact(q.header, secrets),
+    options: q.options.map((o) => ({
+      ...o,
+      label: redact(o.label, secrets),
+      description: redact(o.description, secrets),
+      ...(o.preview !== undefined ? { preview: redact(o.preview, secrets) } : {}),
+    })),
+  }
+}
 
 const within = (ms: number, work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
 
@@ -94,9 +141,14 @@ export class TurnHost {
   #stopping = false
   /** The placement running here for each session. */
   readonly #running = new Map<string, Running>()
+  /** Held calls by request id: each is woken by its entry's NOTIFY. */
+  readonly #waiters = new Map<string, Set<() => void>>()
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
+    deps.listen?.(INPUT_CHANNEL, (requestId) => {
+      for (const wake of this.#waiters.get(requestId) ?? []) wake()
+    })
   }
 
   /** The service is shutting down: no turn is cut yet (`stop` does that past the grace). */
@@ -214,11 +266,7 @@ export class TurnHost {
       userText: input.message?.text ?? text,
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
-      gates: () => ({
-        approvalGate: () => Promise.resolve({ approved: false, message: NO_PARKS }),
-        questionGate: () => Promise.resolve({ answered: false, message: NO_PARKS }),
-        waitForTab: () => Promise.resolve({ back: false, message: NO_PARKS }),
-      }),
+      gates: (ctx) => this.#gates(turnId, control, controller.signal, ctx.secrets, ctx.shown, ctx.turn.run.questionGate !== undefined),
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
@@ -283,6 +331,115 @@ export class TurnHost {
       control.cancelled.removeEventListener('abort', onCancel)
       core.end(outcome, result)
     }
+  }
+
+  /** The turn's parks (§5.4): each opened through the workflow, then held on its row. */
+  #gates(
+    turnId: string,
+    control: TurnControl,
+    stop: AbortSignal,
+    secrets: () => readonly string[],
+    shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>,
+    asks: boolean,
+  ): TurnGates {
+    const tabWait = () => Promise.resolve({ back: false as const, message: NO_PARKS })
+    const open = control.openInput
+    if (!open) {
+      return {
+        approvalGate: () => Promise.resolve({ approved: false, message: NO_PARKS }),
+        questionGate: () => Promise.resolve({ answered: false, message: NO_PARKS }),
+        waitForTab: tabWait,
+      }
+    }
+    /** Each parked call's request id, by its tool_use id: the audit row's approval. */
+    const parkedAs = new Map<string, string>()
+    const park = async (call: OpenInputArgs['call'], signal: AbortSignal): Promise<{ requestId: string; row?: Response; early?: OpenInputAnswer['resolution'] }> => {
+      const opened = await open({ turn_id: turnId, call })
+      parkedAs.set(call.id, opened.request_id)
+      // Settled at once: a grant's or the flow's row is there already; a read call or a malformed question has none.
+      if (opened.resolution) return { requestId: opened.request_id, row: await this.#row(opened.request_id), early: opened.resolution }
+      return { requestId: opened.request_id, row: await this.#hold(opened.request_id, signal) }
+    }
+    const approvalGate: ApprovalGate = async (request): Promise<ApprovalVerdict> => {
+      if (stop.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.' }
+      // A copy taken now is what runs: the entry's hash is of this input.
+      const input = structuredClone(request.input)
+      if (request.agentId === undefined) await shown(request.toolUseId, request.toolName, request.input)
+      let parked
+      try {
+        parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]))
+      } catch (err) {
+        if (stop.aborted || request.signal.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.' }
+        return { approved: false, message: `${request.toolName} could not be put to the user for approval (${describe(err)}), so it was not run.` }
+      }
+      const { requestId, row, early } = parked
+      const outcome = row?.outcome ?? early?.outcome
+      if (outcome === 'approved') return { approved: true, input, approvalId: requestId, decision: 'approved' }
+      const said = row?.responder?.kind === 'flow' && outcome === 'denied' ? 'flow_denied' : (outcome ?? 'cancelled')
+      const decision = outcome === 'denied' || outcome === 'expired' ? outcome : 'cancelled'
+      return { approved: false, message: refusal(request.toolName, requestId, said, row?.reason), approvalId: requestId, decision }
+    }
+    const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
+      // An attention request has its own timers and replies (harness/attention.ts), which this gate does not hold yet.
+      if (request.attention) return { answered: false, message: NO_PARKS }
+      if (stop.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
+      // The card the panel shows, with the turn's secrets redacted as the classic QuestionService does.
+      const hidden = secrets()
+      const card = request.questions.map((q) => cardOf(q, hidden))
+      let parked
+      try {
+        parked = await park({ id: request.toolUseId, name: GATE_ASK, input: { questions: card } }, AbortSignal.any([stop, request.signal]))
+      } catch (err) {
+        return { answered: false, message: `The user did not answer: the question could not be asked (${describe(err)}).` }
+      }
+      const { row, early } = parked
+      if (!row) {
+        return { answered: false, message: early ? 'The question was not asked: its input is not the shape AskUserQuestion takes.' : 'The user did not answer: the request is no longer recorded.' }
+      }
+      const answers = Array.isArray(row.response?.answers) ? row.response.answers.filter((a): a is string => typeof a === 'string') : []
+      if (row.outcome !== 'answered' || answers.length === 0) return { answered: false, message: `The user did not answer: ${row.reason ?? 'the request was cancelled'}.` }
+      // One answer per question, in order: keyed by the model's own words, not the card's.
+      return { answered: true, answers: Object.fromEntries(request.questions.map((q, i) => [q.question, answers[i] ?? ''])) }
+    }
+    return {
+      approvalGate,
+      approvalFor: (toolUseId) => Promise.resolve(parkedAs.get(toolUseId)),
+      ...(asks ? { questionGate } : {}),
+      waitForTab: tabWait,
+    }
+  }
+
+  /** The entry's response row, once it is there: woken by its NOTIFY, read every INPUT_POLL_MS besides. Rejects when `signal` aborts. */
+  async #hold(requestId: string, signal: AbortSignal): Promise<Response> {
+    for (;;) {
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('the call stopped waiting')
+      const row = await this.#row(requestId)
+      if (row) return row
+      await this.#pause(requestId, signal)
+    }
+  }
+
+  async #row(requestId: string): Promise<Response | undefined> {
+    const [row] = await this.#deps.sql<Response[]>`
+      SELECT outcome, response, reason, responder FROM ai_input_responses WHERE request_id = ${requestId}`
+    return row
+  }
+
+  #pause(requestId: string, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const set = this.#waiters.get(requestId) ?? new Set()
+      this.#waiters.set(requestId, set)
+      const done = () => {
+        clearTimeout(timer)
+        set.delete(done)
+        if (set.size === 0 && this.#waiters.get(requestId) === set) this.#waiters.delete(requestId)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, this.#deps.inputPollMs ?? INPUT_POLL_MS)
+      set.add(done)
+      signal.addEventListener('abort', done, { once: true })
+    })
   }
 
   /**

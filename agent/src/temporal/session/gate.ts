@@ -404,6 +404,18 @@ export class SessionGate {
     return rid
   }
 
+  /** Whether the entry is parked here (not yet resolved); a call settled at once never was. */
+  isParked(requestId: string): boolean {
+    return this.#parked.has(requestId)
+  }
+
+  /** The one entry cancelled with `reason`, if it is still pending: a call whose turn ended while it was opened. */
+  async cancel(requestId: string, reason: string): Promise<boolean> {
+    const parked = this.#parked.get(requestId)
+    if (!parked || parked.entry.state !== 'pending') return false
+    return await this.#resolve(parked, 'cancelled', SYSTEM, undefined, reason, true)
+  }
+
   /** How the entry ended, once it has. */
   resolution(requestId: string): Promise<Resolution> {
     return this.#slot(requestId).promise

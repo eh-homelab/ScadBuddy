@@ -25,6 +25,7 @@ import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
+import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
 import type { AcquireInput } from '../src/temporal/session/models.js'
 import {
@@ -380,6 +381,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: counted,
         ...sessionFinishActivities(pool.sql, r.m.events),
+        // `gate.settings`, read as each turn starts, and the gate's writers (main.ts).
+        ...sessionGateActivities(pool.sql),
       },
       shutdownGraceMs: 1_000,
       log: () => {},
