@@ -11,6 +11,10 @@ export class Inbox implements AsyncIterable<SDKUserMessage> {
     this.queue.push(message)
     this.wake?.()
   }
+  /** Messages pushed and not yet read: what an interrupt sent now lands after, as Claude Code reads stdin in order. */
+  get waiting(): number {
+    return this.queue.length
+  }
   close(): void {
     this.closed = true
     this.wake?.()

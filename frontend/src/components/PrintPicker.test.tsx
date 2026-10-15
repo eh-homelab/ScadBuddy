@@ -10,7 +10,7 @@ import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
-import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
+import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { startTracing } from '../lib/tracing'
@@ -506,6 +506,35 @@ describe('PrintPicker', () => {
     await screen.findByTestId('filament-slot-1')
   })
 
+  it('re-arranges a recoloured output with a slot for every colour it prints in (#3637)', async () => {
+    const entry = output.manifest![0]!
+    const own = entry.colours[0]!.toUpperCase()
+    const recoloured: Output = {
+      ...output,
+      id: '4'.repeat(32),
+      // Its colours in lower case, and without the colour a copy was swapped to.
+      colors: (output.colors ?? []).map((c) => c.toLowerCase()),
+      manifest: [
+        { ...entry, count: 1, recolour: {} },
+        { ...entry, count: 1, recolour: { [own]: '#FF00FF' } },
+      ],
+    }
+    addMockOutput(recoloured)
+    const { user } = renderPage(
+      <PrintPicker open source={{ kind: 'output', output: recoloured }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    expect(lastArrangeRequest()).toMatchObject({
+      colours: [...(output.colors ?? []).map((c) => c.toUpperCase()), '#FF00FF'],
+      objects: [
+        { output_id: recoloured.id, part: entry.part, count: 1, recolour: {} },
+        { output_id: recoloured.id, part: entry.part, count: 1, recolour: { [own]: '#FF00FF' } },
+      ],
+    })
+  })
+
   it('re-arranges as one traced action, the save in the arrange’s trace (#2292)', async () => {
     const seen: { method: string; path: string; traceparent: string | null }[] = []
     const listen = ({ request }: { request: Request }) => {
@@ -838,7 +867,7 @@ describe('PrintPicker', () => {
       await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
-      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id)
+      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id, expect.any(AbortSignal))
       expect(lastArrangeRequest()).toMatchObject({
         objects: [{ output_id: nova.id, part: 'piece-body', count: 1 }],
         name: 'Nova (arranged)',
@@ -1878,6 +1907,19 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     expect(bodies[0]).not.toHaveProperty('filament_profiles')
   })
 
+  it('turns a profile switched off for one output back on for the next (#2804 review)', async () => {
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await user.click(within(await screen.findByTestId('filament-profile-silk-pla')).getByRole('checkbox', { name: /Silk PLA/ }))
+    expect(within(screen.getByTestId('filament-profile-silk-pla')).getByRole('checkbox', { name: /Silk PLA/ })).not.toBeChecked()
+
+    const second = fixtures.outputs[1] as Output
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    await waitFor(() => expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked())
+  })
+
   it("says why a profile can't apply, and leaves it off", async () => {
     setSilkPreview(silkPreview({ applicable: false, reason: "couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable)", changes: [] }))
     const { bodies } = watch('POST', '/run')
@@ -1926,6 +1968,124 @@ describe('PrintPicker · Filament profiles, checked and unchecked (#2804 review)
     // No "current →" claim it never read; the profile stays on, and the run reports it.
     expect(within(step).getByText('Outer wall speed: → 50 mm/s')).toBeInTheDocument()
     expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked()
+  })
+})
+
+describe('PrintPicker · Prime tower (#3628)', () => {
+  it('stays out of Simple mode, and sends nothing for Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument()
+    await showAdvanced()
+
+    const select = screen.getByLabelText('Prime tower')
+    expect(select).toHaveValue('default')
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Default (process: usually on with more than one filament)',
+      'On',
+      'Off',
+    ])
+    // Default is on, so No sparse layers is offered, and off.
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('prime_tower')
+  })
+
+  it('sends the tower on with No sparse layers', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    expect(screen.getByLabelText('Prime tower')).toHaveValue('on')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['prime_tower']).toEqual({ enabled: true, no_sparse_layers: true })
+  })
+
+  it('sends the tower off as only `enabled: false`, and hides No sparse layers', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    expect(screen.queryByRole('checkbox', { name: /No sparse layers/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['prime_tower']).toEqual({ enabled: false })
+  })
+
+  it('says what Default means for a template that declares the tower, and strikes it when overridden', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_prime_tower: '1', wipe_tower_no_sparse_layers: '1' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByRole('option', { name: 'Default (template: on)' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).toBeChecked()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    const struck = (name: string) => within(list).getByText(name).nextElementSibling?.querySelector('del') !== null
+    expect(struck('No sparse layers on the prime tower')).toBe(false)
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    expect(struck('Prime tower')).toBe(true)
+    expect(struck('No sparse layers on the prime tower')).toBe(true)
+  })
+
+  it('drops the tower chosen in Advanced when switched back to Simple (#3648 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    expect(screen.getByText('(slicer default)')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('prime_tower')
+  })
+
+  it('does not claim a library file’s No sparse layers under Default (#3648 review)', async () => {
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(within(screen.getByLabelText('Prime tower')).getAllByRole('option')[0]).toHaveTextContent(
+      'Default (file or process)',
+    )
+    expect(screen.queryByRole('checkbox', { name: /No sparse layers/ })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'on')
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).not.toBeChecked()
+  })
+
+  it('checks and reslices for the chosen tower, as the run will slice it', async () => {
+    const checks = watch('POST', '/check')
+    const previews = watch('POST', '/preview-slice')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(previews.bodies.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(checks.bodies.at(-1)).not.toHaveProperty('prime_tower')
+    expect(previews.bodies.at(-1)).not.toHaveProperty('prime_tower')
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    const wanted = { prime_tower: { enabled: true, no_sparse_layers: true } }
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(wanted))
+    await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject(wanted), { timeout: 5000 })
   })
 })
 
@@ -4121,5 +4281,96 @@ describe('PrintPicker · a sliced file that does not fit is warned of, never hel
     expect(await screen.findByText(/Sliced for a 0\.6 mm nozzle; 0\.4 mm is mounted/)).toBeInTheDocument()
     expect(screen.getByText(/Sliced for a Bambu Lab X1 Carbon/)).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+})
+
+describe('PrintPicker · Queue (#2288)', () => {
+  it('queues the print to wait for a manual start, unless that is unticked', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    expect(await screen.findByRole('dialog', { name: 'Queue' })).toBeInTheDocument()
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    expect(await screen.findByLabelText('Wait for a manual start')).toHaveValue('true')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ options: { manual_start: true } })
+  })
+
+  it('starts as Print does once the manual start is unticked', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Wait for a manual start'), 'false')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ options: { manual_start: false } })
+  })
+
+  it('never remembers the Queue\'s own manual start (#2786 review)', async () => {
+    const { bodies } = watch('PUT', '/settings/print-options', '/api/v1/')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    // What the user set is saved; the seed every Queue starts with is not, or every
+    // later Print at that scope would wait for a manual start.
+    expect(bodies[0]).toMatchObject({ options: { timelapse: true } })
+    expect(bodies[0]).not.toHaveProperty('options.manual_start')
+  })
+
+  it('remembers a manual start chosen as Yes once it was changed (#2786 review)', async () => {
+    const { bodies } = watch('PUT', '/settings/print-options', '/api/v1/')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    const start = await screen.findByLabelText('Wait for a manual start')
+    await user.selectOptions(start, 'false')
+    await user.selectOptions(start, 'true')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ options: { manual_start: true } })
+  })
+
+  it('hands the manual start back to the default when that is chosen (#2786 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    const start = await screen.findByLabelText('Wait for a manual start')
+    await user.selectOptions(start, 'false')
+    await user.selectOptions(start, '')
+    expect(start).toHaveValue('')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect((bodies[0]?.options as Record<string, unknown> | undefined)?.manual_start ?? null).toBeNull()
+  })
+
+  it('leaves the manual start to the remembered options for Print', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    await loaded()
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('options.manual_start')
   })
 })

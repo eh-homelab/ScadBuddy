@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { notifyWarmEvict } from '../../sessions/warmEvict.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
 import type { PackageSource } from './source.js'
@@ -214,6 +215,8 @@ export class PackageStore implements PackageRepo {
     if (!row) {
       throw new PluginError(`a plugin package named "${p.review.name}" is already installed; re-pin it instead`, 409)
     }
+    // A warm Claude Code loaded the packages of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
+    await notifyWarmEvict(this.sql, '*')
     return view(row)
   }
 
@@ -239,6 +242,7 @@ export class PackageStore implements PackageRepo {
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
+      await notifyWarmEvict(tx, '*')
       return view(row!)
     })
   }
@@ -251,6 +255,7 @@ export class PackageStore implements PackageRepo {
       WHERE name = ${name}
       RETURNING *`
     if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
+    await notifyWarmEvict(this.sql, '*')
     return view(row)
   }
 
@@ -291,12 +296,14 @@ export class PackageStore implements PackageRepo {
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
           RETURNING *`
+        await notifyWarmEvict(tx, '*')
         return view(row!)
       }
       if (current.approved_at !== null && current.allow_refused === allow) return view(current)
       const [row] = await tx<Row[]>`
         UPDATE ai_plugin_packages SET approved_at = now(), allow_refused = ${allow}, updated_at = now()
         WHERE name = ${name} RETURNING *`
+      await notifyWarmEvict(tx, '*')
       return view(row!)
     })
   }
@@ -310,13 +317,16 @@ export class PackageStore implements PackageRepo {
       }
       const [row] = await tx<Row[]>`
         UPDATE ai_plugin_packages SET enabled = ${enabled}, updated_at = now() WHERE name = ${name} RETURNING *`
+      await notifyWarmEvict(tx, '*')
       return view(row!)
     })
   }
 
   async delete(name: string): Promise<boolean> {
     const rows = await this.sql`DELETE FROM ai_plugin_packages WHERE name = ${name}`
-    return rows.count > 0
+    if (rows.count === 0) return false
+    await notifyWarmEvict(this.sql, '*')
+    return true
   }
 
   async enabledPins(): Promise<PackagePin[]> {

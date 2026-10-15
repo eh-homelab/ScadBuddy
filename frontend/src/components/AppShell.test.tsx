@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { renderPage } from '../test/utils'
 import { AppShell } from './AppShell'
 
@@ -93,5 +93,70 @@ describe('the shell’s orientation (#2454)', () => {
     expect(screen.getByRole('main')).toHaveFocus()
     // Its visible text, not a shorter label (axe label-content-name-mismatch).
     expect(screen.getByRole('link', { name: /^ScadBuddy/ })).toHaveAccessibleName('ScadBuddy OpenSCAD customizer')
+  })
+})
+
+describe('the shell’s sidebar (#3653)', () => {
+  const shell = (embedded: boolean) => (
+    <Routes>
+      <Route element={<AppShell embedded={embedded} tabLink={null} />}>
+        <Route path="*" element={<h1>Page</h1>} />
+      </Route>
+    </Routes>
+  )
+  const sidebarState = () => document.querySelector('[data-slot="sidebar"]')?.getAttribute('data-state')
+  const forget = () => {
+    window.localStorage.removeItem('scadbuddy.sidebar.open')
+    window.localStorage.removeItem('scadbuddy.sidebar.open.embedded')
+  }
+
+  it('marks the page’s own link, and folds to its icons and back', async () => {
+    forget()
+    onTestFinished(forget)
+    const { user } = renderPage(shell(false), { route: '/prints/7' })
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(nav).getByRole('link', { name: 'Prints' })).toHaveAttribute('aria-current', 'page')
+    expect(within(nav).getByRole('link', { name: 'Prints' })).toHaveAttribute('data-active', 'true')
+    expect(within(nav).getByRole('link', { name: 'Models' })).not.toHaveAttribute('aria-current')
+
+    const before = sidebarState()
+    await user.click(screen.getByRole('button', { name: 'Toggle navigation' }))
+    expect(sidebarState()).not.toBe(before)
+    // Folded to icons, the links stay, by name.
+    expect(within(nav).getByRole('link', { name: 'Settings' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Toggle navigation' }))
+    expect(sidebarState()).toBe(before)
+    // Remembered in this browser, not in a cookie that every request would carry.
+    expect(window.localStorage.getItem('scadbuddy.sidebar.open')).toBe(String(before === 'expanded'))
+    expect(document.cookie).not.toContain('sidebar_state')
+  })
+
+  it('leaves Ctrl+B to the browser and to whatever has the focus', async () => {
+    forget()
+    const { user } = renderPage(shell(false))
+    const before = sidebarState()
+    await user.keyboard('{Control>}b{/Control}')
+    expect(sidebarState()).toBe(before)
+  })
+
+  it('starts as icons in Bambuddy’s frame, beside its own navigation, whatever the app outside it does', () => {
+    forget()
+    // Expanded outside the frame: the same origin's storage, but not the frame's choice.
+    window.localStorage.setItem('scadbuddy.sidebar.open', 'true')
+    onTestFinished(forget)
+    renderPage(shell(true))
+    expect(sidebarState()).toBe('collapsed')
+    expect(screen.getByRole('banner')).toHaveAttribute('data-embedded', 'true')
+  })
+
+  it('starts as the user left it, in the frame or out of it', () => {
+    window.localStorage.setItem('scadbuddy.sidebar.open.embedded', 'true')
+    window.localStorage.setItem('scadbuddy.sidebar.open', 'false')
+    onTestFinished(forget)
+    const { unmount } = renderPage(shell(true))
+    expect(sidebarState()).toBe('expanded')
+    unmount()
+    renderPage(shell(false))
+    expect(sidebarState()).toBe('collapsed')
   })
 })

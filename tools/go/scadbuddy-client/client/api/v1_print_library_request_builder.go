@@ -135,6 +135,12 @@ func (m *V1PrintLibraryRequestBuilder) Restore() *V1PrintLibraryRestoreRequestBu
 	return NewV1PrintLibraryRestoreRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
+// Search the search property
+// returns a *V1PrintLibrarySearchRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Search() *V1PrintLibrarySearchRequestBuilder {
+	return NewV1PrintLibrarySearchRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // ToGetRequestInformation the folder tree and one folder's files (the root's without “folder_id“).Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“.A file ScadBuddy uploaded names its “output_id“ (#1864), while that output stillexists: the upload row outlives a deleted output, and a file whose output is gone isany other library file (#2138). “file_id“ in place of “folder_id“ lists thefolder that file is in, which a deep link to a file opens (#2165); a file Bambuddyno longer has is its 404.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
