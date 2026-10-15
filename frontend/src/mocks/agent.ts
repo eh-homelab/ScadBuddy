@@ -11,7 +11,8 @@
  * first message that mentions a draft gets a question instead (#940): a draft to
  * approve, which waits on `question.asked` until the panel answers; one that says "post a
  * summary" posts a `done` summary, and one that says the tab dropped parks on an attention
- * request (#815). The panel answers
+ * request (#815); one that names a web address has the headless browser ask to open it
+ * (#982: a site on neither of its lists). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
  * calls `respond` below); the socket's `approval.decision` and `question.answer` still
  * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
@@ -120,7 +121,8 @@ interface MockSession extends SessionSummary {
   log: ServerEvent[]
   timers: ReturnType<typeof setTimeout>[]
   /** The approval the script is parked on, with what to run on each answer. */
-  pending?: { id: string; toolCallId: string }
+  /** `result`: what the call answers once decided, when it is not the send's (#982). */
+  pending?: { id: string; toolCallId: string; result?: { approved: string; denied: string; said: [string, string] } }
   /** The question the script is parked on (#940). */
   asking?: { id: string; toolCallId: string }
   streaming?: string
@@ -292,6 +294,38 @@ export function createMockAgentTransport({
     ]
   }
 
+  /** #982: the headless browser asks to open a site on neither of its lists. */
+  const browserTurn = (s: MockSession, url: string): Array<() => void> => {
+    const navId = nextId('tool')
+    const approvalId = nextId('approval')
+    const tool = 'mcp__playwright__browser_navigate'
+    return [
+      ...say(s, "I'll open that page in my browser to read the model's details."),
+      () =>
+        emit({ type: 'tool.call', sessionId: s.sessionId, id: navId, name: tool, input: { url }, risk: 'outward', title: `Open ${url}` }),
+      () => {
+        s.pending = {
+          id: approvalId,
+          toolCallId: navId,
+          result: {
+            approved: `Opened ${url}`,
+            denied: 'Denied: the page was not opened.',
+            said: ['The model is a spool lock for 1 kg spools, with a shim for 0.5 kg ones.', "OK, I won't open it."],
+          },
+        }
+        emit({
+          type: 'approval.required',
+          sessionId: s.sessionId,
+          id: approvalId,
+          tool: navId,
+          summary: `${tool} ${JSON.stringify({ url })}`,
+          risk: 'outward',
+        })
+        setStatus(s, 'waiting_approval')
+      },
+    ]
+  }
+
   /** #940: a draft to approve, parked on `question.asked`. */
   const questionTurn = (s: MockSession): Array<() => void> => {
     const askId = nextId('tool')
@@ -432,9 +466,18 @@ export function createMockAgentTransport({
           sessionId: s.sessionId,
           id: pending.toolCallId,
           ok: approve,
-          summary: approve ? 'Queued 2 copies in the Keychains project.' : 'Denied: nothing was sent.',
+          summary: pending.result
+            ? approve
+              ? pending.result.approved
+              : pending.result.denied
+            : approve
+              ? 'Queued 2 copies in the Keychains project.'
+              : 'Denied: nothing was sent.',
         }),
-      ...say(s, approve ? 'Sent. Two copies are in the queue.' : "OK, I didn't send it."),
+      ...say(
+        s,
+        pending.result ? pending.result.said[approve ? 0 : 1] : approve ? 'Sent. Two copies are in the queue.' : "OK, I didn't send it.",
+      ),
       () => finish(s),
     ])
   }
@@ -556,7 +599,9 @@ export function createMockAgentTransport({
           s,
           !isNew
             ? followUp(s, msg.text)
-            : /draft/i.test(msg.text)
+            : /https?:\/\/\S+/.test(msg.text)
+              ? browserTurn(s, /https?:\/\/\S+/.exec(msg.text)![0])
+              : /draft/i.test(msg.text)
               ? questionTurn(s)
               : /post a summary|tab dropped/i.test(msg.text)
                 ? attentionTurn(s, /post a summary/i.test(msg.text))

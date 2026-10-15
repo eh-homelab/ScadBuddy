@@ -100,6 +100,15 @@ function supportsPhrase(
   )
 }
 
+function towerPhrase(tower: { enabled: boolean; no_sparse_layers?: boolean } | undefined): string {
+  if (tower === undefined) return ''
+  if (!tower.enabled) return ', without a prime tower'
+  return (
+    ', with a prime tower' +
+    (tower.no_sparse_layers === true ? ' (no sparse layers)' : tower.no_sparse_layers === false ? ' (sparse layers too)' : '')
+  )
+}
+
 /** The folder a library move or copy names, in its approval line (#2670). */
 function folderName(folderId: number | undefined, folderPath: string | undefined): string {
   if (folderId !== undefined) return `library folder ${folderId}`
@@ -443,6 +452,30 @@ export const printTools: Tool[] = [
       const { items, ...rest } = page(files ?? [], args, (file) => String(file.id), 'list_library')
       return json({ ...listing, files: items, ...rest })
     },
+  }),
+
+  // #3630 — a file found by name, without walking the folders one at a time.
+  defineTool({
+    name: 'search_library',
+    description:
+      "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear (as " +
+      'a substring) in ' +
+      "the file's name or its folder path, whatever the case or separator. Each file names its `folder_path`. " +
+      'Without `all` only unsliced 3MFs (`hidden` counts the other matches); with it every file. At most 100 ' +
+      'files; `total` says how many matched. The library is read whole and kept for 30 s: after changing it ' +
+      '(delete_library_files, a move, copy or rename) pass `fresh: true` so the search sees the change.',
+    input: z.object({ query: z.string().min(1).max(200), all: z.boolean().optional(), fresh: z.boolean().optional() }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library/search'],
+    handler: async ({ query, all, fresh }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/library/search', { params: { query: { q: query, all, fresh } } }),
+          'search the library',
+        ),
+      ),
   }),
 
   // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
@@ -869,6 +902,21 @@ export const printTools: Tool[] = [
           'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
             "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
         ),
+      prime_tower: z
+        .object({
+          enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
+          no_sparse_layers: z
+            .boolean()
+            .optional()
+            .describe(
+              "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
+            ),
+        })
+        .optional()
+        .describe(
+          "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
+            'else the process (on whenever a plate uses more than one filament).',
+        ),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -894,6 +942,7 @@ export const printTools: Tool[] = [
         `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
         `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
         `${supportsPhrase(args.supports)}` +
+        `${towerPhrase(args.prime_tower)}` +
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
@@ -990,6 +1039,8 @@ export const printTools: Tool[] = [
                       : { on_build_plate_only: args.supports.on_build_plate_only }),
                   },
             }),
+        // As given: the backend drops No sparse layers with the tower off (#3648 review).
+        ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
       const started = await reattach(

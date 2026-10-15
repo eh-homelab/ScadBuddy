@@ -1,5 +1,6 @@
 import type { Param, ParamValue } from '../../api/types'
 import { Field } from './Field'
+import { paramLabel } from '../../lib/params'
 
 export function SelectWidget({
   param,
@@ -14,7 +15,7 @@ export function SelectWidget({
   const options = param.options ?? []
 
   return (
-    <Field id={id} label={param.caption ?? param.name} name={param.name}>
+    <Field id={id} label={paramLabel(param)} name={param.name}>
       <select
         id={id}
         value={String(value)}

@@ -6,6 +6,7 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { browserGuard } from '../src/browser/guard.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
@@ -15,6 +16,7 @@ import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpReque
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { CALL_ID_META } from '../src/builtins/callId.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -49,8 +51,9 @@ function noDatabase(): unknown {
 function notes(calls: string[]): () => McpServer {
   return () => {
     const server = new McpServer({ name: 'notes', version: '1' })
-    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }) => {
-      calls.push(`read ${id}`)
+    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }, extra) => {
+      const callId = extra._meta?.[CALL_ID_META]
+      calls.push(`read ${id}${callId === undefined ? '' : ` as ${String(callId)}`}`)
       return { content: [{ type: 'text', text: `note ${id}` }] }
     })
     server.registerTool('post', { description: 'posts', inputSchema: { method: z.string(), body: z.string() } }, async ({ body }) => {
@@ -101,6 +104,7 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
+    callIds?: boolean
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -120,6 +124,7 @@ function harness(
     ...(options.mayPark === false ? {} : { mayPark }),
     ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
+    ...(options.callIds ? { callIds: true } : {}),
   }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
@@ -277,6 +282,7 @@ describe('turn tools in a durable session', () => {
       ],
       problems: [],
       secrets: [],
+      terminate: async () => {},
       release: () => {},
     }
     const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
@@ -328,6 +334,36 @@ describe('turn tools in a durable session', () => {
     expect(await env('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
     expect(h.calls).toEqual(['read a'])
     expect(h.audits).toEqual([expect.objectContaining({ action: 'notes__read_note', tier: 'read', outcome: 'ok', sessionId: SESSION })])
+  })
+
+  it("tells a server of its own each call's tool_use id, so a retried activity is one call; never another server (#3201)", async () => {
+    const own = harness({ callIds: true })
+    await env('turn:notes__read_note', 'tool-toolu_01').run(own.call, { id: 'a' })
+    expect(own.calls).toEqual(['read a as toolu_01'])
+    const other = harness()
+    await env('turn:notes__read_note', 'tool-toolu_01').run(other.call, { id: 'a' })
+    expect(other.calls).toEqual(['read a'])
+  })
+
+  it("gives a call the activity's own time, not the MCP client's 60 s default (#3199)", async () => {
+    const slow = () => () => {
+      const server = new McpServer({ name: 'notes', version: '1' })
+      server.registerTool('read.note', { description: 'reads slowly', inputSchema: { id: z.string() } }, async ({ id }) => {
+        await new Promise((r) => setTimeout(r, 1_000))
+        return { content: [{ type: 'text', text: `note ${id}` }] }
+      })
+      return server
+    }
+    const run = (startToCloseTimeoutMs: number) =>
+      new MockActivityEnvironment({
+        activityId: 'tool-toolu_01',
+        activityType: 'turn:notes__read_note',
+        workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+        taskQueue: 'agent-tools',
+        startToCloseTimeoutMs,
+      }).run(harness({ server: slow }).call, { id: 'a' })
+    expect((await failure(run(300))).message).toMatch(/timed out/i)
+    expect(await run(10 * 60_000)).toBe('note a')
   })
 
   it("records the durable turn on a call's audit row and in its servers' context, as a classic turn's (#2497)", async () => {
@@ -520,6 +556,102 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe("the headless browser's lists in a durable turn (#982)", () => {
+  const LISTS = { allow: ['makerworld.com'], deny: ['evil.example'] }
+  const page = (url: string) => `### Page\n- Page URL: ${url}\n\nThe text of ${url}`
+
+  function browserHarness() {
+    const calls: string[] = []
+    const approvals = new Map<string, 'once' | 'session'>()
+    const redirects: Record<string, string> = { 'https://makerworld.com/go': 'https://elsewhere.example/' }
+    const guard = browserGuard({
+      store: {
+        lists: async () => LISTS,
+        approved: async () => new Map(approvals),
+        approve: async (_id, origin, scope) => {
+          if (approvals.get(origin) !== 'session') approvals.set(origin, scope)
+          return true
+        },
+      },
+      sessionId: SESSION,
+      plugins: ['playwright'],
+    })
+    const server: TurnServer = {
+      name: 'playwright',
+      connect: () =>
+        connectInProcess(() => {
+          const mcp = new McpServer({ name: 'playwright', version: '1' })
+          mcp.registerTool('browser_navigate', { description: 'navigate', inputSchema: { url: z.string() } }, async ({ url }) => {
+            calls.push(url)
+            return { content: [{ type: 'text', text: page(redirects[url] ?? url) }] }
+          })
+          return mcp
+        }),
+      tierOf: () => 'outward',
+      guard: (name, input) => guard.check(name, input),
+      screen: (name, input, text) => guard.screen(name, input, text),
+    }
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: async () => ({ servers: [server], problems: [], secrets: [], release: () => {} }),
+      approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    }
+    const activities = turnToolActivities(deps)
+    return {
+      calls,
+      approvals,
+      tier: (url: string) => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'playwright__browser_navigate', input: { url } }),
+      call: (url: string, id = 'tool-toolu_01') => env('turn:playwright__browser_navigate', id).run(turnToolActivity(deps), { url }),
+    }
+  }
+
+  it('tiers a navigation by its page: allowed runs unasked, unlisted parks, denied is not parked', async () => {
+    const h = browserHarness()
+    expect(await h.tier('https://makerworld.com/en/models/1')).toEqual({ tier: 'write' })
+    expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward' })
+    expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward' })
+    // No approval could run it, so the user is not asked: its call refuses it.
+    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write', refused: expect.stringContaining('deny rule "evil.example"') as unknown })
+  })
+
+  it('runs an allowed navigation, refuses a denied one even approved, and an unlisted one until approved', async () => {
+    const h = browserHarness()
+    expect(await h.call('https://makerworld.com/en/models/1')).toContain('The text of https://makerworld.com/en/models/1')
+    const denied = await failure(h.call('https://evil.example/', 'tool-toolu_approved'))
+    expect(denied.message).toContain('deny rule "evil.example"')
+    expect((await failure(h.call('https://example.org/a'))).type).toBe('NotApproved')
+    expect(h.calls).toEqual(['https://makerworld.com/en/models/1'])
+    expect(await h.call('https://example.org/a', 'tool-toolu_approved')).toContain('The text of https://example.org/a')
+    expect(h.approvals.get('https://example.org')).toBe('once')
+  })
+
+  it('withholds a page an allowed navigation was redirected to', async () => {
+    const h = browserHarness()
+    const text = await h.call('https://makerworld.com/go')
+    expect(text).toMatch(/withheld this result: the browser is now on https:\/\/elsewhere\.example/)
+    expect(text).not.toContain('The text of')
+  })
+
+  it("lists a remote plugin's browser tools as may_park, and browser_navigate's tier as the page's", async () => {
+    const forwarded: PluginsForRun = {
+      plugins: [{ name: 'playwright', url: 'http://127.0.0.1:9/forward/pw', toolTiers: { browser_snapshot: 'read' }, disabledTools: [] }],
+      problems: [],
+      secrets: [],
+      release: () => {},
+      terminate: async () => {},
+    }
+    const { servers } = await turnServers({
+      remotePlugins: async () => forwarded,
+      browserOrigins: { lists: async () => LISTS, approved: async () => new Map(), approve: async () => true },
+    })({ session: SESSION, owner: BROWSER, signal: new AbortController().signal, listing: true })
+    const pw = servers.find((s) => s.name === 'playwright')!
+    expect(pw.mayPark?.('mcp__playwright__browser_snapshot')).toBe(true)
+    expect(pw.fixedTier?.('mcp__playwright__browser_snapshot')).toBe('read')
+    expect(pw.fixedTier?.('mcp__playwright__browser_navigate')).toBeUndefined()
+    expect(await pw.guard?.('mcp__playwright__browser_navigate', { url: 'https://makerworld.com/' })).toMatchObject({ allow: expect.any(String) })
   })
 })
 

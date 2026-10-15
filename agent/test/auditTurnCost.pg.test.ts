@@ -52,9 +52,12 @@ describe.skipIf(skip !== undefined)(`turn cost in the audit log${skip ? ` (skipp
   }
 
   async function stopMidReply(id: string, text: string) {
+    // This turn's own delta, not an earlier turn's: the stop must land once the
+    // prompt is in and the reply streaming, as a user's does (sessions/warmTurn.ts).
+    const before = (await m.events.read(id)).at(-1)?.seq ?? 0
     const turn = await m.send(id, browser, text)
     for (let i = 0; i < 200; i++) {
-      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > 4)) break
+      if ((await m.events.read(id)).some((e) => e.event.type === 'assistant.text.delta' && e.seq > before)) break
       await new Promise((r) => setTimeout(r, 10))
     }
     expect(await m.interrupt(id, browser)).toBe(true)

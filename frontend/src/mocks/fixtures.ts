@@ -483,9 +483,35 @@ export const versionIds = {
   raised: commit('c3d4e5f6a7b8'),
   synced: commit('d9e0f1a2b3c4'),
   builtinFirst: commit('e5f6a7b8c9d0'),
+  // The mocked assistant session's change to gridfinity-bin, and the version before it.
+  binTall: commit('3f9c2a1b7d4e'),
+  binFirst: commit('f0e1d2c3b4a5'),
 }
 
 export const versions: Record<string, ModelVersion[]> = {
+  'gridfinity-bin': [
+    {
+      commit: versionIds.binTall,
+      short: versionIds.binTall.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-10-03T09:00:00Z',
+      message: 'Edit gridfinity-bin source',
+      files: [{ status: 'M', path: 'model.scad' }],
+      current: true,
+    },
+    {
+      commit: versionIds.binFirst,
+      short: versionIds.binFirst.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-14T09:12:00Z',
+      message: 'Add gridfinity-bin',
+      files: [
+        { status: 'A', path: 'model.json' },
+        { status: 'A', path: 'model.scad' },
+      ],
+      current: false,
+    },
+  ],
   [BUILTIN_SLUG]: [
     {
       commit: versionIds.synced,

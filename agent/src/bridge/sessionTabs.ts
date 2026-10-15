@@ -8,6 +8,14 @@ import type { Sql } from 'postgres'
 
 export interface SessionTabStore {
   set(sessionId: string, tabId: string): Promise<void>
+  /**
+   * `set`, only while the session's row still names `seen` or there is no row, in one
+   * statement: a pairing made between a read and this write is never lost (#2271).
+   * No row matches any `seen`: every stored pairing is a row, so there is none to
+   * lose, and `seen` may be this replica's own map when the store's read failed
+   * (#3478 review). Whether it wrote. Optional: without it the hub compares, then writes.
+   */
+  setIf?(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean>
   /** `signal` stops the read with the call it is for. */
   get(sessionId: string, signal?: AbortSignal): Promise<string | undefined>
 }
@@ -23,6 +31,21 @@ export class PostgresSessionTabStore implements SessionTabStore {
     await this.#sql`
       INSERT INTO ai_session_tabs (session_id, tab_id) VALUES (${sessionId}, ${tabId})
       ON CONFLICT (session_id) DO UPDATE SET tab_id = EXCLUDED.tab_id, paired_at = now()`
+  }
+
+  async setIf(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean> {
+    // An insert, or an update of the row only while it names `seen`: on a row naming
+    // another tab the conflict updates nothing and returns no row.
+    const rows =
+      seen === undefined
+        ? await this.#sql`
+            INSERT INTO ai_session_tabs (session_id, tab_id) VALUES (${sessionId}, ${tabId})
+            ON CONFLICT (session_id) DO NOTHING RETURNING 1`
+        : await this.#sql`
+            INSERT INTO ai_session_tabs (session_id, tab_id) VALUES (${sessionId}, ${tabId})
+            ON CONFLICT (session_id) DO UPDATE SET tab_id = EXCLUDED.tab_id, paired_at = now()
+            WHERE ai_session_tabs.tab_id = ${seen} RETURNING 1`
+    return rows.length > 0
   }
 
   async get(sessionId: string, signal?: AbortSignal): Promise<string | undefined> {

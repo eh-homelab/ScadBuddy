@@ -300,6 +300,29 @@ describe('the library routes', () => {
     expect(result.total).toBe(2)
     expect(result.next_cursor).toBeTruthy()
   })
+
+  it('finds files by name in every folder (#3630)', async () => {
+    let query = ''
+    const found = {
+      query: 'dino',
+      all: false,
+      files: [{ id: 7, filename: 'dino.3mf', file_type: '3mf', printable: true, folder_path: ['Toys'] }],
+      total: 1,
+      hidden: 0,
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/library/search`, ({ request }) => {
+        query = new URL(request.url).search
+        return HttpResponse.json(found)
+      }),
+    )
+    expect(tool('search_library').risk).toBe('read')
+    const result = firstText(await tool('search_library').execute({ query: 'dino' }, ctx()))
+    expect(query).toBe('?q=dino')
+    expect(result).toEqual(found)
+    await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
+    expect(query).toBe('?q=dino&fresh=true')
+  })
 })
 
 describe('print_output on a library file', () => {

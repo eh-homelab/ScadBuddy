@@ -42,6 +42,12 @@ interface Props {
    * disclosure — the send bar's Copies box is the effective `quantity`.
    */
   onEffective?: (effective: PrintOptions) => void
+  /**
+   * What Remember saves, when it is not `value`: a caller that seeds a value of its own
+   * into what this send shows (Queue's manual start, #2288) passes the user's edits here,
+   * so a save never remembers the seed for every later print.
+   */
+  toRemember?: PrintOptions
 }
 
 const UNSET = ''
@@ -60,6 +66,7 @@ export function PrintOptionsDisclosure({
   value,
   onChange,
   onEffective,
+  toRemember = value,
 }: Props) {
   const slug = subject?.key
   const noun = subject?.noun ?? 'model'
@@ -148,7 +155,7 @@ export function PrintOptionsDisclosure({
         // Merged with what that scope already holds, never just this dialog's edits: the
         // PUT replaces a scope wholesale, so sending only the current overlay would
         // delete every option remembered there on an earlier visit.
-        options: clear ? {} : resolveOptions(storedFor(activeScope), value),
+        options: clear ? {} : resolveOptions(storedFor(activeScope), toRemember),
       })
       setRemembered(view)
       setSavedScope(activeScope)

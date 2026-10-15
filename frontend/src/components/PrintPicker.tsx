@@ -15,6 +15,7 @@ import type {
   PrintRunResult,
   PrintSequence,
   SupportsChoice,
+  PrimeTowerChoice,
   RackAlgorithm,
 } from '../api/types'
 import {
@@ -72,6 +73,8 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
+import { PrimeTowerStep } from './print/PrimeTowerStep'
+import { overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicedSettings } from './print/SlicedSettings'
@@ -198,6 +201,11 @@ interface Props {
    * output. A library file has none of ScadBuddy's.
    */
   printSettings?: Record<string, string> | undefined
+  /**
+   * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
+   * the print waits in Bambuddy's queue rather than starting. It can be unticked.
+   */
+  queue?: boolean
 }
 
 export function PrintPicker({
@@ -209,6 +217,7 @@ export function PrintPicker({
   project,
   printSettings,
   batch,
+  queue = false,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
@@ -314,6 +323,35 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
+  // Memoised: it is a dependency of the run and of the background analysis.
+  // Seeded only while it was never chosen. `null` is the user handing it back to the
+  // remembered value or Bambuddy's ("the default"): sent as no override at all.
+  const sentOptions = useMemo(() => {
+    if (!queue) return options
+    const { manual_start: start, ...rest } = options
+    if (start === undefined) return { ...rest, manual_start: true }
+    return start === null ? rest : options
+  }, [queue, options])
+  /**
+   * #2786 review — the disclosure's edits, kept as the user's own: it builds each edit
+   * from the value it shows, which in a Queue carries the seed. The seed passing back
+   * through is not a choice; Queue's start dropped from what it showed is "the default".
+   */
+  const editOptions = (next: PrintOptions) => {
+    if (!queue) return setOptions(next)
+    const { manual_start: start, ...rest } = next
+    if (start === undefined) return setOptions({ ...rest, manual_start: null })
+    // A `true` while never chosen is the seed passing back through, not a choice. The
+    // select already shows Yes then, so picking Yes fires nothing either: to remember
+    // Yes, the user picks No and then Yes, and that one is kept.
+    setOptions(start === true && options.manual_start === undefined ? rest : next)
+  }
+  /** What Remember saves: the user's edits, never Queue's seed or an unset. */
+  const rememberOptions = useMemo(() => {
+    const { manual_start: start, ...rest } = options
+    return start === null || start === undefined ? rest : options
+  }, [options])
   /**
    * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
    * never remembered (until #1754 decides remembered choices by subject).
@@ -321,6 +359,8 @@ export function PrintPicker({
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
+  // #3628 — this print's prime tower; `null` leaves it to the template and the process.
+  const [primeTower, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -373,8 +413,12 @@ export function PrintPicker({
   // Simple mode shows no rack step, so a hand pick would be sent unseen (as
   // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
   const { advanced } = picker
+  // The same for the prime tower (#3648 review): Simple mode sends none.
   useEffect(() => {
-    if (!advanced) setRackPosition(null)
+    if (!advanced) {
+      setRackPosition(null)
+      setPrimeTower(null)
+    }
   }, [advanced])
   useEffect(() => {
     setRackPosition(null)
@@ -480,9 +524,10 @@ export function PrintPicker({
     planChanged,
     copies,
     projectId,
-    options,
+    options: sentOptions,
     printSequence,
     supports,
+    primeTower,
     filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
@@ -529,12 +574,15 @@ export function PrintPicker({
   // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange
   // made of it, which keeps the dialog's settings.
   const { sourceKey: currentKey } = picker
+  const { reset: resetProfiles } = filamentProfiles
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
-  }, [currentKey, carry])
+    setPrimeTower(null)
+    resetProfiles()
+  }, [currentKey, carry, resetProfiles])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
   async function rearrange(backfill: boolean) {
@@ -579,11 +627,23 @@ export function PrintPicker({
                 output_id: from.id,
                 part: object.part,
                 count: object.count,
+                // #3637 — each colouring of a part is its own entry: named by its colours.
+                recolour: object.recolour ?? {},
               })),
               goal: arrangeGoal,
               printer_id: printerId,
               filament_plan: { slots: plan, force_colour_match: false },
-              colours: from.colors ?? [],
+              // #3637 — every colour a recoloured copy prints in has its slot, whether
+              // or not this output's `colors` already lists it.
+              colours: [
+                ...new Set([
+                  // Upper case on both sides, as the API compares them: one colour, one slot.
+                  ...(from.colors ?? []).map((c) => c.toUpperCase()),
+                  ...(from.manifest ?? []).flatMap((object) =>
+                    Object.values(object.recolour ?? {}).map((c) => c.toUpperCase()),
+                  ),
+                ]),
+              ],
               name: arrangedName(from.name),
             },
             { signal: controller.signal, within },
@@ -656,7 +716,7 @@ export function PrintPicker({
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
           copies: effectiveCopies,
-          options,
+          options: sentOptions,
         }
       : null
 
@@ -679,7 +739,8 @@ export function PrintPicker({
           // slices; the check and the background slice must see it as the run does.
           // #1899, #717: supports and the profiles left on are process overrides too, and
           // Checks says when one can't apply.
-          ...sliceOverrides(printSequence, supports, filamentProfiles.active),
+          // #3628: and so is the prime tower.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
@@ -853,10 +914,11 @@ export function PrintPicker({
       copies,
       plate,
       projectId,
-      options,
+      options: sentOptions,
       printSequence,
-      // What Print would send (#1899, #717): a batch step keeps them for Queue all.
+      // What Print would send (#1899, #3628, #717): a batch step keeps them for Queue all.
       supports,
+      primeTower,
       filamentProfiles: filamentProfiles.active,
       rackPosition,
       rackAlgorithm: chosenAlgorithm,
@@ -897,6 +959,8 @@ export function PrintPicker({
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
+    setPrimeTower(null)
+    filamentProfiles.reset()
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -912,7 +976,7 @@ export function PrintPicker({
   return (
     <Dialog
       open={open}
-      title={batch ? batch.title : 'Print'}
+      title={batch ? batch.title : queue ? 'Queue' : 'Print'}
       description={
         result || unanswered !== null
           ? undefined
@@ -994,7 +1058,7 @@ export function PrintPicker({
               {...USER_ONLY}
             >
               {running && <Spinner />}
-              Print
+              {queue ? 'Queue' : 'Print'}
             </Button>
           </>
         )
@@ -1335,12 +1399,23 @@ export function PrintPicker({
                             fromFile={given?.kind !== 'output'}
                           />
 
+                          <PrimeTowerStep
+                            value={primeTower}
+                            onChange={setPrimeTower}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                            // The filament step is the chosen plate's (useFilamentPlan reads it per
+                            // plate), so these are that plate's filaments; null while they load.
+                            colours={filaments ? (filaments.slots ?? []).length : null}
+                          />
+
                           {given?.kind === 'output' && (
                             <SlicerDefaults
                               settings={printSettings}
                               overridden={[
                                 ...(printSequence !== null ? ['print_sequence'] : []),
                                 ...overriddenSupportKeys(supports),
+                                ...overriddenTowerKeys(primeTower),
                               ]}
                             />
                           )}
@@ -1350,10 +1425,11 @@ export function PrintPicker({
                       <PrintOptionsDisclosure
                         subject={subject}
                         printerId={printerId}
-                        value={copies === null ? options : { ...options, quantity: copies }}
+                        value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
+                        toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
                         onChange={({ quantity, ...rest }) => {
                           setCopies(quantity ?? null)
-                          setOptions(rest)
+                          editOptions(rest)
                         }}
                       />
 
