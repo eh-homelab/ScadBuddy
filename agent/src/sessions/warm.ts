@@ -151,8 +151,16 @@ class MirroredTranscript {
    * append is refused, the process writes nothing more.
    */
   fence: AppendFence | undefined
+  /**
+   * The `cost-state` total in the main transcript the process loaded to resume (the SDK loads it
+   * through this store), 0 when there was none; undefined until it loads. A resumed total is
+   * restored from exactly these entries, so this, not another read of the table, is its baseline (#3695).
+   */
+  loadedCostUsd: number | undefined
+  /** Told `loadedCostUsd` once the process has loaded. */
+  onLoaded: ((usd: number) => void) | undefined
 
-  constructor(inner: SessionStore, tail: string | null, readTail: () => Promise<string | null>) {
+  constructor(inner: SessionStore, tail: string | null, readTail: () => Promise<string | null>, log: (message: string) => void = () => {}) {
     this.lastUuid = tail
     const append = (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
       const main = (key.subpath ?? '') === ''
@@ -181,7 +189,15 @@ class MirroredTranscript {
     }
     this.store = {
       append,
-      load: (key) => inner.load(key),
+      load: async (key) => {
+        const entries = await inner.load(key)
+        if ((key.subpath ?? '') === '') {
+          const state = entries?.findLast((e) => e.type === 'cost-state')
+          this.loadedCostUsd = costStateUsd(state ? JSON.stringify(state) : null, log)
+          this.onLoaded?.(this.loadedCostUsd)
+        }
+        return entries
+      },
       ...(inner.listSessions ? { listSessions: inner.listSessions.bind(inner) } : {}),
       ...(inner.listSessionSummaries ? { listSessionSummaries: inner.listSessionSummaries.bind(inner) } : {}),
       ...(inner.delete ? { delete: inner.delete.bind(inner) } : {}),
@@ -197,7 +213,11 @@ type Slot = {
   /** The pool candidate it was spawned on, when the turn's candidates held it: what a resync looks for again. */
   candidate: { id: string; epoch: number } | undefined
   mirror: MirroredTranscript | undefined
-  /** What the transcript's last `cost-state` held at spawn: what a resume restores (manager.ts `finish`). */
+  /**
+   * What the process's total carries in from before it: with a mirror, the `cost-state` of the
+   * transcript it loaded (`MirroredTranscript.loadedCostUsd`, 0 when it loaded none), else the
+   * transcript's last one at spawn. Read at its first result (`baseline`).
+   */
   carriedUsd: number
   settled: boolean
   /** From `acquire` (its checks included) to `settle` or `abandon`: never evicted for idleness or the cap. */
@@ -566,11 +586,16 @@ export class WarmSessions {
           WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL
           ORDER BY id DESC LIMIT 1) AS tail,
         EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume`
-    const costState = row?.resume ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
-    const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const mirror = turn.run.sessionStore
-      ? new MirroredTranscript(turn.run.sessionStore, row?.tail ?? null, () => this.tail(sessionId))
+      ? new MirroredTranscript(turn.run.sessionStore, row?.tail ?? null, () => this.tail(sessionId), this.log)
       : undefined
+    // What the process's total carries in. With a mirror, the process's own load says it (#3695):
+    // the SDK loads the transcript a resume restores from through it, and a baseline read here
+    // apart from that load could name a cost-state the process never counted, which priced its
+    // first turn at nothing. 0 until it loads, so a process that loads nothing counts from 0.
+    // Without one, the transcript's last cost-state, as before.
+    const costState = !mirror && row?.resume ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
+    const carriedUsd = mirror ? 0 : costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
     const query = this.start({
@@ -597,7 +622,7 @@ export class WarmSessions {
     const on = turn.candidates.find((c) => credentialHash(c.credential) === hash)
     // Its reserved place (`reserve`) is the process's now.
     this.reserved.delete(sessionId)
-    this.slots.set(sessionId, {
+    const slot: Slot = {
       entry,
       credential: hash,
       candidate: on ? { id: on.id, epoch: on.epoch } : undefined,
@@ -606,7 +631,19 @@ export class WarmSessions {
       settled: false,
       busy: true,
       closed: false,
-    })
+    }
+    this.slots.set(sessionId, slot)
+    if (mirror) {
+      // Before its first result only: its later totals are differences within the process.
+      const loaded = (usd: number) => {
+        if (slot.settled || entry.lastTotalUsd !== entry.costAtSpawnUsd) return
+        slot.carriedUsd = usd
+        entry.costAtSpawnUsd = usd
+        entry.lastTotalUsd = usd
+      }
+      mirror.onLoaded = loaded
+      if (mirror.loadedCostUsd !== undefined) loaded(mirror.loadedCostUsd)
+    }
     return entry
   }
 

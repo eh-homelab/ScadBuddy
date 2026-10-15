@@ -68,7 +68,12 @@ export type ScriptedStream = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt'
  * (`yield* scripted.runner(run)`), those are gone, and the manager's abort
  * signal stands in for them. The real SDK is covered by test/sessions.e2e.test.ts.
  */
-export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn) {
+/**
+ * `loads`: a resumed process loads its transcript through `run.sessionStore` first, as the SDK
+ * does (sdk.mjs: `sessionStore.load({projectKey, sessionId: resume})` before Claude Code starts);
+ * false for one that carries nothing in. Its totals are still the script's (`costUsd`).
+ */
+export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn, { loads = true }: { loads?: boolean } = {}) {
   const runs: HarnessRun[] = []
   const prompts: SDKUserMessage[] = []
   let n = 0
@@ -115,6 +120,7 @@ export function scriptedRunner(next: (run: HarnessRun, text: string) => FakeTurn
     const result = (fields: Record<string, unknown>) => ({ type: 'result', total_cost_usd: total, session_id, ...fields }) as unknown as SDKMessage
     async function* process(): AsyncGenerator<SDKMessage, void, undefined> {
       await Promise.resolve()
+      if (loads && run.resume && run.sessionStore) await run.sessionStore.load({ projectKey: '', sessionId: run.resume })
       const inbox = typeof run.prompt === 'string' ? [userMessage(run.prompt)] : run.prompt
       for await (const message of inbox) {
         if (closed) return
