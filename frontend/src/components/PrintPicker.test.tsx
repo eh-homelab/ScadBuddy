@@ -4025,6 +4025,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     // save back for the life of the page, with nothing shown.
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const { answers, answer, saves, stored } = heldSaves()
+    const timeoutMs = rackAlgorithmSave.timeoutMs
     rackAlgorithmSave.timeoutMs = 100
     try {
       renderPicker()
@@ -4037,7 +4038,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       // Only the first save is meant to run out of time. Each save reads the timeout as it
       // starts: at 100 ms the second, answered below, also timed out whenever its answer
       // took that long to arrive under load, and the dialog showed it as not remembered.
-      rackAlgorithmSave.timeoutMs = 25_000
+      rackAlgorithmSave.timeoutMs = timeoutMs
       fireEvent.change(select, { target: { value: 'bambuddy' } })
       await waitFor(() => expect(answers.length).toBe(2))
       answer(1, 200)
@@ -4045,7 +4046,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
       expect(stored()).toBe('bambuddy')
       expect(screen.queryByTestId('rack-algorithm-unsaved')).toBeNull()
     } finally {
-      rackAlgorithmSave.timeoutMs = 25_000
+      rackAlgorithmSave.timeoutMs = timeoutMs
     }
   })
 

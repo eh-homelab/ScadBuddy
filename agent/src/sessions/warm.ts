@@ -122,24 +122,25 @@ export class WarmBusyError extends Error {
 
 /**
  * The service's transcript mirror as one process sees it: every append goes
- * through to `inner`, in call order, and the last main-transcript uuid that
- * landed is remembered. The transcript tail rule compares it with the table's
- * tail: equal unless another process wrote since. A process's own writes can
- * land after its `result` (a `prompt_snapshot` attachment and `last-prompt`
- * did; a streaming process's `cost-state` only as it ends: measured against
- * the fake endpoint, test/warm.pg.test.ts), so the rule never compares a tail
- * read at the result with a later one. And since another process's write
- * could land just before one of this process's own, which would then be the
- * tail again, each of its own appends first checks that the table's tail is
- * still the last one it wrote (`foreign`).
+ * through to `inner`, in call order, and every main-transcript uuid it handed
+ * over is remembered (`own`). The transcript tail rule asks whether the main
+ * transcript holds any other row past `since`, the last row there when the
+ * process spawned: none unless another process wrote since. A process's own
+ * writes can land after its `result` (a `prompt_snapshot` attachment and
+ * `last-prompt` did; a streaming process's `cost-state` only as it ends:
+ * measured against the fake endpoint, test/warm.pg.test.ts), and another
+ * process's write can land between two of its own, or between an own write's
+ * id and its row (store.ts reserves ids first), so no single tail read can
+ * tell; the rows past `since` can.
  */
 class MirroredTranscript {
   readonly store: SessionStore
-  lastUuid: string | null
+  /** The id of the main transcript's last row with a uuid at spawn, or null when it had none. */
+  readonly since: string | null
+  /** Every main-transcript uuid this process handed over. */
+  readonly own = new Set<string>()
   /** Every append so far, in order; never rejects. */
   pending: Promise<void> = Promise.resolve()
-  /** Another write landed in the main transcript between two of this process's own. */
-  foreign = false
   /**
    * What Claude Code restores from the main transcript the SDK loaded through
    * this mirror for the resume (`restoredCostUsd`), told to `onLoaded` for the
@@ -152,27 +153,18 @@ class MirroredTranscript {
   constructor(
     inner: SessionStore,
     sessionId: string,
-    tail: string | null,
-    readTail: () => Promise<string | null>,
+    since: string | null,
     log: (message: string) => void,
   ) {
-    this.lastUuid = tail
+    this.since = since
     const append = (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
-      const main = (key.subpath ?? '') === ''
-      const uuid = main ? entries.findLast((e) => typeof e.uuid === 'string')?.uuid : undefined
-      const write = this.pending.then(async () => {
-        if (typeof uuid === 'string' && !this.foreign) {
-          // A failed read cannot tell: taken as moved, which only costs a respawn.
-          const tail = await readTail().catch(() => undefined)
-          if (tail !== this.lastUuid) this.foreign = true
-        }
-        await inner.append(key, entries)
-      })
+      if ((key.subpath ?? '') === '') {
+        for (const entry of entries) if (typeof entry.uuid === 'string') this.own.add(entry.uuid)
+      }
+      const write = this.pending.then(() => inner.append(key, entries))
+      // A failed append is the SDK's to retry.
       this.pending = write.then(
-        () => {
-          if (typeof uuid === 'string') this.lastUuid = uuid
-        },
-        // A failed append is the SDK's to retry; the tail stays where it landed.
+        () => {},
         () => {},
       )
       return write
@@ -481,18 +473,14 @@ export class WarmSessions {
     for (let attempt = 0; attempt < 3; attempt++) {
       const pending = mirror.pending
       await pending
-      const tail = await this.tail(slot.entry.sessionId)
-      if (mirror.pending === pending) return mirror.foreign || tail !== mirror.lastUuid
+      const other = await this.deps.sql<{ uuid: string }[]>`
+        SELECT uuid FROM ai_session_entries
+        WHERE session_id = ${slot.entry.sessionId} AND subpath = '' AND uuid IS NOT NULL
+          AND id > ${mirror.since ?? '0'}::bigint AND NOT (uuid = ANY(${[...mirror.own]}::text[]))
+        LIMIT 1`
+      if (mirror.pending === pending) return other.length > 0
     }
     return true
-  }
-
-  private async tail(sessionId: string): Promise<string | null> {
-    const rows = await this.deps.sql<{ uuid: string }[]>`
-      SELECT uuid FROM ai_session_entries
-      WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL
-      ORDER BY id DESC LIMIT 1`
-    return rows[0]?.uuid ?? null
   }
 
   private async spawn(sessionId: string, turn: AssembledTurn, credential: Credential, remainingUsd: number, print: string): Promise<WarmEntry> {
@@ -500,14 +488,13 @@ export class WarmSessions {
     // resume at all. With a mirror, the cost a resume restores is read from
     // what the process loads through it (`onLoaded`); without one, from the
     // table's last `cost-state`.
-    const [row] = await this.deps.sql<{ tail: string | null; resume: boolean }[]>`
+    const [row] = await this.deps.sql<{ since: string | null; resume: boolean }[]>`
       SELECT
-        (SELECT uuid FROM ai_session_entries
-          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL
-          ORDER BY id DESC LIMIT 1) AS tail,
+        (SELECT max(id) FROM ai_session_entries
+          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL)::text AS since,
         EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume`
     const mirror = turn.run.sessionStore
-      ? new MirroredTranscript(turn.run.sessionStore, sessionId, row?.tail ?? null, () => this.tail(sessionId), this.log)
+      ? new MirroredTranscript(turn.run.sessionStore, sessionId, row?.since ?? null, this.log)
       : undefined
     const costState = row?.resume && !mirror ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
     const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)

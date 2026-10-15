@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { ModalCompanionContext, focusInto, focusables } from '../../../lib/modal'
+import { ModalCompanionContext, focusInto, focusables, roomFor } from '../../../lib/modal'
 import { Button } from '../Button'
 
 interface Props {
@@ -29,20 +29,6 @@ interface Props {
 function topmost(panel: HTMLElement | null): boolean {
   const dialogs = document.querySelectorAll('[role="dialog"]')
   return dialogs[dialogs.length - 1] === panel
-}
-
-/** The narrowest a dialog's overlay gets beside a companion; narrower, the dialog covers it. */
-const MIN_BESIDE = 360
-
-/**
- * The room to keep for `companion` at the right edge, in CSS pixels: 0 when there is
- * none to spare (a phone), so the dialog covers it; null when it is not laid out
- * (jsdom), where it counts as beside.
- */
-function roomFor(companion: HTMLElement): number | null {
-  const { left, width } = companion.getBoundingClientRect()
-  if (width === 0) return null
-  return left >= MIN_BESIDE ? window.innerWidth - left : 0
 }
 
 /** Whether `companion` is usable beside the dialog, measured now. */

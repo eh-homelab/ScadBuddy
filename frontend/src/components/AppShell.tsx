@@ -338,7 +338,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                     // opens beside a dialog that is already open, as the shortcut does. Only
                     // where the panel can sit beside one (#2013): on a phone the dialog covers
                     // the panel anyway, and a raised button would paint over the dialog.
-                    className={cn(!panelOverlays && 'relative z-[60]', open && 'bg-secondary text-secondary-foreground')}
+                    // Clickable over a Radix modal too, which turns pointer events off outside it;
+                    // the dialog leaves a press here alone (`data-modal-companion-toggle`).
+                    data-modal-companion-toggle=""
+                    className={cn(!panelOverlays && 'pointer-events-auto relative z-[60]', open && 'bg-secondary text-secondary-foreground')}
                   >
                     {working ? (
                       <span

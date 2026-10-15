@@ -1,9 +1,15 @@
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { blobUrl, type SentImage } from '../../agent/chat/protocol'
-import { ModalCompanionContext } from '../../lib/modal'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
 
 /** Where the opened image's full size stands: loading, shown, or failed (its preview shown instead). */
 type Load = 'loading' | 'loaded' | 'failed'
@@ -19,6 +25,8 @@ type Load = 'loading' | 'loaded' | 'failed'
 export function SentImages({ images, sessionId = '' }: { images: SentImage[]; sessionId?: string }) {
   const [shown, setShown] = useState<number | null>(null)
   const [load, setLoad] = useState<Load>('loading')
+  /** The thumbnail that opened the lightbox: focus goes back to it when it closes. */
+  const opener = useRef<HTMLElement | null>(null)
   const count = images.length
   const name = (index: number) => `Image ${index + 1} of ${count}`
   const image = shown === null ? undefined : images[shown]
@@ -36,76 +44,81 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
       <ul aria-label="Images sent" className="mb-1 flex flex-wrap gap-1.5">
         {images.map((sent, index) => (
           <li key={index}>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               aria-label={`View image ${index + 1} of ${count} larger`}
               aria-haspopup="dialog"
-              onClick={() => open(index)}
-              className="block min-h-6 min-w-6 cursor-zoom-in rounded-[4px] outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              onClick={(event) => {
+                opener.current = event.currentTarget
+                open(index)
+              }}
+              className="h-auto min-h-6 min-w-6 cursor-zoom-in p-0 hover:bg-transparent"
             >
               <img
                 src={previewUrl(sent)}
                 alt={name(index)}
-                className="max-h-24 max-w-[8rem] rounded-[4px] border border-line object-contain"
+                className="max-h-24 max-w-[8rem] rounded-md border border-border object-contain"
               />
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
-      {image &&
-        shown !== null &&
-        createPortal(
-          // A lightbox covers the assistant panel too, rather than sitting beside it as a
-          // page's dialog does (#798): it is the panel's own, and modal. Its Escape is
-          // kept from the panel, whose own Escape would close the panel with it.
-          <ModalCompanionContext.Provider value={null}>
-            <div
-              onKeyDown={(event) => {
-                if (event.key !== 'Escape') return
-                event.preventDefault()
-                event.stopPropagation()
-                close()
-              }}
-            >
-              <Dialog
-                open
-                size="wide"
-                title={name(shown)}
-                description={
-                  full
-                    ? undefined
-                    : fullUrl
-                      ? 'The full image could not be loaded, so this is its preview. The assistant was given the full image.'
-                      : 'Only a preview of this image is kept. The assistant was given the full image.'
-                }
-                onClose={close}
-                footer={<Button onClick={close}>Close</Button>}
-              >
-                {load !== 'loaded' && (
-                  <img
-                    src={previewUrl(image)}
-                    alt={`${name(shown)}, preview`}
-                    className="mx-auto max-h-[calc(100dvh-12rem)] w-full max-w-3xl object-contain"
-                  />
-                )}
-                {full && (
-                  // A same-origin URL, so it loads inside Bambuddy's sandboxed frame too.
-                  // Hidden until it has, while the preview stands in for it.
-                  <img
-                    key={fullUrl}
-                    src={fullUrl}
-                    alt={`${name(shown)}, as sent`}
-                    hidden={load !== 'loaded'}
-                    onLoad={() => setLoad('loaded')}
-                    onError={() => setLoad('failed')}
-                    className="mx-auto max-h-[calc(100dvh-12rem)] max-w-full object-contain"
-                  />
-                )}
-              </Dialog>
-            </div>
-          </ModalCompanionContext.Provider>,
-          document.body,
+      {/* A lightbox covers the assistant panel too, rather than sitting beside it as a
+          page's dialog does (#798): it is the panel's own, and modal. Its Escape is its
+          own (Radix marks it handled), so the panel's Escape does not close the panel. */}
+      <Dialog open={image !== undefined && shown !== null} onOpenChange={(next) => !next && close()}>
+        {image && shown !== null && (
+          <DialogContent
+            data-modal=""
+            className="sm:max-w-4xl"
+            showCloseButton={false}
+            onCloseAutoFocus={(event) => {
+              // No DialogTrigger (one lightbox for every thumbnail): back to the one opened.
+              event.preventDefault()
+              opener.current?.focus()
+            }}
+            {...(full ? { 'aria-describedby': undefined } : {})}
+          >
+            <DialogHeader>
+              <DialogTitle>{name(shown)}</DialogTitle>
+              {!full && (
+                <DialogDescription>
+                  {fullUrl
+                    ? 'The full image could not be loaded, so this is its preview. The assistant was given the full image.'
+                    : 'Only a preview of this image is kept. The assistant was given the full image.'}
+                </DialogDescription>
+              )}
+            </DialogHeader>
+            {load !== 'loaded' && (
+              <img
+                src={previewUrl(image)}
+                alt={`${name(shown)}, preview`}
+                className="mx-auto max-h-[calc(100dvh-12rem)] w-full max-w-3xl object-contain"
+              />
+            )}
+            {full && (
+              // A same-origin URL, so it loads inside Bambuddy's sandboxed frame too.
+              // Hidden until it has, while the preview stands in for it.
+              <img
+                key={fullUrl}
+                src={fullUrl}
+                alt={`${name(shown)}, as sent`}
+                hidden={load !== 'loaded'}
+                onLoad={() => setLoad('loaded')}
+                onError={() => setLoad('failed')}
+                className="mx-auto max-h-[calc(100dvh-12rem)] max-w-full object-contain"
+              />
+            )}
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button variant="outline" size="lg">
+                  Close
+                </Button>
+              </DialogClose>
+            </DialogFooter>
+          </DialogContent>
         )}
+      </Dialog>
     </>
   )
 }
