@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
+import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
@@ -453,6 +454,19 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
+  it("shows the arranged result's plates once, in its next step, not on its row too (#2754 review)", async () => {
+    server.use(http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])))
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('group', { name: 'Next step' })
+    const arranged = (await screen.findByText('Arranged from 1 output')).closest('li')!
+    expect(await screen.findByRole('figure', { name: 'Plates' })).toBeInTheDocument()
+    expect(screen.getAllByRole('figure', { name: 'Plates' })).toHaveLength(1)
+    expect(within(arranged).queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+  })
+
   it('keeps the list up while it reads it again after an arrange (#2283)', async () => {
     let slow = false
     server.use(
@@ -517,7 +531,7 @@ describe('HistoryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
     await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
     await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
-    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
     await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
@@ -599,6 +613,54 @@ describe('HistoryPage', () => {
     expect(within(batch).getByText('Arranged from 2 outputs and 1 library file')).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
+  })
+
+  it('shows an arranged output\'s plates on its row, and a rendered one\'s not (#2282)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    const read: string[] = []
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged, outputs[1]])),
+      http.get('/api/v1/outputs/:id/plates', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: false, name: 'tags' },
+        ])
+      }),
+    )
+    render()
+    const batch = await row('Batch')
+    // #2754 review — read once the row nears the viewport, not as it mounts.
+    expect(within(batch).getByTestId('arranged-plates-pending')).toBeInTheDocument()
+    expect(read).toEqual([])
+    intersect(batch)
+    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    expect(plates).toHaveTextContent('2 plates')
+    expect(within(plates).getByRole('img', { name: 'Plate 1' })).toHaveAttribute(
+      'src',
+      `/api/v1/outputs/${'f'.repeat(32)}/plates/1/thumbnail`,
+    )
+    expect(plates).toHaveTextContent('Plate 2: tags')
+    expect(within(await row('Nova')).queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+    // Only the arranged output's plates are read. Not "read once": run after the file's
+    // other tests they are read twice (CI, 2026-10-14), which is no part of what this
+    // test is about.
+    expect(new Set(read)).toEqual(new Set(['f'.repeat(32)]))
+  })
+
+  it('shows a plate whose picture fails to load as one with none (#2754 review)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged])),
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])),
+    )
+    render()
+    const batch = await row('Batch')
+    intersect(batch)
+    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    fireEvent.error(within(plates).getByRole('img', { name: 'Plate 1' }))
+    expect(within(plates).queryByRole('img')).not.toBeInTheDocument()
+    expect(plates).toHaveTextContent('Plate 1')
   })
 })
 

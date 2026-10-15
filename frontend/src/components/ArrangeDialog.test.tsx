@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
-import { fromFiles, fromOutputs } from '../lib/arrange'
+import { fromFiles, fromOutputs, objectNames } from '../lib/arrange'
 import { startTracing } from '../lib/tracing'
 import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
@@ -141,7 +141,7 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Add from a model' }))
     await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
-    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
 
@@ -516,6 +516,25 @@ describe('ArrangeDialog', () => {
       expect(screen.getByRole('button', { name: 'Add from a model' })).toBeDisabled()
     })
 
+    it('leaves a flagged output with objects out once it is removed (#2754 review)', async () => {
+      // The list showed Nova's objects; Arrange's refusal flagged it. Removed, it is in
+      // neither the re-render nor the request, and no prompt opens over an empty list.
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(within(await screen.findByRole('group', { name: 'Re-render first' })).getByRole('button', { name: 'Cancel' }))
+      await user.click(screen.getByRole('button', { name: /^Remove .*Nova$/ }))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual(first.manifest!.map(() => first.id))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
@@ -562,6 +581,131 @@ describe('ArrangeDialog', () => {
     const progress = await screen.findByText('Laying out the objects…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  describe('names, not ids (#2285)', () => {
+    it('names an unnamed output by its model and short id, and an object by its model', async () => {
+      const unnamed: Output = {
+        ...first,
+        id: 'a1ac23f1'.padEnd(32, '0'),
+        name: null,
+        manifest: [{ ...first.manifest![0]!, bom_piece: null, file: 'model.scad' }],
+      }
+      addMockOutput(unnamed)
+      renderPage(<ArrangeDialog open sources={fromOutputs([unnamed])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByLabelText('Copies of Name Keychain — a1ac23f1')).toBeInTheDocument()
+      expect(screen.queryByText(/model\.scad/)).not.toBeInTheDocument()
+    })
+
+    it('numbers two objects of one output that would read the same', async () => {
+      const twice: Output = {
+        ...first,
+        id: 'b'.repeat(32),
+        name: 'Pair',
+        manifest: [
+          { ...first.manifest![0]!, part: 'p-1', bom_piece: null },
+          { ...first.manifest![0]!, part: 'p-2', bom_piece: null, count: 1 },
+        ],
+      }
+      addMockOutput(twice)
+      renderPage(<ArrangeDialog open sources={fromOutputs([twice])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByLabelText('Copies of Name Keychain 1 — Pair')).toBeInTheDocument()
+      expect(screen.getByLabelText('Copies of Name Keychain 2 — Pair')).toBeInTheDocument()
+    })
+
+    it('lists an output that needs a re-render as a row; its Re-render makes it an ordinary row', async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const label = 'Name Keychain — c0ffee00'
+      expect(await screen.findByText(label, { exact: false })).toHaveTextContent('needs a re-render')
+      // The note names it as the row does, never by its 32-hex id.
+      expect(screen.getByRole('status')).toHaveTextContent('Name Keychain c0ffee00 was saved before Arrange existed')
+      await user.click(screen.getByRole('button', { name: `Re-render ${label}` }))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(stale.id, expect.any(AbortSignal)))
+      expect(await screen.findByLabelText(/^Copies of .* — c0ffee00$/, {}, { timeout: 5000 })).toBeInTheDocument()
+      expect(screen.queryByText('needs a re-render', { exact: false })).not.toBeInTheDocument()
+    })
+
+    it("traces a row's Re-render as one action (#2754 review)", async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(
+          <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+        )
+        await user.click(await screen.findByRole('button', { name: 'Re-render Name Keychain — c0ffee00' }))
+        await waitFor(() => expect(tracing.exporter.getFinishedSpans().map((s) => s.name)).toContain('rerender'), {
+          timeout: 5000,
+        })
+        const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'rerender')
+        expect(span?.attributes['scadbuddy.output_id']).toBe(stale.id)
+      } finally {
+        tracing.uninstall()
+      }
+    })
+
+    it('takes an output that needs a re-render out with Remove, asking nothing about it', async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Remove Name Keychain — c0ffee00' }))
+      expect(screen.queryByText('needs a re-render', { exact: false })).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
+    it('names an output added as a library file by the file', async () => {
+      const stale: Output = { ...first, id: 'd'.repeat(32), name: null, manifest: [] }
+      addMockOutput(stale)
+      const file = { ...(libraryFiles.find((f) => f.id === 89) as LibraryEntry), output_id: stale.id }
+      renderPage(<ArrangeDialog open sources={fromFiles([file])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByRole('status')).toHaveTextContent(`${file.filename} was saved before Arrange existed`)
+    })
+
+    it('lists models by name with a search, and outputs with their date and size', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+      const select = await screen.findByLabelText('Model')
+      await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(2))
+      const names = within(select)
+        .getAllByRole('option')
+        .slice(1)
+        .map((o) => o.textContent ?? '')
+      expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))
+      await user.type(screen.getByLabelText('Find a model'), 'keychain')
+      const found = within(select).getAllByRole('option').slice(1)
+      expect(found.length).toBeGreaterThan(0)
+      expect(found.every((o) => /keychain/i.test(o.textContent ?? ''))).toBe(true)
+      await user.selectOptions(select, 'name-keychain')
+      expect(await screen.findByRole('checkbox', { name: /^Nova · .* ago · .*mm · needs a re-render$/ })).toBeInTheDocument()
+    })
+
+    it('finds a model by its slug as well as its name (#2754 review)', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+      const select = await screen.findByLabelText('Model')
+      await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(2))
+      // "Name Keychain" holds no hyphen: only its slug matches.
+      await user.type(screen.getByLabelText('Find a model'), 'name-keychain')
+      const found = within(select).getAllByRole('option').slice(1)
+      expect(found.map((o) => o.textContent)).toEqual(['Name Keychain'])
+    })
   })
 
   describe('controls (#2286)', () => {
@@ -895,5 +1039,29 @@ describe('ArrangeDialog', () => {
     saved({ ...first, id: 'o-new' })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onArranged).not.toHaveBeenCalled()
+  })
+})
+
+describe('objectNames (#2754 review)', () => {
+  it('names a manifest in one pass, not one per object', () => {
+    const manifest = (parts: number) =>
+      ({
+        ...fixtures.outputs[0],
+        manifest: Array.from({ length: parts }, (_, i) => ({ part: `p${i}`, slug: 'same', bom_piece: null, count: 1 })),
+      }) as unknown as Output
+    const time = (parts: number) => {
+      const output = manifest(parts)
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const began = performance.now()
+        objectNames(output, (slug) => slug)
+        best = Math.min(best, performance.now() - began)
+      }
+      return best
+    }
+    const names = objectNames(manifest(3), (slug) => slug)
+    expect([...names.values()]).toEqual(['same 1', 'same 2', 'same 3'])
+    // Four times the parts is about four times the work; a count per object is sixteen.
+    expect(time(16_000)).toBeLessThan(8 * time(4_000) + 20)
   })
 })
