@@ -169,7 +169,11 @@ function UpdateDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && close()}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl">
+      <DialogContent
+        // The footer has its own Close then: one is enough.
+        showCloseButton={!(dismissed || noUpdate)}
+        className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl"
+      >
         <DialogHeader>
           <DialogTitle>{noUpdate ? 'No update' : dismissed ? 'Dismissed update' : 'Update available'}</DialogTitle>
           {status.data && (

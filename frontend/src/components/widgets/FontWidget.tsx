@@ -44,6 +44,7 @@ function FontField({
   onChange: (next: string) => void
 }) {
   const listId = useId()
+  const anchor = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const typed = value.trim().toLowerCase()
   const matches = choices.filter((choice) => choice.toLowerCase().includes(typed)).slice(0, MAX_SUGGESTIONS)
@@ -53,7 +54,7 @@ function FontField({
     <Popover open={shown} onOpenChange={setOpen}>
       <Command shouldFilter={false} loop className="h-auto flex-1 overflow-visible rounded-none! bg-transparent p-0">
         <PopoverAnchor asChild>
-          <div className="w-full">
+          <div ref={anchor} className="w-full">
             <ActiveInput
               id={id}
               value={value}
@@ -78,8 +79,10 @@ function FontField({
           className="w-(--radix-popover-trigger-width) min-w-64 p-1"
           // The field keeps the focus: the list is completion, not a place to go.
           onOpenAutoFocus={(event) => event.preventDefault()}
+          // A press in the field is no press outside. By the event's path, since in a
+          // template UI's shadow root the target the document sees is the host element.
           onInteractOutside={(event) => {
-            if (event.target instanceof Node && document.getElementById(id)?.contains(event.target)) event.preventDefault()
+            if (anchor.current && event.detail.originalEvent.composedPath().includes(anchor.current)) event.preventDefault()
           }}
         >
           <CommandList label="Installed fonts" className="max-h-64">

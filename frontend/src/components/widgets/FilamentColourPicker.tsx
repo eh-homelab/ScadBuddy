@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 
 type State =
@@ -75,7 +76,7 @@ export function FilamentColourPicker({
   return (
     <Command className="rounded-lg! border p-0">
       {state.spools.length > 6 && <CommandInput placeholder="Search filaments" />}
-      <CommandList aria-label={`Filaments for ${label}`} className="max-h-60">
+      <CommandList label={`Filaments for ${label}`} className="max-h-60">
         <CommandEmpty>No filament matches.</CommandEmpty>
         <CommandGroup>
           {state.spools.map((spool) => {
@@ -111,5 +112,49 @@ export function FilamentColourPicker({
         </CommandGroup>
       </CommandList>
     </Command>
+  )
+}
+
+/**
+ * The list behind a "Choose from a filament" toggle, inline, for a place with no popover
+ * to open it from (a copy's colours in Arrange). The list is read each time it opens.
+ */
+export function FilamentColourDisclosure({
+  label,
+  value,
+  onPick,
+}: {
+  label: string
+  value: string
+  onPick: (hex: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const listId = useId()
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5 text-xs">
+      <Button
+        type="button"
+        variant="link"
+        size="xs"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        onClick={() => setOpen((now) => !now)}
+        className="h-auto self-start px-0"
+      >
+        {open ? 'Hide filaments' : 'Choose from a filament'}
+      </Button>
+      {open && (
+        <div id={listId}>
+          <FilamentColourPicker
+            label={label}
+            value={value}
+            onPick={(hex) => {
+              onPick(hex)
+              setOpen(false)
+            }}
+          />
+        </div>
+      )}
+    </div>
   )
 }

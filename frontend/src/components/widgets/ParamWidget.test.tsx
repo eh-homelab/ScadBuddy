@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Param, ParamValue } from '../../api/types'
 import { UNINSTALLABLE_FONT } from '../../mocks/fixtures'
 import { ParamWidget } from './ParamWidget'
+import { optionNames, selectOption } from '../../test/select'
 
 const fonts = [
   { family: 'Liberation Sans', styles: ['Regular', 'Bold'] },
@@ -61,12 +62,12 @@ describe('slider', () => {
     const range = screen.getByRole('slider', { name: 'Text size' })
     const number = screen.getByRole('spinbutton', { name: 'Text size value' })
 
-    for (const input of [range, number]) {
-      expect(input).toHaveAttribute('min', '6')
-      expect(input).toHaveAttribute('max', '28')
-      expect(input).toHaveAttribute('step', '0.5')
-    }
-    expect(range).toHaveValue('14')
+    expect(number).toHaveAttribute('min', '6')
+    expect(number).toHaveAttribute('max', '28')
+    expect(number).toHaveAttribute('step', '0.5')
+    expect(range).toHaveAttribute('aria-valuemin', '6')
+    expect(range).toHaveAttribute('aria-valuemax', '28')
+    expect(range).toHaveAttribute('aria-valuenow', '14')
   })
 
   it('sizes the number box for the widest value its range holds (#367)', () => {
@@ -378,8 +379,8 @@ describe('select', () => {
   it('labels options by name and submits their value', async () => {
     const { onChange, user } = setup(param, 'left')
     const select = screen.getByRole('combobox', { name: 'Hole position' })
-    expect(screen.getByRole('option', { name: 'Left' })).toBeInTheDocument()
-    await user.selectOptions(select, 'right')
+    expect(await optionNames(user, select)).toEqual(['Left', 'Right'])
+    await selectOption(user, select, 'Right')
     expect(onChange).toHaveBeenCalledWith('right')
   })
 
@@ -405,7 +406,7 @@ describe('select', () => {
         onChange={onChange}
       />,
     )
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Layers' }), '2')
+    await selectOption(user, screen.getByRole('combobox', { name: 'Layers' }), 'Two')
     expect(onChange).toHaveBeenCalledWith(2)
   })
 })
@@ -510,8 +511,9 @@ describe('color', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
-  it('pairs a colour picker with the hex field', () => {
-    const { container } = render(
+  it('pairs a colour picker with the hex field', async () => {
+    const user = userEvent.setup()
+    render(
       <ParamWidget
         slug="name-keychain"
         param={param}
@@ -521,7 +523,8 @@ describe('color', () => {
         onChange={vi.fn()}
       />,
     )
-    const picker = container.querySelector('input[type="color"]')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const picker = document.querySelector('input[type="color"]')
     expect(picker).toHaveValue('#1b6ca8')
     expect(screen.getAllByDisplayValue('#1B6CA8')).not.toHaveLength(0)
   })
@@ -536,10 +539,12 @@ describe('font', () => {
     caption: 'Typeface',
   }
 
-  it('offers every installed family and style for completion', () => {
-    setup(param, 'Liberation Sans:style=Bold')
-    const options = screen.getByTestId('font-options').querySelectorAll('option')
-    expect([...options].map((option) => option.getAttribute('value'))).toEqual([
+  it('offers every installed family and style for completion', async () => {
+    const { user } = setup(param, '')
+    await user.click(screen.getByRole('combobox', { name: 'Typeface' }))
+    await user.keyboard('{ArrowDown}')
+    const list = await screen.findByRole('listbox', { name: 'Installed fonts' })
+    expect(within(list).getAllByRole('option').map((option) => option.textContent)).toEqual([
       'Liberation Sans:style=Regular',
       'Liberation Sans:style=Bold',
       'DejaVu Sans:style=Book',
@@ -563,7 +568,7 @@ describe('font', () => {
     const { onChange, user } = setup(param, 'Liberation Sans:style=Bold')
     const styles = screen.getByRole('combobox', { name: 'Typeface style' })
 
-    await user.selectOptions(styles, 'Regular')
+    await selectOption(user, styles, 'Regular')
 
     expect(onChange).toHaveBeenLastCalledWith('Liberation Sans:style=Regular')
   })
@@ -579,10 +584,10 @@ describe('font', () => {
     await user.click(screen.getByRole('button', { name: 'Browse' }))
     const dialog = await screen.findByRole('dialog', { name: 'Choose a font' })
     await waitFor(() =>
-      expect(within(dialog).getByRole('button', { name: /Pacifico/ })).toBeInTheDocument(),
+      expect(within(dialog).getByRole('option', { name: /Pacifico/ })).toBeInTheDocument(),
     )
 
-    await user.click(within(dialog).getByRole('button', { name: /Pacifico/ }))
+    await user.click(within(dialog).getByRole('option', { name: /Pacifico/ }))
 
     await waitFor(() => expect(onChange).toHaveBeenLastCalledWith('Pacifico:style=Regular'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

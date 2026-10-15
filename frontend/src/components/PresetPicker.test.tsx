@@ -230,7 +230,8 @@ describe('PresetPicker', () => {
     // The edits are changes to Mum, a saved preset, so Update is the way to keep them.
     expect(dialog).toHaveTextContent('You changed Mum since you picked it.')
     expect(dialog).toHaveTextContent('To keep them, cancel and update Mum or save them as a preset first.')
-    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mummy')
+    // Behind the dialog, so out of the accessibility tree while it is open.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag', hidden: true })).toHaveValue('Mummy')
   })
 
   it('keeps asking about the first preset picked while the dialog is open (#1475)', async () => {
@@ -403,7 +404,8 @@ describe('PresetPicker', () => {
     // Above them, one line, the whole name kept for the eye that hovers.
     expect(note.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(note).toHaveClass('truncate')
-    expect(screen.getByRole('status', { name: 'Changed from Mum' })).toBe(note)
+    expect(note).toHaveAttribute('role', 'status')
+    expect(note).toHaveTextContent('Changed from Mum')
   })
 
   it('offers neither Update nor Delete on a preset the template ships', async () => {
@@ -461,6 +463,7 @@ describe('PresetPicker', () => {
     expect(select).toHaveTextContent('Tiny for Bo')
     await user.click(select)
     expect(await screen.findByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')
+    await user.keyboard('{Escape}')
     // The copy is the user's, so it can be changed and deleted, unlike the original.
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
     expect(screen.getByRole('button', { name: /^Update preset / })).toBeInTheDocument()

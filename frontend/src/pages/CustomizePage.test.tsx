@@ -27,6 +27,7 @@ import {
 } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { selectOption } from '../test/select'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { AssistantOpenerContext } from '../agent/chat/opener'
@@ -1486,8 +1487,8 @@ describe('CustomizePage', () => {
     expect(checked.map(([x]) => x)).not.toContain('64.1')
     expect(screen.getByTestId('print')).toHaveTextContent('Too big on X')
     // The Print button's tooltip names the plate too, not only the banner.
-    expect(screen.getByTestId('print')).toHaveAttribute(
-      'title',
+    fireEvent.focus(screen.getByTestId('print'))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
       'plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm)',
     )
   })
@@ -2054,9 +2055,9 @@ describe('CustomizePage, project file (#317)', () => {
     await firstRender()
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
     const presets = screen.getByRole('combobox', { name: 'Preset' })
-    await user.selectOptions(presets, 'template-tiny')
+    await selectOption(user, presets, 'Tiny')
     await waitFor(() => expect(pagePicker()).toHaveValue('2'))
-    await user.selectOptions(presets, '')
+    await selectOption(user, presets, 'No preset')
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
   })
 
@@ -2067,7 +2068,7 @@ describe('CustomizePage, project file (#317)', () => {
     const { user } = render()
     await firstRender()
     await waitFor(() => expect(pagePicker()).toHaveValue('2'))
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Preset' }), 'template-tiny')
+    await selectOption(user, screen.getByRole('combobox', { name: 'Preset' }), 'Tiny')
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(pagePicker()).toHaveValue('2')
     await generate(user)
@@ -2088,7 +2089,7 @@ describe('CustomizePage, project file (#317)', () => {
 
     // Cancel saves nothing.
     await user.click(screen.getByTestId('generate'))
-    const dialog = await screen.findByRole('dialog', { name: 'File in another project?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'File in another project?' })
     expect(within(dialog).getByTestId('generate-project-confirm')).toHaveTextContent(
       'Name Keychain was last filed in Gridfinity Bins. File this in Reagan Keychain?',
     )
@@ -2099,7 +2100,7 @@ describe('CustomizePage, project file (#317)', () => {
     // "Use" files in the remembered project and moves the picker there.
     await user.click(screen.getByTestId('generate'))
     await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Use Gridfinity Bins' }),
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Use Gridfinity Bins' }),
     )
     await screen.findByTestId('project-filed')
     expect(await filed[0]).toEqual({ project_id: 2 })
@@ -2121,7 +2122,7 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
     await user.click(screen.getByTestId('generate'))
     expect(
-      within(await screen.findByRole('dialog')).getByTestId('generate-project-confirm'),
+      within(await screen.findByRole('alertdialog')).getByTestId('generate-project-confirm'),
     ).toHaveTextContent('Name Keychain was last filed in Reagan Keychain. File this in Gridfinity Bins?')
   })
 
@@ -2160,7 +2161,7 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
     await user.click(screen.getByTestId('generate'))
     await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'File in Reagan Keychain' }),
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'File in Reagan Keychain' }),
     )
     await screen.findByTestId('project-filed')
     expect(await filed[0]).toEqual({ project_id: 1 })
@@ -2280,8 +2281,8 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     await user.clear(name)
     await user.type(name, 'Edited')
     const select = screen.getByLabelText('Preset')
-    await waitFor(() => expect(within(select).getByRole('option', { name: 'Old' })).toBeInTheDocument())
-    await user.selectOptions(select, 'Old')
+    await waitFor(() => expect(select).toBeEnabled())
+    await selectOption(user, select, 'Old')
     await user.click(await screen.findByRole('button', { name: 'Replace my changes' }))
     expect(await screen.findByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
     // A preset that cannot be migrated keeps the values on screen.
@@ -2321,8 +2322,8 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     )
     const { user } = render('/m/name-keychain')
     const select = await screen.findByLabelText('Preset')
-    await waitFor(() => expect(within(select).getByRole('option', { name: 'Renamed' })).toBeInTheDocument())
-    await user.selectOptions(select, 'Renamed')
+    await waitFor(() => expect(select).toBeEnabled())
+    await selectOption(user, select, 'Renamed')
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('x'),
     )

@@ -289,10 +289,10 @@ describe('ArrangeDialog: a copy in other colours (#3637)', () => {
     const copy = `${label}, copy 1 in other colours`
     const editor = screen.getByRole('list', { name: `Colours of ${copy}` })
     await user.click(within(editor).getByRole('button', { name: 'Choose from a filament' }))
-    const spools = await within(editor).findByRole('list', { name: `Filaments for #FFD54F of ${copy}` })
+    const spools = await within(editor).findByRole('listbox', { name: `Filaments for #FFD54F of ${copy}` })
     const [spool] = within(spools)
-      .getAllByRole('button')
-      .filter((b) => !(b as HTMLButtonElement).disabled && b.getAttribute('aria-pressed') !== 'true')
+      .getAllByRole('option')
+      .filter((o) => o.getAttribute('aria-disabled') !== 'true' && !o.textContent?.includes('(the colour now)'))
     await user.click(spool!)
     const keep = within(editor).getByRole('button', { name: 'Keep #FFD54F' })
     await user.click(keep)

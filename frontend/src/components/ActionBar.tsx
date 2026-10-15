@@ -772,12 +772,20 @@ function GenerateMenu({
   // The dialog opens once the menu has closed and put the focus back on its button, so
   // the dialog returns it there when it closes in turn.
   const after = (open: () => void) => () => setTimeout(open, 0)
+  const [open, setOpen] = useState(false)
   return (
-    <DropdownMenu modal={false}>
+    <DropdownMenu modal={false} open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
           disabled={disabled}
+          // The APG menu button opens on ArrowUp too; Radix's only on Enter, Space and ArrowDown.
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setOpen(true)
+            }
+          }}
           aria-label="More to generate"
           data-testid="generate-menu"
           className="h-9 rounded-l-none border-l border-l-primary-foreground/25 px-2"
@@ -785,7 +793,16 @@ function GenerateMenu({
           <ChevronDownIcon />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="end" aria-label="More to generate" className="w-auto min-w-56">
+      <DropdownMenuContent
+        side="top"
+        align="end"
+        aria-label="More to generate"
+        // Tab leaves the menu closed, rather than kept in it (Radix holds it) or open behind.
+        onKeyDown={(event) => {
+          if (event.key === 'Tab') setOpen(false)
+        }}
+        className="w-auto min-w-56"
+      >
         <DropdownMenuItem data-testid="generate-image" onSelect={after(onImage)} className="flex-col items-start gap-0">
           Rendered image…
           <span className="text-xs text-muted-foreground">A high-resolution PNG of the view</span>

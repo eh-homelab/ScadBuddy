@@ -9,6 +9,7 @@ import { setSessionResources } from '../mocks/features/assistantSessions'
 import { BUILTIN_SLUG, versionIds, versions } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
 import { VersionsPage } from './VersionsPage'
 
@@ -86,10 +87,7 @@ describe('VersionsPage', () => {
     await rows()
     await screen.findByTestId('diff')
 
-    await user.selectOptions(
-      screen.getByLabelText('Compare with'),
-      versionIds.added,
-    )
+    await selectOption(user, screen.getByLabelText('Compare with'), new RegExp(`^${versionIds.added.slice(0, 7)} `))
 
     // Two revisions of distance, so both patches are in the output.
     await waitFor(() => {
@@ -106,7 +104,7 @@ describe('VersionsPage', () => {
     await user.click(
       within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -127,7 +125,7 @@ describe('VersionsPage', () => {
     await user.click(
       within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -163,7 +161,7 @@ describe('VersionsPage', () => {
     await user.click(
       within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Restore' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('the worktree is locked')
     expect(await rows()).toHaveLength(3)
@@ -229,7 +227,7 @@ describe('VersionsPage, item context (#975)', () => {
     const listed = await rows()
     await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
 
-    const dialog = screen.getByRole('dialog', { name: `Restore version ${versionIds.added.slice(0, 7)}?` })
+    const dialog = screen.getByRole('alertdialog', { name: `Restore version ${versionIds.added.slice(0, 7)}?` })
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(await rows()).toHaveLength(3)
@@ -239,7 +237,7 @@ describe('VersionsPage, item context (#975)', () => {
     const { user } = render()
     const listed = await rows()
     await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => expect(await rows()).toHaveLength(4))
     const head = (await rows())[0] as HTMLElement
