@@ -716,7 +716,7 @@ describe('ArrangeDialog', () => {
       )
       const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
       expect(within(dialog).getByLabelText('Name')).toHaveFocus()
-      expect(within(dialog).getByRole('button', { name: 'Arrange' }).className).toContain('bg-accent')
+      expect(within(dialog).getByRole('button', { name: 'Arrange' }).className).toContain('bg-primary')
       await user.click(within(dialog).getByRole('button', { name: 'Close' }))
       expect(onClose).toHaveBeenCalledOnce()
     })

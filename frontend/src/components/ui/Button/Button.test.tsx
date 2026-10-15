@@ -17,7 +17,8 @@ describe('Button', () => {
     const off = screen.getByRole('button', { name: 'Off' }).className
     const on = screen.getByRole('button', { name: 'On' }).className
     expect(on).not.toEqual(off)
-    expect(on).toContain('bg-surface-3')
-    expect(on).not.toContain('bg-transparent')
+    const surface = /(^| )bg-ui-muted( |$)/
+    expect(on).toMatch(surface)
+    expect(off).not.toMatch(surface)
   })
 })

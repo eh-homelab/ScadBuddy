@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { FlowDefinition, FlowSummary } from '../../api/types'
-import { USER_ONLY } from '../../agent/dom'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
+import { Button } from '@/components/ui/button'
 import { Spinner } from '../ui/Spinner'
+import { Confirm } from './Confirm'
 
 type Pending = 'archive' | 'delete' | null
 
@@ -56,14 +55,21 @@ export function FlowActions({
   const deleted = flow.deleted_at != null
   const archived = flow.archived_at != null
 
+  const confirm = (kind: Exclude<Pending, null>) => (open: boolean) => {
+    if (open) setPending(kind)
+    else close()
+  }
+
   return (
     <>
       <div className="flex flex-wrap gap-2">
         {deleted ? (
           restore && (
             <Button
+              variant="outline"
               size="sm"
               disabled={busy}
+              aria-busy={busy}
               onClick={() =>
                 void act(
                   () => api.restoreFlowVersion(flow.name, restore.commit),
@@ -71,95 +77,76 @@ export function FlowActions({
                 )
               }
             >
-              {busy ? <Spinner /> : `Restore v${restore.version}`}
+              {busy && <Spinner />}
+              {`Restore v${restore.version}`}
             </Button>
           )
         ) : archived ? (
-          <Button size="sm" disabled={busy} onClick={() => void act(() => api.unarchiveFlow(flow.name), onChanged)}>
-            {busy ? <Spinner /> : 'Unarchive'}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => void act(() => api.unarchiveFlow(flow.name), onChanged)}
+          >
+            {busy && <Spinner />}
+            Unarchive
           </Button>
         ) : (
-          <Button size="sm" onClick={() => setPending('archive')}>
-            Archive
-          </Button>
+          <Confirm
+            trigger={
+              <Button variant="outline" size="sm">
+                Archive
+              </Button>
+            }
+            open={pending === 'archive'}
+            onOpenChange={confirm('archive')}
+            title={`Archive ${flow.name}?`}
+            action="Archive"
+            destructive={false}
+            busy={busy}
+            error={error}
+            onAction={() => void act(() => api.archiveFlow(flow.name), onChanged)}
+          >
+            <p>
+              Every version of it leaves the Flows list (Show archived lists it again), and none of them can be started
+              until you unarchive it.
+            </p>
+            <p>Runs in progress keep running. Finished runs keep their steps, their result and the script they ran.</p>
+          </Confirm>
         )}
         {!deleted && (
-          <Button size="sm" variant="danger" onClick={() => setPending('delete')}>
-            Delete
-          </Button>
+          <Confirm
+            trigger={
+              <Button variant="destructive" size="sm">
+                Delete
+              </Button>
+            }
+            open={pending === 'delete'}
+            onOpenChange={confirm('delete')}
+            title={`Delete ${flow.name}?`}
+            action="Delete flow"
+            busy={busy}
+            error={error}
+            onAction={() => void act(() => api.deleteFlow(flow.name), onChanged)}
+          >
+            <p>
+              Its script is removed by a commit in the flows&apos; history, which keeps every version. No run of it can
+              be started.
+            </p>
+            <p>
+              Runs in progress keep running on the version they started with. Finished runs still show the script they
+              ran.
+            </p>
+            <p>To bring it back, restore one of its versions: Show archived lists it.</p>
+          </Confirm>
         )}
       </div>
       {error && pending === null && (
-        <p role="alert" className="mt-1 text-[12.5px] text-warn">
+        <p role="alert" className="mt-1 text-[12.5px] text-destructive">
           {error}
         </p>
       )}
-      <Dialog
-        open={pending === 'archive'}
-        title={`Archive ${flow.name}?`}
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={() => void act(() => api.archiveFlow(flow.name), onChanged)} disabled={busy}>
-              {busy ? <Spinner /> : 'Archive'}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-2 text-[13px] text-muted">
-          <p>
-            Every version of it leaves the Flows list (Show archived lists it again), and none of them can be started
-            until you unarchive it.
-          </p>
-          <p>Runs in progress keep running. Finished runs keep their steps, their result and the script they ran.</p>
-          {error && (
-            <p role="alert" className="text-warn">
-              {error}
-            </p>
-          )}
-        </div>
-      </Dialog>
-      <Dialog
-        open={pending === 'delete'}
-        title={`Delete ${flow.name}?`}
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={busy}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void act(() => api.deleteFlow(flow.name), onChanged)}
-              disabled={busy}
-              {...USER_ONLY}
-            >
-              {busy ? <Spinner /> : 'Delete flow'}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-2 text-[13px] text-muted">
-          <p>
-            Its script is removed by a commit in the flows&apos; history, which keeps every version. No run of it can be
-            started.
-          </p>
-          <p>
-            Runs in progress keep running on the version they started with. Finished runs still show the script they
-            ran.
-          </p>
-          <p>To bring it back, restore one of its versions: Show archived lists it.</p>
-          {error && (
-            <p role="alert" className="text-warn">
-              {error}
-            </p>
-          )}
-        </div>
-      </Dialog>
     </>
   )
 }
-

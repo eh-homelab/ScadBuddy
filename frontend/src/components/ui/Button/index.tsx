@@ -1,23 +1,22 @@
 import type { ButtonHTMLAttributes, ReactNode, Ref } from 'react'
+import { Button as ShadcnButton } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
 type Variant = 'primary' | 'default' | 'ghost' | 'danger'
 type Size = 'sm' | 'md'
 
-const VARIANT: Record<Variant, string> = {
-  primary:
-    'bg-accent text-accent-ink border-accent hover:brightness-110 disabled:hover:brightness-100 font-medium',
-  default: 'bg-surface-2 text-ink border-line hover:border-line-strong hover:bg-surface-3',
-  ghost: 'bg-transparent text-muted border-transparent hover:text-ink hover:bg-surface-2',
-  danger: 'bg-transparent text-warn border-line hover:bg-warn/10 hover:border-warn/50',
-}
+/** The legacy variants in shadcn's (#3653). */
+const VARIANT = {
+  primary: 'default',
+  default: 'outline',
+  ghost: 'ghost',
+  danger: 'destructive',
+} as const
+
+const SIZE = { sm: 'sm', md: 'lg' } as const
 
 /** A ghost toggle that is on (#1488): without it a pressed ghost button looks unpressed. */
-const GHOST_PRESSED = 'bg-surface-3 text-ink border-line hover:bg-surface-3'
-
-const SIZE: Record<Size, string> = {
-  sm: 'h-7 px-2.5 text-[13px]',
-  md: 'h-9 px-3.5',
-}
+const GHOST_PRESSED = 'bg-ui-muted text-foreground hover:bg-ui-muted dark:hover:bg-ui-muted'
 
 interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant
@@ -26,22 +25,21 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
   ref?: Ref<HTMLButtonElement>
 }
 
-export function Button({
-  variant = 'default',
-  size = 'md',
-  className = '',
-  children,
-  ...rest
-}: Props) {
+/**
+ * #3653 — the legacy button's props over shadcn's button (`@/components/ui/button`),
+ * kept until every area has moved to that directly.
+ */
+export function Button({ variant = 'default', size = 'md', className, children, ...rest }: Props) {
   const pressed = rest['aria-pressed'] === true || rest['aria-pressed'] === 'true'
-  const look = variant === 'ghost' && pressed ? GHOST_PRESSED : VARIANT[variant]
   return (
-    <button
+    <ShadcnButton
       type="button"
       {...rest}
-      className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-[6px] border whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${look} ${SIZE[size]} ${className}`}
+      variant={VARIANT[variant]}
+      size={SIZE[size]}
+      className={cn(variant === 'ghost' && pressed && GHOST_PRESSED, className)}
     >
       {children}
-    </button>
+    </ShadcnButton>
   )
 }

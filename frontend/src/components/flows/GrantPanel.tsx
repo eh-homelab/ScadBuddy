@@ -4,9 +4,11 @@ import type { FlowGrantRule, FlowGrantSpec, FlowGrantView } from '../../api/type
 import { USER_ONLY } from '../../agent/dom'
 import { actorText } from '../../lib/flows'
 import { grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
-import { Spinner } from '../ui/Spinner'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Confirm } from './Confirm'
 import { GrantEditor } from './GrantEditor'
 
 const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : '—')
@@ -81,14 +83,18 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
   }
 
   return (
-    <section aria-label="Grant" className="mb-3 rounded-[8px] border border-line bg-surface-2 p-3 text-[13px]">
-      <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h2 className="font-medium">Grant</h2>
-        <p>
-          <span className="text-muted">Status: </span>
-          <span data-testid="grant-status">{grantStatus(grant)}</span>
+    <Card size="sm" role="region" aria-label="Grant" className="mb-3 text-[13px]">
+      <CardHeader className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <CardTitle>
+          <h2>Grant</h2>
+        </CardTitle>
+        <p className="flex items-center gap-1.5">
+          <span className="text-muted-foreground">Status</span>
+          <Badge variant={live ? 'default' : 'secondary'} data-testid="grant-status">
+            {grantStatus(grant)}
+          </Badge>
         </p>
-        <p className="text-muted">
+        <CardDescription>
           {grant.status === 'requested'
             ? `Requested by ${actorText(grant.requested_by)}`
             : grant.revoked_at
@@ -96,141 +102,141 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
               : grant.approved_at
                 ? `Approved by ${grant.approved_by ?? 'someone'}, ${when(grant.approved_at)}`
                 : null}
+        </CardDescription>
+        <CardDescription>Expires {when(grant.expires_at ?? grant.spec.expires_at)}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        <p className="text-[12.5px] text-muted-foreground">
+          {grant.spec.sessions ? 'Extends to the sessions it starts.' : 'Does not extend to the sessions it starts.'}{' '}
+          {grant.spec.ask_starter_session
+            ? 'Calls outside it ask the starting session first.'
+            : 'Calls outside it come to you.'}
         </p>
-        <p className="text-muted">Expires {when(grant.expires_at ?? grant.spec.expires_at)}</p>
-      </div>
-      <p className="mb-2 text-[12.5px] text-muted">
-        {grant.spec.sessions ? 'Extends to the sessions it starts.' : 'Does not extend to the sessions it starts.'}{' '}
-        {grant.spec.ask_starter_session
-          ? 'Calls outside it ask the starting session first.'
-          : 'Calls outside it come to you.'}
-      </p>
-      {rules.length === 0 ? (
-        <p className="text-[12.5px] text-muted">No rules: every outward call asks.</p>
-      ) : (
-        <table aria-label="Grant rules" className="mb-2 w-full text-left text-[12.5px]">
-          <thead className="text-muted">
-            <tr>
-              <th className="py-1 font-normal">#</th>
-              <th className="py-1 font-normal">Rule</th>
-              <th className="py-1 font-normal">Bounds</th>
-              <th className="py-1 font-normal">Used</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rules.map((rule, i) => (
-              <tr key={i} className="border-t border-line align-top">
-                <td className="py-1">{i + 1}</td>
-                <td className="py-1 font-mono">{rule.fn === 'tool' ? `tool: ${rule.tool ?? ''}` : rule.fn}</td>
-                <td className="py-1">
-                  {isUnbounded(rule) ? (
-                    <span className="text-warn">{unboundedText(rule)}</span>
-                  ) : (
-                    bounds(rule).map((b) => <span key={b} className="block">{b}</span>)
-                  )}
-                </td>
-                <td className="py-1">
-                  {usage(rule, grant.used[String(i)]).map((u) => (
-                    <span key={u} className="block">
-                      {u}
-                    </span>
-                  ))}
-                </td>
+        {rules.length === 0 ? (
+          <p className="text-[12.5px] text-muted-foreground">No rules: every outward call asks.</p>
+        ) : (
+          <table aria-label="Grant rules" className="w-full text-left text-[12.5px]">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="py-1 font-normal">#</th>
+                <th className="py-1 font-normal">Rule</th>
+                <th className="py-1 font-normal">Bounds</th>
+                <th className="py-1 font-normal">Used</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {grant.uses.length > 0 && (
-        <table aria-label="Grant uses" className="mb-2 w-full text-left text-[12.5px]">
-          <thead className="text-muted">
-            <tr>
-              <th className="py-1 font-normal">Time</th>
-              <th className="py-1 font-normal">Call</th>
-              <th className="py-1 font-normal">Tool</th>
-              <th className="py-1 font-normal">Session</th>
-            </tr>
-          </thead>
-          <tbody>
-            {grant.uses.map((use) => (
-              <tr key={use.request_id} className="border-t border-line">
-                <td className="py-1">{when(use.created_at)}</td>
-                <td className="py-1 font-mono">{use.fn}</td>
-                <td className="py-1 font-mono">{use.tool ?? '—'}</td>
-                <td className="py-1 font-mono">{use.session_id ?? '—'}</td>
+            </thead>
+            <tbody>
+              {rules.map((rule, i) => (
+                <tr key={i} className="border-t align-top">
+                  <td className="py-1">{i + 1}</td>
+                  <td className="py-1 font-mono">{rule.fn === 'tool' ? `tool: ${rule.tool ?? ''}` : rule.fn}</td>
+                  <td className="py-1">
+                    {isUnbounded(rule) ? (
+                      <span className="text-destructive">{unboundedText(rule)}</span>
+                    ) : (
+                      bounds(rule).map((b) => <span key={b} className="block">{b}</span>)
+                    )}
+                  </td>
+                  <td className="py-1">
+                    {usage(rule, grant.used[String(i)]).map((u) => (
+                      <span key={u} className="block">
+                        {u}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {grant.uses.length > 0 && (
+          <table aria-label="Grant uses" className="w-full text-left text-[12.5px]">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="py-1 font-normal">Time</th>
+                <th className="py-1 font-normal">Call</th>
+                <th className="py-1 font-normal">Tool</th>
+                <th className="py-1 font-normal">Session</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {error && !approving && !revoking && (
-        <p role="alert" className="mb-2 text-warn">
-          {error}
-        </p>
-      )}
-      <div className="flex flex-wrap gap-2">
-        {grant.status === 'requested' && !grant.revoked_at && (
-          <>
-            <Button variant="primary" size="sm" onClick={() => setApproving(true)} disabled={busy} {...USER_ONLY}>
-              Approve grant…
-            </Button>
-            <Button variant="danger" size="sm" onClick={() => void act(() => api.declineFlowGrant(runId))} disabled={busy} {...USER_ONLY}>
-              Decline grant
-            </Button>
-          </>
+            </thead>
+            <tbody>
+              {grant.uses.map((use) => (
+                <tr key={use.request_id} className="border-t">
+                  <td className="py-1">{when(use.created_at)}</td>
+                  <td className="py-1 font-mono">{use.fn}</td>
+                  <td className="py-1 font-mono">{use.tool ?? '—'}</td>
+                  <td className="py-1 font-mono">{use.session_id ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
-        {live && (
-          <Button variant="danger" size="sm" onClick={() => setRevoking(true)} disabled={busy} {...USER_ONLY}>
-            Revoke grant
-          </Button>
-        )}
-      </div>
-      <Dialog
-        open={approving}
-        title="Approve this grant"
-        description="Approve it as requested, or narrow (or widen) any bound first: the request was only a proposal."
-        onClose={() => !busy && setApproving(false)}
-      >
-        <GrantEditor
-          initial={grant.spec}
-          submitLabel="Approve grant"
-          busy={busy}
-          onSubmit={(spec) => void approve(spec)}
-          onCancel={() => setApproving(false)}
-        />
-        {error && (
-          <p role="alert" className="mt-2 text-[13px] text-warn">
+        {error && !approving && !revoking && (
+          <p role="alert" className="text-destructive">
             {error}
           </p>
         )}
-      </Dialog>
-      <Dialog
-        open={revoking}
-        title="Revoke this grant?"
-        onClose={() => !busy && setRevoking(false)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setRevoking(false)} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void revoke()} disabled={busy} {...USER_ONLY}>
-              {busy ? <Spinner /> : 'Revoke grant'}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-2 text-[13px] text-muted">
-          <p>
-            The run goes on, but from now on every outward call it makes waits for a decision. Revoking is final: the
-            run cannot get this grant, or another, back.
-          </p>
+        <div className="flex flex-wrap gap-2">
+          {grant.status === 'requested' && !grant.revoked_at && (
+            <>
+              <Button size="sm" onClick={() => setApproving(true)} disabled={busy} {...USER_ONLY}>
+                Approve grant…
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => void act(() => api.declineFlowGrant(runId))}
+                disabled={busy}
+                {...USER_ONLY}
+              >
+                Decline grant
+              </Button>
+            </>
+          )}
+          {live && (
+            <Confirm
+              trigger={
+                <Button variant="destructive" size="sm" disabled={busy} {...USER_ONLY}>
+                  Revoke grant
+                </Button>
+              }
+              open={revoking}
+              onOpenChange={setRevoking}
+              title="Revoke this grant?"
+              action="Revoke grant"
+              busy={busy}
+              error={error}
+              onAction={() => void revoke()}
+            >
+              <p>
+                The run goes on, but from now on every outward call it makes waits for a decision. Revoking is final: the
+                run cannot get this grant, or another, back.
+              </p>
+            </Confirm>
+          )}
+        </div>
+      </CardContent>
+      <Dialog open={approving} onOpenChange={(open) => !open && !busy && setApproving(false)}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Approve this grant</DialogTitle>
+            <DialogDescription>
+              Approve it as requested, or narrow (or widen) any bound first: the request was only a proposal.
+            </DialogDescription>
+          </DialogHeader>
+          <GrantEditor
+            initial={grant.spec}
+            submitLabel="Approve grant"
+            busy={busy}
+            onSubmit={(spec) => void approve(spec)}
+            onCancel={() => setApproving(false)}
+          />
           {error && (
-            <p role="alert" className="text-warn">
+            <p role="alert" className="text-[13px] text-destructive">
               {error}
             </p>
           )}
-        </div>
+        </DialogContent>
       </Dialog>
-    </section>
+    </Card>
   )
 }

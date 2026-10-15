@@ -1,5 +1,6 @@
 import { Suspense, lazy, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
+import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -48,9 +49,10 @@ function Editing({ children }: { children: ReactNode }) {
   return (
     <Suspense
       fallback={
-        <p className="flex h-full items-center justify-center text-[13px] text-muted">
-          Loading the editor
-        </p>
+        <div role="status" aria-label="Loading the editor" className="flex h-full flex-col gap-3 p-4">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="min-h-0 flex-1 rounded-xl" />
+        </div>
       }
     >
       {children}

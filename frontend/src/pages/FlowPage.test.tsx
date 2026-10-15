@@ -6,7 +6,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
 import { COASTER_INPUTS, flowRequests, setFlowState } from '../mocks/features/flows'
-import { renderPage } from '../test/utils'
+import { renderPage, selectOption } from '../test/utils'
 import { FlowPage } from './FlowPage'
 
 // #2350 — one flow version over the msw flows (src/mocks/features/flows.ts): its
@@ -131,22 +131,21 @@ describe('FlowPage', () => {
     const versions = vi.spyOn(api, 'listFlowVersions')
     render('def-plates-1')
     const list = await screen.findByRole('region', { name: 'Versions' })
-    await within(list).findByRole('link', { name: 'v2' })
+    await within(list).findByRole('link', { name: /^v2 / })
     const items = within(list).getAllByRole('listitem')
-    expect(items.map((li) => li.textContent?.split(' ')[0])).toEqual(['v2', 'v1'])
+    expect(items.map((li) => li.querySelector('a > span')?.textContent)).toEqual(['v2', 'v1'])
     expect(items[0]).toHaveTextContent('you, in the browser')
     expect(items[1]).toHaveTextContent('an assistant (session sess-1)')
-    expect(within(list).getByRole('link', { name: 'v2' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
-    expect(within(list).getByText('v1')).toHaveAttribute('aria-current', 'page')
+    expect(within(list).getByRole('link', { name: /^v2 / })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
+    expect(within(list).getByRole('link', { name: /^v1 / })).toHaveAttribute('aria-current', 'page')
     expect(versions).toHaveBeenCalledWith('plates')
   })
 
   it('diffs any two versions, the one viewed against the one before by default', async () => {
     const { user } = render('def-plates-2')
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
-    await within(compare).findAllByRole('option', { name: 'v1' })
-    expect(within(compare).getByRole('combobox', { name: 'From' })).toHaveDisplayValue('v1')
-    expect(within(compare).getByRole('combobox', { name: 'To' })).toHaveDisplayValue('v2')
+    expect(within(compare).getByRole('combobox', { name: 'From' })).toHaveTextContent('v1')
+    expect(within(compare).getByRole('combobox', { name: 'To' })).toHaveTextContent('v2')
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     const diff = await screen.findByTestId('source-diff')
     expect(diff).toHaveAttribute('data-language', 'python')
@@ -155,8 +154,8 @@ describe('FlowPage', () => {
     expect(screen.getByTestId('modified')).toHaveTextContent('await queue_print')
     expect(screen.getByRole('heading', { name: 'v1 → v2' })).toBeInTheDocument()
 
-    await user.selectOptions(within(compare).getByRole('combobox', { name: 'From' }), 'v2')
-    await user.selectOptions(within(compare).getByRole('combobox', { name: 'To' }), 'v1')
+    await selectOption(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
+    await selectOption(user, within(compare).getByRole('combobox', { name: 'To' }), 'v1')
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByRole('heading', { name: 'v2 → v1' })).toBeInTheDocument()
     expect(screen.getByTestId('original')).toHaveTextContent('await queue_print')
@@ -242,8 +241,7 @@ describe('FlowPage', () => {
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
     const compare = screen.getByRole('region', { name: 'Compare versions' })
-    await within(compare).findAllByRole('option', { name: 'v2' })
-    await user.selectOptions(within(compare).getByRole('combobox', { name: 'To' }), 'v2')
+    await selectOption(user, within(compare).getByRole('combobox', { name: 'To' }), 'v2')
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByTestId('source-diff')).toHaveAttribute('data-side-by-side', 'false')
     expect(screen.getByRole('button', { name: 'Start run' })).toBeInTheDocument()
@@ -252,7 +250,7 @@ describe('FlowPage', () => {
   it('archives the flow, stopping new runs until it is unarchived (#2485)', async () => {
     const { user } = render('def-swap')
     await user.click(await screen.findByRole('button', { name: 'Archive' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Archive swap?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Archive swap?' })
     expect(dialog).toHaveTextContent('Finished runs keep their steps, their result and the script they ran')
     await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
     expect(await screen.findByText(/Archived by you, in the browser/)).toBeInTheDocument()
@@ -265,7 +263,7 @@ describe('FlowPage', () => {
   it('deletes the flow and restores the version viewed as its next (#2485)', async () => {
     const { user } = render('def-plates-1')
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete plates?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete plates?' })
     expect(dialog).toHaveTextContent('which keeps every version')
     await user.click(within(dialog).getByRole('button', { name: 'Delete flow' }))
     expect(await screen.findByText(/Deleted by you, in the browser/)).toBeInTheDocument()

@@ -79,3 +79,11 @@ if (!globalThis.IntersectionObserver) {
   globalThis.IntersectionObserver =
     FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }
+
+// #3653 — Radix's Select reads pointer capture and scrolls its chosen item into view,
+// none of which jsdom has.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.releasePointerCapture = () => {}
+}
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
