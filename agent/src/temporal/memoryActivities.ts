@@ -70,7 +70,9 @@ async function allEvents(events: MemoryActivityDeps['events'], session: string):
 /**
  * The session's conversation as Claude Code transcript lines (what the classic Stop hook
  * reads): each `user.turn`, each assistant message's text, and each of the main agent's
- * tool calls. A subagent's calls (`parent`) are its sidechain, left out as there.
+ * tool calls. A subagent's calls (`parent`) are its sidechain, left out as there, and so is a
+ * refused credential's notice (`notice`, #3703), as the classic transcript leaves out
+ * Claude Code's synthetic error message (memory/hindsight.ts, #3701).
  */
 export function transcriptOf(events: readonly LoggedEvent[]): SessionStoreEntry[] {
   const lines: SessionStoreEntry[] = []
@@ -78,7 +80,7 @@ export function transcriptOf(events: readonly LoggedEvent[]): SessionStoreEntry[
   for (const { event } of events) {
     if (event.type === 'user.turn') {
       lines.push({ type: 'user', message: { content: event.text } })
-    } else if (event.type === 'assistant.text.delta') {
+    } else if (event.type === 'assistant.text.delta' && event.notice !== true) {
       let message = texts.get(event.messageId)
       if (!message) {
         message = { content: [{ type: 'text', text: '' }] }

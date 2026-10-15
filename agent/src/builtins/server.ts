@@ -296,16 +296,12 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
 }
 
 /**
- * A classic turn's background built-ins (CronCreate and the rest) as an in-process
- * server, in place of Claude Code's own: those live in its process, which the turn ends
- * ("Session-only (not written to disk, dies when Claude exits)"), while these are kept by
- * the session (src/background/). Each call is outward, as every package built-in is.
- */
-/**
- * The built-ins a classic turn gets from the session instead of Claude Code: the
- * background ones, which Claude Code would lose with the turn's process, and WebFetch,
- * whose fetch connects only to the addresses its egress check passed (#2684; Claude Code's
- * resolves the name again as it connects).
+ * The built-ins a classic turn gets from the session instead of Claude Code, served
+ * in-process. The background ones (CronCreate and the rest) live in Claude Code's own
+ * process, which the turn ends ("Session-only (not written to disk, dies when Claude
+ * exits)"), while these are kept by the session (src/background/). WebFetch's fetch
+ * connects only to the addresses its egress check passed (#2684; Claude Code's resolves
+ * the name again as it connects). Each call is outward, as every package built-in is.
  */
 export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
 
