@@ -496,11 +496,13 @@ func fileType(name string) string {
 // thumbnail from the name it is uploaded under).
 var typed = map[string]bool{"3mf": true, "gcode.3mf": true, "gcode": true, "stl": true}
 
-// retypes is whether renaming from to to must send the file again: it becomes a type
-// Bambuddy handles differently. Any other rename (model.3mf to model.3mf.bak) keeps the
-// file's ID, so its print history and queue entries still point at it.
+// retypes is whether renaming from to to must send the file again: it becomes one of
+// the typed types from a type that is not (x.3mf.tmp to x.3mf). Any other rename keeps
+// the file's ID, so its print history and queue entries still point at it: model.3mf
+// to model.3mf.bak, and x.stl to x.3mf, whose STL bytes sent again would not make it
+// a 3MF.
 func retypes(from, to string) bool {
-	return fileType(from) != fileType(to) && typed[fileType(to)]
+	return typed[fileType(to)] && !typed[fileType(from)]
 }
 
 // retype renames f to name in folder by uploading its contents under the new name and
@@ -566,13 +568,16 @@ func (d *dir) upload(ctx context.Context, f api.File, folder int, name, key stri
 	got, err := d.tree.lib.Upload(ctx, folder, name, key, fh)
 	_ = fh.Close()
 	if err != nil {
-		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+		// The upload may have run with its answer lost: a retry sends this key again,
+		// and without one a stray copy can stay in folder under name.
+		return api.File{}, failed("rename: upload", err, "file", f.ID, "folder", folder, "name", name, "key", key)
 	}
 	return got, 0
 }
 
 // retypeKey is the Idempotency-Key of f's retype to name in folder.
 func retypeKey(f api.File, folder int, name string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("retype\x00%d\x00%d\x00%d\x00%d\x00%s", f.ID, f.Created.UnixNano(), f.Size, folder, name)))
-	return hex.EncodeToString(sum[:16])
+	h := sha256.New()
+	fmt.Fprintf(h, "retype\x00%d\x00%d\x00%d\x00%d\x00%s", f.ID, f.Created.UnixNano(), f.Size, folder, name)
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
