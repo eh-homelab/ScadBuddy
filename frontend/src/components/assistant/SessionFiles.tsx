@@ -133,7 +133,8 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
       if (preview?.path === file.path) setPreview(null)
       // From the latest list: another delete may have finished while this one ran.
       const now = latest.current
-      if (now) setData({ ...now, files: now.files.filter((f) => f.path !== file.path) })
+      // Supersede: another delete's read still in flight would show this file again.
+      if (now) setData({ ...now, files: now.files.filter((f) => f.path !== file.path) }, { supersede: true })
       setAnnouncement(`Deleted ${file.path}.`)
       refresh()
     } catch (caught) {

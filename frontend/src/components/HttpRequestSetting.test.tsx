@@ -11,7 +11,7 @@ const LABEL = 'Let the assistant make HTTP requests'
 describe('HttpRequestSetting (#827)', () => {
   it('is on by default, and turns off and on at once', async () => {
     const { user } = renderPage(<HttpRequestSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     expect(box).toBeChecked()
 
     await user.click(box)
@@ -25,7 +25,7 @@ describe('HttpRequestSetting (#827)', () => {
 
   it('is for the user only: an agent cannot flip it', async () => {
     renderPage(<HttpRequestSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     expect(box.closest('[data-agent-user-only]')).not.toBeNull()
   })
 
@@ -36,7 +36,7 @@ describe('HttpRequestSetting (#827)', () => {
       ),
     )
     const { user } = renderPage(<HttpRequestSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     await user.click(box)
     expect(await screen.findByRole('alert')).toHaveTextContent('must come from the ScadBuddy UI')
     expect(box).toBeChecked()

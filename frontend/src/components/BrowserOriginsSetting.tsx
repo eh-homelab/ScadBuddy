@@ -3,8 +3,11 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { ApprovedBrowserOrigin } from '../api/types'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { CardContent } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { SaveFooter, SettingCard } from './settings/form'
 
 const lines = (text: string) =>
   text
@@ -70,56 +73,63 @@ export function BrowserOriginsSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface" data-testid="browser-origins">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">AI headless browser</h2>
+    <SettingCard title="AI headless browser" data-testid="browser-origins">
       <form
-        className="flex flex-col gap-3 p-4"
         onSubmit={(event: FormEvent) => {
           event.preventDefault()
           void save({ allow: lines(allowText), deny: lines(denyText) })
         }}
       >
-        <p id="browser-origins-help" className="text-[12px] text-muted">
-          For the assistant&rsquo;s own browser (the Playwright plugin in Settings &rarr; Plugins). Sites it may open
-          without asking, sites it may never open (even if you approve), and anything else asks you in the chat first,
-          where you can allow it once, for that chat, or always. One per line: a site such as{' '}
-          <code>makerworld.com</code> (https only), all its subdomains as <code>*.example.com</code>, an exact origin
-          such as <code>http://printer.lan:8080</code>, or an address range such as <code>10.0.0.0/8</code>.
-        </p>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col gap-1 text-[13px]">
-            Opens without asking
-            <textarea
-              value={allowText}
-              onChange={(event) => setAllow(event.target.value)}
-              rows={8}
-              spellCheck={false}
-              className="sb-field font-mono text-[12px]"
-              aria-describedby="browser-origins-help"
-              {...USER_ONLY}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            Never opens
-            <textarea
-              value={denyText}
-              onChange={(event) => setDeny(event.target.value)}
-              rows={8}
-              spellCheck={false}
-              className="sb-field font-mono text-[12px]"
-              aria-describedby="browser-origins-help"
-              {...USER_ONLY}
-            />
-          </label>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
+        <CardContent className="space-y-4 py-4">
+          <p id="browser-origins-help" className="text-xs text-muted-foreground">
+            For the assistant&rsquo;s own browser (the Playwright plugin in Settings &rarr; Plugins). Sites it may open
+            without asking, sites it may never open (even if you approve), and anything else asks you in the chat first,
+            where you can allow it once, for that chat, or always. One per line: a site such as{' '}
+            <code>makerworld.com</code> (https only), all its subdomains as <code>*.example.com</code>, an exact origin
+            such as <code>http://printer.lan:8080</code>, or an address range such as <code>10.0.0.0/8</code>.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="browser-origins-allow" className="font-normal">
+                Opens without asking
+              </Label>
+              <Textarea
+                id="browser-origins-allow"
+                value={allowText}
+                onChange={(event) => setAllow(event.target.value)}
+                rows={8}
+                spellCheck={false}
+                className="min-h-40 font-mono text-xs"
+                aria-describedby="browser-origins-help"
+                {...USER_ONLY}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="browser-origins-deny" className="font-normal">
+                Never opens
+              </Label>
+              <Textarea
+                id="browser-origins-deny"
+                value={denyText}
+                onChange={(event) => setDeny(event.target.value)}
+                rows={8}
+                spellCheck={false}
+                className="min-h-40 font-mono text-xs"
+                aria-describedby="browser-origins-help"
+                {...USER_ONLY}
+              />
+            </div>
+          </div>
+        </CardContent>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={saved && !changed ? 'Saved. The next page the browser opens uses these lists.' : undefined}
+          error={error}
+        >
           <Button
             type="button"
-            variant="default"
+            variant="outline"
             size="sm"
             disabled={defaults || saving}
             onClick={() => void save(current.defaults)}
@@ -127,36 +137,26 @@ export function BrowserOriginsSetting() {
           >
             Restore defaults
           </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. The next page the browser opens uses these lists.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
-          </p>
-        )}
+        </SaveFooter>
       </form>
-      <div className="border-t border-line p-4">
-        <h3 className="text-[12.5px] font-medium">Approved in chats</h3>
+      <CardContent className="border-t py-4">
+        <h3 className="text-sm font-medium">Approved in chats</h3>
         {current.approved.length === 0 ? (
-          <p className="mt-1 text-[12px] text-muted">None yet. Sites you allow for one chat are listed here.</p>
+          <p className="mt-1 text-xs text-muted-foreground">None yet. Sites you allow for one chat are listed here.</p>
         ) : (
           <ul className="mt-2 flex flex-col gap-1.5" aria-label="Sites approved in chats">
             {current.approved.map((item) => {
               const key = `${item.session_id} ${item.origin}`
               return (
-                <li key={key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px]">
-                  <span className="min-w-0 break-all font-mono text-[12px]">{item.origin}</span>
-                  <span className="min-w-0 text-muted">
+                <li key={key} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <span className="min-w-0 font-mono text-xs break-all">{item.origin}</span>
+                  <span className="min-w-0 text-muted-foreground">
                     {item.scope === 'session' ? 'for' : 'opened once in'} &ldquo;{item.title || 'Untitled chat'}&rdquo;
                   </span>
                   <Button
                     type="button"
-                    variant="default"
-                    size="sm"
+                    variant="outline"
+                    size="xs"
                     disabled={revoking === key}
                     aria-busy={revoking === key}
                     aria-label={`Revoke ${item.origin} in ${item.title || 'Untitled chat'}`}
@@ -170,7 +170,7 @@ export function BrowserOriginsSetting() {
             })}
           </ul>
         )}
-      </div>
-    </section>
+      </CardContent>
+    </SettingCard>
   )
 }

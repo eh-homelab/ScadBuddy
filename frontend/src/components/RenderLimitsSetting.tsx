@@ -3,8 +3,10 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { RenderLimits } from '../api/types'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard, SuggestInput } from './settings/form'
 
 /** agent `src/tools/renderLimits.ts` MAX_RENDER_*. */
 const MAX_CONCURRENT = 64
@@ -88,13 +90,12 @@ export function RenderLimitsSetting() {
   ]
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant render limits</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <div className="flex flex-wrap gap-4">
-          <label className="flex flex-col gap-1 text-[13px]">
-            Renders at once, per caller
-            <input
+    <SettingCard title="Assistant render limits">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <div className="flex flex-wrap gap-4">
+            <LabeledInput
+              label="Renders at once, per caller"
               type="number"
               inputMode="numeric"
               min={1}
@@ -103,13 +104,11 @@ export function RenderLimitsSetting() {
               required
               value={current.per_principal}
               onChange={(event) => edit({ per_principal: event.target.value })}
-              className="sb-field sb-num w-32"
+              className="w-48"
               aria-describedby="render-limits-help"
             />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            Renders at once, in all
-            <input
+            <LabeledInput
+              label="Renders at once, in all"
               type="number"
               inputMode="numeric"
               min={0}
@@ -118,13 +117,11 @@ export function RenderLimitsSetting() {
               required
               value={current.global}
               onChange={(event) => edit({ global: event.target.value })}
-              className="sb-field sb-num w-32"
+              className="w-48"
               aria-describedby="render-limits-help"
             />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            Renders per 10 min, per caller
-            <input
+            <LabeledInput
+              label="Renders per 10 min, per caller"
               type="number"
               inputMode="numeric"
               min={0}
@@ -133,98 +130,92 @@ export function RenderLimitsSetting() {
               required
               value={current.per_window}
               onChange={(event) => edit({ per_window: event.target.value })}
-              className="sb-field sb-num w-32"
+              className="w-48"
               aria-describedby="render-limits-help"
             />
-          </label>
-        </div>
+          </div>
 
-        <fieldset className="flex flex-col gap-2">
-          <legend className="mb-1 text-[13px]">Per-caller overrides</legend>
-          <datalist id="render-limit-callers">
-            {callers.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label}
-              </option>
+          <fieldset className="flex flex-col gap-2">
+            <legend className="mb-1 text-sm">Per-caller overrides</legend>
+            {current.overrides.map((row, index) => (
+              <div key={index} className="flex flex-wrap items-end gap-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`render-limit-caller-${index}`} className="text-xs font-normal">
+                    Caller
+                  </Label>
+                  <SuggestInput
+                    id={`render-limit-caller-${index}`}
+                    type="text"
+                    required
+                    value={row.principal}
+                    onChange={(event) => editRow(index, { principal: event.target.value })}
+                    onFocus={() => setWantTokens(true)}
+                    onOpen={() => setWantTokens(true)}
+                    suggestions={callers.map((c) => ({ value: c.id, label: c.label }))}
+                    onPick={(principal) => editRow(index, { principal })}
+                    suggestionsLabel={`Known callers for override ${index + 1}`}
+                    className="w-72 max-w-full"
+                    placeholder="browser, token:<id>, oidc:<issuer>#<sub>"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`render-limit-at-once-${index}`} className="text-xs font-normal">
+                    At once
+                  </Label>
+                  <Input
+                    id={`render-limit-at-once-${index}`}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={MAX_CONCURRENT}
+                    step={1}
+                    required
+                    value={row.concurrent}
+                    onChange={(event) => editRow(index, { concurrent: event.target.value })}
+                    className="sb-num w-24"
+                  />
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => edit({ overrides: current.overrides.filter((_, i) => i !== index) })}
+                  aria-label={`Remove the override for ${row.principal || 'this caller'}`}
+                  {...USER_ONLY}
+                >
+                  Remove
+                </Button>
+              </div>
             ))}
-          </datalist>
-          {current.overrides.map((row, index) => (
-            <div key={index} className="flex flex-wrap items-end gap-2">
-              <label className="flex flex-col gap-1 text-[12px]">
-                Caller
-                <input
-                  type="text"
-                  list="render-limit-callers"
-                  required
-                  value={row.principal}
-                  onChange={(event) => editRow(index, { principal: event.target.value })}
-                  onFocus={() => setWantTokens(true)}
-                  className="sb-field w-72"
-                  placeholder="browser, token:<id>, oidc:<issuer>#<sub>"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-[12px]">
-                At once
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  min={1}
-                  max={MAX_CONCURRENT}
-                  step={1}
-                  required
-                  value={row.concurrent}
-                  onChange={(event) => editRow(index, { concurrent: event.target.value })}
-                  className="sb-field sb-num w-24"
-                />
-              </label>
+            <div>
               <Button
                 type="button"
                 size="sm"
-                onClick={() => edit({ overrides: current.overrides.filter((_, i) => i !== index) })}
-                aria-label={`Remove the override for ${row.principal || 'this caller'}`}
+                variant="outline"
+                onClick={() =>
+                  edit({ overrides: [...current.overrides, { principal: '', concurrent: current.per_principal }] })
+                }
                 {...USER_ONLY}
               >
-                Remove
+                Add override
               </Button>
             </div>
-          ))}
-          <div>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() =>
-                edit({ overrides: [...current.overrides, { principal: '', concurrent: current.per_principal }] })
-              }
-              {...USER_ONLY}
-            >
-              Add override
-            </Button>
-          </div>
-        </fieldset>
+          </fieldset>
 
-        <p id="render-limits-help" className="text-[12px] text-muted">
-          A render past a limit waits its turn instead of failing, so the assistant and its sub-agents can queue
-          renders (up to 100 per caller). &ldquo;In all&rdquo; counts every caller together; 0 means no limit beyond
-          the render workers&rsquo; own. The per-10-minute cap stops an assistant stuck in a loop and counts renders
-          still waiting; 0 turns it off. Changes apply at once, to renders already waiting too.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. The assistant uses these limits now.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+          <p id="render-limits-help" className="text-xs text-muted-foreground">
+            A render past a limit waits its turn instead of failing, so the assistant and its sub-agents can queue
+            renders (up to 100 per caller). &ldquo;In all&rdquo; counts every caller together; 0 means no limit beyond
+            the render workers&rsquo; own. The per-10-minute cap stops an assistant stuck in a loop and counts renders
+            still waiting; 0 turns it off. Changes apply at once, to renders already waiting too.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={saved && !changed ? 'Saved. The assistant uses these limits now.' : null}
+          error={error}
+        />
       </form>
-    </section>
+    </SettingCard>
   )
 }

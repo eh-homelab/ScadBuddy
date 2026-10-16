@@ -38,17 +38,18 @@ test.describe('settings', () => {
   test('holds an in-app link while a section is unsaved, and discards on request', async ({ page }) => {
     await page.goto('/settings')
     const preview = page.getByRole('region', { name: 'Preview' })
-    await page.getByLabel('Show dimensions in').selectOption('in')
+    await page.getByLabel('Show dimensions in').click()
+    await page.getByRole('option', { name: 'Inches (in)' }).click()
     await expect(preview.getByText('Unsaved')).toBeVisible()
 
     await page.getByRole('link', { name: 'Models', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = page.getByRole('alertdialog', { name: 'Leave without saving?' })
     await expect(dialog).toContainText('Preview')
     await dialog.getByRole('button', { name: 'Stay' }).click()
     await expect(page).toHaveURL(/\/settings$/)
 
     await preview.getByRole('button', { name: 'Discard Preview changes' }).click()
-    await expect(page.getByLabel('Show dimensions in')).toHaveValue('mm')
+    await expect(page.getByLabel('Show dimensions in')).toHaveText('Millimetres (mm)')
     await page.getByRole('link', { name: 'Models', exact: true }).click()
     await expect(dialog).toHaveCount(0)
     // The catalogue writes its view to the URL (#534, lib/catalogueQuery.ts).
