@@ -113,6 +113,8 @@ describe('assistant panel', () => {
     expect(screen.getByRole('button', { name: 'Assistant' })).toBeInTheDocument()
     act(() => availability.set({ available: false, state: 'unavailable' }))
     expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    // #2962 review: an outage is not a close, so a reload during it still reopens the panel.
+    expect(window.sessionStorage.getItem('scadbuddy.assistant.open')).toBe('1')
 
     // Its chat gate refuses this address: off for this page.
     act(() => availability.set({ available: false, state: 'unavailable', chat: 'refused' }))

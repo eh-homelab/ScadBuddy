@@ -24,7 +24,7 @@ const turnContext = (turnId: string): TurnContext => ({
   turnId,
   principal: {},
   approvalGate: () => Promise.resolve({ approved: false, message: 'unused' }),
-  trace: new TurnTrace({ sessionId: 's', turnId, parent: ROOT_CONTEXT, tierOf: () => 'read' }),
+  trace: new TurnTrace({ sessionId: 's', turnId, parent: ROOT_CONTEXT, tierOf: () => 'read', before: { costUsd: 0, turns: 0 } }),
   signalInterrupt: () => {},
 })
 
