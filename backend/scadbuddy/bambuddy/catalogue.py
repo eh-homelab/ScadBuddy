@@ -255,7 +255,9 @@ def _sweep(kept: Path) -> None:
     """Remove the files beside ``kept`` that have gone :data:`CATALOGUE_ORPHAN_AGE`
     unwritten (#3423): an old URL's, key's or version's, or a crashed write's. Another
     replica may remove the same file first, and a file that cannot go waits for the
-    next keep."""
+    next keep. It lists the whole directory on every keep, refreshes included: that
+    holds one file per Bambuddy, key and version, a handful, so it is not rate-limited
+    (#3816 review). A directory that grows past that wants a limit here."""
     cutoff = time.time() - CATALOGUE_ORPHAN_AGE
     try:
         entries = list(kept.parent.iterdir())

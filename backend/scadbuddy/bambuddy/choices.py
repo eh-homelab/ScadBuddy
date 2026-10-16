@@ -138,7 +138,9 @@ async def choices_for(
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     cache: Path,
-    catalogue_key: bytes | None = None,
+    # Required, so a caller chooses the file name's key rather than falling back to the
+    # bare hash without saying so (#3816 review): None only when there is no KEK.
+    catalogue_key: bytes | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
@@ -266,7 +268,9 @@ async def choices_for_output(
     *,
     printer_id: int | None,
     cache: Path,
-    catalogue_key: bytes | None = None,
+    # Required, so a caller chooses the file name's key rather than falling back to the
+    # bare hash without saying so (#3816 review): None only when there is no KEK.
+    catalogue_key: bytes | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     return await choices_for(
