@@ -3002,7 +3002,7 @@
     "tests/test_checkout_leases.py::test_a_lease_the_worker_holds_is_seen_by_the_apis_removal": 0.14611757399984526,
     "tests/test_checkout_leases.py::test_a_lease_waits_out_a_removal_in_another_process": 0.6927768900000046,
     "tests/test_checkout_leases.py::test_a_live_install_is_renewed_past_its_ttl": 1.7202071510000678,
-    "tests/test_checkout_leases.py::test_a_live_lease_is_renewed_past_its_ttl": 1.705798550000054,
+    "tests/test_checkout_leases.py::test_a_live_lease_is_renewed_past_its_ttl": 3.15,
     "tests/test_checkout_leases.py::test_a_live_pin_is_renewed_past_its_ttl": 1.750839957999915,
     "tests/test_checkout_leases.py::test_a_pin_cancelled_while_it_takes_its_hold_leaves_none": 0.9154343219997827,
     "tests/test_checkout_leases.py::test_a_pin_in_another_process_holds_off_a_removal": 1.4519962340000347,

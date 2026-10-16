@@ -88,7 +88,10 @@ async def test_a_live_lease_is_renewed_past_its_ttl(
 ) -> None:
     """Checked as a renewal lands, not at a wall-clock time (#3855): a loaded runner can
     stall a renewal past the TTL, so the row lapses until the next one. That stall is
-    made here, on the first renewal, so the check cannot pass on timing alone."""
+    made here, on the first renewal, so the check cannot pass on timing alone. It relies
+    on a renewal reviving a lapsed row: ``renew`` has no ``expires_at > now()`` guard. A
+    guard added there is a change to this test's premise, not a regression it catches
+    (#3931 review)."""
     ttl = 1.5
     leases = CheckoutLeases(pg_pool, tmp_path, ttl=ttl)
     renew = leases.renew
