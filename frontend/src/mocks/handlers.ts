@@ -3339,14 +3339,13 @@ export const handlers = [
     // #480 — like the server, each plate uses only some of the slots (`setMockPlateSlots`;
     // unset, plate N uses slot N, so plate 1 has only slot 1), and `all_plates` answers
     // with the union of every plate's slots: an all-plates read differs from a plate-1
-    // read. This filters
-    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
-    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
-    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
-    // `choices.filaments` payload instead of ever hitting this route. That assumption is
-    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
-    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
-    // instead of every other test's single-plate fixture silently losing slots.
+    // read. This filters the shared `fixtures.filamentOptions` for every caller, not just
+    // the plate-2+/all-plates tests that motivate it — it stays safe only because
+    // PrintPicker.tsx's `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the
+    // bulk `choices.filaments` payload instead of ever hitting this route. That
+    // assumption is pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1
+    // without all plates" (#525 finding 3) — if it ever removes the shortcut, that test
+    // fails here instead of every other test's single-plate fixture silently losing slots.
     const rawPlateId = Number(search.get('plate_id') ?? 1)
     const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []

@@ -54,17 +54,22 @@ def _segment(value: Any) -> str:
 
 
 def _chosen_plates(request: dict[str, Any]) -> int:
-    """How many distinct plates a print's `plate_ids` chose, 1 when it names none. Not a
-    list of plate numbers is refused here, as the print route's 422 would, so the call is
-    outside its grant rather than a TypeError."""
+    """How many distinct plates a print's `plate_ids` chose, 1 when it names none.
+
+    Anything but a non-empty list of whole plate numbers is refused, so the call is
+    outside its grant (a person decides it) rather than a TypeError. That is stricter
+    than the print route, whose lax parsing also takes `["3"]` or `[true]`: such a call
+    asks a person, never passes a grant on a count it could not read."""
     plate_ids = request.get("plate_ids")
     if plate_ids is None:
         return 1
-    if not isinstance(plate_ids, list) or not all(
-        isinstance(p, int) and not isinstance(p, bool) and p >= 1 for p in plate_ids
+    if (
+        not isinstance(plate_ids, list)
+        or not plate_ids
+        or not all(isinstance(p, int) and not isinstance(p, bool) and p >= 1 for p in plate_ids)
     ):
         raise ValueError("plate_ids is not a list of plate numbers")
-    return len(set(plate_ids)) or 1
+    return len(set(plate_ids))
 
 
 def _quantity(options: Any) -> int | None:
