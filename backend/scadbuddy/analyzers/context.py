@@ -21,7 +21,12 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.analyzers.model import ScopeRef
-from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions, FilamentPlan
+from scadbuddy.bambuddy.filaments import (
+    MAX_PLATES,
+    FilamentOptions,
+    FilamentPlan,
+    one_plate_folded,
+)
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
@@ -66,7 +71,8 @@ class AnalysisRequest(BaseModel):
     #: ``plate_id``.
     all_plates: bool = False
     #: Several plates' print (#3652): the filament checks read those plates' usage, as
-    #: ``all_plates`` reads every plate's. The mesh checks still read ``plate_id``.
+    #: ``all_plates`` reads every plate's. The mesh checks still read ``plate_id``. One
+    #: plate here becomes ``plate_id`` (``one_plate_folded``), as on a print run.
     plate_ids: list[Annotated[int, Field(ge=1)]] | None = Field(
         default=None, min_length=1, max_length=MAX_PLATES
     )
@@ -78,10 +84,11 @@ class AnalysisRequest(BaseModel):
 
     @model_validator(mode="after")
     def _one_plate_is_plate_id(self) -> AnalysisRequest:
-        # As `PrintRunRequest` folds it (#3768 review): one chosen plate is that plate's
-        # print, so the mesh checks read the plate that prints.
-        if not self.all_plates and self.plate_ids is not None and len(set(self.plate_ids)) == 1:
-            self.plate_id, self.plate_ids = self.plate_ids[0], None
+        # As `PrintRunRequest` folds it (#3768 review), so the mesh checks read the plate
+        # that prints.
+        self.plate_id, self.plate_ids = one_plate_folded(
+            self.plate_id, self.all_plates, self.plate_ids
+        )
         return self
 
 

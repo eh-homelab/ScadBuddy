@@ -857,6 +857,18 @@ def asked_plates(
     return [plate_id]
 
 
+def one_plate_folded(
+    plate_id: int, all_plates: bool, plate_ids: Sequence[int] | None
+) -> tuple[int, list[int] | None]:
+    """``(plate_id, plate_ids)`` with one chosen plate as ``plate_id`` (#3762 review):
+    ``plate_ids=[2]`` is ``plate_id=2``'s print, for a run and an analysis alike. Several
+    plates are left each once in plate order; ``all_plates`` leaves both as they are."""
+    if all_plates or plate_ids is None:
+        return plate_id, None if plate_ids is None else list(plate_ids)
+    chosen = sorted(set(plate_ids))
+    return (chosen[0], None) if len(chosen) == 1 else (plate_id, chosen)
+
+
 def plates_named(plates: Sequence[int]) -> str:
     """``plate 4``, or ``plates 4 and 5``, or ``plates 4, 5 and 6``."""
     if len(plates) == 1:

@@ -58,6 +58,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     every_plate,
     gather_plate_options,
+    one_plate_folded,
     plates_named,
     queue_filaments,
     read_inventory,
@@ -231,8 +232,9 @@ class PrintRunRequest(BaseModel):
     def _one_plate_is_plate_id(self) -> PrintRunRequest:
         # One chosen plate is that plate's print, under the key `plate_id` gives it
         # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
-        if not self.all_plates and self.plate_ids is not None and len(self.plate_ids) == 1:
-            self.plate_id, self.plate_ids = self.plate_ids[0], None
+        self.plate_id, self.plate_ids = one_plate_folded(
+            self.plate_id, self.all_plates, self.plate_ids
+        )
         return self
 
     def asked_plates(self) -> list[int] | None:
