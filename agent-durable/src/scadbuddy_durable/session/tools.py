@@ -62,10 +62,11 @@ def parse_manifest(data: Any) -> tuple[ManifestEntry, ...]:
         name, tier = str(e["name"]), str(e["tier"])
         if tier not in RISK_TIERS:
             # Said once, as the manifest is the worker's for its life, and the worker
-            # still starts: such a tool is labelled outward, as an unlisted one is
-            # (#3245, #3581). The tool, never the value.
+            # still starts: follow_session labels such a tool outward, as an unlisted one
+            # (#3245, #3581). The tool, never the value. Kept as the manifest has it, not
+            # relabelled here: as `outward` it would outrank a Settings raise, which
+            # sanitise_overrides then drops, and the tool would run ungated (#3882).
             log.warning("tool %s has no known tier in the manifest: labelled outward", name)
-            tier = "outward"
         out.append(
             ManifestEntry(
                 name=name,
