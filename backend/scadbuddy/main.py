@@ -96,7 +96,8 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.backends import UnrecordedSweeper
+from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
@@ -349,6 +350,7 @@ async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = Fa
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more. Only
     the Schedule's sweep runs it, so a failure is logged and fails its activity."""
+    unrecorded = 0
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
@@ -361,10 +363,14 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     state.store.content, state.refs, grace=state.config.job_ttl
                 )
                 backend = state.store.content.backend
-                if isinstance(backend, BambuddyContentBackend):
+                if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
-                    removed += await backend.sweep_unrecorded(cutoff=cutoff)
+                    index = state.store.content.index
+                    swept = await backend.sweep_unrecorded(
+                        cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
+                    )
+                    unrecorded = swept if isinstance(swept, int) else len(swept)
             except BaseException:
                 # BaseException on purpose: a cancelled sweep must stay cancelled, not be
                 # replaced by the trim's own failure below.
@@ -387,6 +393,8 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
+    if unrecorded:
+        logger.info("removed unrecorded uploads", extra={"count": unrecorded})
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
         # A swept piece is no geometry's source any more (`store/geometry.py`).

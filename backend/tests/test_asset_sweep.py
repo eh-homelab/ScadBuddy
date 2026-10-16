@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -11,8 +12,10 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
+from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.bambuddy import BambuddyContentBackend
 from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.s3 import S3ContentBackend
 
 
 class _Remote:
@@ -130,13 +133,25 @@ async def test_the_blob_sweep_forgets_the_geometry_of_the_pieces_it_removes(
     assert _forgotten == [["p1", "p2"]]
 
 
+class _Index:
+    """A blob index that only answers which backend ids a row names."""
+
+    def __init__(self, recorded: frozenset[tuple[str, str]] = frozenset()) -> None:
+        self.recorded = recorded
+
+    def shares_backend_id(self, backend: str, backend_id: str) -> bool:
+        return (backend, backend_id) in self.recorded
+
+
 class _Bambuddy(BambuddyContentBackend):
     """A Bambuddy backend that only records the reconcile it is asked for."""
 
     def __init__(self) -> None:
         self.cutoffs: list[datetime] = []
 
-    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+    async def sweep_unrecorded(
+        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+    ) -> list[str]:
         self.cutoffs.append(cutoff)
         return ["600"]
 
@@ -155,7 +170,9 @@ async def test_the_blob_sweep_reconciles_unrecorded_work_files_on_bambuddy_only(
     monkeypatch.setattr(main, "GeometryIndex", _Geometry)
     backend: Any = _Bambuddy() if on_bambuddy else object()
     state = SimpleNamespace(
-        store=SimpleNamespace(content=SimpleNamespace(backend=backend), blobs=object()),
+        store=SimpleNamespace(
+            content=SimpleNamespace(backend=backend, index=_Index()), blobs=object()
+        ),
         refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(job_ttl=86400),
     )
@@ -168,6 +185,52 @@ async def test_the_blob_sweep_reconciles_unrecorded_work_files_on_bambuddy_only(
             <= cutoff
             <= datetime.now(UTC) - timedelta(seconds=86400)
         )
+
+
+async def test_the_blob_sweep_reconciles_unrecorded_s3_objects_by_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On S3 too, the sweep deletes the objects no row names that are older than
+    `job_ttl`; whether a row names one is the content store's index, asked for `s3`."""
+    calls: list[tuple[datetime, Callable[[str], bool]]] = []
+
+    async def sweep_unrecorded(
+        self: S3ContentBackend, *, cutoff: datetime, recorded: Callable[[str], bool]
+    ) -> int:
+        calls.append((cutoff, recorded))
+        return 2
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(S3ContentBackend, "sweep_unrecorded", sweep_unrecorded)
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    monkeypatch.setattr(main, "GeometryIndex", _Geometry)
+    _forgotten.clear()
+    backend = S3ContentBackend(
+        S3Settings(
+            endpoint="http://127.0.0.1:1",
+            bucket="b",
+            prefix="p",
+            access_key_id="a",
+            secret_access_key="s",
+        )
+    )
+    index = _Index(frozenset({("s3", "p/piece/kept")}))
+    state = SimpleNamespace(
+        store=SimpleNamespace(
+            content=SimpleNamespace(backend=backend, index=index), blobs=object()
+        ),
+        refs=SimpleNamespace(pool=object()),
+        config=SimpleNamespace(job_ttl=86400),
+    )
+    before = datetime.now(UTC)
+    await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    [(cutoff, recorded)] = calls
+    ttl = timedelta(seconds=86400)
+    assert before - ttl <= cutoff <= datetime.now(UTC) - ttl
+    assert recorded("p/piece/kept") is True and recorded("p/piece/gone") is False
+    assert _forgotten == []  # objects are no piece keys
 
 
 class _Cache(CachedBlobStore):
@@ -185,7 +248,9 @@ class _Unreachable(BambuddyContentBackend):
     def __init__(self) -> None:
         pass
 
-    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+    async def sweep_unrecorded(
+        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+    ) -> list[str]:
         raise OSError("Bambuddy is down")
 
 
@@ -195,7 +260,9 @@ class _Reachable(BambuddyContentBackend):
     def __init__(self) -> None:
         self.swept = 0
 
-    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+    async def sweep_unrecorded(
+        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+    ) -> list[str]:
         self.swept += 1
         return []
 
@@ -216,7 +283,9 @@ async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
     monkeypatch.setattr(main, "sweep_content", sweep_content)
     cache = _Cache()
     state = SimpleNamespace(
-        store=SimpleNamespace(content=SimpleNamespace(backend=_Unreachable()), blobs=cache),
+        store=SimpleNamespace(
+            content=SimpleNamespace(backend=_Unreachable(), index=_Index()), blobs=cache
+        ),
         refs=object(),
         config=SimpleNamespace(job_ttl=86400),
     )
@@ -237,7 +306,9 @@ class _FailingCache(CachedBlobStore):
 
 def _sweep_state(cache: CachedBlobStore, backend: Any) -> SimpleNamespace:
     return SimpleNamespace(
-        store=SimpleNamespace(content=SimpleNamespace(backend=backend), blobs=cache),
+        store=SimpleNamespace(
+            content=SimpleNamespace(backend=backend, index=_Index()), blobs=cache
+        ),
         refs=object(),
         config=SimpleNamespace(job_ttl=86400),
     )

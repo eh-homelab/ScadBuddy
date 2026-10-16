@@ -13,10 +13,12 @@ from scadbuddy.core.config import Config, StoreBackend
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
+from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.store import BlobStore
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.backends import RECOVER_LOCAL_SQL as RECOVER_LOCAL_SQL
+from scadbuddy.store.backends import RemoteBackend, build_backend
+from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore, StoreUsage
 from scadbuddy.store.download_cache import DownloadCache
@@ -30,10 +32,6 @@ if TYPE_CHECKING:
     from scadbuddy.core.metrics import Metrics
 
 
-#: The recovery from a refused start: back to the local store (README, "Deploying").
-RECOVER_LOCAL_SQL = "UPDATE settings SET value = '\"local\"' WHERE name = 'store_backend';"
-
-
 @dataclass
 class StoreBundle:
     backend: StoreBackend
@@ -43,7 +41,7 @@ class StoreBundle:
     remote_assets: RemoteAssets | None
     fonts: FontMirror | None
     source: RenderSettingsSource
-    remote: BambuddyContentBackend | None = None
+    remote: RemoteBackend | None = None
     #: #2788: whole Bambuddy downloads by sha256, when this process keeps them.
     downloads: DownloadCache | None = None
     #: The local backend's last walk, `(monotonic time, usage)`, for `store_usage`'s max age.
@@ -85,18 +83,7 @@ def build_store(
     )
     if backend == "local":
         return StoreBundle("local", local, None, None, None, None, source, downloads=downloads)
-    # From any source, the environment's seed included: a Bambuddy store without a URL
-    # or an inbox could store nothing, so the process does not start on it.
-    if not current.bambuddy_url or current.library_folder_id is None:
-        raise StoreNotReadyError(
-            "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
-            " library folder (its inbox). To start on the local store, run"
-            f" {RECOVER_LOCAL_SQL} in ScadBuddy's database, in the schema its"
-            " SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
-            " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
-            ' See README, "Recovering an unready blob store".'
-        )
-    remote = BambuddyContentBackend(source.target, pool)
+    remote = build_backend(backend, current, source, pool)
     content = ContentStore(
         remote,
         BlobIndex(pool),
@@ -115,7 +102,7 @@ def build_store(
     )
     locks = KeyLocks()
     return StoreBundle(
-        "bambuddy",
+        backend,
         blobs,
         content,
         SnapshotStore(content, paths, history, locks=locks),
