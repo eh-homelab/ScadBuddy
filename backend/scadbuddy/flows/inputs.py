@@ -166,8 +166,9 @@ def _pattern(
     """jsonschema's `pattern`, run with a deadline: past PATTERN_TIMEOUT_S the value is
     refused rather than left to backtrack on the API's event loop (#2661).
 
-    The dialect is `regex`'s (VERSION0), not `re`'s or ECMA-262's: it takes syntax `re`
-    refuses (`\\p{L}`, possessive quantifiers), and that is the contract (#3416)."""
+    A pattern runs on `regex` (VERSION0), but registration checks it with the metaschema's
+    `regex` format, which compiles it with `re`: so the dialect is what both accept, and a
+    pattern only `regex` takes (`\\p{L}`) is refused when the flow is registered (#3416)."""
     if not validator.is_type(instance, "string"):
         return
     timeout = PATTERN_TIMEOUT_S
