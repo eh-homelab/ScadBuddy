@@ -4,8 +4,20 @@ import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
+import { CameraIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
 import { mergeCards, type NowCard } from './nowCards'
 import { PlateWarning } from './PlateWarning'
 
@@ -13,13 +25,13 @@ import { PlateWarning } from './PlateWarning'
 export const NOW_POLL_MS = 15_000
 
 const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> = {
-  printing: { label: 'Printing', tone: 'border-accent/50 bg-accent/10 text-ink' },
+  printing: { label: 'Printing', tone: 'border-primary/30 bg-ui-muted' },
   paused: { label: 'Paused', tone: 'border-warn/40 bg-warn/10 text-warn' },
-  idle: { label: 'Idle', tone: 'border-line text-muted' },
+  idle: { label: 'Idle', tone: 'text-muted-foreground' },
   finished: { label: 'Finished', tone: 'border-ok/40 bg-ok/10 text-ok' },
   failed: { label: 'Failed', tone: 'border-warn/40 bg-warn/10 text-warn' },
-  offline: { label: 'Offline', tone: 'border-dashed border-line-strong text-faint' },
-  unknown: { label: 'Unknown', tone: 'border-line text-muted' },
+  offline: { label: 'Offline', tone: 'border-dashed text-muted-foreground' },
+  unknown: { label: 'Unknown', tone: 'text-muted-foreground' },
 }
 
 /**
@@ -89,22 +101,22 @@ export function NowPrinting() {
       className="mb-6"
       data-testid="now-printing"
     >
-      <h2 id="now-printing-heading" className="mb-2 text-[13px] font-medium text-ink">
+      <h2 id="now-printing-heading" className="mb-2 text-sm font-medium">
         Now printing
       </h2>
       {loading && (
-        <div className="grid gap-2 sm:grid-cols-2" data-testid="now-printing-loading">
-          <div className="h-[72px] animate-pulse rounded-[6px] border border-line bg-surface-2" />
+        <div className="grid gap-3 sm:grid-cols-2" data-testid="now-printing-loading">
+          <Skeleton className="h-[88px] rounded-xl" />
           <span className="sr-only">Reading the printers</span>
         </div>
       )}
       {error && (
-        <p className="mb-2 text-[12px] text-muted" data-testid="now-printing-error">
+        <p className="mb-2 text-xs text-muted-foreground" data-testid="now-printing-error">
           {error}
         </p>
       )}
       {cards && cards.length > 0 && (
-        <ul className="grid gap-2 sm:grid-cols-2" aria-label="Printers">
+        <ul className="grid gap-3 sm:grid-cols-2" aria-label="Printers">
           {cards.map((card) => (
             <PrinterCard key={card.printer.printer_id} card={card} onCamera={() => setWatching(card.printer.printer_id)} />
           ))}
@@ -122,27 +134,36 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
   const { printer, stale } = card
   const activity = ACTIVITY[printer.activity]
   return (
-    <li
-      className={`min-w-0 rounded-[6px] border bg-surface px-3 py-2 text-[12.5px] ${stale ? 'border-dashed border-line-strong' : 'border-line'}`}
-      data-testid={`printer-now-${printer.printer_id}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-medium text-ink">{printer.name}</span>
-        <span className={`inline-flex shrink-0 items-center rounded-full border px-2 py-px text-[11px] ${activity.tone}`}>
-          {activity.label}
-        </span>
-      </div>
-      {stale && (
-        <p className="mt-0.5 text-[11.5px] text-faint" data-testid={`printer-now-stale-${printer.printer_id}`}>
-          Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
-        </p>
-      )}
-      <JobStatus printer={printer} />
-      {printer.activity !== 'offline' && !printer.error && !stale && (
-        <Button variant="ghost" size="sm" onClick={onCamera} className="mt-1.5" aria-label={`Camera of ${printer.name}`}>
-          Camera
-        </Button>
-      )}
+    <li className="min-w-0" data-testid={`printer-now-${printer.printer_id}`}>
+      <Card
+        size="sm"
+        className={cn('h-full gap-0 px-3 text-[12.5px]', stale && 'border border-dashed ring-0')}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate font-medium">{printer.name}</span>
+          <Badge variant="outline" className={cn('font-normal', activity.tone)}>
+            {activity.label}
+          </Badge>
+        </div>
+        {stale && (
+          <p className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid={`printer-now-stale-${printer.printer_id}`}>
+            Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
+          </p>
+        )}
+        <JobStatus printer={printer} />
+        {printer.activity !== 'offline' && !printer.error && !stale && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onCamera}
+            className="mt-2 self-start"
+            aria-label={`Camera of ${printer.name}`}
+          >
+            <CameraIcon aria-hidden="true" />
+            Camera
+          </Button>
+        )}
+      </Card>
     </li>
   )
 }
@@ -154,10 +175,10 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
   const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
   return (
     <>
-      {printer.error && <p className="mt-1 text-[12px] text-muted">{printer.error}</p>}
+      {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
       {working && (
         <>
-          {printer.job_name && <p className="mt-1 truncate text-ink">{printer.job_name}</p>}
+          {printer.job_name && <p className="mt-1 truncate">{printer.job_name}</p>}
           {progress !== null && (
             <div
               role="progressbar"
@@ -165,12 +186,12 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={Math.round(progress)}
-              className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-surface-2"
+              className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-ui-muted"
             >
-              <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
+              <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
             </div>
           )}
-          <p className="sb-num mt-1 flex flex-wrap gap-x-3 text-[12px] text-muted">
+          <p className="sb-num mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
             {progress !== null && <span>{Math.round(progress)}%</span>}
             {printer.layer != null && printer.total_layers ? (
               <span>
@@ -186,32 +207,32 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
       <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id}`} />
       {hms.length > 0 && (
         <ul
-          className={`mt-1.5 space-y-0.5 text-[12px] ${printer.activity === 'paused' ? 'text-warn' : 'text-muted'}`}
+          className={cn('mt-1.5 space-y-0.5 text-xs', printer.activity === 'paused' ? 'text-warn' : 'text-muted-foreground')}
           aria-label={`${printer.name} errors`}
           data-testid={`printer-now-hms-${printer.printer_id}`}
         >
           {hms.map((error, index) => (
             <li key={`${index}-${error.code}`}>
               {error.description ?? 'No description from Bambuddy'}{' '}
-              <span className="sb-num text-faint">HMS {error.code}</span>
+              <span className="sb-num text-muted-foreground/70">HMS {error.code}</span>
             </li>
           ))}
         </ul>
       )}
       {printer.archive_id != null &&
         (printer.linked ? (
-          <Link to={`/prints/${printer.archive_id}`} className="mt-1.5 inline-block text-[12px] text-accent hover:underline">
-            View this print
-          </Link>
+          <Button asChild variant="link" size="xs" className="mt-1 h-auto self-start px-0">
+            <Link to={`/prints/${printer.archive_id}`}>View this print</Link>
+          </Button>
         ) : printer.bambuddy_url ? (
           // Bambuddy has no page per archive, so the link names the page it opens and the
           // archive to look for there sits beside it (#2930).
-          <p className="mt-1.5 text-[12px] text-muted">
+          <p className="mt-1.5 text-xs text-muted-foreground">
             <a
               href={bambuddyLink(printer.bambuddy_url)}
               target="_blank"
               rel="noreferrer"
-              className="text-accent hover:underline"
+              className="font-medium text-primary underline-offset-4 hover:underline"
             >
               Bambuddy's archives
             </a>{' '}
@@ -232,20 +253,24 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
  */
 function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClose: () => void }) {
   return (
-    <Dialog
-      open={printer !== null}
-      title={printer ? `${printer.name} camera` : 'Camera'}
-      onClose={onClose}
-      size="wide"
-      footer={
-        <Button variant="ghost" onClick={onClose}>
-          Close
-        </Button>
-      }
-    >
-      {/* Keyed per printer, so another printer's camera starts live, never in the last
-          one's snapshot mode (which would fetch a snapshot first). */}
-      {printer && <CameraView key={printer.printer_id} printer={printer} />}
+    <Dialog open={printer !== null} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent
+        showCloseButton={false}
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-5xl"
+      >
+        <DialogHeader>
+          <DialogTitle>{printer ? `${printer.name} camera` : 'Camera'}</DialogTitle>
+          <DialogDescription className="sr-only">The printer's live camera and what it is printing.</DialogDescription>
+        </DialogHeader>
+        {/* Keyed per printer, so another printer's camera starts live, never in the last
+            one's snapshot mode (which would fetch a snapshot first). */}
+        {printer && <CameraView key={printer.printer_id} printer={printer} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -275,7 +300,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
             ref={dropStreamOnUnmount}
             src={api.printerCameraStreamUrl(printer.printer_id)}
             alt={`Live camera of ${printer.name}`}
-            className="w-full rounded-[6px] border border-line bg-surface-2"
+            className="w-full rounded-lg border bg-ui-muted"
             onError={() => {
               if (leaving.current) return
               // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
@@ -288,22 +313,26 @@ function CameraView({ printer }: { printer: PrinterNow }) {
             <img
               src={api.printerCameraUrl(printer.printer_id, at)}
               alt={`Camera snapshot of ${printer.name}`}
-              className="w-full rounded-[6px] border border-line bg-surface-2"
+              className="w-full rounded-lg border bg-ui-muted"
             />
-            <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted" role="status">
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
               The live stream stopped; this is a snapshot.
-              <Button variant="ghost" size="sm" onClick={() => setAt(Date.now())}>
+              <Button variant="outline" size="sm" onClick={() => setAt(Date.now())}>
+                <RefreshCwIcon aria-hidden="true" />
                 Refresh
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setLive(true)}>
+              <Button variant="outline" size="sm" onClick={() => setLive(true)}>
+                <VideoIcon aria-hidden="true" />
                 Try live again
               </Button>
             </p>
           </>
         )}
       </div>
-      <div className="min-w-0 text-[12.5px]" data-testid="printer-camera-status">
-        <p className="font-medium text-ink">{ACTIVITY[printer.activity].label}</p>
+      <div className="flex min-w-0 flex-col text-[12.5px]" data-testid="printer-camera-status">
+        <Badge variant="outline" className={cn('font-normal', ACTIVITY[printer.activity].tone)}>
+          {ACTIVITY[printer.activity].label}
+        </Badge>
         <JobStatus printer={printer} />
       </div>
     </div>

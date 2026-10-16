@@ -74,7 +74,7 @@ describe('PrintProgressPanel', () => {
 
     expect(screen.getByTestId('print-progress')).toHaveTextContent('Queue entry #4471')
     const reason = screen.getByText('No active H2C printers are idle')
-    expect(reason).toHaveClass('text-faint')
+    expect(reason).toHaveClass('text-muted-foreground')
     expect(screen.queryByTestId('print-progress-error')).not.toBeInTheDocument()
     expect(screen.queryByTestId('print-progress-fix')).not.toBeInTheDocument()
   })
