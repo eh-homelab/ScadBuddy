@@ -54,15 +54,23 @@ function unanswered(result: FetchResult<unknown>): boolean {
  * `send`'s result, sent again while it goes unanswered (a dropped connection, fetch's
  * `TypeError`, or a proxy's own 502/503/504/524). Safe only for a request keyed to its
  * effect, or one that only reads. A problem the backend wrote is never re-sent.
+ * `began` is the start of the budget it spends: a follow passes its own, so a nested
+ * call's re-sends and pauses never run past it (review #2849).
  */
 export async function answered<T>(
   ctx: ToolContext,
   send: () => Promise<FetchResult<T>>,
   what: string,
   gaveUp = '',
-): Promise<FetchResult<T>> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
-  const began = performance.now()
+  began = performance.now(),
+): Promise<FetchResult<T>> {
+  const budget = ctx.acceptingMs ?? ACCEPTING_MS
+  // A pause that would end past the budget is not taken, whatever it waits on.
+  const pause = async (ms: number, why: string) => {
+    if (performance.now() - began + ms >= budget) throw new ToolError(`${what}: ScadBuddy did not answer (${why}).${gaveUp}`)
+    await sleep(ms, undefined, { signal: ctx.signal })
+  }
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
   for (let misses = 0; ; ) {
     let result: FetchResult<T>
@@ -71,21 +79,104 @@ export async function answered<T>(
     } catch (caught) {
       if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
       if (misses++ >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      await pause(ctx.pollIntervalMs, caught.message)
       continue
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? performance.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= budget : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       // The backend's Retry-After paces a re-send it answered (review #1061 4a).
       const after = Number(result.response.headers.get('Retry-After'))
-      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
+      await pause(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), `HTTP ${result.response.status}`)
       continue
     }
     return result
   }
+}
+
+/**
+ * #2795 — RFC 7240's preference (spec 2026-10-13): a command the backend has not
+ * accepted within a few seconds answers 202 `accepting`, followed here, instead of 503
+ * `command-still-accepting` re-sent every few seconds.
+ */
+export const RESPOND_ASYNC = { Prefer: 'respond-async' } as const
+
+/** The followed Update is not known (never kept, or a closing run rejected it): send again. */
+const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
+
+type CommandAccepting = components['schemas']['CommandAccepting']
+
+/** `retry_after` is ignored on purpose: the follow is itself a long-poll (spec §5.2's pacing). */
+function acceptingOf(result: FetchResult<unknown>): CommandAccepting | undefined {
+  const body = result.data as { status?: unknown } | undefined
+  return result.response.status === 202 && body?.status === 'accepting' ? (body as CommandAccepting) : undefined
+}
+
+function resendOf(result: FetchResult<unknown>): boolean {
+  const problem = typeof result.error === 'object' && result.error !== null ? (result.error as { type?: unknown }) : {}
+  return result.response.status === 409 && problem.type === COMMAND_RESEND
+}
+
+/**
+ * `answered` for a command sent with `RESPOND_ASYNC`: a 202 `accepting` is followed at
+ * `POST /api/v1/commands/{workflow_id}/updates/{update_id}` (a long-poll) to the answer
+ * the route would have given, for up to `ACCEPTING_MS` as the re-sends were. A follow
+ * answered 409 `command-resend` sends the request again, with its key.
+ *
+ * The budget is checked before each follow, pause and re-send, so none starts past
+ * it; a follow started just inside it can still outlast it by one server
+ * long-poll (`FOLLOW_WAIT`, ~10 s), as the request itself is not cut short (#3039).
+ */
+export async function answeredFollowing<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<FetchResult<T>> {
+  const began = performance.now()
+  // Neither a follow, a pause nor a re-send starts past the budget (#3039, #3571):
+  // one check, one error.
+  const within = (extra = 0) => {
+    if (performance.now() - began + extra >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
+      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
+    }
+  }
+  let result = await answered(ctx, send, what, gaveUp, began)
+  for (let follows = 0, accepting = acceptingOf(result); accepting; accepting = acceptingOf(result), follows++) {
+    // The follow is itself a long-poll, so the first goes at once; a repeat waits only
+    // the polling floor, not `retry_after` on top of the server's wait (review #2849).
+    const pause = follows > 0 ? ctx.pollIntervalMs : 0
+    within(pause)
+    if (pause > 0) await sleep(pause, undefined, { signal: ctx.signal })
+    const { workflow_id, update_id } = accepting
+    // Followed by its ids, with the follow URL's query (a render's `supersedes`): the
+    // URL's path must name the same Update, or this would follow another one quietly.
+    const follow = new URL(accepting.follow_url, 'http://follow')
+    if (follow.pathname !== `/api/v1/commands/${encodeURIComponent(workflow_id)}/updates/${encodeURIComponent(update_id)}`) {
+      throw new ToolError(`${what}: ScadBuddy's follow URL does not name the command it answered.${gaveUp}`)
+    }
+    const query = Object.fromEntries(follow.searchParams)
+    const followed = (await answered(
+      ctx,
+      () =>
+        ctx.backend.POST('/api/v1/commands/{workflow_id}/updates/{update_id}', {
+          params: { path: { workflow_id, update_id }, query },
+          signal: ctx.signal,
+        }),
+      what,
+      gaveUp,
+      began,
+    )) as FetchResult<T>
+    if (!resendOf(followed)) {
+      result = followed
+      continue
+    }
+    within()
+    result = await answered(ctx, send, what, gaveUp, began)
+  }
+  return result
 }
 
 /** `answered`, then its body or the backend's problem as a ToolError. */
@@ -96,6 +187,16 @@ export async function reattach<T>(
   gaveUp = '',
 ): Promise<T> {
   return ok(answered(ctx, send, what, gaveUp), what)
+}
+
+/** `answeredFollowing`, then its body or the backend's problem as a ToolError. */
+export async function reattachFollowing<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<T> {
+  return ok(answeredFollowing(ctx, send, what, gaveUp), what)
 }
 
 type Operation = components['schemas']['Operation']
@@ -115,8 +216,9 @@ export function isRunning(result: unknown): result is OperationRunning {
   return (result as OperationRunning | undefined)?.status === 'running' && typeof (result as OperationRunning).operation_id === 'string'
 }
 
-/** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
-export type CommandHeaders = { 'Idempotency-Key': string }
+/** The `Idempotency-Key` header a command sends (32 hex digits, one per call), and its
+ * preference to follow a slow start (#2795). */
+export type CommandHeaders = { 'Idempotency-Key': string; Prefer: 'respond-async' }
 
 /**
  * Run a command route: `send` with this call's key, re-sent with the same key while it
@@ -145,9 +247,9 @@ export async function commandAnswer<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<FetchResult<T> | OperationRunning> {
-  const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+  const headers: CommandHeaders = { 'Idempotency-Key': randomUUID().replaceAll('-', ''), ...RESPOND_ASYNC }
   const gaveUp = ' It may have been done anyway: check before trying again.'
-  const first = await answered(ctx, () => send(headers), what, gaveUp)
+  const first = await answeredFollowing(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
   const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)

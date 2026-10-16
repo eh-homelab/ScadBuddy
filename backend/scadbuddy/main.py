@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Final
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
@@ -39,6 +39,7 @@ from scadbuddy.api import (
     print_attachments,
     telemetry,
 )
+from scadbuddy.api.accepting import install_accepting_handler, note_preference
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
@@ -1136,7 +1137,7 @@ async def _end_lost_runs_until(
     store: PrintRunStore,
     operations: OperationStore,
     stop: asyncio.Event,
-    where: Mapping[str, str] | None = None,
+    where: Mapping[str, str],
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
@@ -1373,10 +1374,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         # OTEL_EXPORTER_OTLP_ENDPOINT: spans past the scrub, which wraps only ours
         # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
         telemetry={"auto_configure": False},
+        # #2794: whether a request follows a 202 itself, for `run_operation`.
+        dependencies=[Depends(note_preference)],
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
+    install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).

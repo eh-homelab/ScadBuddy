@@ -376,6 +376,7 @@ export function CustomizePage() {
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
+  const renderable = Boolean(settled && seed && !invalid)
   const {
     job,
     rendering,
@@ -385,9 +386,9 @@ export function CustomizePage() {
     settledFor,
     jobFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, renderable ? debounced : undefined, version, extra)
   // Armed only while the values would render: retryRender does nothing without them.
-  useRenderAutoRetry(renderError, rendering, retryRender, debounced, Boolean(settled && seed && !invalid))
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced, renderable)
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the

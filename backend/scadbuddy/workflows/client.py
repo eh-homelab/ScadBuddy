@@ -387,20 +387,21 @@ async def reconcile_lost_operations(
     client: Client,
     store: OperationStore,
     *,
+    where: Mapping[str, str],
     older_than: timedelta = LOST_RUN_GRACE,
-    where: Mapping[str, str] | None = None,
 ) -> int:
     """End each ``running`` operation whose execution has closed or is gone (review
     #1063 1): terminated after ``op_insert``, or past a timeout, it never runs
     ``op_finish``. The same rule as :func:`reconcile_lost_runs`. ``where`` is each
-    kind's ``OperationKind.where``, what its problem says to check (#1174); Bambuddy
-    for a kind not in it. Returns how many it ended."""
+    kind's ``OperationKind.where``, what its problem says to check (#1174). It is
+    required, so no caller can forget it; Bambuddy is said only for a row whose kind is
+    no longer registered. Returns how many it ended."""
     rows = await store.running_executions(older_than)
     # Each row's own kind, read with it: never parsed back out of the workflow ID.
     kinds = {op_id: kind for op_id, _, _, kind in rows}
 
     async def end(op_id: str) -> bool:
-        lost = operation_lost((where or {}).get(kinds[op_id], "Bambuddy"))
+        lost = operation_lost(where.get(kinds[op_id], "Bambuddy"))
         return (await store.finish(op_id, error=lost)).status == "failed"
 
     executions = [(op_id, workflow_id, run_id) for op_id, workflow_id, run_id, _ in rows]

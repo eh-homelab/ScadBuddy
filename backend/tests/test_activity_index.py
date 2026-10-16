@@ -128,6 +128,19 @@ async def test_first_attribution_wins(pg_pool: PgPool) -> None:
 
 
 @pytest.mark.requires_postgres
+async def test_an_attribution_that_changes_nothing_announces_nothing(pg_pool: PgPool) -> None:
+    """#3566: a client that keeps following a finished Update attributes it each time;
+    only a write that fills something in publishes an ActivityEvent."""
+    events = Events()
+    index = ActivityIndex(pg_pool, events=events)
+    for _ in range(3):
+        await index.attribute("render:j4", principal="token:a", session=None, via_tool=None)
+    assert len(events.published) == 1
+    await index.attribute("render:j4", principal="token:a", session="s", via_tool=None)
+    assert len(events.published) == 2
+
+
+@pytest.mark.requires_postgres
 async def test_upsert_with_attribution_publishes_principal(pg_pool: PgPool) -> None:
     from scadbuddy.activity.index import Attribution
 

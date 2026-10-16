@@ -243,10 +243,31 @@ export const GREP_BUDGET_MS = 2_000
 // RegExp backtracks, so a pattern such as `(a+)+$` can hold the event loop for ever.
 // Matching runs under vm's timeout, which interrupts a RegExp mid-match (measured on
 // Node 24: `(a+)+$` on 40 a's then b, stopped after 200 ms).
-function matchesOf(text: string, re: RegExp, deadline: number): { index: number; text: string }[] {
+// Without multiline, ripgrep matches each line on its own, so no match crosses a newline
+// (not even \s or [^x]) and the empty "line" after a final newline never matches. The
+// split runs inside the vm too, so it stays under the Grep timeout; matches go
+// straight into one array.
+const MATCH_SCRIPT = `
+  const out = []
+  const at = (line, offset) => {
+    for (const m of line.matchAll(re)) out.push({ index: offset + m.index, text: m[0] })
+  }
+  if (whole) at(text, 0)
+  else {
+    const lines = text.split('\\n')
+    if (lines.at(-1) === '') lines.pop()
+    let offset = 0
+    for (const line of lines) {
+      at(line, offset)
+      offset += line.length + 1
+    }
+  }
+  out`
+
+function matchesOf(text: string, re: RegExp, whole: boolean, deadline: number): { index: number; text: string }[] {
   const timeout = Math.max(1, deadline - Date.now())
   try {
-    return vm.runInNewContext('Array.from(text.matchAll(re), (m) => ({ index: m.index, text: m[0] }))', { text, re }, { timeout }) as {
+    return vm.runInNewContext(MATCH_SCRIPT, { text, re, whole }, { timeout }) as {
       index: number
       text: string
     }[]
@@ -260,9 +281,18 @@ function matchesOf(text: string, re: RegExp, deadline: number): { index: number;
 
 export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinResult> {
   return guarded(async () => {
+    // Each line is matched on its own unless multiline is set (matchesOf), so ^ and $
+    // already anchor per line; m would also end a line at \r, U+2028 and U+2029.
     let flags = 'g'
     if (input['-i']) flags += 'i'
     if (input.multiline) flags += 'ms'
+    // Each line is matched alone, so a newline in the pattern could never match; ripgrep
+    // refuses it rather than answer "No matches found". An escaped backslash (\\n) is
+    // not a newline, and a negated class ([^\n]) never matches one, so both are allowed.
+    const outsideNegated = input.pattern.replace(/\[\^(?:\\.|[^\]\\])*\]/g, '')
+    if (!input.multiline && (outsideNegated.includes('\n') || /(?<!\\)(?:\\\\)*\\n/.test(outsideNegated))) {
+      throw new BuiltinError('The literal "\\n" is not allowed in a regex unless multiline is set; set multiline: true to match across lines')
+    }
     let re: RegExp
     try {
       re = new RegExp(input.pattern, flags)
@@ -284,7 +314,7 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
       const file = await ctx.files.read(ctx.ws, info.path)
       const text = file && decodeText(file.bytes, file.mediaType)
       if (text === undefined || text === null || text === '') continue
-      const hits = matchesOf(text, re, deadline)
+      const hits = matchesOf(text, re, input.multiline === true, deadline)
       if (!hits.length) continue
       const lines: string[] = []
       if (mode === 'content') {

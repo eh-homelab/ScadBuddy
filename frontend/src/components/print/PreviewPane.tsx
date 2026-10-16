@@ -248,8 +248,10 @@ export function PreviewPane({
                   Undo
                 </Button>
               )}
-              {sliced.get(slot.slot_id)?.side && (
-                <span className={`shrink-0 text-muted-foreground ${stale ? 'opacity-60' : ''}`} data-testid={`preview-side-${slot.slot_id}`}>
+              {/* #3500 review: a side is a claim about the sliced plate, as the moved-nozzle
+                  note is, so it is hidden while stale with it; the grams only dim. */}
+              {!stale && sliced.get(slot.slot_id)?.side && (
+                <span className="shrink-0 text-muted-foreground" data-testid={`preview-side-${slot.slot_id}`}>
                   {sliced.get(slot.slot_id)?.side === 'L' ? 'left nozzle' : 'right nozzle'}
                 </span>
               )}
@@ -303,7 +305,8 @@ export function PreviewPane({
         ) : (
           !slicing && !sliceError && <p className="mt-1 text-[12px] text-subtle">Sliced once the choices are made.</p>
         )}
-        {/* #3208: hidden while stale, as the grams are: the next slice may say otherwise. */}
+        {/* #3208: hidden while stale, where the grams only dim: the next slice may
+            contradict them. */}
         {!stale && departures.length > 0 && (
           <ul className="mt-1 space-y-0.5 text-[12px] text-warn" data-testid="slice-departures">
             {departures.map((note) => (

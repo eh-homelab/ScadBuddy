@@ -72,6 +72,8 @@ export type ToolServices = {
   renderWaitMs: number
   /** How long a command follows a 202 (tools/command.ts); `COMMAND_FOLLOW_MS` when unset. */
   commandFollowMs?: number
+  /** How long a command follows a 202 `accepting` (tools/command.ts); `ACCEPTING_MS` when unset. */
+  acceptingMs?: number
   /** How long a call may run past its own waits before it is answered as timed out; `TOOL_DEADLINE_MS` when unset. */
   toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */

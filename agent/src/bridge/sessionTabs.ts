@@ -11,9 +11,9 @@ export interface SessionTabStore {
   /**
    * `set`, only while the session's row still names `seen` or there is no row, in one
    * statement: a pairing made between a read and this write is never lost (#2271).
-   * No row matches any `seen`: every stored pairing is a row, so there is none to
-   * lose, and `seen` may be this replica's own map when the store's read failed
-   * (#3478 review). Whether it wrote. Optional: without it the hub compares, then writes.
+   * With no row it inserts, whatever `seen` is: every stored pairing is a row, so
+   * there is none to lose, and `seen` may be this replica's own map when the store's
+   * read failed (#3478 review). Whether it wrote. Optional: without it the hub compares, then writes.
    */
   setIf?(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean>
   /** `signal` stops the read with the call it is for. */

@@ -748,7 +748,6 @@ function SettingsSections() {
                   event.preventDefault()
                   reveal(section.id)
                   goToSection(section.id, { inPlace: dirty })
-
                 }}
                 // shadcn's tabs look (#3671): the section in view is the active tab. Links,
                 // not tabs: each moves to its section in this one page.

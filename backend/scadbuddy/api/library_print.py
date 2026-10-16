@@ -982,13 +982,14 @@ async def post_library_run(
     file_id: FileIdPath,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
-) -> PrintRun:
+) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is queued as it is, with no slice (#2671), and never refused: one
@@ -1007,6 +1008,7 @@ async def post_library_run(
         budget=budget,
         downloads=downloads,
         response=response,
+        http=http,
     )
 
 
@@ -1021,11 +1023,14 @@ async def start_library_run(
     budget: ReadBudget,
     downloads: DownloadCache | None,
     response: Response | None = None,
-) -> PrintRun:
+    http: Request | None = None,
+) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
     signature (#2718 review). ``response`` takes the route's status code; a caller with
-    no response of its own reads the run's ``status`` instead."""
+    no response of its own reads the run's ``status`` instead. Only ``http`` asking for
+    ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
+    calls it, the answer is always the run."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
         filaments = await _run_filaments(store, paths, budget, file_id, downloads)
@@ -1034,6 +1039,7 @@ async def start_library_run(
     return await accept_run(
         runs,
         response if response is not None else Response(),
+        http=http,
         subject=PrintSubject.library(file_id),
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,

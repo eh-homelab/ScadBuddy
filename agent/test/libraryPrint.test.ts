@@ -118,8 +118,8 @@ describe('the library routes', () => {
       plates: [],
       plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
     })
-    // #1814: the log names the error; its message (the model sees it above) is not logged.
-    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError)']])
+    // #1814: the log names the error and the backend's status; its message (the model sees it above) is not logged.
+    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError 502)']])
   })
 
   it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {

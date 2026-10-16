@@ -58,7 +58,9 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
     // hold the button. Each call mints its own Idempotency-Key, so a second Enter
     // would be a second import.
     // `importing` is this render's: two submits in one tick both see it false, so the
-    // ref, set at once, holds the second (#2558).
+    // ref, set at once, holds the second (#2558). The other way round, `finally` clears
+    // the ref before a refusal's wait renders, and the in-flight render's `importing`,
+    // still true, holds a submit in that gap.
     if (!url.trim() || importing || inFlight.current || wait > 0) return
     inFlight.current = true
     setImporting(true)

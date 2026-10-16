@@ -146,7 +146,8 @@ export function canRetry(error: unknown): boolean {
  * #2464 — a render that could not be submitted (a 503 while the server restarts, no
  * answer at all) is tried again on its own, at once when the browser comes back online,
  * so a deploy mid-edit does not leave the page on the previous render for good. At most
- * RENDER_AUTO_RETRIES timed tries in a row (one made on coming back online is not counted),
+ * RENDER_AUTO_RETRIES timed tries in a row (one made on coming back online is not counted,
+ * and is made past the cap too),
  * and none while `enabled` is false; the count starts over once a render goes through,
  * and for new values (`values`), which the server may take where it refused the old.
  */
@@ -169,17 +170,20 @@ export function useRenderAutoRetry(
       if (!rendering) tries.current = 0
       return
     }
-    if (tries.current >= RENDER_AUTO_RETRIES) return
-    const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** tries.current, RENDER_AUTO_RETRY_MAX_MS)
-    const again = () => {
-      tries.current += 1
-      retry()
-    }
-    const timer = setTimeout(again, wait)
     // Back online: tried at once but not counted (#3341). The connection failed, not the
-    // server, and one that keeps dropping must not use up the tries the server needs.
+    // server, and one that keeps dropping must not use up the tries the server needs. So
+    // it is listened for past the cap too (#3552): an offline spell spends the timed tries,
+    // and coming back is exactly when one should go.
     const online = () => retry()
     window.addEventListener('online', online)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    if (tries.current < RENDER_AUTO_RETRIES) {
+      const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** tries.current, RENDER_AUTO_RETRY_MAX_MS)
+      timer = setTimeout(() => {
+        tries.current += 1
+        retry()
+      }, wait)
+    }
     return () => {
       clearTimeout(timer)
       window.removeEventListener('online', online)

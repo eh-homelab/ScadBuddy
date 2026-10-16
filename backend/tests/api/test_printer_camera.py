@@ -452,8 +452,9 @@ def test_a_snapshot_answered_416_is_refused_not_served_as_a_frame(client: TestCl
 
     response = client.get("/api/v1/print/printers/7/camera")
 
-    assert response.status_code >= 400, response.status_code
-    assert response.content != JPEG
+    # Mapped as any unexpected answer is: Bambuddy's fault, naming the 416.
+    assert response.status_code == 502, response.text
+    assert response.json()["bambuddy_status"] == 416
 
 
 @respx.mock
