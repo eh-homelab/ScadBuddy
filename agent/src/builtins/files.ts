@@ -286,6 +286,13 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
     let flags = 'g'
     if (input['-i']) flags += 'i'
     if (input.multiline) flags += 'ms'
+    // Each line is matched alone, so a newline in the pattern could never match; ripgrep
+    // refuses it rather than answer "No matches found". An escaped backslash (\\n) is
+    // not a newline, and a negated class ([^\n]) never matches one, so both are allowed.
+    const outsideNegated = input.pattern.replace(/\[\^(?:\\.|[^\]\\])*\]/g, '')
+    if (!input.multiline && (outsideNegated.includes('\n') || /(?<!\\)(?:\\\\)*\\n/.test(outsideNegated))) {
+      throw new BuiltinError('The literal "\\n" is not allowed in a regex unless multiline is set; set multiline: true to match across lines')
+    }
     let re: RegExp
     try {
       re = new RegExp(input.pattern, flags)
