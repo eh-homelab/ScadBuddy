@@ -184,6 +184,14 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(combobox('Template')).toHaveTextContent('Name Keychain')
   })
 
+  it('offers a status it does not know, even one named "any", as its own choice (#3674 review)', async () => {
+    const { user } = render('/prints?status=any')
+    await waitFor(() => expect(combobox('Status')).toHaveTextContent(/^any$/))
+    expect(await optionNames(user, combobox('Status'))).toEqual(expect.arrayContaining(['Any status', 'any']))
+    await selectOption(user, combobox('Status'), 'Any status')
+    expect(location()).toBe('/prints')
+  })
+
   it('filters by date range', async () => {
     const { user } = render()
     await waitFor(async () => expect(await shown()).toHaveLength(4))

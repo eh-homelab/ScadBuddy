@@ -708,8 +708,9 @@ describe('PrintDetailPage (#311)', () => {
 
   it('shows what ScadBuddy still knows of a print deleted in Bambuddy', async () => {
     render(38)
-    const notice = await screen.findByText(/This print was deleted in Bambuddy/)
-    expect(notice.closest('[role="status"]')).not.toBeNull()
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(/This print was deleted in Bambuddy/),
+    )
     const provenance = await section('Provenance')
     expect(within(provenance).getByRole('table', { name: 'Parameters' })).toHaveTextContent('Workshop')
     const files = await section('Files')

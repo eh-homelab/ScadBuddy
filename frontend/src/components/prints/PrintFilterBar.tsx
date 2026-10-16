@@ -235,7 +235,7 @@ export function PrintFilterBar({ query, onChange, templates, printers, fileName 
 }
 
 /** The Select's value for "any": Radix keeps '' for "nothing chosen". */
-const ANY = 'any'
+const ANY = '__any__'
 
 /** A filter's select: `''` is its "any" choice, as in the URL. */
 function FilterSelect({

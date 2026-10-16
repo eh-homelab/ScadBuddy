@@ -709,11 +709,16 @@ function RunRow({ run }: { run: Run }) {
       )}
       {run.filament_used_grams != null &&
         (run.filament_reading_suspect ? (
-          <Hint content={SUSPECT_READING}>
-            <span className="sb-num text-warn" aria-description={SUSPECT_READING}>
-              {`${run.filament_used_grams} g, not this print's`}
+          <>
+            <Hint content={SUSPECT_READING}>
+              <span className="sb-num text-warn" aria-describedby={`run-${run.id}-suspect`}>
+                {`${run.filament_used_grams} g, not this print's`}
+              </span>
+            </Hint>
+            <span id={`run-${run.id}-suspect`} className="sr-only">
+              {SUSPECT_READING}
             </span>
-          </Hint>
+          </>
         ) : (
           <span className="sb-num text-muted-foreground">{run.filament_used_grams} g</span>
         ))}
