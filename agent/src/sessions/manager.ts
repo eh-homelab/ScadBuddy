@@ -2013,7 +2013,7 @@ export class SessionManager {
         // Another turn owns the session now, wherever it runs: this process is not kept for it.
         // Before the charge, which needs the database a lost claim may have lost too (#3849 review).
         for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
-        await this.chargeLostTurn(session.id, turnId, result, turnUsd, cutUsd)
+        await this.chargeLostTurn(session.id, turnId, result, turnUsd, cutUsd, traced)
         return outcome
       }
       // A turn stopped after its refusal was reported is still the caller's.
@@ -2028,6 +2028,7 @@ export class SessionManager {
         secrets,
         turnUsd,
         cutUsd,
+        traced,
       )
       // A claim that went after the lost check above: its process is not kept either (#2981 review).
       if (outcome.kind === 'lost_claim') for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
@@ -2074,6 +2075,8 @@ export class SessionManager {
      * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
      */
     cutUsd: number,
+    /** The turn's trace: a lost turn's spend that could not be recorded goes on it. */
+    trace: TurnTrace,
   ): Promise<TurnOutcome> {
     const id = session.id
     let status: SessionStatus
@@ -2107,7 +2110,7 @@ export class SessionManager {
     // connection, so a lock taken here could wait on itself.
     const [held] = await this.deps.sql`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_id = ${turnId}`
     if (!held) {
-      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd)
+      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd, trace)
       return { kind: 'lost_claim' }
     }
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
@@ -2190,7 +2193,7 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
     if (!released) {
-      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd)
+      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd, trace)
       return { kind: 'lost_claim' }
     }
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
@@ -2708,6 +2711,7 @@ export class SessionManager {
     result: SDKResultMessage | undefined,
     turnUsd: number,
     cutUsd: number,
+    trace: TurnTrace,
   ): Promise<void> {
     const usd = (result ? turnUsd : 0) + cutUsd
     if (usd <= 0) return
@@ -2717,6 +2721,7 @@ export class SessionManager {
         WHERE id = ${id}`
     } catch (err) {
       this.deps.stderr?.(`session ${id} turn ${turnId}: its spend of ${usd} USD was not recorded: ${describe(err)}\n`)
+      trace.unrecordedSpend(usd)
     }
   }
 
