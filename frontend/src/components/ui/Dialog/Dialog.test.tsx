@@ -119,15 +119,19 @@ describe('Dialog focus (#351)', () => {
     expect(screen.getByRole('dialog', { name: 'Name it' })).toHaveAccessibleDescription('Shown in the preset list.')
   })
 
-  // Radix (1.1.23) ties aria-describedby only to a description it has seen rendered.
+  // Radix ties aria-describedby only to a description it has seen rendered: measured by
+  // this test, on @radix-ui/react-dialog 1.1.23 (`descriptionPresent` in DialogContent).
   it('without a description, has none and draws no warning from Radix', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const user = userEvent.setup()
-    render(<Page />)
-    await user.click(screen.getByRole('button', { name: 'Open it' }))
-    expect(screen.getByRole('dialog', { name: 'Name it' })).not.toHaveAttribute('aria-describedby')
-    expect(warn.mock.calls.flat().join(' ')).not.toMatch(/Description/)
-    warn.mockRestore()
+    try {
+      const user = userEvent.setup()
+      render(<Page />)
+      await user.click(screen.getByRole('button', { name: 'Open it' }))
+      expect(screen.getByRole('dialog', { name: 'Name it' })).not.toHaveAttribute('aria-describedby')
+      expect(warn.mock.calls.flat().join(' ')).not.toMatch(/Description/)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
