@@ -259,7 +259,9 @@ async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
         # Each row's kind comes with the sweep's one read.
         monkeypatch.setattr(store, "get", no_read_per_row)
         try:
-            ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+            ended = await reconcile_lost_operations(
+                client, store, older_than=timedelta(0), where={}
+            )
         finally:
             monkeypatch.setattr(store, "get", get)
             await live.terminate("test over")
@@ -301,7 +303,9 @@ async def test_temporal_down_stops_the_operations_pass_once(
     client = DownClient(describe)
 
     with caplog.at_level(logging.WARNING, logger=client_module.__name__):
-        ended = await reconcile_lost_operations(cast(Any, client), store, older_than=timedelta(0))
+        ended = await reconcile_lost_operations(
+            cast(Any, client), store, older_than=timedelta(0), where={}
+        )
 
     assert ended == 0
     assert len(client.timeouts) == 1
@@ -327,7 +331,7 @@ async def test_one_failing_operation_does_not_stop_the_reconcile(
 
     monkeypatch.setattr(store, "finish", failing)
     async with temporal_client() as client:
-        ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+        ended = await reconcile_lost_operations(client, store, older_than=timedelta(0), where={})
     assert ended == 1
     assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
     assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
