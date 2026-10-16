@@ -152,6 +152,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     }
   })
 
+  // #3778 follow-up: an id that is not a uuid is refused before any query. Reaching
+  // `$1::uuid` it would be a 22P02, which the activity retries, not a refusal.
+  it('refuses an id that is not a uuid without asking the database', async () => {
+    let queries = 0
+    const counted = Object.assign((...args: Parameters<typeof t.db.sql>) => {
+      queries += 1
+      return t.db.sql(...args)
+    }, t.db.sql) as unknown as typeof t.db.sql
+    const guarded = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(counted) })
+    for (const sid of ['-'.repeat(36), 'g'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12), ` ${randomUUID()}`]) {
+      const err = await failure(env().run(guarded[FLOW_SESSION_CHECK]!, { session_id: sid }))
+      expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])
+    }
+    expect(queries).toBe(0)
+  })
+
   // #2258: as flowCaller and turnCaller refuse it, never looked up as execution ''.
   it("refuses a call that carries no execution run id", async () => {
     const sid = await session()
