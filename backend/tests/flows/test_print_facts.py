@@ -41,3 +41,14 @@ async def test_an_outputs_chosen_plates_each_count(request_: dict[str, Any], pri
 async def test_a_library_files_chosen_plates_each_count() -> None:
     assert await _prints({"file_id": 7}, {"copies": 3, "plate_ids": [2, 4]}) == 6
     assert await _prints({"file_id": 7}, {"copies": 3, "all_plates": True}) is None
+
+
+@pytest.mark.parametrize("plate_ids", [3, "1,3", {"1": 3}, [1, "3"], [True], [0]])
+async def test_plate_ids_that_are_not_plate_numbers_are_refused_not_a_type_error(
+    plate_ids: object,
+) -> None:
+    """#3762 review: a flow's `plate_ids` that is not a list of plate numbers is a
+    ValueError, which `match_grant` turns into an outside verdict (the call asks a
+    person, and the print route answers it 422), never a TypeError."""
+    with pytest.raises(ValueError, match="plate_ids is not a list of plate numbers"):
+        await _prints({"output_id": "o1"}, {"copies": 2, "plate_ids": plate_ids})

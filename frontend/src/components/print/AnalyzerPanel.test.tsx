@@ -34,7 +34,7 @@ function reportWith(diagnostics: AnalyzerDiagnostic[], extra: object = {}) {
   )
 }
 
-function renderPanel(props: { allPlates?: boolean } = {}) {
+function renderPanel(props: { allPlates?: boolean; request?: AnalysisRequest } = {}) {
   return renderPage(<AnalyzerPanel target={{ output_id: output.id }} request={request} {...props} />)
 }
 
@@ -160,6 +160,14 @@ describe('AnalyzerPanel', () => {
     await screen.findByTestId('diagnostic-SB1003')
     expect(screen.getByTestId('print-checks')).toHaveTextContent(
       'The mesh checks read plate 1; the plate-fit and filament checks read every plate.',
+    )
+  })
+
+  it('names the plate the mesh checks read when several plates are chosen (#3762 review)', async () => {
+    renderPanel({ allPlates: true, request: { ...request, plate_id: 2, plate_ids: [2, 3] } })
+    await screen.findByTestId('diagnostic-SB1003')
+    expect(screen.getByTestId('print-checks')).toHaveTextContent(
+      'The mesh checks read plate 2; the plate-fit and filament checks read each chosen plate.',
     )
   })
 

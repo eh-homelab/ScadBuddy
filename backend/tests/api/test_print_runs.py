@@ -986,6 +986,18 @@ def test_chosen_plates_are_part_of_the_key_only_when_sent() -> None:
     assert len({run_key("a" * 32, r) for r in (plain, some, other)}) == 3
 
 
+def test_one_chosen_plate_is_that_plates_print() -> None:
+    """#3762 review: `plate_ids=[2]` queues what `plate_id=2` does, so it is the same
+    run, under the key from before plate lists existed."""
+    alone = PrintRunRequest.model_validate({**body(), "plate_ids": [2, 2]})
+    by_id = PrintRunRequest.model_validate({**body(), "plate_id": 2})
+    assert (alone.plate_id, alone.plate_ids) == (2, None)
+    assert run_key("a" * 32, alone) == run_key("a" * 32, by_id)
+    # All plates still wins over a chosen one.
+    every = PrintRunRequest.model_validate({**body(), "all_plates": True, "plate_ids": [2]})
+    assert every.asked_plates() is None
+
+
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:
     """#836: a request with no rack position or algorithm keeps the key it had before
     the fields existed, and each choice is a print of its own."""

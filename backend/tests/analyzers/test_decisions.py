@@ -254,6 +254,24 @@ def test_the_report_lists_inputs_and_the_base() -> None:
     ]
 
 
+def test_the_base_identity_moves_with_the_plate_set() -> None:
+    """#3762 review: plates [1, 3] and [1, 2] share `plate_id` 1 but are different
+    prints, so a fix accepted on one is stale on the other. A one-plate print keeps the
+    identity it had before plate sets existed."""
+    ctx = _silk_context()
+
+    def identity(request: AnalysisRequest) -> dict[str, object]:
+        return base_profile(request, ctx.choices, ctx.printer, ctx.filaments, ctx.plate).identity()
+
+    plain = identity(AnalysisRequest())
+    assert "plates" not in plain
+    assert identity(AnalysisRequest(plate_ids=[1])) == plain
+    one_three = identity(AnalysisRequest(plate_ids=[3, 1]))
+    assert one_three["plates"] == [1, 3]
+    assert one_three != identity(AnalysisRequest(plate_ids=[1, 2]))
+    assert identity(AnalysisRequest(all_plates=True))["plates"] == "all"
+
+
 # --- the stores ---------------------------------------------------------------------
 
 

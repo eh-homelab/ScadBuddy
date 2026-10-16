@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Literal, Protocol
 
 from fastapi import status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.clearance import (
@@ -226,6 +226,14 @@ class PrintRunRequest(BaseModel):
     def _plates_in_order(cls, ids: list[int] | None) -> list[int] | None:
         # Each once and in plate order, so the same plates are the same run's key.
         return None if ids is None else sorted(set(ids))
+
+    @model_validator(mode="after")
+    def _one_plate_is_plate_id(self) -> PrintRunRequest:
+        # One chosen plate is that plate's print, under the key `plate_id` gives it
+        # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
+        if not self.all_plates and self.plate_ids is not None and len(self.plate_ids) == 1:
+            self.plate_id, self.plate_ids = self.plate_ids[0], None
+        return self
 
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
@@ -1060,7 +1068,7 @@ async def prepare_run(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
     plate_warnings: list[FilamentWarning] = []
-    missing = [plate for plate in plate_ids if laid_out and plate not in laid_out]
+    missing = [plate for plate in plate_ids if plate not in laid_out] if laid_out else []
     if source.is_sliced and missing:
         # A sliced file is never refused (#2671): the dialog offers only its plates, so
         # a request for another one prints the rest, or the file's first, and says so.

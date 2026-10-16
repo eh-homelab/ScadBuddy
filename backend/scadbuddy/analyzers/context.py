@@ -115,13 +115,18 @@ class BaseProfile(BaseModel):
     process_preset_name: str | None = None
     bed_type: str | None = None
     plate_id: int = 1
+    #: The print's plates when it is not ``plate_id`` alone (#3652): ``None`` for that
+    #: plate, the chosen plates in plate order, or ``"all"`` for every plate.
+    plates: list[int] | Literal["all"] | None = None
     plate_model: str | None = None
     slots: list[BaseSlot] = Field(default_factory=list)
     copies: int = 1
 
     def identity(self) -> dict[str, Any]:
-        """What a diff is judged against: moving any of it makes a preview stale."""
-        return {
+        """What a diff is judged against: moving any of it makes a preview stale. The
+        plate set is in it only when the print is more than ``plate_id``, so a one-plate
+        print's identity is what it was before plate sets existed."""
+        identity: dict[str, Any] = {
             "printer": self.printer_id,
             "printer_preset": self.printer_preset_name,
             "process_preset": self.process_preset_name,
@@ -129,6 +134,16 @@ class BaseProfile(BaseModel):
             "plate": self.plate_id,
             "slots": [(slot.slot_id, slot.spool_id, slot.preset) for slot in self.slots],
         }
+        if self.plates is not None:
+            identity["plates"] = self.plates
+        return identity
+
+
+def _plates(request: AnalysisRequest) -> list[int] | Literal["all"] | None:
+    if request.all_plates:
+        return "all"
+    chosen = sorted(set(request.plate_ids or [request.plate_id]))
+    return None if chosen == [request.plate_id] else chosen
 
 
 def base_profile(
@@ -164,6 +179,7 @@ def base_profile(
         process_preset_name=process,
         bed_type=choices.bed_type if choices else None,
         plate_id=request.plate_id,
+        plates=_plates(request),
         plate_model=plate.model if plate else None,
         slots=slots,
         copies=request.copies or request.options.quantity or 1,

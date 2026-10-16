@@ -676,6 +676,39 @@ def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    ("plate_ids", "warning", "queued_plates"),
+    [
+        ([3, 2, 1], "This file holds no plate 2, so it is left out.", [1, 3]),
+        ([1, 2, 4], "This file holds no plates 2 and 4, so they are left out.", [1]),
+    ],
+)
+def test_a_sliced_file_leaves_out_chosen_plates_it_does_not_hold(
+    client: TestClient, plate_ids: list[int], warning: str, queued_plates: list[int]
+) -> None:
+    """#3762 review: of several chosen plates, the ones a sliced file holds are queued
+    and the rest are named in a warning, never refused (#2671)."""
+    configure(client)
+    sliced_file(104, sliced_3mf(plates=(1, 3)))
+    run_routes()
+    queued = queue_route()
+    request = {**SLICED_RUN, "plate_ids": plate_ids}
+
+    check = client.post("/api/v1/print/library/104/check", json=request)
+    run = run_library(client, 104, json=request)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert {"kind": "sliced-plate-missing", "slot_id": None, "message": warning} in check.json()[
+        "warnings"
+    ]
+    assert run.status_code == 200, run.text
+    assert any(w["message"] == warning for w in run.json()["warnings"])
+    sent = [json.loads(call.request.content)["plate_id"] for call in queued.calls]
+    assert sorted(sent) == queued_plates
+
+
+@respx.mock
 def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
     """#2671: an H2C file for the 0.4 the printer has, on a plate it holds: nothing to
     warn of, though the printer is not one ScadBuddy chooses presets for by name."""

@@ -13,6 +13,7 @@ import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
+import { ANALYSIS_DEBOUNCE_MS } from '../lib/useAnalysis'
 import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
@@ -3370,14 +3371,23 @@ describe('PrintPicker · Plates of a 3MF', () => {
         ]),
       ),
     )
+    const checks = watch('POST', '/check')
+    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
     const { user } = renderPicker()
     await loaded()
     const plates = await screen.findByTestId('plate-choice')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await waitFor(() => expect(analyses.ended).toBe(analyses.urls.length))
+    const checked = checks.urls.length
+    const analysed = analyses.urls.length
 
     await user.click(within(plates).getByTestId('plates-none'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('No plate chosen. Choose at least one to print.')
     expect(screen.getByTestId('run-print')).toBeDisabled()
+    // #3762 review: no plate is checked or judged for a print that names none.
+    await new Promise((settle) => setTimeout(settle, ANALYSIS_DEBOUNCE_MS * 2))
+    expect(checks.urls).toHaveLength(checked)
+    expect(analyses.urls).toHaveLength(analysed)
 
     await user.click(within(plates).getByTestId('plates-all'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('All 2 plates')
