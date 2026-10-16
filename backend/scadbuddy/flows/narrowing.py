@@ -57,6 +57,19 @@ def _all_plates(original: Any, proposed: Any, what: str) -> str | None:
     return None
 
 
+def _plate_ids(original: Any, proposed: Any, what: str) -> str | None:
+    """Fewer of the call's chosen plates (#3652), never others or none."""
+    if proposed == original:
+        return None
+    if not isinstance(original, list):
+        return f"{what} must stay as the call had it"
+    if not isinstance(proposed, list) or not proposed:
+        return f"{what} must keep at least one of the call's plates"
+    if any(plate not in original for plate in proposed):
+        return f"{what} may only leave out plates the call chose"
+    return None
+
+
 def _print_copies(original: Any, proposed: Any, what: str) -> str | None:
     problem = _fewer(original, proposed, what)
     if problem is None and proposed < 1:
@@ -94,7 +107,7 @@ def narrowing_problem(fn: str, original: dict[str, Any], proposed: dict[str, Any
         return _fields(
             original.get("request") or {},
             proposed.get("request") or {},
-            {"copies": _print_copies, "all_plates": _all_plates},
+            {"copies": _print_copies, "all_plates": _all_plates, "plate_ids": _plate_ids},
             "",
         )
     if fn == "arrange":

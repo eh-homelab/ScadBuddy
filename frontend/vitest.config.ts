@@ -15,5 +15,7 @@ export default defineConfig({
     // take 1-3 s alone. On a shared host (the WSL dev box runs at load 20-50 from other
     // work) they ran into the 5 s default although nothing was wrong (#1485).
     testTimeout: 15_000,
+    // No `sequence.hooks` here: the default, 'stack', runs afterEach hooks in reverse, so a
+    // file's own afterEach runs before Testing Library's cleanup unmounts (PrintPicker.test.tsx).
   },
 })

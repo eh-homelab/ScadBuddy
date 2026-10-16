@@ -7,6 +7,7 @@ import { FLOW_MARKER_OWNER, flowCompletions, flowHover, problemMarkers } from '.
 import { monaco, PYTHON_LANGUAGE_ID, setupMonaco } from '../../lib/monaco'
 import { editorTheme } from '../../lib/openscadLanguage'
 import { useLatest } from '../../lib/useLatest'
+import { Skeleton } from '@/components/ui/skeleton'
 
 setupMonaco()
 
@@ -118,7 +119,7 @@ export function FlowEditor({ version, name, initialValue, onChange, problems, ho
   }, [problems])
 
   return (
-    <div className="flex h-[28rem] flex-col rounded-[6px] border border-line">
+    <div className="flex h-[28rem] flex-col overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="min-h-0 flex-1">
         <Editor
           path={uri}
@@ -134,10 +135,10 @@ export function FlowEditor({ version, name, initialValue, onChange, problems, ho
             if (model) monaco.editor.setModelMarkers(model, FLOW_MARKER_OWNER, problemMarkers(problems, model.getValue()))
           }}
           options={OPTIONS}
-          loading={<span className="text-[13px] text-muted">Loading the editor</span>}
+          loading={<Skeleton role="status" aria-label="Loading the editor" className="size-full rounded-none" />}
         />
       </div>
-      <p aria-hidden="true" className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+      <p aria-hidden="true" className="shrink-0 border-t px-3 py-0.5 text-[11px] text-muted-foreground">
         {LEAVE_HINT}
       </p>
     </div>

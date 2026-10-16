@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.render.paint import PaintCodeError, remap, states
+from scadbuddy.render.paint import PaintCodeError, remap, single_code, states, uniform_state
 
 # Codes for a whole triangle painted with extruders 1-4, as Bambu Studio's
 # `TriangleSelector::serialize` (linked in the module) writes them.
@@ -70,3 +70,44 @@ def test_a_code_past_the_length_cap_is_refused_before_it_is_expanded() -> None:
         states(long)
     with pytest.raises(PaintCodeError, match="longer"):
         remap(long, {1: 2})
+
+
+# A real split code from Bambuddy library file 688: leaves of extruder 0 and 1.
+MIXED = "00400644002044A3003003"
+# Split in two (sides 01, special side 0), both halves extruder 2.
+SPLIT_GREEN = "881"
+
+
+def test_a_whole_triangle_has_one_state() -> None:
+    for extruder, code in WHOLE.items():
+        assert uniform_state(code) == extruder
+    assert uniform_state("") == 0
+
+
+def test_a_split_triangle_of_one_extruder_has_one_state() -> None:
+    assert uniform_state(SPLIT_GREEN) == 2
+
+
+def test_a_triangle_split_between_two_extruders_has_none() -> None:
+    assert uniform_state("481") is None
+    # The part's own colour (leaf 0) is a colour too: painted in part only.
+    assert uniform_state(MIXED) is None
+    assert states(MIXED) == {1}
+
+
+def test_single_code_is_bambu_studios_whole_triangle() -> None:
+    assert {s: single_code(s) for s in WHOLE} == WHOLE
+    assert single_code(0) == ""
+
+
+def test_single_code_round_trips_every_state() -> None:
+    for state in range(0, 60):
+        assert uniform_state(single_code(state)) == state
+    assert remap(single_code(2), {2: 33}) == single_code(33)
+
+
+def test_single_code_refuses_a_state_no_code_names() -> None:
+    with pytest.raises(PaintCodeError):
+        single_code(256)
+    with pytest.raises(PaintCodeError):
+        single_code(-1)

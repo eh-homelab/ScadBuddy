@@ -12,6 +12,16 @@ import {
   warningsFor,
   type SpoolFilters,
 } from '../lib/filaments'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { Swatch } from './print/Swatch'
 
 /**
@@ -46,25 +56,25 @@ import { Swatch } from './print/Swatch'
  */
 const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'no-choice': 'text-warn',
-  'not-loaded': 'text-muted',
-  'low-filament': 'text-muted',
-  'no-preset': 'text-muted',
-  'no-fan-out': 'text-muted',
+  'not-loaded': 'text-subtle',
+  'low-filament': 'text-subtle',
+  'no-preset': 'text-subtle',
+  'no-fan-out': 'text-subtle',
   // spec 2026-09-27 — the spool-first resolver's own kinds (task 5-7). None of these
   // are ever produced by this picker's own `warningsFor`, but the type is shared with
   // `PrintRunResult.warnings`, so the map still has to be exhaustive over it.
   'mixed-sizes': 'text-warn',
   'no-process': 'text-warn',
   'not-installed': 'text-warn',
-  'plate-differs': 'text-muted',
+  'plate-differs': 'text-subtle',
   // #2366 — a plate the printer's model does not take: it sets the bed temperature.
   'plate-not-listed': 'text-warn',
-  'hf-unsupported': 'text-muted',
+  'hf-unsupported': 'text-subtle',
   'hf-mounted': 'text-warn',
   // spec 2026-10-01 (#836) — the rack pick's own kinds; plate-wide, from PrintRunResult/check.
   'rack-unsafe-material': 'text-warn',
-  'rack-left-to-bambuddy': 'text-muted',
-  'rack-manual-partial': 'text-muted',
+  'rack-left-to-bambuddy': 'text-subtle',
+  'rack-manual-partial': 'text-subtle',
   // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
   'sequence-clearance': 'text-warn',
   'profile-not-applied': 'text-warn',
@@ -83,7 +93,7 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   // #2956 — sliced for another model of the same G-code family, which prints it.
   'sliced-same-family': 'text-muted',
   // #2955 — ScadBuddy's own earlier slice queued: said, so a missing slice job reads as intended.
-  'slice-reused': 'text-muted',
+  'slice-reused': 'text-subtle',
 }
 
 /**
@@ -95,14 +105,58 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
 function SideBadge({ side, testId }: { side: 'L' | 'R'; testId: string }) {
   const word = side === 'L' ? 'left' : 'right'
   return (
-    <span
-      className="inline-flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold"
-      style={{ background: 'var(--sb-side-bg)', color: 'var(--sb-side-ink)' }}
-      title={`Feeds the ${word} extruder`}
-      data-testid={testId}
-    >
-      {side}
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          className="size-4 rounded px-0 text-[10px] font-bold"
+          style={{ background: 'var(--sb-side-bg)', color: 'var(--sb-side-ink)' }}
+          aria-label={`Feeds the ${word} extruder`}
+          data-testid={testId}
+        >
+          {side}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>Feeds the {word} extruder</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** A filter select's value for no filter: Radix's select takes no empty value. */
+const ANY = 'any'
+
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+  testId,
+}: {
+  label: string
+  value: string
+  options: string[]
+  onChange: (next: string) => void
+  testId: string
+}) {
+  const id = `${testId}-select`
+  return (
+    <div className="grid gap-1">
+      <Label htmlFor={id} className="text-xs font-normal text-muted-foreground">
+        {label}
+      </Label>
+      <Select value={value || ANY} onValueChange={(next) => onChange(next === ANY ? '' : next)}>
+        <SelectTrigger id={id} size="sm" className="min-w-24" data-testid={testId}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ANY}>Any</SelectItem>
+          {options.map((option) => (
+            <SelectItem key={option} value={option}>
+              {option}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   )
 }
 
@@ -121,7 +175,7 @@ function needLabel(slot: SlotNeed, copies: number, stale: boolean): string {
 export function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
   if (warnings.length === 0) return null
   return (
-    <ul className="mt-1.5 space-y-0.5 text-[12px]" data-testid={testId}>
+    <ul className="mt-1.5 space-y-0.5 text-xs" data-testid={testId}>
       {warnings.map((warning, index) => (
         <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={WARNING_TONE[warning.kind]}>
           {warning.message}
@@ -201,113 +255,87 @@ export function FilamentPicker({
   const anyOpen = slots.some((slot) => isOpen(slot.slot_id))
 
   return (
-    <section className="mt-4">
+    <section className="space-y-3">
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-[13px] text-ink">Filaments</h3>
-        <button
+        <h3 className="text-sm font-medium">Filaments</h3>
+        <Button
           type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0 text-xs"
           onClick={() => {
             onChange(suggested.map((choice) => ({ ...choice })))
             setOpened(new Set())
           }}
-          className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
           data-testid="reset-filaments"
         >
           Reset to the suggested filaments
-        </button>
+        </Button>
       </div>
 
       {anyOpen && (
-        <>
-        {/* One filter row for every slot: the inventory is the same list each time, and a
-            per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}
-        <div className="mt-2 flex flex-wrap items-end gap-2">
-          <label className="flex flex-col gap-1 text-[12px] text-muted">
-            Material
-            <select
+        <div className="space-y-2">
+          {/* One filter row for every slot: the inventory is the same list each time, and a
+              per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}
+          <div className="flex flex-wrap items-end gap-2">
+            <FilterSelect
+              label="Material"
               value={filters.material}
-              onChange={(event) => set('material', event.target.value)}
-              className="sb-field cursor-pointer py-1 text-[12px]"
-              data-testid="filter-material"
-            >
-              <option value="">Any</option>
-              {choices.materials.map((material) => (
-                <option key={material} value={material}>
-                  {material}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[12px] text-muted">
-            Subtype
-            <select
+              options={choices.materials}
+              onChange={(next) => set('material', next)}
+              testId="filter-material"
+            />
+            <FilterSelect
+              label="Subtype"
               value={filters.subtype}
-              onChange={(event) => set('subtype', event.target.value)}
-              className="sb-field cursor-pointer py-1 text-[12px]"
-              data-testid="filter-subtype"
-            >
-              <option value="">Any</option>
-              {choices.subtypes.map((subtype) => (
-                <option key={subtype} value={subtype}>
-                  {subtype}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[12px] text-muted">
-            Brand
-            <select
+              options={choices.subtypes}
+              onChange={(next) => set('subtype', next)}
+              testId="filter-subtype"
+            />
+            <FilterSelect
+              label="Brand"
               value={filters.brand}
-              onChange={(event) => set('brand', event.target.value)}
-              className="sb-field cursor-pointer py-1 text-[12px]"
-              data-testid="filter-brand"
-            >
-              <option value="">Any</option>
-              {choices.brands.map((brand) => (
-                <option key={brand} value={brand}>
-                  {brand}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-1 flex-col gap-1 text-[12px] text-muted">
-            Search
-            <input
-              type="search"
-              value={filters.search}
-              placeholder="Colour or brand"
-              onChange={(event) => set('search', event.target.value)}
-              className="sb-field py-1 text-[12px]"
-              data-testid="filter-search"
+              options={choices.brands}
+              onChange={(next) => set('brand', next)}
+              testId="filter-brand"
             />
-          </label>
+            <div className="grid min-w-40 flex-1 gap-1">
+              <Label htmlFor="filter-search" className="text-xs font-normal text-muted-foreground">
+                Search
+              </Label>
+              <Input
+                id="filter-search"
+                type="search"
+                value={filters.search}
+                placeholder="Colour or brand"
+                onChange={(event) => set('search', event.target.value)}
+                className="h-7"
+                data-testid="filter-search"
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <Label className="cursor-pointer text-xs font-normal text-muted-foreground">
+              <Checkbox
+                checked={filters.loadedOnly}
+                onCheckedChange={(checked) => set('loadedOnly', checked === true)}
+                data-testid="filter-loaded-only"
+              />
+              Loaded in a printer
+            </Label>
+            <Label className="cursor-pointer text-xs font-normal text-muted-foreground">
+              <Checkbox
+                checked={filters.enoughOnly}
+                onCheckedChange={(checked) => set('enoughOnly', checked === true)}
+                data-testid="filter-enough"
+              />
+              Enough for this print
+            </Label>
+          </div>
         </div>
-        <div className="mt-2 flex flex-wrap gap-4">
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
-            <input
-              type="checkbox"
-              checked={filters.loadedOnly}
-              onChange={(event) => set('loadedOnly', event.target.checked)}
-              className="accent-[var(--sb-accent)]"
-              data-testid="filter-loaded-only"
-            />
-            Loaded in a printer
-          </label>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted">
-            <input
-              type="checkbox"
-              checked={filters.enoughOnly}
-              onChange={(event) => set('enoughOnly', event.target.checked)}
-              className="accent-[var(--sb-accent)]"
-              data-testid="filter-enough"
-            />
-            Enough for this print
-          </label>
-        </div>
-        </>
       )}
 
-      <div className="mt-3 space-y-3">
+      <div className="space-y-3">
         {slots.map((slot) => {
           const need = slotNeed(slot, copies)
           const chosen = chosenFor(slot.slot_id)
@@ -324,127 +352,130 @@ export function FilamentPicker({
             : matched.some((spool) => spool.spool_id === chosen)
               ? matched
               : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
+          const heading = `filament-slot-${slot.slot_id}-heading`
           return (
-            // min-w-0: a fieldset defaults to min-inline-size: min-content, so without it
-            // the slot grows to its widest row and runs off a phone's screen (#944).
-            <fieldset key={slot.slot_id} className="min-w-0" data-testid={`filament-slot-${slot.slot_id}`}>
-              <legend className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink">
-                Slot {slot.slot_id}
+            // min-w-0: without it the slot grows to its widest row and runs off a phone's
+            // screen (#944).
+            <Card
+              key={slot.slot_id}
+              size="sm"
+              role="group"
+              aria-labelledby={heading}
+              className="min-w-0 gap-2 px-3"
+              data-testid={`filament-slot-${slot.slot_id}`}
+              onKeyDown={(event) => {
+                // #3636 — Escape in an opened list closes that list, not the print
+                // dialog around it: the dialog closes only on an Escape nothing took.
+                if (event.key !== 'Escape' || !opened.has(slot.slot_id) || chosen === null) return
+                event.stopPropagation()
+                event.preventDefault()
+                setOpen(slot.slot_id, false)
+                event.currentTarget.querySelector<HTMLElement>(`[data-testid="change-slot-${slot.slot_id}"]`)?.focus()
+              }}
+            >
+              <div id={heading} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                <span className="font-medium">Slot {slot.slot_id}</span>
                 {/* The file's own colour for this slot, labelled so it is not read as a
                     second choice beside the "prints in" swatch. */}
-                <span
-                  className="flex items-center gap-1 text-[12px] text-faint"
-                  title="The colour this slot has in the file"
-                  data-testid={`slot-original-${slot.slot_id}`}
-                >
-                  <Swatch colour={slot.colour} size="sm" />
-                  original
-                </span>
-                {slot.material ? <span className="text-muted">{slot.material}</span> : null}
-                <span className="text-[12px] text-faint">{needLabel(slot, copies, gramsStale)}</span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="flex items-center gap-1 text-xs text-muted-foreground"
+                      data-testid={`slot-original-${slot.slot_id}`}
+                    >
+                      <Swatch colour={slot.colour} size="sm" />
+                      original
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>The colour this slot has in the file</TooltipContent>
+                </Tooltip>
+                {slot.material ? <Badge variant="outline">{slot.material}</Badge> : null}
+                <span className="text-xs text-muted-foreground">{needLabel(slot, copies, gramsStale)}</span>
                 {/* The colour this part will actually come out in: the file is recoloured
                     to it before slicing, so the plate thumbnail shows it too (#476). */}
                 {chosenSpool && (
                   <span
-                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-muted"
+                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
                     data-testid={`slot-prints-in-${slot.slot_id}`}
                   >
                     <span aria-hidden="true">→</span>
                     <Swatch colour={chosenSpool.colour} size="sm" />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
                     {showSides && chosenSpool.side && (
-                      <SideBadge
-                        side={chosenSpool.side}
-                        testId={`slot-side-${slot.slot_id}`}
-                      />
+                      <SideBadge side={chosenSpool.side} testId={`slot-side-${slot.slot_id}`} />
                     )}
                   </span>
                 )}
-              </legend>
-              <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-[6px] border border-line">
-                {listOpen && rows.length === 0 && (
-                  <li className="px-2.5 py-3 text-[12px] text-muted">
-                    No spool matches those filters.
-                  </li>
-                )}
-                {rows.map((spool) => {
-                  const where = loadedLabel(spool, options.printer_id)
-                  // Shown, not hidden: printing two slots from one spool is a real thing
-                  // to want, and Bambuddy accepts it. It just should not be a surprise.
-                  const elsewhere = plan.find(
-                    (choice) => choice.spool_id === spool.spool_id && choice.slot_id !== slot.slot_id,
-                  )
-                  return (
-                    <li key={spool.spool_id} className="border-b border-line last:border-b-0">
+              </div>
+              {listOpen && rows.length === 0 ? (
+                <p className="rounded-lg border px-2.5 py-3 text-xs text-muted-foreground">
+                  No spool matches those filters.
+                </p>
+              ) : (
+                <RadioGroup
+                  aria-labelledby={heading}
+                  value={chosen === null ? '' : String(chosen)}
+                  onValueChange={(next) => choose(slot.slot_id, Number(next))}
+                  className="max-h-56 gap-0 overflow-y-auto rounded-lg border"
+                >
+                  {rows.map((spool) => {
+                    const where = loadedLabel(spool, options.printer_id)
+                    // Shown, not hidden: printing two slots from one spool is a real thing
+                    // to want, and Bambuddy accepts it. It just should not be a surprise.
+                    const elsewhere = plan.find(
+                      (choice) => choice.spool_id === spool.spool_id && choice.slot_id !== slot.slot_id,
+                    )
+                    return (
                       <label
-                        className={`flex cursor-pointer flex-wrap items-center gap-x-2.5 gap-y-1 px-2.5 py-2 transition-colors ${
-                          chosen === spool.spool_id ? 'bg-accent/8' : 'hover:bg-surface-2'
-                        }`}
+                        key={spool.spool_id}
+                        className={cn(
+                          'flex cursor-pointer flex-wrap items-center gap-x-2.5 gap-y-1 border-b px-2.5 py-2 transition-colors last:border-b-0',
+                          chosen === spool.spool_id ? 'bg-accent' : 'hover:bg-muted',
+                        )}
                       >
-                        <input
-                          type="radio"
-                          name={`filament-slot-${slot.slot_id}`}
-                          value={spool.spool_id}
-                          checked={chosen === spool.spool_id}
-                          onChange={() => choose(slot.slot_id, spool.spool_id)}
-                          className="accent-[var(--sb-accent)]"
-                          data-testid={`spool-${spool.spool_id}`}
-                        />
+                        <RadioGroupItem value={String(spool.spool_id)} data-testid={`spool-${spool.spool_id}`} />
                         <Swatch colour={spool.colour} size="sm" />
                         {/* The name takes at least 12rem; when the row is narrower than that
                             plus the details, the details wrap onto a second line (#944). */}
-                        <span className="min-w-0 flex-[1_1_12rem] truncate text-[12px] text-ink">
-                          {spoolLabel(spool)}
-                        </span>
+                        <span className="min-w-0 flex-[1_1_12rem] truncate text-xs">{spoolLabel(spool)}</span>
                         <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2.5">
                           {elsewhere && (
-                            <span className="shrink-0 text-[11px] text-faint">
+                            <span className="shrink-0 text-[11px] text-muted-foreground">
                               used by slot {elsewhere.slot_id}
                             </span>
                           )}
-                          {where && (
-                            <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
-                              {where}
-                            </span>
-                          )}
-                          {showSides && spool.side && (
-                            <SideBadge
-                              side={spool.side}
-                              testId={`side-${spool.spool_id}`}
-                            />
-                          )}
-                          <span className="sb-num shrink-0 text-[11px] text-faint">
+                          {where && <Badge variant="secondary">{where}</Badge>}
+                          {showSides && spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />}
+                          <span className="sb-num shrink-0 text-[11px] text-muted-foreground">
                             {spool.remaining_g === null || spool.remaining_g === undefined
                               ? '—'
                               : grams(spool.remaining_g)}
                           </span>
                         </span>
                       </label>
-                    </li>
-                  )
-                })}
-              </ul>
+                    )
+                  })}
+                </RadioGroup>
+              )}
               {chosenSpool && (
-                <button
+                <Button
                   type="button"
+                  variant="link"
+                  size="sm"
+                  className="h-auto w-fit px-0 text-xs"
                   onClick={() => setOpen(slot.slot_id, !listOpen)}
                   aria-expanded={listOpen}
-                  className="mt-1 text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
                   data-testid={`change-slot-${slot.slot_id}`}
                 >
                   {listOpen ? 'Done' : 'Change'}
-                </button>
+                </Button>
               )}
 
-              <WarningList
-                warnings={warningsFor(warnings, slot.slot_id)}
-                testId={`filament-warnings-${slot.slot_id}`}
-              />
-            </fieldset>
+              <WarningList warnings={warningsFor(warnings, slot.slot_id)} testId={`filament-warnings-${slot.slot_id}`} />
+            </Card>
           )
         })}
       </div>
-
     </section>
   )
 }

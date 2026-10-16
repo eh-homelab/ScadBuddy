@@ -35,6 +35,8 @@ for (const { name, viewport } of [
     test.use({ viewport })
 
     const phone = viewport.width < 640
+    // The script check's verdict, not a part of the page still loading (a skeleton's status).
+    const checkStatus = (page: Page) => page.getByRole('status').filter({ hasText: /problem|Checking|Could not check/ })
     const noSideScroll = async (page: Page) =>
       expect(await page.evaluate<number>('document.documentElement.scrollWidth')).toBeLessThanOrEqual(viewport.width)
 
@@ -92,7 +94,7 @@ for (const { name, viewport } of [
       await expect(grant.getByRole('table', { name: 'Grant rules' })).toContainText('printers 1')
       await noSideScroll(page)
       await grant.getByRole('button', { name: 'Revoke grant' }).click()
-      await page.getByRole('dialog', { name: 'Revoke this grant?' }).getByRole('button', { name: 'Revoke grant' }).click()
+      await page.getByRole('alertdialog', { name: 'Revoke this grant?' }).getByRole('button', { name: 'Revoke grant' }).click()
       await expect(grant.getByTestId('grant-status')).toHaveText('Revoked')
       await expect(grant.getByRole('button', { name: 'Revoke grant' })).toHaveCount(0)
     })
@@ -115,14 +117,15 @@ for (const { name, viewport } of [
     test('previews a reset with the outward call flagged, and resets once confirmed', async ({ page }) => {
       await page.goto('/workflows/runs/run-done')
       await page.getByRole('button', { name: 'Preview a reset' }).click()
-      await page.getByRole('combobox', { name: 'Reset point' }).selectOption({ label: 'Event 11: before step 1 (render)' })
+      await page.getByRole('combobox', { name: 'Reset point' }).click()
+      await page.getByRole('option', { name: 'Event 11: before step 1 (render)' }).click()
       const again = page.getByRole('list', { name: 'Calls that run again' })
       await expect(again.getByRole('listitem')).toHaveCount(3)
       await expect(again.locator('[data-outward]')).toHaveText(/queue_print\s*Outward: sent again/)
       await noSideScroll(page)
 
       await page.getByRole('button', { name: 'Reset to this point…' }).click()
-      const dialog = page.getByRole('dialog', { name: 'Reset this run?' })
+      const dialog = page.getByRole('alertdialog', { name: 'Reset this run?' })
       await expect(dialog.getByRole('list', { name: 'Outward calls sent again' })).toContainText('#2 queue_print')
       await expect(dialog.getByRole('button', { name: 'Reset run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Reset run' }).click()
@@ -155,7 +158,7 @@ for (const { name, viewport } of [
       await page.keyboard.press('Shift+End')
       await page.keyboard.type('await sleep(5')
       await expect(lines).toContainText('await sleep(5)')
-      await expect(page.getByRole('status')).toHaveText('No problems')
+      await expect(checkStatus(page)).toHaveText('No problems')
       await expect(problems).toHaveCount(0)
       await page.getByRole('button', { name: 'Save' }).click()
       await expect(page).toHaveURL(/\/workflows\/flows\/def-swap-2$/)
@@ -164,7 +167,7 @@ for (const { name, viewport } of [
       await expect(versions.getByRole('listitem').first()).toContainText('v2 you, in the browser')
 
       const compare = page.getByRole('region', { name: 'Compare versions' })
-      await expect(compare.getByRole('combobox', { name: 'From' })).toHaveValue(/^c0ffee1/)
+      await expect(compare.getByRole('combobox', { name: 'From' })).toHaveText('v1')
       await compare.getByRole('button', { name: 'Compare' }).click()
       await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
       const diff = page.locator('.monaco-diff-editor')
@@ -172,7 +175,7 @@ for (const { name, viewport } of [
       await expect(diff.locator('.modified-in-monaco-diff-editor .view-lines')).toContainText('await sleep(5)')
       await noSideScroll(page)
 
-      await versions.getByRole('link', { name: 'v1' }).click()
+      await versions.getByRole('link', { name: /^v1 / }).click()
       await expect(page).toHaveURL(/\/workflows\/flows\/def-swap$/)
       await page.getByRole('button', { name: 'Restore v1' }).click()
       await expect(page).toHaveURL(/\/workflows\/flows\/def-swap-3$/)
@@ -193,7 +196,8 @@ for (const { name, viewport } of [
       await expect(page.getByRole('button', { name: 'Start run' })).toBeVisible()
 
       const compare = page.getByRole('region', { name: 'Compare versions' })
-      await compare.getByRole('combobox', { name: 'To' }).selectOption({ label: 'v2' })
+      await compare.getByRole('combobox', { name: 'To' }).click()
+      await page.getByRole('option', { name: 'v2' }).click()
       await compare.getByRole('button', { name: 'Compare' }).click()
       await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
       const diff = page.locator('.monaco-diff-editor')
@@ -205,7 +209,7 @@ for (const { name, viewport } of [
     test('forgets a run once confirmed', async ({ page }) => {
       await page.goto('/workflows/runs/run-done')
       await page.getByRole('button', { name: 'Forget run' }).click()
-      const dialog = page.getByRole('dialog', { name: 'Forget this run?' })
+      const dialog = page.getByRole('alertdialog', { name: 'Forget this run?' })
       await expect(dialog).toContainText("This can't be undone.")
       await expect(dialog.getByRole('button', { name: 'Forget run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Forget run' }).click()
@@ -218,14 +222,14 @@ for (const { name, viewport } of [
       await page.goto('/workflows/flows')
       const swap = page.locator('[data-flow="swap"]')
       await swap.getByRole('button', { name: 'Archive' }).click()
-      const dialog = page.getByRole('dialog', { name: 'Archive swap?' })
+      const dialog = page.getByRole('alertdialog', { name: 'Archive swap?' })
       await expect(dialog).toContainText('Runs in progress keep running')
       await expect(dialog.getByRole('button', { name: 'Archive' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Archive' }).click()
       await expect(swap).toHaveCount(0)
       await expect(page.locator('[data-flow]')).toHaveCount(2)
 
-      await page.getByRole('checkbox', { name: 'Show archived' }).check()
+      await page.getByRole('switch', { name: 'Show archived' }).click()
       await expect(swap).toContainText('Archived by you, in the browser')
       await expect(swap.getByRole('button', { name: 'Unarchive' })).toBeInViewport()
       await noSideScroll(page)
@@ -238,7 +242,7 @@ for (const { name, viewport } of [
     }) => {
       await page.goto('/workflows/flows/def-plates-2')
       await page.getByRole('button', { name: 'Delete', exact: true }).click()
-      const dialog = page.getByRole('dialog', { name: 'Delete plates?' })
+      const dialog = page.getByRole('alertdialog', { name: 'Delete plates?' })
       await expect(dialog).toContainText('Runs in progress keep running on the version they started with')
       await expect(dialog).toContainText('Finished runs still show the script they ran')
       await expect(dialog.getByRole('button', { name: 'Delete flow' })).toBeInViewport()
@@ -272,7 +276,8 @@ for (const { name, viewport } of [
       await start.click()
       await expect(dialog.getByText('Required')).toBeVisible()
       await dialog.getByRole('textbox', { name: /Template/ }).fill('coaster')
-      await dialog.getByRole('combobox', { name: /Colour/ }).selectOption('blue')
+      await dialog.getByRole('combobox', { name: /Colour/ }).click()
+      await page.getByRole('option', { name: 'blue' }).click()
       await dialog.getByRole('spinbutton', { name: /Copies/ }).fill('99')
       await expect(start).toBeInViewport()
       await noSideScroll(page)
@@ -299,12 +304,12 @@ for (const { name, viewport } of [
       }
       const schema = page.getByRole('textbox', { name: 'Inputs (JSON Schema)' })
       await expect(schema).toHaveValue(/"slug"/)
-      await expect(page.getByRole('status')).toHaveText('No problems', { timeout: 15_000 })
+      await expect(checkStatus(page)).toHaveText('No problems', { timeout: 15_000 })
       await schema.fill('{"type": "array"}')
       const problems = page.getByRole('list', { name: 'Problems' })
       await expect(problems.getByRole('listitem')).toHaveText([/^Inputs.*top level/])
       await schema.fill('{"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}')
-      await expect(page.getByRole('status')).toHaveText('No problems')
+      await expect(checkStatus(page)).toHaveText('No problems')
       await noSideScroll(page)
       await page.getByRole('button', { name: 'Save' }).click()
       await expect(page).toHaveURL(/\/workflows\/flows\/def-coasters-2$/)

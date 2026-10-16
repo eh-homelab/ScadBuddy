@@ -12,6 +12,7 @@ import type {
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
+import { plateFields, plateKey } from './plateChoice'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -94,6 +95,7 @@ export function useRunPrint({
   onRan,
 }: RunInput) {
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
+  const platesKey = plateKey(plate)
   // By value: the caller builds a new array each render.
   const profilesKey = filamentProfiles.join(',')
   const supportsKey = JSON.stringify(supports)
@@ -130,7 +132,7 @@ export function useRunPrint({
     plan,
     overrides,
     printerId,
-    plate,
+    platesKey,
     printSequence,
     supportsKey,
     towerKey,
@@ -186,8 +188,7 @@ export function useRunPrint({
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         ...(copies === null ? {} : { copies }),
-        plate_id: plate === 'all' ? 1 : plate,
-        all_plates: plate === 'all',
+        ...plateFields(plate),
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
         ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),

@@ -1186,6 +1186,14 @@ describe('get_printer_camera (#796)', () => {
 })
 
 describe('analyze_geometry', () => {
+  it('tells the model about weak joints and the split each suggests', () => {
+    const t = tool('analyze_geometry')
+    expect(t.description).toContain('weak_joints')
+    expect(t.description).toContain('split_at_plane')
+    expect(t.description).toContain('un-arranged')
+    expect(t.description).toContain('a quarter of the wider')
+  })
+
   it('is a read tool returning the backend analysis', async () => {
     const id = 'a'.repeat(32)
     server.use(

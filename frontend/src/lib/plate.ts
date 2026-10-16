@@ -117,7 +117,13 @@ export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plat
   }
 }
 
-/** #986 — a plate as the dialog names it: what it holds (#929), else its number. */
+/**
+ * #986 — a plate as the dialog names it: what it holds (#929), else its number. A name
+ * another plate shares says the number too (#3652), or two plates read the same.
+ */
 export function plateLabel(plates: readonly OutputPlate[], index: number): string {
-  return plates.find((plate) => plate.index === index)?.name || `Plate ${index}`
+  const name = plates.find((plate) => plate.index === index)?.name
+  if (!name) return `Plate ${index}`
+  const shared = plates.some((plate) => plate.index !== index && plate.name === name)
+  return shared ? `${name} (plate ${index})` : name
 }

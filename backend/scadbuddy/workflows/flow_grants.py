@@ -101,6 +101,8 @@ class FlowGrants:
         if printer is None:
             printer = options.get("printer_id")
         all_plates = bool(request.get("all_plates"))
+        # Several chosen plates (#3652) each print, as every plate of an all-plates one.
+        chosen = len(set(request.get("plate_ids") or [])) or 1
         plates: int | None
         if source.get("output_id") is not None:
             output = await self._get(f"/api/v1/outputs/{_segment(source['output_id'])}")
@@ -112,7 +114,7 @@ class FlowGrants:
             models_of, scope = [], f"library:{library_file}"
             # A library file's plates are not counted here: an all-plates print of one
             # does not match a print bound.
-            plates = None if all_plates else 1
+            plates = None if all_plates else chosen
         # As print_run.py resolves `copies`: the request's, else the most specific
         # remembered quantity (global, then the printer's, then the model's), else 1.
         copies = request.get("copies")
@@ -142,7 +144,7 @@ class FlowGrants:
             printer_id=None if printer is None else int(printer),
             models=models_of,
             library_file=library_file,
-            prints=None if plates is None else int(copies) * (plates if all_plates else 1),
+            prints=None if plates is None else int(copies) * (plates if all_plates else chosen),
         )
 
     def _hash(self, key: bytes) -> Callable[[str, str | None, dict[str, Any]], str]:

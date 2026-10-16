@@ -890,7 +890,11 @@ beyond Temporal's retention.
 - An event the bus lost while its LISTEN connection was down (`bus.resync`) fires
   nothing: a trigger fires at most once per event.
 - The event's facts (kind, slug, job or commit) are recorded on the fire and shown with
-  the run. They are not passed to the script (#2666).
+  the run. The script reads them with the host function `trigger()` (#2666): a
+  `ModelChanged` (`slug`, `commit`) or a `RenderFinished` (`slug`, `job_id`) told apart by
+  `kind`, or None for a run started by hand or on a schedule. They come from the run's
+  start message, as `inputs()`'s values do, and are data only: §12.4's authority is
+  untouched.
 
 ### 12.4 Authority
 

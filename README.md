@@ -111,7 +111,7 @@ and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`
 on shutdown.
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
-  secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
+  secret needed), built for `linux/amd64` only. It has these tags:
   `main` (latest `main`), `sha-<short>`, and `X.Y.Z` / `X.Y` for releases.
 - **LAN only.** ScadBuddy has **no authentication**. Anyone who can reach it can
   add, edit and delete models, and send prints using the stored Bambuddy key.
@@ -229,7 +229,9 @@ on shutdown.
   - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
     runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
     so it stays on the prune Schedule while the background-slice sweep obeys 0. It
-    needs the same `Recreate` rollout.
+    needs the same `Recreate` rollout: until it finishes, a prune run whose sweep an
+    old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
+    sweep waits for the next tick (300 s).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):

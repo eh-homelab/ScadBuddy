@@ -1,4 +1,5 @@
 import { useRealtimeStatus } from '../lib/realtime'
+import { Badge } from '@/components/ui/badge'
 
 /**
  * #266 — shown while something on the page follows live updates and the realtime
@@ -8,12 +9,13 @@ export function LiveUpdatesIndicator() {
   const { status, following } = useRealtimeStatus()
   if (status !== 'unavailable' || !following) return null
   return (
-    <span
+    <Badge
+      variant="secondary"
       role="status"
       title="The realtime connection is down; views refresh by polling until it is back."
-      className="shrink-0 rounded-[6px] bg-surface-2 px-2 py-0.5 text-[11px] text-muted"
+      className="text-muted-foreground"
     >
       Live updates unavailable
-    </span>
+    </Badge>
   )
 }

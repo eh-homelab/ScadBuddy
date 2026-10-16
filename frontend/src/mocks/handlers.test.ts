@@ -468,6 +468,20 @@ describe('mock API: duplicate (#156)', () => {
     )
   })
 
+  it('answers a re-send with the same Idempotency-Key as it answered the first', async () => {
+    const send = () =>
+      fetch(`/api/v1/models/${BUILTIN_SLUG}/duplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'one-press' },
+        body: JSON.stringify({ name: 'Twice Sent' }),
+      })
+    expect((await send()).status).toBe(201)
+    const again = await send()
+    expect(again.status).toBe(201)
+    expect(await again.json()).toMatchObject({ slug: 'twice-sent' })
+    expect((await api.listModels()).filter((model) => model.slug === 'twice-sent')).toHaveLength(1)
+  })
+
   it('refuses a slug that is taken with a 409', async () => {
     const error: unknown = await api
       .duplicateModel(BUILTIN_SLUG, 'Name Keychain')

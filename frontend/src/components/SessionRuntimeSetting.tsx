@@ -1,10 +1,8 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { SessionRuntime } from '../api/types'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /** agent `sessions/runtimeSettings.ts` RUNTIME_BOUNDS (unified runtime spec §13). */
 const FIELDS: { key: keyof SessionRuntime; label: string; min: number; max: number }[] = [
@@ -54,14 +52,14 @@ export function SessionRuntimeSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant session runtime</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <div className="flex flex-wrap gap-4">
-          {FIELDS.map(({ key, label, min, max }) => (
-            <label key={key} className="flex flex-col gap-1 text-[13px]">
-              {label}
-              <input
+    <SettingCard title="Assistant session runtime">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <div className="flex flex-wrap gap-4">
+            {FIELDS.map(({ key, label, min, max }) => (
+              <LabeledInput
+                key={key}
+                label={label}
                 type="number"
                 inputMode="numeric"
                 min={min}
@@ -70,34 +68,19 @@ export function SessionRuntimeSetting() {
                 required
                 value={text(key)}
                 onChange={(event) => setDraft((d) => ({ ...d, [key]: event.target.value }))}
-                className="sb-field sb-num w-32"
+                className="w-48"
                 aria-describedby="session-runtime-help"
               />
-            </label>
-          ))}
-        </div>
-        <p id="session-runtime-help" className="text-[12px] text-muted">
-          A replica keeps up to this many assistant processes warm between turns, each for the idle time given; 0
-          starts every turn cold. A change applies to the warm processes at once; a running turn is never stopped by it.
-          The park hold and the longest turn are read by later versions of the assistant.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+            ))}
+          </div>
+          <p id="session-runtime-help" className="text-xs text-muted-foreground">
+            A replica keeps up to this many assistant processes warm between turns, each for the idle time given; 0
+            starts every turn cold. A change applies to the warm processes at once; a running turn is never stopped by it.
+            The park hold and the longest turn are read by later versions of the assistant.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter saving={saving} disabled={!changed} saved={saved && !changed ? 'Saved.' : null} error={error} />
       </form>
-    </section>
+    </SettingCard>
   )
 }

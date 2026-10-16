@@ -29,6 +29,7 @@ from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
+from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
@@ -2373,6 +2374,29 @@ def test_a_library_3mfs_slots_are_read_from_the_file_never_from_bambuddy(
     assert not asked.called
     # Read once, then from the cache under the file's hash.
     assert download.call_count == 1
+
+
+@respx.mock
+def test_a_library_3mfs_chosen_plates_offer_just_their_slots(client: TestClient) -> None:
+    """#3652: a repeated ``plate_ids`` on a library file answers for those plates only.
+    Plate 2 alone is its own slot 2; plates 2 and 1 together are every slot either uses.
+    Past ``MAX_PLATES`` entries the read is refused."""
+    configure(client)
+    library_file(
+        67, plates="library-plates-multi.json", content=two_plate_3mf(), file_hash="a" * 64
+    )
+    run_routes()
+    url = "/api/v1/print/library/67/filaments"
+
+    plate_2 = client.get(url, params=[("plate_ids", 2)])
+    both = client.get(url, params=[("plate_ids", 2), ("plate_ids", 1)])
+    too_many = client.get(url, params=[("plate_ids", 1)] * (MAX_PLATES + 1))
+
+    assert plate_2.status_code == 200, plate_2.text
+    assert [slot["slot_id"] for slot in plate_2.json()["slots"]] == [2]
+    assert both.status_code == 200, both.text
+    assert [slot["slot_id"] for slot in both.json()["slots"]] == [1, 2, 3]
+    assert too_many.status_code == 422, too_many.text
 
 
 @respx.mock

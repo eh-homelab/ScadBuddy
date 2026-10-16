@@ -153,10 +153,10 @@ async def test_prime_keeps_what_one_list_read_holds(clock: Clock) -> None:
     )
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        held = await cache.prime(
+        primed = await cache.prime(
             bambuddy, [35, 36], date_from=date(2026, 9, 26), date_to=date(2026, 9, 28), limit=8
         )
-        assert held == Primed(missing=2, listed=1)
+        assert primed == Primed(missing=2, listed=1)
         found = await cache.archive(bambuddy, 35)
         assert found is not None and found.id == 35
         assert (await cache.archive(bambuddy, 36)) is not None
@@ -201,8 +201,8 @@ async def test_a_failed_list_read_leaves_the_archives_to_single_reads(
     ]
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        held = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
-        assert held == Primed(missing=2, listed=0)
+        primed = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
+        assert primed == Primed(missing=2, listed=0)
         assert [
             (await cache.archive(bambuddy, archive_id)) is not None for archive_id in (35, 36)
         ] == [
@@ -226,8 +226,8 @@ async def test_a_row_that_does_not_parse_leaves_the_rows_that_do(clock: Clock) -
     )
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        held = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
-        assert held == Primed(missing=2, listed=2)
+        primed = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
+        assert primed == Primed(missing=2, listed=2)
         assert [
             (await cache.archive(bambuddy, archive_id)) is not None for archive_id in (35, 36)
         ] == [
@@ -260,8 +260,8 @@ async def test_a_wanted_archive_whose_row_does_not_parse_falls_back_to_its_singl
     cache = ArchiveCache(30.0, clock=clock)
     with caplog.at_level(logging.INFO, logger="scadbuddy.bambuddy.client"):
         async with client() as bambuddy:
-            held = await cache.prime(bambuddy, [35, 37], date_from=None, date_to=None, limit=8)
-            assert held == Primed(missing=2, listed=1)
+            primed = await cache.prime(bambuddy, [35, 37], date_from=None, date_to=None, limit=8)
+            assert primed == Primed(missing=2, listed=1)
             assert (await cache.archive(bambuddy, 37)) is not None
     assert single.call_count == 1
     unparsed = [r for r in caplog.records if "did not parse" in r.getMessage()]

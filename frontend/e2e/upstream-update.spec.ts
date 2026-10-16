@@ -124,7 +124,7 @@ test.describe('taking upstream updates (#160)', () => {
     await card.getByRole('heading', { name: 'Keychain for Nova' }).click()
 
     await page.getByRole('button', { name: 'Upstream gone' }).click()
-    await page.getByRole('dialog', { name: 'Upstream gone' }).getByRole('button', { name: 'Detach' }).click()
+    await page.getByRole('alertdialog', { name: 'Upstream gone' }).getByRole('button', { name: 'Detach' }).click()
     await expect(page.getByTestId('upstream-gone')).toHaveCount(0)
     await expect(page.getByTestId('duplicated-from')).toHaveCount(0)
   })

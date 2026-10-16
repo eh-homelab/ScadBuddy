@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Diagnostic, Job, Plate } from '../api/types'
 import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
@@ -363,7 +363,7 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
     expect(screen.getByTestId('plate-badge')).toHaveTextContent(/^330 × 320 mm$/)
   })
 
-  it('folds the notes and warnings into one chip on a short preview, which opens them', () => {
+  it('folds the notes and warnings into one chip on a short preview, which opens them', async () => {
     previewSized(390, 120)
     render(
       <Preview
@@ -392,7 +392,8 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(chip).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByRole('region', { name: 'Notes from the template' })).not.toBeInTheDocument()
-    expect(chip).toHaveFocus()
+    // Radix puts the focus back a task after the popover closes.
+    await waitFor(() => expect(chip).toHaveFocus())
   })
 
   it('names a chip of notes alone by its notes', () => {
