@@ -427,7 +427,7 @@ describe('color', () => {
 
   it('shows a short hex whole, and sends nothing for a colour left as it was', async () => {
     const { onChange, user } = setup(param, '#ABC')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     expect(hex).toHaveValue('#AABBCC')
     await user.click(hex)
     await user.tab()
@@ -437,7 +437,7 @@ describe('color', () => {
 
   it('sends a colour typed in another spelling only when it is another colour', async () => {
     const { onChange, user } = setup(param, '#ff0000')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('red')
     await user.tab()
@@ -452,7 +452,7 @@ describe('color', () => {
   // colour is never padded into one.
   it('turns a colour name into its hex', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('red')
     expect(onChange).not.toHaveBeenCalled()
@@ -464,7 +464,7 @@ describe('color', () => {
 
   it.each([['blah'], ['#12'], ['#GGG']])('keeps %j as typed and says it is no colour', async (typed) => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard(typed)
     await user.tab()
@@ -476,7 +476,7 @@ describe('color', () => {
 
   it('sends nothing while a hex is half typed, and takes a whole one at once', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('#00FF0')
     expect(onChange).not.toHaveBeenCalled()
@@ -487,7 +487,7 @@ describe('color', () => {
 
   it('takes a hex typed without its #, sending it with one', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('F00')
     await user.tab()
@@ -500,7 +500,7 @@ describe('color', () => {
     const view = render(
       <ParamWidget slug="name-keychain" param={param} value="#1B6CA8" fonts={fonts} onChange={onChange} />,
     )
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('#00FF')
     // A preset applied while the box still has focus.
@@ -549,6 +549,17 @@ describe('font', () => {
       'Liberation Sans:style=Bold',
       'DejaVu Sans:style=Book',
     ])
+  })
+
+  it('takes a completion clicked with the pointer, the field keeping the focus (#3672)', async () => {
+    const { onChange, user } = setup(param, '')
+    const field = screen.getByRole('combobox', { name: 'Typeface' })
+    await user.click(field)
+    await user.keyboard('{ArrowDown}')
+    const list = await screen.findByRole('listbox', { name: 'Installed fonts' })
+    await user.click(within(list).getByRole('option', { name: 'DejaVu Sans:style=Book' }))
+    expect(onChange).toHaveBeenLastCalledWith('DejaVu Sans:style=Book')
+    expect(field).toHaveFocus()
   })
 
   it('accepts a font the server did not list', async () => {

@@ -249,7 +249,7 @@ describe('CustomizePage', () => {
     const { user } = render()
     await firstRender()
     await user.click(screen.getByRole('tab', { name: 'Colours' }))
-    const field = (name: string) => screen.getByRole('textbox', { name: `${name} hex` }).closest('[data-param]')!
+    const field = (name: string) => screen.getByRole('textbox', { name }).closest('[data-param]')!
     await waitFor(() => expect(field('Text')).toHaveTextContent('extruder 2'))
     expect(field('Plate')).toHaveTextContent('not in this render')
     expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
@@ -261,7 +261,7 @@ describe('CustomizePage', () => {
     const { user } = render()
     await firstRender()
     await user.click(screen.getByRole('tab', { name: 'Colours' }))
-    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const hex = screen.getByRole('textbox', { name: 'Text' })
     const field = hex.closest('[data-param]')!
     await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
     // One whole valid colour: clear-then-type left '#000000#00FF00', which is not one,
@@ -286,7 +286,7 @@ describe('CustomizePage', () => {
     const { user } = render()
     await firstRender()
     await user.click(screen.getByRole('tab', { name: 'Colours' }))
-    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const hex = screen.getByRole('textbox', { name: 'Text' })
     const field = hex.closest('[data-param]')!
     await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
     server.use(
@@ -1046,7 +1046,7 @@ describe('CustomizePage', () => {
     const before = renders.length
 
     await user.click(screen.getByRole('tab', { name: 'Colours' }))
-    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const hex = screen.getByRole('textbox', { name: 'Text' })
     await user.tripleClick(hex)
     await user.keyboard('#RREEDD')
     await user.tab()

@@ -61,7 +61,7 @@ export function ColorWidget({
       error={error}
       readout={
         extruder === null ? (
-          <span>not in this render</span>
+          <span className="text-muted-foreground">not in this render</span>
         ) : extruder ? (
           <span className="text-foreground">extruder {extruder}</span>
         ) : undefined
@@ -106,7 +106,7 @@ export function ColorWidget({
           id={id}
           type="text"
           value={draft ?? hex}
-          aria-label={`${paramLabel(param)} hex`}
+          // Named by the Field's label, so the agent's fill finds the colour by its caption.
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${id}-error` : undefined}
           spellCheck={false}

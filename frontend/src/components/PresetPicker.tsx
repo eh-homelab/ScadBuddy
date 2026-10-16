@@ -288,7 +288,6 @@ export function PresetPicker({
     return () => clearTimeout(timer)
   }, [settling, extra])
 
-
   const selected = selection?.preset
   useEffect(() => {
     onSelected?.(selected ?? null)

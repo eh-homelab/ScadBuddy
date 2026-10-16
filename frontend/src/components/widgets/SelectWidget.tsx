@@ -27,8 +27,9 @@ export function SelectWidget({
     options: () => options.map((option) => ({ value: String(option.value), label: option.name })),
     value: () => String(value),
     set: (next) => {
+      // `fill` sets only a value `options` lists, so this always finds one.
       const picked = options.find((option) => String(option.value) === next)
-      onChange(picked ? picked.value : next)
+      if (picked) onChange(picked.value)
     },
   })
 

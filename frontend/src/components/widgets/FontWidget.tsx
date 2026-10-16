@@ -79,6 +79,9 @@ function FontField({
           className="w-(--radix-popover-trigger-width) min-w-64 p-1"
           // The field keeps the focus: the list is completion, not a place to go.
           onOpenAutoFocus={(event) => event.preventDefault()}
+          // Nor does a press on the list take it: the field's blur would close the list
+          // before the click that picks the option lands (#3672 review).
+          onMouseDown={(event) => event.preventDefault()}
           // A press in the field is no press outside. By the event's path, since in a
           // template UI's shadow root the target the document sees is the host element.
           onInteractOutside={(event) => {

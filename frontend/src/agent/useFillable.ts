@@ -12,6 +12,8 @@ export function useFillable(ref: RefObject<Element | null>, fillable: Fillable):
     latest.current = fillable
   })
   const registered = useRef<{ element: Element; release: () => void } | null>(null)
+  // No deps, deliberately: a ref's element can change without the ref doing so. Cheap,
+  // since it returns at once while the element is the one registered.
   useEffect(() => {
     const element = ref.current
     if (registered.current?.element === element) return
