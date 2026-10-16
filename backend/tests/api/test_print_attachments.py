@@ -479,9 +479,6 @@ def test_the_sweep_forgets_the_attachments_of_an_archive_bambuddy_deleted(
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     _attach(state, 35)
     _attach(state, 36)
-    respx.get(f"{API}/updates/version").mock(
-        return_value=httpx.Response(200, json={"version": "1"})
-    )
     mock_archive(35)
     respx.get(f"{API}/archives/36").mock(
         return_value=httpx.Response(404, json={"detail": "Archive not found"})
@@ -495,22 +492,23 @@ def test_the_sweep_forgets_the_attachments_of_an_archive_bambuddy_deleted(
 
 
 @pytest.mark.parametrize(
-    ("version", "archive"),
+    "archive",
     [
-        # Not Bambuddy at that URL: every archive would read 404.
-        (httpx.Response(404, text="Not Found"), httpx.Response(404)),
+        # A 404 that is not Bambuddy's "Archive not found": a proxy, or no Bambuddy
+        # at that URL, would answer every archive so.
+        httpx.Response(404, text="Not Found"),
+        httpx.Response(404, json={"detail": "Not Found"}),
         # Bambuddy, failing: no answer about the archive is not "gone".
-        (httpx.Response(200, json={"version": "1"}), httpx.Response(503)),
+        httpx.Response(503),
     ],
 )
 @respx.mock
 def test_the_sweep_forgets_nothing_without_bambuddys_own_404(
-    client: TestClient, version: httpx.Response, archive: httpx.Response
+    client: TestClient, archive: httpx.Response
 ) -> None:
     configure(client)
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     _attach(state, 36)
-    respx.get(f"{API}/updates/version").mock(return_value=version)
     respx.get(f"{API}/archives/36").mock(return_value=archive)
 
     with pytest.raises(ApiError):

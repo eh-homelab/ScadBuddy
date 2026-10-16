@@ -214,22 +214,13 @@ class AttachmentStore:
 async def sweep_gone_archives(client: BambuddyClient, store: AttachmentStore) -> int:
     """#3047: forget the attachments of each archive Bambuddy no longer has. The photos
     went with the archive; a promoted copy is the template's own now, and stays. Only
-    Bambuddy's 404 is "gone": any other failure stops the sweep, which the next tick
-    runs again, so an outage never forgets anything. Returns how many archives.
-
-    Bambuddy's own answer is checked first: a URL that is not Bambuddy's answers every
-    archive 404 too, and would otherwise forget them all."""
-    archive_ids = await store.archive_ids()
-    if not archive_ids:
-        return 0
-    await client.version()
+    Bambuddy's own "Archive not found" is "gone" (`BambuddyClient.archive_deleted`):
+    any other answer, a 404 that is not Bambuddy's included, stops the sweep, which the
+    next tick runs again, so a wrong URL or an outage never forgets anything. Returns
+    how many archives it forgot."""
     gone = 0
-    for archive_id in archive_ids:
-        try:
-            await client.archive(archive_id)
-        except ApiError as error:
-            if error.status != status.HTTP_404_NOT_FOUND:
-                raise
+    for archive_id in await store.archive_ids():
+        if await client.archive_deleted(archive_id):
             await store.forget_archive(archive_id)
             gone += 1
     return gone

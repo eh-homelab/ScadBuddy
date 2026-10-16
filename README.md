@@ -235,8 +235,8 @@ on shutdown.
   - **This release adds a sweep**, `housekeeping_sweep_print_attachments` (#3047): it
     forgets the attachment rows of a print whose archive was deleted in Bambuddy (the
     photos went with it; a copy promoted to a template stays). It forgets an archive
-    only on Bambuddy's own 404, after Bambuddy has answered for its version, so a
-    wrong URL or an outage forgets nothing. It runs on the first Schedule, so 0 leaves
+    only on Bambuddy's own 404, `{"detail": "Archive not found"}`; any other 404 (a
+    wrong URL, a proxy) or an outage forgets nothing and stops the sweep. It runs on the first Schedule, so 0 leaves
     the rows. It needs the same `Recreate` rollout.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
