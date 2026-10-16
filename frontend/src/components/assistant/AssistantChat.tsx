@@ -532,6 +532,18 @@ export function AssistantChat({
       throw reason(caught)
     }
   }
+  // #3738 — the open chat's Archive and Unarchive: a refusal is shown for that chat only.
+  // True once the agent took it.
+  const setArchived = async (id: string, archived: boolean): Promise<boolean> => {
+    setArchiveError(null)
+    try {
+      await updateSession(id, { archived })
+      return true
+    } catch (caught) {
+      setArchiveError({ id, message: caught instanceof Error ? caught.message : String(caught) })
+      return false
+    }
+  }
   // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
   const cancelOffer = async (id: string) => {
     try {
@@ -742,19 +754,14 @@ export function AssistantChat({
             </Button>
           </Tip>
           {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
-              went unfound. Offered as there, to the owner, while no turn runs or waits. */}
+              went unfound. Offered as there, to the owner, while no turn runs or waits (`isBusy`). */}
           {owned && !busy && !archived && (
             <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
               <Button
                 variant="ghost"
                 size="sm"
                 data-agent-user-only=""
-                onClick={() => {
-                  setArchiveError(null)
-                  updateSession(active.id, { archived: true }).catch((caught: unknown) =>
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) }),
-                  )
-                }}
+                onClick={() => void setArchived(active.id, true)}
               >
                 Archive
               </Button>
@@ -1022,11 +1029,9 @@ export function AssistantChat({
                 variant="outline"
                 data-agent-user-only=""
                 onClick={() => {
-                  setArchiveError(null)
                   unarchiving.current = true
-                  updateSession(active.id, { archived: false }).catch((caught: unknown) => {
-                    unarchiving.current = false
-                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) })
+                  void setArchived(active.id, false).then((done) => {
+                    if (!done) unarchiving.current = false
                   })
                 }}
               >
