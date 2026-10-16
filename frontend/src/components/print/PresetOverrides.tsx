@@ -1,3 +1,6 @@
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { StepCard } from './StepCard'
 import type { FilamentPresetOption, PresetRef, SlotNeed } from '../../api/types'
 import { refKey } from '../../lib/printChoices'
 
@@ -8,6 +11,9 @@ type Props = {
   overrides: Record<string, PresetRef>
   onChange: (slotId: number, key: string) => void
 }
+
+/** The select's value for the spool's own preset: Radix's select takes no empty value. */
+const OWN = 'own'
 
 /** "PLA" for "PLA Basic" or "PLA-CF": the material a preset and a slot are matched by. */
 function materialFamily(material: string | null | undefined): string {
@@ -21,42 +27,42 @@ function materialFamily(material: string | null | undefined): string {
  */
 export function PresetOverrides({ size, slots, presets, overrides, onChange }: Props) {
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Filament presets — {size} mm nozzle</legend>
-      <div className="mt-1.5 flex flex-col gap-2">
-        {slots.map((slot) => {
-          const id = `preset-override-${slot.slot_id}`
-          const chosen = overrides[String(slot.slot_id)]
-          const family = materialFamily(slot.material)
-          const offered = presets.filter(
-            (row) =>
-              !family ||
-              !row.filament_type ||
-              materialFamily(row.filament_type) === family ||
-              (chosen !== undefined && refKey(row.ref) === refKey(chosen)),
-          )
-          return (
-            <div key={slot.slot_id} className="flex flex-col gap-1">
-              <label htmlFor={id} className="text-[12px] text-muted">
-                Preset for slot {slot.slot_id}
-              </label>
-              <select
-                id={id}
-                value={chosen ? refKey(chosen) : ''}
-                onChange={(event) => onChange(slot.slot_id, event.target.value)}
-                className="sb-field"
-              >
-                <option value="">The spool&apos;s own preset</option>
+    <StepCard title={`Filament presets — ${size} mm nozzle`}>
+      {slots.map((slot) => {
+        const id = `preset-override-${slot.slot_id}`
+        const chosen = overrides[String(slot.slot_id)]
+        const family = materialFamily(slot.material)
+        const offered = presets.filter(
+          (row) =>
+            !family ||
+            !row.filament_type ||
+            materialFamily(row.filament_type) === family ||
+            (chosen !== undefined && refKey(row.ref) === refKey(chosen)),
+        )
+        return (
+          <div key={slot.slot_id} className="grid gap-1.5">
+            <Label htmlFor={id} className="text-xs font-normal text-muted-foreground">
+              Preset for slot {slot.slot_id}
+            </Label>
+            <Select
+              value={chosen ? refKey(chosen) : OWN}
+              onValueChange={(next) => onChange(slot.slot_id, next === OWN ? '' : next)}
+            >
+              <SelectTrigger id={id} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={OWN}>The spool&apos;s own preset</SelectItem>
                 {offered.map((row) => (
-                  <option key={refKey(row.ref)} value={refKey(row.ref)}>
+                  <SelectItem key={refKey(row.ref)} value={refKey(row.ref)}>
                     {row.name}
-                  </option>
+                  </SelectItem>
                 ))}
-              </select>
-            </div>
-          )
-        })}
-      </div>
-    </fieldset>
+              </SelectContent>
+            </Select>
+          </div>
+        )
+      })}
+    </StepCard>
   )
 }

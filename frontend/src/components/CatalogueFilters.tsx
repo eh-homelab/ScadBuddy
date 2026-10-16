@@ -8,7 +8,14 @@ import {
   type CatalogueSort,
   type CatalogueView,
 } from '../lib/catalogueQuery'
-import { Button } from './ui/Button'
+import { ChevronRightIcon, SearchIcon, XIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { cn } from '@/lib/utils'
 
 const SEARCH_DEBOUNCE_MS = 250
 
@@ -42,12 +49,6 @@ function isTyping(target: EventTarget | null): boolean {
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
-function chipClass(selected: boolean): string {
-  return `rounded-full border px-2.5 py-0.5 text-[12px] transition-colors ${
-    selected ? 'border-accent bg-accent/15 text-ink' : 'border-line text-muted hover:text-ink'
-  }`
-}
-
 /** #276 — search, tag chips, origin and sort above the catalogue; #278 — the view. */
 export function CatalogueFilters({ query, onChange, tags, shown, total }: Props) {
   const [text, setText] = useState(query.q)
@@ -57,6 +58,7 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
   const input = useRef<HTMLInputElement>(null)
   const [tagsOpen, setTagsOpen] = useState(false)
   const tagsId = useId()
+  const sortId = useId()
 
   // A search that changed from outside (Clear filters, back/forward) replaces the text.
   useEffect(() => {
@@ -123,40 +125,48 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
 
   const filtered = query.q.trim() !== '' || query.tags.length > 0 || query.origin !== 'all'
 
+  const shownTags = tags.filter(({ tag }) => tagsOpen || query.tags.includes(tag))
   return (
     <div className="mb-4 space-y-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <input
-          ref={input}
-          type="search"
-          aria-label="Search models"
-          placeholder="Search models  /"
-          value={text}
-          onChange={(event) => search(event.target.value)}
-          className="sb-field h-8 min-w-48 flex-1"
-        />
+        <div className="relative min-w-48 flex-1">
+          <SearchIcon aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            ref={input}
+            type="search"
+            aria-label="Search models"
+            placeholder="Search models  /"
+            value={text}
+            onChange={(event) => search(event.target.value)}
+            className="pl-8"
+          />
+        </div>
         <SegmentedGroup
           label="Origin"
           options={ORIGINS}
           value={query.origin}
           onChange={(origin) => commit({ ...query, q: text, origin })}
         />
-        <label className="flex items-center gap-1.5 text-[12px] text-muted">
-          Sort
-          <select
+        <span className="flex items-center gap-1.5">
+          <Label id={sortId} className="text-xs font-normal text-muted-foreground">
+            Sort
+          </Label>
+          <Select
             value={query.sort}
-            onChange={(event) =>
-              commit({ ...query, q: text, sort: event.target.value as CatalogueSort })
-            }
-            className="sb-field h-8 w-auto cursor-pointer"
+            onValueChange={(sort) => commit({ ...query, q: text, sort: sort as CatalogueSort })}
           >
-            {SORTS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger size="sm" aria-labelledby={sortId}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SORTS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </span>
         <SegmentedGroup
           label="View"
           options={VIEWS}
@@ -169,54 +179,49 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
           full they pushed the first model a screen and a half down on a phone and put
           120 tab stops before it. A selected tag stays in view so it can be cleared. */}
       {tags.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            aria-expanded={tagsOpen}
-            aria-controls={tagsId}
-            onClick={() => setTagsOpen((open) => !open)}
-            className="flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-[12px] text-muted transition-colors hover:text-ink"
+        <Collapsible open={tagsOpen} onOpenChange={setTagsOpen} className="flex flex-wrap items-center gap-1.5">
+          <CollapsibleTrigger asChild>
+            <Button variant="outline" size="xs" className="rounded-full" aria-controls={tagsId}>
+              <ChevronRightIcon aria-hidden className={cn('transition-transform', tagsOpen && 'rotate-90')} />
+              Tags <span className="sb-num text-muted-foreground">{tags.length}</span>
+            </Button>
+          </CollapsibleTrigger>
+          {/* Not a CollapsibleContent: the selected tags stay in it while it is folded. */}
+          <ToggleGroup
+            id={tagsId}
+            type="multiple"
+            role="group"
+            aria-label="Tags"
+            size="sm"
+            spacing={1}
+            value={query.tags}
+            onValueChange={(next) => {
+              const changed = [...next.filter((tag) => !query.tags.includes(tag)), ...query.tags.filter((tag) => !next.includes(tag))]
+              if (changed[0] !== undefined) toggleTag(changed[0])
+            }}
+            className="flex-wrap"
           >
-            <span
-              aria-hidden="true"
-              className={`inline-block transition-transform ${tagsOpen ? 'rotate-90' : ''}`}
-            >
-              ›
-            </span>
-            Tags <span className="sb-num text-faint">{tags.length}</span>
-          </button>
-          <div id={tagsId} role="group" aria-label="Tags" className="flex flex-wrap gap-1.5">
-            {tags
-              .filter(({ tag }) => tagsOpen || query.tags.includes(tag))
-              .map(({ tag, count }) => {
-                const selected = query.tags.includes(tag)
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => toggleTag(tag)}
-                    className={chipClass(selected)}
-                  >
-                    {tag} <span className="sb-num text-faint">{count}</span>
-                  </button>
-                )
-              })}
-          </div>
-        </div>
+            {shownTags.map(({ tag, count }) => (
+              <ToggleGroupItem
+                key={tag}
+                value={tag}
+                variant="outline"
+                className="h-6 rounded-full px-2.5 text-xs font-normal data-[state=on]:border-primary/60 data-[state=on]:bg-primary/15"
+              >
+                {tag} <span className="sb-num text-muted-foreground">{count}</span>
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </Collapsible>
       )}
 
-      <div className="flex items-center gap-3 text-[12px] text-faint">
+      <div className="flex items-center gap-3 text-xs text-muted-foreground">
         <p data-testid="result-count" className="sb-num">
           {shown} of {total}
         </p>
         {filtered && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => commit(clearFilters(query))}
-          >
-            Clear filters
+          <Button size="xs" variant="ghost" onClick={() => commit(clearFilters(query))}>
+            <XIcon /> Clear filters
           </Button>
         )}
       </div>
@@ -237,24 +242,21 @@ function SegmentedGroup<T extends string>({
   onChange: (value: T) => void
 }) {
   return (
-    <div
-      role="group"
+    <ToggleGroup
+      type="single"
       aria-label={label}
-      className="flex rounded-[6px] border border-line bg-surface p-0.5"
+      variant="outline"
+      size="sm"
+      spacing={0}
+      value={value}
+      // Radix answers '' for a click on the pressed one: one stays pressed.
+      onValueChange={(next) => next && onChange(next as T)}
     >
       {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-          className={`h-6 rounded-[4px] px-2.5 text-[12px] transition-colors ${
-            value === option.value ? 'bg-surface-3 text-ink' : 'text-muted hover:text-ink'
-          }`}
-        >
+        <ToggleGroupItem key={option.value} value={option.value} className="px-3 text-xs">
           {option.label}
-        </button>
+        </ToggleGroupItem>
       ))}
-    </div>
+    </ToggleGroup>
   )
 }

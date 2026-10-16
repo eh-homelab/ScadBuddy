@@ -3,6 +3,9 @@ import type { Param } from '../../api/types'
 import { colourHex, paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
+import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Separator } from '@/components/ui/separator'
 
 /**
  * A whole `#RRGGBB` as typed: taken at once, before the field loses focus. An 8-digit
@@ -30,6 +33,7 @@ export function ColorWidget({
   // partial or wrong value is never padded into a colour ("red" was sent as "#RREEDD");
   // a colour name becomes its hex.
   const [draft, setDraft] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
   // A value set from outside (a preset, a reset) replaces a half-typed draft, so a
   // blur never commits the stale text over it.
   const [shown, setShown] = useState(value)
@@ -57,26 +61,55 @@ export function ColorWidget({
       error={error}
       readout={
         extruder === null ? (
-          <span className="text-faint">not in this render</span>
+          <span className="text-muted-foreground">not in this render</span>
         ) : extruder ? (
-          <span className="text-muted">extruder {extruder}</span>
+          <span className="text-foreground">extruder {extruder}</span>
         ) : undefined
       }
     >
       <div className="flex items-center gap-2">
-        <input
+        {/* #3672 — the swatch opens the ways to pick: any colour, or a filament's. */}
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label={`Choose ${paramLabel(param)}`}
+              style={{ background: colour ?? 'transparent' }}
+              className="size-8 shrink-0 cursor-pointer rounded-lg border border-input ring-1 ring-black/10 ring-inset outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            />
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-80">
+            <label className="flex items-center gap-2 text-xs font-medium">
+              <input
+                type="color"
+                // The picker takes only #rrggbb; while the text is no colour it shows black.
+                value={(colour ?? '#000000').toLowerCase()}
+                // Not the caption itself, which names the hex field: fill finds that one alone.
+                // That holds while the popover is non-modal; a modal one would narrow fill's
+                // search to itself (agent/dom activeDialog) and find no field by the caption.
+                aria-label={`${paramLabel(param)} picker`}
+                onChange={(event) => commit(event.target.value)}
+                className="h-8 w-14 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+              />
+              Any colour
+            </label>
+            <Separator />
+            <p className="text-xs font-medium">From a filament</p>
+            <FilamentColourPicker
+              label={paramLabel(param)}
+              value={hex}
+              onPick={(picked) => {
+                onChange(picked)
+                setOpen(false)
+              }}
+            />
+          </PopoverContent>
+        </Popover>
+        <Input
           id={id}
-          type="color"
-          // The picker takes only #rrggbb; while the text is no colour it shows black.
-          value={(colour ?? '#000000').toLowerCase()}
-          aria-label={paramLabel(param)}
-          onChange={(event) => commit(event.target.value)}
-          className="size-8 shrink-0 cursor-pointer rounded-[4px] border border-line bg-surface-2 p-0.5"
-        />
-        <input
           type="text"
           value={draft ?? hex}
-          aria-label={`${paramLabel(param)} hex`}
+          // Named by the Field's label, so the agent's fill finds the colour by its caption.
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${id}-error` : undefined}
           spellCheck={false}
@@ -86,10 +119,9 @@ export function ColorWidget({
             else setDraft(text)
           }}
           onBlur={(event) => commit(event.target.value)}
-          className="sb-field sb-num uppercase"
+          className="sb-num uppercase"
         />
       </div>
-      <FilamentColourPicker label={paramLabel(param)} value={hex} onPick={onChange} />
     </Field>
   )
 }

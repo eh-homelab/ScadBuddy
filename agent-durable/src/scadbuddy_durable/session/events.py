@@ -83,8 +83,11 @@ def translate(
         if not isinstance(text, str) or not text:
             return []
         message = f"durable-{event['offset']}"
+        # A refused credential's notice (runner.py HeldText.mark_notice, #3703):
+        # shown, never retained.
+        notice = {"notice": True} if event.get("notice") is True else {}
         return [
-            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text},
+            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text, **notice},
             {**base, "type": "assistant.text.done", "messageId": message},
         ]
     if kind == "tool_call":

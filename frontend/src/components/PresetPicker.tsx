@@ -22,9 +22,40 @@ import {
 } from '../lib/presets'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { useFillable } from '../agent/useFillable'
+import { Hint } from './Hint'
+import { Spinner } from './ui/spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import { MoreHorizontalIcon } from 'lucide-react'
 
 interface Props {
   slug: string
@@ -111,8 +142,8 @@ function prefill(base: string, suffix: string): string {
   return [...base].slice(0, MAX_NAME - [...suffix].length).join('') + suffix
 }
 
-const FIELD =
-  'w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
+/** The select's "no preset" item: Radix refuses an item whose value is "". */
+const NONE = '\u0000none'
 
 /** The user's own input, which ends a pick's settling (#1775, #2132). */
 const USER_EVENTS = ['pointerdown', 'keydown', 'wheel', 'input'] as const
@@ -167,6 +198,8 @@ export function PresetPicker({
   const descriptionInput = useRef<HTMLTextAreaElement>(null)
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
+  const fieldIds = useId()
+  const trigger = useRef<HTMLButtonElement>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   /** #359 — the preset a pick would apply over unsaved edits, while it asks. */
   const [pending, setPending] = useState<ParamPreset | null>(null)
@@ -254,14 +287,6 @@ export function PresetPicker({
     const timer = setTimeout(() => setSettling(false), SETTLE_MS)
     return () => clearTimeout(timer)
   }, [settling, extra])
-
-  // #350 — the prefill selected, so typing replaces it rather than appending to it.
-  // After the dialog's own effect, which focuses its panel.
-  useEffect(() => {
-    if (naming === null) return
-    nameInput.current?.focus()
-    nameInput.current?.select()
-  }, [naming])
 
   const selected = selection?.preset
   useEffect(() => {
@@ -517,58 +542,94 @@ export function PresetPicker({
     }
   }
 
+  // #1445 — the assistant's fill picks a preset as it did on the native select: by id or name.
+  useFillable(trigger, {
+    // "No preset" as the list offers it, so fill can clear the pick with "" as before.
+    options: () => [
+      ...(selected ? [{ value: '', label: 'No preset' }] : []),
+      ...presets.map((preset) => ({ value: preset.id, label: preset.name })),
+    ],
+    value: () => selected?.id ?? '',
+    set: choose,
+  })
+  const nameId = `${fieldIds}-name`
+  const descriptionId = `${fieldIds}-description`
+  const tagsId = `${fieldIds}-tags`
+  const namingTitle =
+    naming === 'duplicate'
+      ? `Duplicate ${selected?.name ?? 'preset'}`
+      : naming === 'details'
+        ? `Edit details of ${selected?.name ?? 'preset'}`
+        : 'Save as preset'
+  const namingDescription =
+    naming === 'duplicate'
+      ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values, description and tags. The original stays as it is.`
+      : naming === 'details'
+        ? 'Its values stay as they are: Update saves the ones on screen.'
+        : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
+
   return (
-    <div data-testid="preset-picker" className="flex flex-col gap-1.5 border-b border-line px-3 py-2">
+    <div data-testid="preset-picker" className="flex flex-col gap-2 border-b px-3 py-2.5">
       <div className="flex items-center gap-2">
-        <label htmlFor="preset-select" className="shrink-0 text-[12px] text-muted">
+        <Label htmlFor="preset-select" className="shrink-0 font-normal text-muted-foreground">
           Preset
-        </label>
-        <select
-          id="preset-select"
+        </Label>
+        <Select
           value={selected?.id ?? ''}
-          onChange={(event) => choose(event.target.value)}
+          onValueChange={(id) => choose(id === NONE ? '' : id)}
           disabled={presetsState.loading && !presetsState.data}
-          className="sb-field min-w-0 flex-1 cursor-pointer"
         >
-          <option value="">
-            {presets.length === 0 ? 'No presets yet' : 'Choose a preset…'}
-          </option>
-          {shipped.length > 0 && (
-            <optgroup label="From the template">
-              {shipped.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </optgroup>
-          )}
-          {saved.length > 0 && (
-            <optgroup label="Saved">
-              {saved.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
+          <SelectTrigger ref={trigger} id="preset-select" className="min-w-0 flex-1">
+            <SelectValue placeholder={presets.length === 0 ? 'No presets yet' : 'Choose a preset…'} />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {selected && (
+              <>
+                <SelectItem value={NONE}>No preset</SelectItem>
+                <SelectSeparator />
+              </>
+            )}
+            {shipped.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>From the template</SelectLabel>
+                {shipped.map((preset) => (
+                  <SelectItem key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            )}
+            {saved.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>Saved</SelectLabel>
+                {saved.map((preset) => (
+                  <SelectItem key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            )}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* #352 — its own line above the buttons: beside them it wrapped word by word
           into a narrow column, and a long name pushed it out of the panel.
           #351 — always in the page, so "Changed from …" is announced as it appears;
           out of the flow while empty, so it adds no gap. */}
-      <p
-        role="status"
-        data-testid={modified ? 'preset-modified' : undefined}
-        title={modified ? `Changed from ${selected?.name ?? ''}` : undefined}
-        className={modified ? 'min-w-0 truncate text-[12px] text-faint' : 'sr-only'}
-      >
-        {modified && <>Changed from {selected?.name}</>}
-      </p>
-      <div className="flex flex-wrap items-center justify-end gap-1">
+      <Hint content={modified ? `Changed from ${selected?.name ?? ''}` : undefined}>
+        <p
+          role="status"
+          data-testid={modified ? 'preset-modified' : undefined}
+          className={modified ? 'min-w-0 truncate text-xs text-muted-foreground' : 'sr-only'}
+        >
+          {modified && <>Changed from {selected?.name}</>}
+        </p>
+      </Hint>
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
         {editable && modified && !pinned && (
           <Button
+            type="button"
             size="sm"
             onClick={() => void update()}
             disabled={busy}
@@ -577,58 +638,57 @@ export function PresetPicker({
             Update
           </Button>
         )}
-        {selected && (
-          <Button
-            size="sm"
-            onClick={openDuplicate}
-            disabled={busy}
-            aria-label={`Duplicate preset ${selected.name}`}
-          >
-            Duplicate
-          </Button>
-        )}
-        <Button size="sm" onClick={openSaveAs} disabled={busy || pinned}>
+        <Button type="button" variant="outline" size="sm" onClick={openSaveAs} disabled={busy || pinned}>
           Save as preset…
         </Button>
-        {editable && (
-          <Button
-            size="sm"
-            onClick={openDetails}
-            disabled={busy}
-            aria-label={`Edit details of preset ${selected?.name ?? ''}`}
-          >
-            Edit details
-          </Button>
-        )}
-        {editable && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setConfirmingDelete(true)}
-            disabled={busy}
-            aria-label={`Delete preset ${selected?.name ?? ''}`}
-          >
-            Delete
-          </Button>
+        {selected && (
+          // #3672 — the preset's own actions, in one menu beside Save as. Each dialog opens
+          // once the menu has closed and put the focus back on its button.
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="outline" size="icon-sm" disabled={busy} aria-label={`More for preset ${selected.name}`}>
+                <MoreHorizontalIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-auto min-w-44">
+              <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
+                Duplicate
+              </DropdownMenuItem>
+              {editable && (
+                <DropdownMenuItem onSelect={() => setTimeout(openDetails, 0)} aria-label={`Edit details of preset ${selected.name}`}>
+                  Edit details
+                </DropdownMenuItem>
+              )}
+              {editable && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => setTimeout(() => setConfirmingDelete(true), 0)}
+                    aria-label={`Delete preset ${selected.name}`}
+                  >
+                    Delete
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
 
       {pinned && (
-        <p data-testid="preset-pinned" className="text-[12px] text-faint">
+        <p data-testid="preset-pinned" className="text-xs text-muted-foreground">
           Presets are saved against the current version.
         </p>
       )}
 
       {selected && (selected.description || selected.tags.length > 0) && (
-        <div data-testid="preset-details" className="flex flex-col gap-1 text-[12px] text-muted">
+        <div data-testid="preset-details" className="flex flex-col gap-1.5 text-xs text-muted-foreground">
           {selected.tags.length > 0 && (
             <ul aria-label="Preset tags" className="flex flex-wrap gap-1">
               {selected.tags.map((tag) => (
-                <li
-                  key={tag}
-                  className="rounded-full border border-line bg-surface-2 px-2 py-px text-[11px]"
-                >
-                  {tag}
+                <li key={tag}>
+                  <Badge variant="secondary">{tag}</Badge>
                 </li>
               ))}
             </ul>
@@ -642,127 +702,127 @@ export function PresetPicker({
       )}
 
       {skipped.length > 0 && (
-        <p role="status" className="text-[12px] text-warn">
+        <p role="status" className="text-xs text-destructive">
           Skipped {skipped.length === 1 ? 'a value' : `${skipped.length} values`} this template no
           longer has: {describeSkipped(skipped)}
         </p>
       )}
       {(error ?? presetsState.error) && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-xs text-destructive">
           {error ?? `Could not load presets: ${presetsState.error?.message}`}
         </p>
       )}
 
-      <Dialog
-        open={naming !== null}
-        title={
-          naming === 'duplicate'
-            ? `Duplicate ${selected?.name ?? 'preset'}`
-            : naming === 'details'
-              ? `Edit details of ${selected?.name ?? 'preset'}`
-              : 'Save as preset'
-        }
-        description={
-          naming === 'duplicate'
-            ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values, description and tags. The original stays as it is.`
-            : naming === 'details'
-              ? 'Its values stay as they are: Update saves the ones on screen.'
-              : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
-        }
-        onClose={closeNaming}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeNaming} disabled={busy}>
+      <Dialog open={naming !== null} onOpenChange={(open) => !open && closeNaming()}>
+        <DialogContent
+          // #350 — the name field takes the focus with its prefill selected, so typing
+          // replaces it rather than appending to it.
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            nameInput.current?.focus()
+            nameInput.current?.select()
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{namingTitle}</DialogTitle>
+            <DialogDescription>{namingDescription}</DialogDescription>
+          </DialogHeader>
+          <form id={`${fieldIds}-form`} onSubmit={submitNaming} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor={nameId}>Preset name</Label>
+              <Input
+                id={nameId}
+                ref={nameInput}
+                value={name}
+                onChange={(event) => {
+                  setName(event.target.value)
+                  edited()
+                }}
+                maxLength={MAX_NAME}
+                aria-invalid={invalidField === 'name' || undefined}
+                aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
+              />
+            </div>
+            {naming !== 'duplicate' && (
+              <>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor={descriptionId}>Description (optional, Markdown)</Label>
+                  <Textarea
+                    id={descriptionId}
+                    ref={descriptionInput}
+                    value={description}
+                    onChange={(event) => {
+                      setDescription(event.target.value)
+                      edited()
+                    }}
+                    rows={3}
+                    aria-invalid={invalidField === 'description' || undefined}
+                    aria-describedby={invalidField === 'description' && nameError ? dialogErrorId : undefined}
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor={tagsId}>Tags (optional, comma-separated)</Label>
+                  <Input
+                    id={tagsId}
+                    ref={tagsInput}
+                    value={tagsText}
+                    onChange={(event) => {
+                      setTagsText(event.target.value)
+                      edited()
+                    }}
+                    aria-invalid={invalidField === 'tags' || undefined}
+                    aria-describedby={invalidField === 'tags' && nameError ? dialogErrorId : undefined}
+                    placeholder="gift, small"
+                  />
+                </div>
+              </>
+            )}
+            {nameError && (
+              <p id={dialogErrorId} role="alert" className="text-sm text-destructive">
+                {nameError}
+              </p>
+            )}
+          </form>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={closeNaming} disabled={busy}>
               Cancel
             </Button>
-            <Button
-              variant="primary"
-              onClick={() => submitNaming()}
-              disabled={busy || !name.trim()}
-            >
+            <Button type="submit" form={`${fieldIds}-form`} disabled={busy || !name.trim()}>
               {busy && <Spinner />}
               {naming === 'duplicate' ? 'Duplicate' : 'Save'}
             </Button>
-          </>
-        }
-      >
-        <form onSubmit={submitNaming} className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1 text-[13px] text-muted">
-            Preset name
-            <input
-              ref={nameInput}
-              value={name}
-              onChange={(event) => {
-                setName(event.target.value)
-                edited()
-              }}
-              maxLength={MAX_NAME}
-              autoFocus
-              aria-invalid={invalidField === 'name' || undefined}
-              aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
-              className={`h-8 ${FIELD}`}
-            />
-          </label>
-          {naming !== 'duplicate' && (
-            <>
-              <label className="flex flex-col gap-1 text-[13px] text-muted">
-                Description (optional, Markdown)
-                <textarea
-                  ref={descriptionInput}
-                  value={description}
-                  onChange={(event) => {
-                    setDescription(event.target.value)
-                    edited()
-                  }}
-                  rows={3}
-                  aria-invalid={invalidField === 'description' || undefined}
-                  aria-describedby={
-                    invalidField === 'description' && nameError ? dialogErrorId : undefined
-                  }
-                  className={`py-1.5 ${FIELD}`}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-[13px] text-muted">
-                Tags (optional, comma-separated)
-                <input
-                  ref={tagsInput}
-                  value={tagsText}
-                  onChange={(event) => {
-                    setTagsText(event.target.value)
-                    edited()
-                  }}
-                  aria-invalid={invalidField === 'tags' || undefined}
-                  aria-describedby={invalidField === 'tags' && nameError ? dialogErrorId : undefined}
-                  placeholder="gift, small"
-                  className={`h-8 ${FIELD}`}
-                />
-              </label>
-            </>
-          )}
-        </form>
-        {nameError && (
-          <p id={dialogErrorId} role="alert" className="mt-3 text-[13px] text-warn">
-            {nameError}
-          </p>
-        )}
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={pending !== null}
-        title={`Apply preset ${pending?.name ?? ''}?`}
-        description={
-          selected
-            ? `You changed ${selected.name} since you picked it.`
-            : 'The values on screen have changes no preset holds.'
-        }
-        onClose={() => setPending(null)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setPending(null)}>
-              Cancel
-            </Button>
+      <AlertDialog open={pending !== null} onOpenChange={(open) => !open && setPending(null)}>
+        <AlertDialogContent
+          // Opened from the select's list, which is gone by now: back to the select (#1457).
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            trigger.current?.focus()
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Apply preset ${pending?.name ?? ''}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {selected
+                ? `You changed ${selected.name} since you picked it.`
+                : 'The values on screen have changes no preset holds.'}{' '}
+              Applying {pending?.name} replaces them.
+              {!pinned && (
+                <>
+                  {' '}To keep them, cancel and {editable ? `update ${selected?.name} or ` : ''}save
+                  them as a preset first.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <Button
-              variant="danger"
+              type="button"
+              variant="destructive"
               // The preset as asked about, not looked up again: it may have changed since.
               // Not USER_ONLY: replacing the values on screen stays in the page, so the
               // assistant may confirm a pick it made (spec §8.1).
@@ -773,62 +833,45 @@ export function PresetPicker({
             >
               Replace my changes
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">
-          Applying {pending?.name} replaces them.
-          {!pinned && (
-            <>
-              {' '}To keep them, cancel and {editable ? `update ${selected?.name} or ` : ''}save
-              them as a preset first.
-            </>
-          )}
-        </p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
-      <Dialog
-        open={confirmingUpdate}
-        title={`Update preset ${selected?.name ?? ''}`}
-        description="This template no longer has every parameter the preset sets."
-        onClose={() => setConfirmingUpdate(false)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setConfirmingUpdate(false)} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void update(true)} disabled={busy} {...USER_ONLY}>
+      <AlertDialog open={confirmingUpdate} onOpenChange={(open) => !open && setConfirmingUpdate(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Update preset ${selected?.name ?? ''}`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              This template no longer has every parameter the preset sets. {selected?.name} also sets{' '}
+              {describeSkipped(skipped)}, which this template no longer has. Updating drops them; note them
+              first to re-enter them on the new parameters.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={() => void update(true)} disabled={busy} {...USER_ONLY}>
               {busy && <Spinner />}
               Update and drop them
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">
-          {selected?.name} also sets {describeSkipped(skipped)}, which this template no longer has.
-          Updating drops them; note them first to re-enter them on the new parameters.
-        </p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
-      <Dialog
-        open={confirmingDelete}
-        title={`Delete preset ${selected?.name ?? ''}`}
-        description="The values on screen stay as they are."
-        onClose={() => setConfirmingDelete(false)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setConfirmingDelete(false)} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void remove()} disabled={busy} {...USER_ONLY}>
+      <AlertDialog open={confirmingDelete} onOpenChange={(open) => !open && setConfirmingDelete(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Delete preset ${selected?.name ?? ''}`}</AlertDialogTitle>
+            <AlertDialogDescription>The values on screen stay as they are. This cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={() => void remove()} disabled={busy} {...USER_ONLY}>
               {busy && <Spinner />}
               Delete preset
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">This cannot be undone.</p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

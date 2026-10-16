@@ -46,7 +46,7 @@ describe('McpOidcSettings', () => {
     await user.clear(issuer)
     await user.type(issuer, 'https://auth.home.example/application/o/scadbuddy/')
     await user.type(screen.getByLabelText('Also read tiers from claim (optional)'), 'groups')
-    await user.click(screen.getByRole('checkbox', { name: /Let MCP clients sign in/ }))
+    await user.click(screen.getByRole('switch', { name: /Let MCP clients sign in/ }))
     await user.click(screen.getByRole('button', { name: 'Save sign-in settings' }))
     expect(await screen.findByRole('status')).toHaveTextContent('now accepts sign-ins')
     expect(sent).toMatchObject({
@@ -63,7 +63,7 @@ describe('McpOidcSettings', () => {
     const issuer = await screen.findByLabelText('Issuer URL')
     await user.clear(issuer)
     await user.type(issuer, 'https://typo.example/')
-    await user.click(screen.getByRole('checkbox', { name: /Let MCP clients sign in/ }))
+    await user.click(screen.getByRole('switch', { name: /Let MCP clients sign in/ }))
     await user.click(screen.getByRole('button', { name: 'Save sign-in settings' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('nothing was saved')
   })

@@ -68,16 +68,17 @@ describe('usePrintChoices', () => {
     expect(read).toHaveBeenLastCalledWith(OUTPUT_A, null)
   })
 
-  it('a new output resets the plate and seeds again', async () => {
+  it('a new output resets the plates to every plate and seeds again (#3652)', async () => {
     const { result, rerender } = renderHook(({ id }) => usePrintChoices(true, { kind: 'output', output: { id, slug: 'm' } }), {
       initialProps: { id: OUTPUT_A },
     })
     await waitFor(() => expect(result.current.choices).not.toBeNull())
-    act(() => result.current.setPlate('all'))
+    expect(result.current.selection.plate).toBe('all')
+    act(() => result.current.setPlate([2]))
     act(() => result.current.changeNozzles(DEFAULT_NOZZLES))
 
     rerender({ id: OUTPUT_B })
-    expect(result.current.selection.plate).toBe(1)
+    expect(result.current.selection.plate).toBe('all')
     await waitFor(() => expect(read).toHaveBeenLastCalledWith(OUTPUT_B, null))
     await waitFor(() => expect(result.current.selection.nozzles[0]?.size).toBe('0.2'))
   })

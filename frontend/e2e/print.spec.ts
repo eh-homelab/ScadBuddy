@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { choose } from './select'
 
 test.describe('print dialog', () => {
   // These drive the msw worker; the real stack is covered by real-backend.spec.ts.
@@ -37,7 +38,7 @@ test.describe('print dialog', () => {
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
 
     await dialog.getByRole('radio', { name: /0\.2 mm/ }).check()
-    await dialog.getByLabel('Process').selectOption('0.08mm High Quality @BBL H2C 0.2 nozzle')
+    await choose(page, dialog.getByLabel('Process'), '0.08mm High Quality @BBL H2C 0.2 nozzle')
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
 
     const queued = dialog.getByTestId('queued-items')
@@ -92,7 +93,7 @@ test.describe('print dialog', () => {
     await edges.getByRole('button', { name: 'Suppress…' }).click()
     const form = edges.getByRole('form', { name: 'Suppress SB1002:part-2' })
     await expect(form.getByRole('button', { name: 'Suppress' })).toBeDisabled()
-    await form.getByLabel('Scope').selectOption({ label: 'This template' })
+    await choose(page, form.getByLabel('Scope'), 'This template')
     await form.getByLabel('Reason').fill('the seam is inside the ring')
     await form.getByRole('button', { name: 'Suppress' }).click()
     await expect(edges).toHaveCount(0)
@@ -112,8 +113,8 @@ test.describe('print dialog', () => {
     await expect(dialog.getByLabel('Process')).toHaveCount(0)
 
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
-    await dialog.getByLabel('Process').selectOption('0.24mm Standard @BBL H2C')
-    await dialog.getByLabel('Preset for slot 1').selectOption({ label: 'Bambu ABS @BBL H2C' })
+    await choose(page, dialog.getByLabel('Process'), '0.24mm Standard @BBL H2C')
+    await choose(page, dialog.getByLabel('Preset for slot 1'), 'Bambu ABS @BBL H2C')
     // High Flow is offered per side, and sliced as High Flow (#484): nothing says otherwise.
     await dialog.getByRole('radio', { name: 'Left High Flow' }).check()
     await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
@@ -130,10 +131,10 @@ test.describe('print dialog', () => {
 
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     const tower = dialog.getByLabel('Prime tower')
-    await tower.selectOption('off')
+    await choose(page, tower, 'Off')
     await expect(dialog.getByRole('checkbox', { name: /No sparse layers/ })).toHaveCount(0)
     await expect(dialog.getByText(/Without a tower/)).toBeVisible()
-    await tower.selectOption('on')
+    await choose(page, tower, 'On')
     const noSparse = dialog.getByRole('checkbox', { name: /No sparse layers/ })
     await noSparse.uncheck()
     await noSparse.check()
@@ -202,7 +203,11 @@ test.describe('print dialog', () => {
     await preview.getByRole('radio', { name: 'Layers' }).click()
     const slider = preview.getByRole('slider', { name: 'Layer height' })
     await expect(slider).toBeEnabled()
-    await slider.fill('2')
+    // A Radix slider: moved by keyboard, a step at a time, from the lowest layer up to 2 mm.
+    await slider.press('Home')
+    for (let i = 0; i < 200 && Number(await slider.getAttribute('aria-valuenow')) < 2 - 1e-6; i++) {
+      await slider.press('ArrowRight')
+    }
     await expect(preview.getByText(/^Up to 2\.00 of /)).toBeVisible()
 
     await preview.getByRole('button', { name: 'Close' }).click()

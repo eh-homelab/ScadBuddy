@@ -2,7 +2,8 @@ import { Link, Navigate, useLocation, useParams } from 'react-router'
 import { api } from '../api/client'
 import { arrangedSources } from '../lib/arrange'
 import { modelPath, type EditNavigationState } from '../lib/deeplink'
-import { Spinner } from '../components/ui/Spinner'
+import { PageLoading, PageProblem } from '../components/PageState'
+import { Button } from '@/components/ui/button'
 import { useAsync } from '../lib/useAsync'
 
 /**
@@ -27,26 +28,23 @@ export function EditPage() {
     ? { loading: false, error: undefined, data: preloaded }
     : { loading: fetched.loading, error: fetched.error, data: fetched.data }
 
-  if (target.loading) {
-    return (
-      <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
-        <Spinner /> Opening that output
-      </p>
-    )
-  }
+  if (target.loading) return <PageLoading label="Opening that output" rows={1} />
 
   if (target.error || !target.data) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">That output is gone</h1>
-        <p className="mt-2 text-[13px] text-muted">
-          Nothing in ScadBuddy has the id <span className="sb-num">{outputId}</span> any more, and
-          no 3MF was left to read its parameters from.
-        </p>
-        <Link to="/" className="mt-4 inline-block text-[13px] text-accent underline">
-          Back to models
-        </Link>
-      </div>
+      <PageProblem
+        title="That output is gone"
+        message={
+          <>
+            Nothing in ScadBuddy has the id <span className="sb-num">{outputId}</span> any more, and no 3MF was
+            left to read its parameters from.
+          </>
+        }
+      >
+        <Button asChild variant="outline">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
@@ -56,21 +54,15 @@ export function EditPage() {
   if (arrangedFrom > 0) {
     const sources = arrangedSources(target.data.arranged_from ?? [])
     return (
-      <div className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">
-          {`${target.data.name ?? 'This output'} was arranged`}
-        </h1>
-        <p className="mt-2 text-[13px] text-muted">
-          It lays out objects from {sources}, so it has no one set of parameters to open in the
-          customizer.
-        </p>
-        <Link
-          to={modelPath(target.data.slug, 'history')}
-          className="mt-4 inline-block text-[13px] text-accent underline"
-        >
-          Open its history
-        </Link>
-      </div>
+      <PageProblem
+        alert={false}
+        title={`${target.data.name ?? 'This output'} was arranged`}
+        message={`It lays out objects from ${sources}, so it has no one set of parameters to open in the customizer.`}
+      >
+        <Button asChild variant="outline">
+          <Link to={modelPath(target.data.slug, 'history')}>Open its history</Link>
+        </Button>
+      </PageProblem>
     )
   }
 

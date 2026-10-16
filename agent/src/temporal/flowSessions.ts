@@ -1,5 +1,6 @@
 import { ApplicationFailure, Context } from '@temporalio/activity'
 import type { Sql } from 'postgres'
+import { userTurnRows } from '../sessions/eventLog.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { sameOwner, type Owner } from '../sessions/protocol.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
@@ -72,8 +73,7 @@ function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<
       const [start] = await sql<{ here: boolean; seq: string | null }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}) AS here, e.seq
           FROM (SELECT 1) AS one
-          LEFT JOIN ai_session_events e
-            ON e.session_id = ${sessionId} AND e.event::jsonb->>'type' = 'user.turn' AND e.event::jsonb->>'turnId' = ${turnId}`
+          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}`
       if (!start?.here) throw gone()
       if (start.seq === null) return undefined
       after = start.seq

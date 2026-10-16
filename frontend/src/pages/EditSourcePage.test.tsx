@@ -349,7 +349,7 @@ describe('EditSourcePage, unsaved edits (#997)', () => {
     const editor = await edit(user)
 
     await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.queryByRole('heading', { name: 'Customizer' })).toBeNull()
     expect(editor).toHaveValue('sphere(2);\n')

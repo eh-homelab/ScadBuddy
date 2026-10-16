@@ -16,12 +16,12 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers.model import ScopeRef
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions, FilamentPlan
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
@@ -65,6 +65,11 @@ class AnalysisRequest(BaseModel):
     #: per slot as the print dialog's filament step does. The mesh checks still read
     #: ``plate_id``.
     all_plates: bool = False
+    #: Several plates' print (#3652): the filament checks read those plates' usage, as
+    #: ``all_plates`` reads every plate's. The mesh checks still read ``plate_id``.
+    plate_ids: list[Annotated[int, Field(ge=1)]] | None = Field(
+        default=None, min_length=1, max_length=MAX_PLATES
+    )
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
     #: What reading a library file's 3MF for the mesh checks may spend (#2087), each

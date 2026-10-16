@@ -35,8 +35,9 @@ jobs:
       contents: read
       # `gh run list` (the fail-fast check below) reads the Actions API.
       actions: read
-    # Build Image takes ~7 min on a warm cache and up to ~40 cold (two
-    # architectures, arm64 emulated). Waiting here costs hosted minutes but is
+    # Build Image took ~7 min on a warm cache and up to ~40 cold when it also
+    # built arm64 under QEMU; amd64 alone is faster, so the bound is generous.
+    # Waiting here costs hosted minutes but is
     # what makes the release event alone sufficient. The poll below gives up at
     # 45 min; the job timeout sits well above it so the loop's own error is
     # what gets reported, not an opaque job timeout.

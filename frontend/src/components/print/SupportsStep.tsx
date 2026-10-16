@@ -1,3 +1,8 @@
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { StepCard } from './StepCard'
 import { useState } from 'react'
 import type { SupportsChoice } from '../../api/types'
 
@@ -46,17 +51,15 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
   // Default, No supports or a reset from outside starts the next choice's field empty.
   if (on === null && angleText !== '') setAngleText('')
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Supports</legend>
-      <div className="mt-1.5 flex flex-col gap-1">
-        <label htmlFor="supports-select" className="text-[12px] text-muted">
+    <StepCard title="Supports">
+      <div className="grid gap-1.5">
+        <Label htmlFor="supports-select" className="text-xs font-normal text-muted-foreground">
           Support type
-        </label>
-        <select
-          id="supports-select"
+        </Label>
+        <Select
           value={mode}
-          onChange={(event) => {
-            const next = event.target.value as Mode
+          onValueChange={(chosen) => {
+            const next = chosen as Mode
             if (next === 'default') onChange(null)
             // Only `enabled`: the backend applies nothing else with supports off (#2837 review).
             else if (next === 'off') onChange({ enabled: false })
@@ -70,21 +73,25 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
                 ...(on?.threshold_angle == null ? {} : { threshold_angle: on.threshold_angle }),
               })
           }}
-          className="sb-field"
         >
-          <option value="default">{defaultLabel(templateSettings, fromFile)}</option>
-          <option value="off">No supports</option>
-          <option value="tree">Tree supports</option>
-          <option value="normal">Normal supports</option>
-        </select>
+          <SelectTrigger id="supports-select" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">{defaultLabel(templateSettings, fromFile)}</SelectItem>
+            <SelectItem value="off">No supports</SelectItem>
+            <SelectItem value="tree">Tree supports</SelectItem>
+            <SelectItem value="normal">Normal supports</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
       {on && (
-        <div className="mt-2 flex flex-col gap-2">
-          <div className="flex flex-col gap-1">
-            <label htmlFor="supports-angle" className="text-[12px] text-muted">
+        <div className="space-y-3 pt-1">
+          <div className="grid gap-1.5">
+            <Label htmlFor="supports-angle" className="text-xs font-normal text-muted-foreground">
               Threshold angle (°)
-            </label>
-            <input
+            </Label>
+            <Input
               id="supports-angle"
               type="number"
               min={0}
@@ -105,29 +112,28 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
                 if (!/^\d+$/.test(raw) || angle > 90) onChange(rest)
                 else onChange({ ...rest, threshold_angle: angle })
               }}
-              className="sb-field w-24"
+              className="w-24"
             />
             {angleInvalid && (
-              <p id="supports-angle-invalid" className="text-[12px] text-warn">
+              <p id="supports-angle-invalid" className="text-xs text-destructive">
                 A whole number of degrees from 0 to 90. Until then, the template&apos;s angle
                 is used, else the preset&apos;s.
               </p>
             )}
-            <p className="text-[12px] text-muted">
+            <p className="text-xs text-muted-foreground">
               Overhangs steeper than this, from vertical, get supports. Empty uses the
               template&apos;s angle, else the preset&apos;s.
             </p>
           </div>
-          <label className="flex items-center gap-2 text-[12px] text-ink">
-            <input
-              type="checkbox"
+          <Label className="cursor-pointer font-normal">
+            <Checkbox
               checked={on.on_build_plate_only ?? false}
-              onChange={(event) => onChange({ ...on, on_build_plate_only: event.target.checked })}
+              onCheckedChange={(checked) => onChange({ ...on, on_build_plate_only: checked === true })}
             />
             On build plate only
-          </label>
+          </Label>
         </div>
       )}
-    </fieldset>
+    </StepCard>
   )
 }

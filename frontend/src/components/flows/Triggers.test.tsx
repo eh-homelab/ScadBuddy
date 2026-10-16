@@ -81,7 +81,7 @@ describe('FlowTriggers', () => {
   it('revokes after a confirmation, then attaches a new grant as shown', async () => {
     const { user } = render()
     await user.click(within(await row(/Every hour/)).getByRole('button', { name: 'Revoke' }))
-    const confirm = await screen.findByRole('dialog', { name: 'Revoke its grant?' })
+    const confirm = await screen.findByRole('alertdialog', { name: 'Revoke its grant?' })
     expect(flowTriggerRequests()).toEqual([])
     await user.click(within(confirm).getByRole('button', { name: 'Revoke' }))
     const attach = await within(await row(/Every hour/)).findByRole('button', { name: 'Attach a grant…' })

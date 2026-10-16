@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
+import type { PlateChoice } from './plateChoice'
 import { DEFAULT_NOZZLES, defaultsOf, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import type { CarryBox } from './useFilamentPlan'
@@ -21,8 +22,8 @@ export interface PrintSelection {
   bedType: string | null
   /** Advanced only — a filament preset per slot id, in place of the spool's own. */
   overrides: Record<string, PresetRef>
-  /** #83 — the plate (or all of them) to print. */
-  plate: number | 'all'
+  /** #83, #3652 — the plates to print: every one, or a set of them. */
+  plate: PlateChoice
   /** #2166, Advanced only — a slot printed on the side chosen by hand, by slot id. */
   sides: Record<string, Side>
 }
@@ -71,9 +72,9 @@ export function usePrintChoices(
   const [advanced, setAdvanced] = useState(false)
   const [overrides, setOverrides] = useState<Record<string, PresetRef>>({})
   const [sides, setSides] = useState<Record<string, Side>>({})
-  /** #83 — the output's plates, and the one (or all) to print. */
+  /** #83 — the output's plates, and the ones to print: every plate unless chosen (#3652). */
   const [plates, setPlates] = useState<OutputPlate[]>([])
-  const [plate, setPlate] = useState<number | 'all'>(1)
+  const [plate, setPlate] = useState<PlateChoice>('all')
 
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -159,7 +160,7 @@ export function usePrintChoices(
   // resets its print options on the same `sourceKey`; the two are one reset.
   const resetKey = key
   useEffect(() => {
-    setPlate(1)
+    setPlate('all')
     setPlates([])
     // Except onto the output a re-arrange made, which keeps the dialog's choices.
     if (carry?.get()) return

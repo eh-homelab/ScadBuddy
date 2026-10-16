@@ -27,7 +27,7 @@ from scadbuddy.analyzers.context import (
     base_profile,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.filaments import every_plate, gather_plate_options
+from scadbuddy.bambuddy.filaments import asked_plates, every_plate, gather_plate_options
 from scadbuddy.bambuddy.library_view import NotViewableError, library_geometry
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
@@ -206,7 +206,9 @@ async def _read_bambuddy(
     # step reads it (`pipelines.filament_options_for_output`). A 3MF whose plates
     # cannot be listed makes the inventory unavailable, as `_read_geometry` treats the
     # same file, rather than failing the run.
-    plate_ids = [request.plate_id]
+    plate_ids = asked_plates(request.plate_id, request.all_plates, request.plate_ids) or [
+        request.plate_id
+    ]
     try:
         if request.all_plates and context.library_file_id is not None:
             # As the library file's filament step reads them: Bambuddy's plates.

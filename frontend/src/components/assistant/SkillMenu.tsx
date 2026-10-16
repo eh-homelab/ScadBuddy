@@ -1,4 +1,6 @@
-import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { Command, CommandItem, CommandList } from '@/components/ui/command'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { loadedSkills, matchingSkills, skillInvocation, slashQuery, type SkillChoice } from '../../agent/chat/skills'
 import { aiPlugins } from '../../api/aiPlugins'
 import { ApiError } from '../../api/client'
@@ -11,7 +13,9 @@ import { ApiError } from '../../api/client'
 // The composer stays a textbox (a multi-line message box, not a one-line picker), with
 // the listbox popup wired to it by aria-autocomplete, aria-controls and
 // aria-activedescendant, so focus never leaves it; a polite status names the count, the
-// option moved to and the insertion for screen readers.
+// option moved to and the insertion for screen readers. #3673 — the popup is shadcn's
+// command list in a popover anchored to the composer; the composer keeps the keys, and
+// the command list follows the highlight it is given.
 
 interface Options {
   draft: string
@@ -19,6 +23,8 @@ interface Options {
   focus: () => void
   /** False while the user cannot write here (another principal's session). */
   enabled: boolean
+  /** The composer, which the popup sits above. */
+  anchor: RefObject<HTMLElement | null>
 }
 
 interface Skills {
@@ -39,8 +45,7 @@ export interface SkillMenu {
   menu: ReactNode
 }
 
-export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): SkillMenu {
-  const id = useId()
+export function useSkillMenu({ draft, writeDraft, focus, enabled, anchor }: Options): SkillMenu {
   const query = slashQuery(draft)
   const [dismissed, setDismissed] = useState(false)
   // The highlighted option, for the query it was chosen under: a new query starts at the top.
@@ -80,17 +85,34 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
   const matches = open && skills.list ? matchingSkills(skills.list, query ?? '') : []
   const index = active.query === query ? Math.min(active.index, Math.max(matches.length - 1, 0)) : 0
   const moved = active.query === query && active.moved
-  const optionId = (i: number) => `${id}-skill-${i}`
-  const listId = `${id}-skills`
   const highlighted = matches[index] as SkillChoice | undefined
   const current = highlighted ? index : -1
 
-  // Only when the highlight moves: the chat re-renders on every streamed token, and
-  // scrolling then would snap back a list the user is scrolling with the mouse (#2104).
+  // The command list names its own ids (cmdk), so the composer's aria-controls and
+  // aria-activedescendant are read from it, and again whenever its highlight moves.
+  const [list, setList] = useState<HTMLDivElement | null>(null)
+  const [ids, setIds] = useState<{ list?: string; option?: string }>({})
   useEffect(() => {
-    if (!open || current < 0) return
-    document.getElementById(`${id}-skill-${current}`)?.scrollIntoView?.({ block: 'nearest' })
-  }, [id, open, current])
+    if (!list) {
+      setIds((was) => (was.list || was.option ? {} : was))
+      return
+    }
+    const read = () => {
+      const option = list.querySelector('[cmdk-item][data-selected="true"]')?.id || undefined
+      setIds((was) => (was.list === list.id && was.option === option ? was : { list: list.id, option }))
+    }
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(list, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-selected'] })
+    return () => observer.disconnect()
+  }, [list])
+
+  // Only when the highlight moves (its option's id changes): the chat re-renders on every
+  // streamed token, and scrolling then would snap back a list the user is scrolling with
+  // the mouse (#2104).
+  useEffect(() => {
+    if (open && ids.option) document.getElementById(ids.option)?.scrollIntoView?.({ block: 'nearest' })
+  }, [open, ids.option])
 
   const choose = (skill: SkillChoice) => {
     const text = skillInvocation(skill)
@@ -141,36 +163,57 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
 
   const menu = (
     <>
-      {open && (
-        <div className="absolute inset-x-2.5 bottom-full z-10 mb-1 max-h-56 overflow-y-auto rounded-[6px] border border-line bg-surface-2 py-1 text-[13px] shadow-lg">
-          {/* Options only: the line said when there are none sits beside it, and the
-              status above says it to screen readers. */}
-          <div id={listId} role="listbox" aria-label="Skills">
-            {matches.map((skill, i) => (
-            <div
-              key={skill.name}
-              id={optionId(i)}
-              role="option"
-              aria-selected={i === index}
-              // Keeps focus (and the caret) in the composer.
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(skill)}
-              onMouseMove={() => i !== index && setActive({ query, index: i, moved: false })}
-              className={`flex min-h-7 cursor-pointer items-center break-all px-2.5 py-1 font-mono ${
-                i === index ? 'bg-accent/15 text-ink' : 'text-muted'
-              }`}
-            >
-              /{skill.name}
-            </div>
-            ))}
-          </div>
-          {!matches.length && (
-            <p data-testid="skill-menu-notice" aria-hidden="true" className="px-2.5 py-1 text-faint">
-              {status}
-            </p>
-          )}
-        </div>
-      )}
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          if (!next) setDismissed(true)
+        }}
+      >
+        <PopoverAnchor virtualRef={anchor as RefObject<HTMLElement>} />
+        <PopoverContent
+          side="top"
+          align="start"
+          className="w-(--radix-popover-trigger-width) gap-0 p-0"
+          // Focus, and the caret, stay in the composer.
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onMouseDown={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            // A click in the composer keeps it open; the draft says whether it should be.
+            if (anchor.current?.contains(event.target as Node)) event.preventDefault()
+          }}
+        >
+          <Command
+            shouldFilter={false}
+            value={highlighted?.name ?? ''}
+            onValueChange={(name) => {
+              const at = matches.findIndex((skill) => skill.name === name)
+              if (at >= 0 && at !== index) setActive({ query, index: at, moved: false })
+            }}
+            className="rounded-lg!"
+          >
+            {/* Options only: the line said when there are none sits beside it, and the
+                status below says it to screen readers. */}
+            <CommandList ref={setList} label="Skills" className="max-h-56">
+              {matches.map((skill) => (
+                <CommandItem
+                  key={skill.name}
+                  value={skill.name}
+                  onSelect={() => choose(skill)}
+                  className="min-h-7 font-mono text-[13px] break-all"
+                >
+                  /{skill.name}
+                </CommandItem>
+              ))}
+            </CommandList>
+            {!matches.length && (
+              <p data-testid="skill-menu-notice" aria-hidden="true" className="px-2.5 py-1.5 text-[13px] text-muted-foreground">
+                {status}
+              </p>
+            )}
+          </Command>
+        </PopoverContent>
+      </Popover>
       <p className="sr-only" role="status" aria-label="Skill suggestions">
         {status}
       </p>
@@ -180,8 +223,8 @@ export function useSkillMenu({ draft, writeDraft, focus, enabled }: Options): Sk
   return {
     inputProps: {
       'aria-autocomplete': 'list',
-      'aria-controls': open ? listId : undefined,
-      'aria-activedescendant': open && current >= 0 ? optionId(current) : undefined,
+      'aria-controls': open ? ids.list : undefined,
+      'aria-activedescendant': open && current >= 0 ? ids.option : undefined,
     },
     onKeyDown,
     menu,

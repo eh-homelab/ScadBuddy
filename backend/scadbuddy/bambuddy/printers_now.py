@@ -61,8 +61,10 @@ class PrinterNow(BaseModel):
     total_layers: int | None = None
     remaining_minutes: int | None = None
     hms: list[HmsNote] = Field(default_factory=list)
-    #: The finished plate must be cleared before the next job starts.
-    awaiting_plate_clear: bool = False
+    #: The finished plate must be cleared before the next job starts. ``None`` when
+    #: that is not known (#3632): the status read failed, or Bambuddy's flag was not a
+    #: bool. The card then asks for the plate to be checked.
+    awaiting_plate_clear: bool | None = False
     archive_id: int | None = None
     #: ScadBuddy linked ``archive_id``: its print is ``/prints/{archive_id}``.
     linked: bool = False
@@ -103,7 +105,11 @@ async def printer_now(
     except ApiError as error:
         logger.info("printer status unreadable", extra={"printer_id": printer.id})
         return PrinterNow(
-            printer_id=printer.id, name=printer.name, activity="unknown", error=error.detail
+            printer_id=printer.id,
+            name=printer.name,
+            activity="unknown",
+            awaiting_plate_clear=None,
+            error=error.detail,
         )
     except (ValidationError, ValueError):
         # A shape the model cannot take, or a body that is not JSON at all
@@ -114,6 +120,7 @@ async def printer_now(
             printer_id=printer.id,
             name=printer.name,
             activity="unknown",
+            awaiting_plate_clear=None,
             error="Bambuddy's status for this printer is in a shape ScadBuddy can't read.",
         )
     activity = _activity(status)

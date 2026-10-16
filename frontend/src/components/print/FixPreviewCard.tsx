@@ -13,8 +13,12 @@ import { scopeLabel, scopesForFinding } from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Spinner } from '../ui/spinner'
 
 /** Problem types `post_apply` refuses with (`backend/scadbuddy/api/analyzers.py`). */
 const STALE_PROBLEM = 'https://scadbuddy.dev/problems/analyzer-fix-stale'
@@ -33,15 +37,18 @@ function show(value: SettingChange['base']): string {
   return value === null || value === undefined ? 'none' : String(value)
 }
 
+/** A text-sized link button, for the actions inside a sentence. */
+const INLINE = 'h-auto p-0 text-[12px] text-inherit underline underline-offset-2'
+
 function scopeValue(scope: ScopeRef): string {
   return `${scope.kind}\u0000${scope.key}`
 }
 
 function ChangeRow({ change }: { change: SettingChange }) {
   return (
-    <li data-testid={`change-${change.setting}`} className="rounded-[4px] bg-surface-2 px-2 py-1">
+    <li data-testid={`change-${change.setting}`} className="rounded-md bg-muted px-2 py-1">
       <div className="flex flex-wrap items-baseline gap-x-2">
-        <code className="sb-num text-ink">
+        <code className="sb-num text-foreground">
           {change.setting}
           {change.slot_id !== null && change.slot_id !== undefined && ` (slot ${change.slot_id})`}
         </code>
@@ -189,13 +196,15 @@ export function FixPreviewCard({
   }
 
   return (
-    <div
+    <Card
+      size="sm"
       role="region"
       aria-label={`Preview of ${fix.title}`}
       data-testid={`fix-preview-${fix.id}`}
-      className="mt-2 space-y-2 rounded-[6px] border border-line bg-surface-2 p-2 text-[12px] text-muted"
+      className="mt-2 text-[12px] text-muted-foreground"
     >
-      <p className="text-ink">{fix.description}</p>
+      <CardContent className="space-y-2">
+      <p className="text-foreground">{fix.description}</p>
       {/* #2927: no scope is two cases. Without a store, the report says why. With one,
           no scope this finding can be accepted at fits, and "not stored" would be false. */}
       {scopes.length === 0 && !decisions.available && (
@@ -210,36 +219,43 @@ export function FixPreviewCard({
       )}
       {scopes.length > 0 && (
         <div className="flex flex-col gap-1">
-          <label htmlFor={`${id}-scope`}>Accept for</label>
-          <select
-            id={`${id}-scope`}
-            value={scope ? scopeValue(scope) : ''}
-            onChange={(event) => {
+          <Label htmlFor={`${id}-scope`} className="text-[12px] font-normal">
+            Accept for
+          </Label>
+          <Select
+            value={scope ? scopeValue(scope) : undefined}
+            onValueChange={(next) => {
               clearRefusals()
-              setChoice(event.target.value)
+              setChoice(next)
             }}
-            className="sb-field"
           >
-            {scopes.map((row) => (
-              <option key={scopeValue(row)} value={scopeValue(row)} title={row.key}>
-                {scopeLabel(row)}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger id={`${id}-scope`} size="sm" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {scopes.map((row) => (
+                <SelectItem key={scopeValue(row)} value={scopeValue(row)}>
+                  {scopeLabel(row)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       )}
 
       {read.loading && (
-        <p className="flex items-center gap-2">
-          <Spinner /> Reading the diff
-        </p>
+        <div role="status" className="space-y-1">
+          <span className="sr-only">Reading the diff</span>
+          <Skeleton aria-hidden="true" className="h-5 w-full" />
+          <Skeleton aria-hidden="true" className="h-5 w-2/3" />
+        </div>
       )}
       {read.error && (
-        <p role="alert" className="text-warn">
+        <p role="alert" className="text-destructive">
           {read.error instanceof ApiError ? read.error.detail : 'The fix could not be previewed.'}{' '}
-          <button type="button" onClick={previewAgain} className="underline underline-offset-2">
+          <Button type="button" variant="link" onClick={previewAgain} className={INLINE}>
             Preview again
-          </button>
+          </Button>
         </p>
       )}
 
@@ -252,7 +268,7 @@ export function FixPreviewCard({
           </ul>
           {preview.blockers.length > 0 && (
             <div data-testid="fix-blockers">
-              <p className="text-ink">Can&apos;t be applied until this is verified:</p>
+              <p className="text-foreground">Can&apos;t be applied until this is verified:</p>
               <ul className="mt-0.5 list-disc pl-4">
                 {preview.blockers.map((blocker) => (
                   <li key={blocker}>{blocker}</li>
@@ -265,24 +281,25 @@ export function FixPreviewCard({
       )}
 
       {stale && (
-        <p role="status" data-testid="fix-stale" className="text-warn">
+        <p role="status" data-testid="fix-stale" className="text-destructive">
           Stale: {stale}.{' '}
-          <button type="button" onClick={previewAgain} className="underline underline-offset-2">
+          <Button type="button" variant="link" onClick={previewAgain} className={INLINE}>
             Preview again
-          </button>
+          </Button>
         </p>
       )}
       {refusal && (
-        <p role="alert" className="text-warn">
+        <p role="alert" className="text-destructive">
           {refusal}
         </p>
       )}
 
       <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onClose} disabled={applying}>
+        <Button type="button" size="sm" variant="ghost" onClick={onClose} disabled={applying}>
           Close
         </Button>
         <Button
+          type="button"
           size="sm"
           onClick={() => void apply()}
           disabled={
@@ -298,6 +315,7 @@ export function FixPreviewCard({
           Apply
         </Button>
       </div>
-    </div>
+      </CardContent>
+    </Card>
   )
 }
