@@ -117,7 +117,7 @@ describe('PrintDetailPage (#311)', () => {
       'Slot 1PLA11.34 g',
       'Slot 2PLA5.02 g',
     ])
-    expect(within(slots).getByTitle('#FF9425')).toBeInTheDocument()
+    expect(within(slots).getByRole('img', { name: '#FF9425' })).toBeInTheDocument()
   })
 
   it('shows Bambuddy’s bookkeeping and every other field it has (#1860)', async () => {
@@ -158,7 +158,7 @@ describe('PrintDetailPage (#311)', () => {
     )
     render(35)
     const slots = within(await section('Slicing')).getByRole('list', { name: 'Filament by slot' })
-    expect(within(slots).getByTitle('url(https://x.example/t.png)')).not.toHaveAttribute('style')
+    expect(within(slots).getByRole('img', { name: 'url(https://x.example/t.png)' })).not.toHaveAttribute('style')
   })
 
   it('rounds Bambuddy’s amounts, names whose currency the cost is in, and opens its links (#1860 review)', async () => {
@@ -218,8 +218,7 @@ describe('PrintDetailPage (#311)', () => {
     render(35)
     const outcome = await section('Outcome')
     const runs = within(outcome).getByRole('list', { name: 'Runs' })
-    expect(within(runs).getByText('1004.2 g, not this print\'s')).toHaveAttribute(
-      'title',
+    expect(within(runs).getByText('1004.2 g, not this print\'s')).toHaveAccessibleDescription(
       expect.stringContaining('not used for the cost'),
     )
   })
@@ -710,7 +709,8 @@ describe('PrintDetailPage (#311)', () => {
 
   it('shows what ScadBuddy still knows of a print deleted in Bambuddy', async () => {
     render(38)
-    expect(await screen.findByRole('status')).toHaveTextContent(/deleted in Bambuddy/)
+    const notice = await screen.findByText(/This print was deleted in Bambuddy/)
+    expect(notice.closest('[role="status"]')).not.toBeNull()
     const provenance = await section('Provenance')
     expect(within(provenance).getByRole('table', { name: 'Parameters' })).toHaveTextContent('Workshop')
     const files = await section('Files')

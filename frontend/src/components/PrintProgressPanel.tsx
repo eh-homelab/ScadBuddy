@@ -1,4 +1,6 @@
+import { CircleAlertIcon } from 'lucide-react'
 import type { CopyProgress, OutputPlate, PrintProgress } from '../api/types'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 import { plateLabel } from '../lib/plate'
@@ -91,14 +93,14 @@ export function PrintProgressPanel({ progress, polling, plates = [] }: Props) {
   const copies = progress.copies_detail ?? []
 
   return (
-    <div className="space-y-2 text-[13px] text-ink" data-testid="print-progress">
-      <p className="flex items-center gap-2">
+    <div className="space-y-2 text-[13px]" data-testid="print-progress">
+      <p className="flex items-center gap-2 font-medium">
         {polling && <Spinner />}
         <span>{headline(progress)}</span>
       </p>
 
       {copies.length > 0 && (
-        <ul className="space-y-1 text-[12px] text-muted">
+        <ul className="space-y-1 text-xs text-muted-foreground">
           {copies.map((copy, index) => (
             <li key={index} data-testid={`print-progress-copy-${index}`}>
               <span>
@@ -108,7 +110,7 @@ export function PrintProgressPanel({ progress, polling, plates = [] }: Props) {
                 <>
                   {' as queue '}
                   <a
-                    className="sb-num underline decoration-dotted underline-offset-2 hover:text-ink"
+                    className="sb-num font-medium text-primary underline-offset-4 hover:underline"
                     href={queueEntryUrl(progress, copy.queue_entry_id)}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -120,22 +122,28 @@ export function PrintProgressPanel({ progress, polling, plates = [] }: Props) {
               {' · '}
               {copy.stage}
               {copy.waiting_reason && (
-                <span className="mt-0.5 block text-faint">{copy.waiting_reason}</span>
+                <span className="mt-0.5 block text-muted-foreground">{copy.waiting_reason}</span>
               )}
             </li>
           ))}
         </ul>
       )}
 
-      {progress.error_message && (
-        <p className="text-[12px] text-warn" data-testid="print-progress-error">
-          {progress.error_message}
-        </p>
-      )}
-      {progress.fix && (
-        <p className="text-[12px] text-muted" data-testid="print-progress-fix">
-          {progress.fix}
-        </p>
+      {(progress.error_message || progress.fix) && (
+        // Read as the panel updates, not announced: the dialog around it says what ended.
+        <Alert role={undefined} className="border-warn/40 bg-warn/10">
+          <CircleAlertIcon aria-hidden="true" className="text-warn" />
+          {progress.error_message && (
+            <AlertTitle className="text-xs text-warn" data-testid="print-progress-error">
+              {progress.error_message}
+            </AlertTitle>
+          )}
+          {progress.fix && (
+            <AlertDescription className="text-xs" data-testid="print-progress-fix">
+              {progress.fix}
+            </AlertDescription>
+          )}
+        </Alert>
       )}
     </div>
   )

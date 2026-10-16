@@ -111,7 +111,7 @@ and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`
 on shutdown.
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
-  secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
+  secret needed), built for `linux/amd64` only. It has these tags:
   `main` (latest `main`), `sha-<short>`, and `X.Y.Z` / `X.Y` for releases.
 - **LAN only.** ScadBuddy has **no authentication**. Anyone who can reach it can
   add, edit and delete models, and send prints using the stored Bambuddy key.

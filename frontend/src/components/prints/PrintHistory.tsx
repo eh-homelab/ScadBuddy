@@ -21,7 +21,13 @@ import { usePrintProgress } from '../../lib/usePrintProgress'
 import { useSeen } from '../../lib/useSeen'
 import { MediaLightbox } from '../media/MediaLightbox'
 import type { Slide } from '../media/slides'
-import { Button } from '../ui/Button'
+import { CircleAlertIcon, XIcon } from 'lucide-react'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
+import { Hint } from '../Hint'
 import { Spinner } from '../ui/Spinner'
 import { PrintFilterBar } from './PrintFilterBar'
 import { PrintItem } from './PrintItem'
@@ -226,41 +232,52 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
       )}
 
       {pages.loading && (
-        <p className="flex items-center gap-2 py-16 text-[13px] text-muted">
-          <Spinner /> Loading prints
-        </p>
-      )}
-
-      {pages.error && (
-        <div role="alert" className="rounded-[6px] border border-warn/40 bg-warn/8 p-4">
-          <p className="text-[13px] text-warn">Could not load the prints: {pages.error.message}</p>
-          <Button size="sm" className="mt-3" onClick={pages.reload}>
-            Try again
-          </Button>
+        <div
+          role="status"
+          aria-label="Loading prints"
+          className={
+            query.view === 'cards' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'flex flex-col gap-2'
+          }
+        >
+          <span className="sr-only">Loading prints</span>
+          {Array.from({ length: 3 }, (_, i) => (
+            <Skeleton key={i} className={cn('rounded-xl', query.view === 'cards' ? 'h-64' : 'h-24')} />
+          ))}
         </div>
       )}
 
+      {pages.error && (
+        <Alert className="border-warn/40 bg-warn/10 text-warn">
+          <CircleAlertIcon aria-hidden="true" />
+          <AlertDescription className="text-warn">
+            <p>Could not load the prints: {pages.error.message}</p>
+            <Button size="sm" variant="outline" className="mt-3 text-foreground" onClick={pages.reload}>
+              Try again
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {!pages.loading && !pages.error && pages.items.length === 0 && pages.next === null && (
-        <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
+        <Card className="border border-dashed px-6 py-10 text-center ring-0">
           {filtered ? (
             <>
-              <h2 className="text-[15px] font-medium">No prints match</h2>
-              <p className="mx-auto mt-2 max-w-md text-[13px] text-muted">
-                No print fits these filters.
-              </p>
-              <Button className="mt-4" onClick={() => setQuery(clearPrintFilters(query))}>
+              <h2 className="text-base font-medium">No prints match</h2>
+              <p className="mx-auto max-w-md text-sm text-muted-foreground">No print fits these filters.</p>
+              <Button variant="outline" className="mx-auto" onClick={() => setQuery(clearPrintFilters(query))}>
+                <XIcon aria-hidden="true" />
                 Clear filters
               </Button>
             </>
           ) : (
             <>
-              <h2 className="text-[15px] font-medium">No prints yet</h2>
-              <p className="mx-auto mt-2 max-w-md text-[13px] text-muted">
+              <h2 className="text-base font-medium">No prints yet</h2>
+              <p className="mx-auto max-w-md text-sm text-muted-foreground">
                 Prints of ScadBuddy outputs show up here once Bambuddy has archived them.
               </p>
             </>
           )}
-        </div>
+        </Card>
       )}
 
       {pages.items.length > 0 && (
@@ -330,12 +347,13 @@ function MorePrints({
   return (
     <div ref={sentinel} className="mt-4 flex flex-col items-center gap-2">
       {failed && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-xs text-warn">
           Could not load more prints: {more.message}
         </p>
       )}
-      <Button size="sm" onClick={onLoadMore} disabled={more === 'loading'}>
-        {more === 'loading' ? <Spinner /> : 'Load more'}
+      <Button variant="outline" onClick={onLoadMore} disabled={more === 'loading'} aria-busy={more === 'loading' || undefined}>
+        {more === 'loading' && <Spinner />}
+        Load more
       </Button>
     </div>
   )
@@ -447,27 +465,30 @@ function WaitingRow({
 }) {
   const settled = progress?.settled ? progress : null
   return (
-    <li
-      ref={ref}
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
-      <span className="text-ink">{name}</span>
-      {settled ? (
-        settled.route === 'run' ? (
-          // #1831 — the run failed in ScadBuddy, before Bambuddy had anything to show.
-          <span className="text-[12px] text-warn">
-            Print failed{settled.error_message ? `: ${settled.error_message}` : ''}
-          </span>
+    <li ref={ref}>
+      <Card
+        size="sm"
+        className="flex-row flex-wrap items-center gap-x-3 gap-y-1 border border-dashed px-3 text-[13px] ring-0"
+      >
+        <span className="font-medium">{name}</span>
+        {settled ? (
+          settled.route === 'run' ? (
+            // #1831 — the run failed in ScadBuddy, before Bambuddy had anything to show.
+            <span className="text-xs text-warn">
+              Print failed{settled.error_message ? `: ${settled.error_message}` : ''}
+            </span>
+          ) : (
+            <Hint content={settled.error_message}>
+              <span className="text-xs text-muted-foreground">{SETTLED_LABEL[settled.stage] ?? 'No longer in Bambuddy'}</span>
+            </Hint>
+          )
         ) : (
-          <span className="text-[12px] text-muted" title={settled.error_message ?? undefined}>
-            {SETTLED_LABEL[settled.stage] ?? 'No longer in Bambuddy'}
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Spinner /> Waiting for Bambuddy
           </span>
-        )
-      ) : (
-        <span className="inline-flex items-center gap-1.5 text-[12px] text-muted">
-          <Spinner /> Waiting for Bambuddy
-        </span>
-      )}
-      {generated && <span className="ml-auto text-[12px] text-faint">Generated {timeAgo(generated)}</span>}
+        )}
+        {generated && <span className="ml-auto text-xs text-muted-foreground">Generated {timeAgo(generated)}</span>}
+      </Card>
     </li>
   )
 }
