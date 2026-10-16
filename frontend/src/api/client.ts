@@ -307,6 +307,12 @@ export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * Several library files asked by id and Bambuddy has none of them (`bambuddy/errors.py`
+ * `LIBRARY_FILES_MISSING_PROBLEM`): the names route's 502, told apart from a Bambuddy
+ * that failed (`BAMBUDDY_UNAVAILABLE`).
+ */
+export const BAMBUDDY_LIBRARY_FILES_MISSING = 'https://scadbuddy.dev/problems/bambuddy-library-files-missing'
 /** No Bambuddy URL is set (`bambuddy/errors.py` `NOT_CONFIGURED_PROBLEM`). */
 export const BAMBUDDY_NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
 /**

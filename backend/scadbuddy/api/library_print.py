@@ -52,6 +52,7 @@ from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
@@ -210,6 +211,7 @@ async def get_library_names(
             status.HTTP_502_BAD_GATEWAY,
             "Bambuddy has none of these library files; is its URL right?",
             title="Bambuddy has none of these library files",
+            type_=LIBRARY_FILES_MISSING_PROBLEM,
         )
     return names
 

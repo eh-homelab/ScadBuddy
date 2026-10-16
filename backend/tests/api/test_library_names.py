@@ -9,6 +9,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from tests.api.test_send import BASE, configure
 
 pytestmark = pytest.mark.requires_postgres
@@ -89,6 +90,8 @@ def test_every_file_missing_is_a_misrouted_bambuddy_not_every_file_deleted(
     assert "URL" in response.json()["detail"]
     # A problem document like the module's other Bambuddy failures, not a bare detail.
     assert response.json()["title"] == "Bambuddy has none of these library files"
+    assert response.json()["type"] == LIBRARY_FILES_MISSING_PROBLEM
+    assert response.headers["content-type"] == "application/problem+json"
     # One file asked and gone is just that file deleted.
     single = client.get("/api/v1/print/library/names?ids=719")
     assert single.status_code == 200

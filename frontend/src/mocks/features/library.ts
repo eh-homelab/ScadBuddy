@@ -1,4 +1,5 @@
 import { HttpResponse, delay, http } from 'msw'
+import { BAMBUDDY_LIBRARY_FILES_MISSING } from '../../api/client'
 import type {
   LibraryFileName,
   AttachResult,
@@ -192,7 +193,9 @@ export const handlers = [
     }) satisfies LibraryFileName[]
     // The route's rule: several files asked and none found reads as a misrouted Bambuddy.
     if (names.length > 1 && names.every((file) => file.name === null)) {
-      return problem(502, 'Bambuddy has none of these library files', 'Bambuddy has none of these library files; is its URL right?')
+      return problem(502, 'Bambuddy has none of these library files', 'Bambuddy has none of these library files; is its URL right?', {
+        type: BAMBUDDY_LIBRARY_FILES_MISSING,
+      })
     }
     return HttpResponse.json(names)
   }),
