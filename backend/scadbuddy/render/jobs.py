@@ -136,6 +136,7 @@ def missing_glyph_warnings(
     if not texts:
         return []
     warnings: list[str] = []
+    skipped: list[str] = []
     deadline = clock() + budget
     for parameter in schema.parameters:
         if parameter.type != "font":
@@ -144,13 +145,19 @@ def missing_glyph_warnings(
         if not font_families(font):
             continue
         left = deadline - clock()
-        if left <= 0:
-            break
+        if skipped or left <= 0:
+            skipped.append(parameter.name)
+            continue
         missing = missing_glyphs(font, texts, coverage(font, left))
         if missing:
             warnings.append(
                 f"font {font!r} has no glyph for {' '.join(missing)}; the text leaves them out"
             )
+    if skipped:
+        # Nothing reaches the user for these, so a wedged fontconfig shows here.
+        logger.debug(
+            "glyph check budget of %.1fs spent; not checked: %s", budget, ", ".join(skipped)
+        )
     return warnings
 
 

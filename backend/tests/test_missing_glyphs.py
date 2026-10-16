@@ -3,6 +3,7 @@ without a word: read off fontconfig's charset for the face a render would get.""
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 
@@ -140,7 +141,7 @@ def test_a_model_with_no_text_asks_nothing() -> None:
     assert missing_glyph_warnings(schema, {}, lambda font, timeout: pytest.fail("asked")) == []
 
 
-def test_every_font_shares_one_wait_on_fontconfig() -> None:
+def test_every_font_shares_one_wait_on_fontconfig(caplog: pytest.LogCaptureFixture) -> None:
     """A wedged fontconfig costs the render the advisory timeout once, not once per
     font: each font gets what is left, and none is asked once it has run out."""
     schema = _schema(
@@ -154,8 +155,11 @@ def test_every_font_shares_one_wait_on_fontconfig() -> None:
         given.append(timeout)
         now[0] += timeout  # it waited out all it was given
 
-    assert missing_glyph_warnings(schema, {}, wedged, budget=5.0, clock=lambda: now[0]) == []
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.render.jobs"):
+        assert missing_glyph_warnings(schema, {}, wedged, budget=5.0, clock=lambda: now[0]) == []
+    # One ask, and the other three fonts skipped by the spent budget, which the log names.
     assert given == [5.0]
+    assert "not checked: font1, font2, font3" in caplog.text
 
     now[0] = 100.0
     given.clear()
