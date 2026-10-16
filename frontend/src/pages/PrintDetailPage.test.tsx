@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useNavigate, useParams } from 'react-router'
@@ -218,9 +218,11 @@ describe('PrintDetailPage (#311)', () => {
     render(35)
     const outcome = await section('Outcome')
     const runs = within(outcome).getByRole('list', { name: 'Runs' })
-    expect(within(runs).getByText('1004.2 g, not this print\'s')).toHaveAccessibleDescription(
-      expect.stringContaining('not used for the cost'),
-    )
+    const reading = within(runs).getByText('1004.2 g, not this print\'s')
+    expect(reading).toHaveAccessibleDescription(expect.stringContaining('not used for the cost'))
+    // Its tooltip opens from the keyboard too (#3674 review).
+    act(() => reading.focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('not used for the cost')
   })
 
   it('shows why a failed print failed', async () => {

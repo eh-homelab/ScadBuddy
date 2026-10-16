@@ -710,8 +710,13 @@ function RunRow({ run }: { run: Run }) {
       {run.filament_used_grams != null &&
         (run.filament_reading_suspect ? (
           <>
+            {/* Focusable, so the tooltip opens from the keyboard too. */}
             <Hint content={SUSPECT_READING}>
-              <span className="sb-num text-warn" aria-describedby={`run-${run.id}-suspect`}>
+              <span
+                tabIndex={0}
+                className="sb-num rounded-sm text-warn outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                aria-describedby={`run-${run.id}-suspect`}
+              >
                 {`${run.filament_used_grams} g, not this print's`}
               </span>
             </Hint>
