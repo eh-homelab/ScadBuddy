@@ -53,7 +53,7 @@ mounting user's access to ScadBuddy. Use it only on a machine whose users you tr
 ## Container image
 
 Published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs` (`sha-<7-char commit>`, `latest`
-for main's head, and the version on a `v*` tag; amd64 and arm64) by
+for main's head, and the version on a `v*` tag; amd64 only) by
 `.github/workflows/build-go-image.yml` on every push to main that touches Go. Build it from the repo root, since it needs the
 workspace and the root `vendor/`:
 
