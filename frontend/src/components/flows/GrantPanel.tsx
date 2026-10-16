@@ -232,7 +232,7 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
             submitLabel="Approve grant"
             busy={busy}
             onSubmit={(spec) => void approve(spec)}
-            onCancel={() => setApproving(false)}
+            onCancel={() => !busy && setApproving(false)}
           />
           {error && (
             <p role="alert" className="text-[13px] text-destructive">

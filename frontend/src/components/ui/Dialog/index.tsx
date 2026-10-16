@@ -44,6 +44,8 @@ export function Dialog({ open, title, description, onClose, children, footer, si
       <DialogContent
         placement={placement}
         showCloseButton={false}
+        // No description: say so, or Radix warns that one is missing.
+        {...(description ? {} : { 'aria-describedby': undefined })}
         className={cn(
           'flex flex-col gap-0 p-0',
           placement === 'right' ? '' : cn('max-h-[calc(100dvh-2rem)]', WIDTH[size]),

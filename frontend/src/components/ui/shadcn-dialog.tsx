@@ -258,7 +258,12 @@ function DialogLayer({
   )
 }
 
-/** Radix's modal dialog (`<Dialog modal>`): over everything, the assistant panel included. */
+/**
+ * Radix's modal dialog (`<Dialog modal>`): over everything, the assistant panel included.
+ * Radix's own Escape, without DialogLayer's `closeOnUntakenEscape` (#3636): it closes on
+ * any Escape, even one a list inside it would keep. Fine for the image lightbox; a modal
+ * dialog with such a list needs that handling added here.
+ */
 function ModalDialogContent({
   className,
   children,

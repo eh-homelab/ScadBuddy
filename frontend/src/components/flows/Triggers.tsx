@@ -276,7 +276,7 @@ function TriggerRow({ trigger, onChanged, compact }: { trigger: FlowTrigger; onC
                     : api.approveFlowTriggerGrant(trigger.id, trigger.seen, spec),
                 )
               }
-              onCancel={() => setOpen(null)}
+              onCancel={() => !busy && setOpen(null)}
             />
             {error && (
               <p role="alert" className="text-[13px] text-destructive">
