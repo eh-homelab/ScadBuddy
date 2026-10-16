@@ -84,7 +84,8 @@ export function ColorWidget({
                 type="color"
                 // The picker takes only #rrggbb; while the text is no colour it shows black.
                 value={(colour ?? '#000000').toLowerCase()}
-                aria-label={paramLabel(param)}
+                // Not the caption itself, which names the hex field: fill finds that one alone.
+                aria-label={`${paramLabel(param)} picker`}
                 onChange={(event) => commit(event.target.value)}
                 className="h-8 w-14 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
               />
