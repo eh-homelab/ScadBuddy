@@ -464,13 +464,6 @@ async def test_the_bambuddy_store_works_as_the_role(
         await backend.aclose()
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
-
-
 @pytest.mark.requires_temporal
 @pytest.mark.requires_git
 async def test_the_worker_renders_as_its_own_role(
@@ -482,6 +475,7 @@ async def test_the_worker_renders_as_its_own_role(
     worker_conninfo: str,
     pg_conninfo: str,
     tmp_path: Path,
+    health_socket: socket.socket,
 ) -> None:
     queue = f"t-{uuid.uuid4().hex[:8]}"
     cfg = settings.model_copy(
@@ -506,7 +500,7 @@ async def test_the_worker_renders_as_its_own_role(
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_worker(cfg, stop=stop, health_port=_free_port(), client=client)
+            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
         )
         try:
             job = await render_to_end(client, queue, job)

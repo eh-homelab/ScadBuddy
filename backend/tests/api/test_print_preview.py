@@ -56,7 +56,8 @@ def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dic
     assert started.status_code == 202, started.text
     op: dict[str, Any] = started.json()
     assert op["status"] == "running"
-    op = follow_operation(client, op, timeout=30)
+    # At the 0.1 s its own loop polled at, which the shard timings were measured with (#3510).
+    op = follow_operation(client, op, timeout=30, poll=0.1)
     assert op["status"] == "succeeded", op
     result: dict[str, Any] = op["result"]
     return result

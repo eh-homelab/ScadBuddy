@@ -84,20 +84,25 @@ class Metrics:
         # Render queue: admission, then the job's life.
         self.render_submitted = Counter(
             "scadbuddy_render_jobs_submitted",
-            "Render requests accepted onto the queue as a new job.",
+            "Render requests accepted onto the queue as a new job."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
-            "Render requests answered with an identical job already waiting.",
+            "Render requests answered with an identical job already waiting."
+            " A request answered 202 accepting is counted by the follow that gets its"
+            " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],
             registry=r,
         )
         self.render_accept_pending = Counter(
             "scadbuddy_render_accept_pending",
-            "Render requests answered 503 command-still-accepting: their job was not"
-            " answered in time, and the client sends the same request again; by kind.",
+            "Render requests whose job was not answered in time: answered 503"
+            " command-still-accepting (the client sends the same request again), or 202"
+            " accepting to a client that follows it (#2340); once per request, by kind.",
             ["kind"],
             registry=r,
         )
@@ -180,7 +185,9 @@ class Metrics:
         )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
-            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."
+            " A request answered 202 accepting and then refused is not counted: its follow"
+            " cannot tell a render's queue-full from an Arrange's (#2340, #3575).",
             ["kind"],
             registry=r,
         )

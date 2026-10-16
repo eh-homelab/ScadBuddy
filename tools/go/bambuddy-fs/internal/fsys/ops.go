@@ -2,8 +2,14 @@ package fsys
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -250,18 +256,29 @@ const renameNoReplace = 0x1
 // renameStored renames a stored file f, then deletes what it replaced: a stored file
 // t, or a queued save q and the stored files that save replaced.
 func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir, newName string, t api.File, isFile bool, q *entry) syscall.Errno {
-	newN, folder := changes(f.Name, newName, d.id, to.id)
-	got, err := d.tree.lib.UpdateFile(ctx, f.ID, newN, folder)
-	if err != nil {
-		return failed("rename", err, "file", f.ID)
+	var got api.File
+	if retypes(f.Name, newName) {
+		var errno syscall.Errno
+		if got, errno = d.retype(ctx, f, to.id, newName); errno != 0 {
+			return errno
+		}
+		// A retry after a lost answer is answered with the copy the first try made,
+		// which is now listed as the file this rename replaces: it is the result.
+		isFile = isFile && t.ID != got.ID
+	} else {
+		newN, folder := changes(f.Name, newName, d.id, to.id)
+		var err error
+		if got, err = d.tree.lib.UpdateFile(ctx, f.ID, newN, folder); err != nil {
+			return failed("rename", err, "file", f.ID)
+		}
+		d.tree.moved(f.ID, got.Name, got.FolderID)
+		d.tree.rebase(f.ID, got)
 	}
-	d.tree.moved(f.ID, got.Name, got.FolderID)
-	d.tree.rebase(f.ID, got.Name, got.FolderID)
 	if child := d.GetChild(name); child != nil {
 		if n, ok := child.Operations().(*file); ok {
 			// The answer has no size or times: keep the file's.
 			if cur := n.current(); cur.ID == f.ID {
-				cur.Name, cur.FolderID = got.Name, got.FolderID
+				cur.ID, cur.Name, cur.FolderID = got.ID, got.Name, got.FolderID
 				n.set(cur)
 			}
 		}
@@ -464,3 +481,98 @@ func (n *file) Setxattr(context.Context, string, []byte, uint32) syscall.Errno {
 }
 
 func (n *file) Removexattr(context.Context, string) syscall.Errno { return n.tree.refused() }
+
+// fileType is what Bambuddy types a file by, its name's extension ("gcode.3mf" for a
+// sliced 3MF), lower-cased.
+func fileType(name string) string {
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".gcode.3mf") {
+		return "gcode.3mf"
+	}
+	return strings.TrimPrefix(filepath.Ext(lower), ".")
+}
+
+// typed are the file types Bambuddy treats as models (types the file and makes its
+// thumbnail from the name it is uploaded under).
+var typed = map[string]bool{"3mf": true, "gcode.3mf": true, "gcode": true, "stl": true}
+
+// retypes is whether renaming from to to must send the file again: it becomes a type
+// Bambuddy handles differently. Any other rename (model.3mf to model.3mf.bak) keeps the
+// file's ID, so its print history and queue entries still point at it.
+func retypes(from, to string) bool {
+	return fileType(from) != fileType(to) && typed[fileType(to)]
+}
+
+// retype renames f to name in folder by uploading its contents under the new name and
+// deleting f. Bambuddy types a file (and makes its thumbnail) from the name it is
+// uploaded under, and a rename keeps both, so an app that saves to "x.3mf.tmp" and
+// renames it to "x.3mf" would leave a file Bambuddy cannot print.
+//
+// The upload's Idempotency-Key comes from f and the new name, so a rename retried
+// after a lost answer is answered with the same file instead of a second copy. That
+// answer can name a copy a rolled-back try deleted, so the copy is looked for before f
+// is deleted, and sent again under a fresh key if it is gone. If f cannot be deleted
+// the new copy is, and the rename fails with f as it was.
+func (d *dir) retype(ctx context.Context, f api.File, folder int, name string) (api.File, syscall.Errno) {
+	got, errno := d.upload(ctx, f, folder, name, retypeKey(f, folder, name))
+	if errno != 0 {
+		return api.File{}, errno
+	}
+	if l, err := d.tree.lib.List(ctx, folder, true); err != nil {
+		return api.File{}, failed("rename: list", err, "folder", folder)
+	} else if !slices.ContainsFunc(l.Files, func(x api.File) bool { return x.ID == got.ID }) {
+		if got, errno = d.upload(ctx, f, folder, name, api.NewKey()); errno != 0 {
+			return api.File{}, errno
+		}
+	}
+	if err := d.tree.lib.DeleteFiles(ctx, f.ID); err != nil {
+		slog.Error("rename: the old file could not be deleted, so the copy under the new name is", "file", f.ID, "new", got.ID, "err", err)
+		if err := d.tree.lib.DeleteFiles(ctx, got.ID); err != nil {
+			slog.Error("rename: the copy under the new name remains beside the old file", "file", f.ID, "new", got.ID, "err", err)
+			d.tree.forget(folder)
+		}
+		return api.File{}, syscall.EIO
+	}
+	got.Size, got.Created = f.Size, f.Created
+	if got.FolderID == 0 {
+		got.FolderID = folder
+	}
+	// Both IDs are claimed, so no download of either writes its cache file meanwhile.
+	if err := d.tree.cache.claim(ctx, f.ID); err != nil {
+		d.tree.cache.drop(f.ID)
+	} else {
+		if err := d.tree.cache.claim(ctx, got.ID); err == nil {
+			if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+				d.tree.cache.drop(f.ID)
+			}
+			d.tree.cache.release(got.ID)
+		} else {
+			d.tree.cache.drop(f.ID)
+		}
+		d.tree.cache.release(f.ID)
+	}
+	d.tree.unremember(f.ID)
+	d.tree.remember(got)
+	d.tree.rebase(f.ID, got)
+	return got, 0
+}
+
+// upload sends f's contents (cached, or downloaded first) as name in folder.
+func (d *dir) upload(ctx context.Context, f api.File, folder int, name, key string) (api.File, syscall.Errno) {
+	fh, err := d.tree.cache.open(ctx, d.tree.lib, f, "")
+	if err != nil {
+		return api.File{}, failed("rename: read", err, "file", f.ID)
+	}
+	got, err := d.tree.lib.Upload(ctx, folder, name, key, fh)
+	_ = fh.Close()
+	if err != nil {
+		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+	}
+	return got, 0
+}
+
+// retypeKey is the Idempotency-Key of f's retype to name in folder.
+func retypeKey(f api.File, folder int, name string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("retype\x00%d\x00%d\x00%d\x00%d\x00%s", f.ID, f.Created.UnixNano(), f.Size, folder, name)))
+	return hex.EncodeToString(sum[:16])
+}

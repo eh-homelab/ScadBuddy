@@ -88,6 +88,23 @@ def _expire(cache: Path) -> None:
     os.utime(kept, (0, 0))
 
 
+class _HeldPresets:
+    """/slicer/presets held until ``release`` is set, counting the reads as they
+    start: respx counts a call only once it has answered."""
+
+    def __init__(self, answer: Callable[[], httpx.Response]) -> None:
+        self.started = 0
+        self.asked = asyncio.Event()
+        self.release = asyncio.Event()
+        self._answer = answer
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.started += 1
+        self.asked.set()
+        await self.release.wait()
+        return self._answer()
+
+
 def _preset_routes() -> tuple[respx.Route, respx.Route]:
     return (
         respx.get(f"{API}/slicer/presets").mock(return_value=_ok("slicer-presets-h2c.json")),
@@ -310,6 +327,83 @@ async def test_a_failed_catalogue_read_is_not_kept(
     assert (await cached_catalogue(bambuddy, tmp_path)).process
 
     assert presets.call_count == 2
+
+
+@respx.mock
+async def test_opens_with_nothing_kept_share_one_read(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#2906: with no catalogue kept yet (a fresh volume, a new key), opens at once
+    each read /slicer/presets (~6 s, 1 MB). They now wait on one read."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(3)]
+    async with asyncio.timeout(5):
+        await held.asked.wait()
+        # Every open has reached its read, or the one read, by now.
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    held.release.set()
+    async with asyncio.timeout(5):
+        first, *rest = await asyncio.gather(*opens)
+
+    assert rest == [first, first]
+    assert held.started == 1
+    assert not catalogue._reading
+
+
+@respx.mock
+async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#2906: choices_for cancels its catalogue read when another read fails first;
+    that must not take the shared read from the opens still waiting on it."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    given_up = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    waiting = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    async with asyncio.timeout(5):
+        await held.asked.wait()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    given_up.cancel()
+    held.release.set()
+
+    async with asyncio.timeout(5):
+        assert (await waiting).process
+    assert given_up.cancelled()
+    assert held.started == 1
+    # Kept for the next open, though the one that started the read gave up on it.
+    assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
+
+
+@respx.mock
+async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    held = _HeldPresets(lambda: httpx.Response(500))
+    presets = respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(2)]
+    async with asyncio.timeout(5):
+        await held.asked.wait()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    held.release.set()
+    async with asyncio.timeout(5):
+        outcomes = await asyncio.gather(*opens, return_exceptions=True)
+
+    assert all(isinstance(outcome, ApiError) for outcome in outcomes)
+    assert held.started == 1
+    assert not catalogue._reading
+    # The next open reads again.
+    presets.mock(side_effect=None, return_value=_ok("slicer-presets-h2c.json"))
+    assert (await cached_catalogue(bambuddy, tmp_path)).process
 
 
 @respx.mock

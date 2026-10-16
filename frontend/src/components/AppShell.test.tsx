@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { lazyRetry } from '../lib/lazyRetry'
 import { renderPage } from '../test/utils'
 import { AppShell } from './AppShell'
 
@@ -62,6 +63,37 @@ describe('the shell’s page boundary (#361, #1446)', () => {
   })
 })
 
+describe('the shell’s page boundary retries a page chunk (#3241, #3754)', () => {
+  it('shows a page whose chunk failed once when it is visited again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const load = vi
+      .fn<() => Promise<{ default: () => React.JSX.Element }>>()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch dynamically imported module: Prints-abc.js'))
+      .mockResolvedValue({ default: () => <p>prints page</p> })
+    const Prints = lazyRetry(load)
+    const { user } = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} tabLink={null} />}>
+          <Route path="/prints" element={<Prints />} />
+          <Route path="/library" element={<p>library page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/prints' },
+    )
+    const main = screen.getByRole('main')
+    expect(await within(main).findByRole('alert')).toHaveTextContent('This page stopped working')
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+
+    await user.click(within(nav).getByRole('link', { name: 'Library' }))
+    expect(await within(main).findByText('library page')).toBeInTheDocument()
+    await user.click(within(nav).getByRole('link', { name: 'Prints' }))
+
+    // The page boundary's onError dropped the rejected import, so this visit loads it.
+    expect(await within(main).findByText('prints page')).toBeInTheDocument()
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('the shell’s orientation (#2454)', () => {
   it('names the tab after the page’s heading, and follows navigation', async () => {
     const { user } = renderPage(
@@ -86,11 +118,18 @@ describe('the shell’s orientation (#2454)', () => {
         </Route>
       </Routes>,
     )
+    // #3393: a click on a bare spot of the page does not focus <main>.
+    await user.click(screen.getByRole('heading', { name: 'Models' }))
+    expect(screen.getByRole('main')).not.toHaveFocus()
     await user.tab()
     const skip = screen.getByRole('link', { name: 'Skip to main content' })
     expect(skip).toHaveFocus()
     await user.click(skip)
     expect(screen.getByRole('main')).toHaveFocus()
+    // Focusable only while the skip link has put focus there.
+    await user.tab()
+    expect(screen.getByRole('main')).not.toHaveFocus()
+    expect(screen.getByRole('main')).not.toHaveAttribute('tabindex')
     // Its visible text, not a shorter label (axe label-content-name-mismatch).
     expect(screen.getByRole('link', { name: /^ScadBuddy/ })).toHaveAccessibleName('ScadBuddy OpenSCAD customizer')
   })

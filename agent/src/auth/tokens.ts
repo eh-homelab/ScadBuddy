@@ -173,11 +173,13 @@ export class PostgresTokenStore implements TokenStore {
     return rows.length > 0
   }
 
-  async liveTier(id: string, now: Date = new Date()): Promise<Tier | null> {
+  /** Without `now`, expiry is judged by Postgres's clock, as escalation hops are (#3411). */
+  async liveTier(id: string, now?: Date): Promise<Tier | null> {
     if (!UUID.test(id)) return null
     const rows = await this.#sql<{ tier: Tier }[]>`
       SELECT tier FROM ai_mcp_tokens
-       WHERE id = ${id} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ${now})`
+       WHERE id = ${id} AND revoked_at IS NULL
+         AND (expires_at IS NULL OR expires_at > ${now ?? this.#sql`now()`})`
     return rows[0]?.tier ?? null
   }
 }

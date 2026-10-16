@@ -357,6 +357,20 @@ export class QuestionService {
     return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
   }
 
+  /**
+   * ``events``, then the session's status refresh when ``resolved`` (#3256 review): in
+   * the same commit as the resolution (#3255), since a turn resumes on that commit
+   * alone. One shape for every resolution, so none drifts from the others.
+   */
+  private async withStatus(
+    tx: TransactionSql,
+    sessionId: string,
+    resolved: boolean,
+    events: ServerEvent[],
+  ): Promise<ServerEvent[]> {
+    return resolved ? events.concat(await this.statusRefresh(tx, sessionId)) : events
+  }
+
   /** `question_expiry_seconds`, clamped as `approval_expiry_seconds` is. */
   async expirySeconds(): Promise<number> {
     const value = await this.deps.settings?.get<number>(SETTING_QUESTION_EXPIRY_SECONDS)
@@ -381,13 +395,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: expired,
-        events: expired.flatMap((r) => [
+        events: await this.withStatus(tx, sessionId, expired.length > 0, expired.flatMap((r) => [
           event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
           inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ]).concat(
-          // In the same commit (#3255): a turn resumes on this commit alone.
-          expired.length > 0 ? await this.statusRefresh(tx, sessionId) : [],
-        ),
+        ])),
       }
     })
     if (rows.length === 0) return false
@@ -480,12 +491,10 @@ export class QuestionService {
       return row
         ? {
             value: row,
-            events: [
+            events: await this.withStatus(tx, sessionId, true, [
               event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal }),
               inputResolved(sessionId, `question:${id}`, 'answer', 'answered'),
-              // In the same commit (#3255): a turn resumes on this commit alone.
-              ...(await this.statusRefresh(tx, sessionId)),
-            ],
+            ]),
           }
         : { value: undefined, events: [] }
     })
@@ -544,13 +553,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
-        events: cancelled.flatMap((r) => [
+        events: await this.withStatus(tx, sessionId, cancelled.length > 0 && options.refresh !== false, cancelled.flatMap((r) => [
           event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
           inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ]).concat(
-          // In the same commit (#3255): a turn resumes on this commit alone.
-          cancelled.length > 0 && options.refresh !== false ? await this.statusRefresh(tx, sessionId) : [],
-        ),
+        ])),
       }
     })
     if (rows.length === 0) return 0
@@ -598,13 +604,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: resolved,
-        events: resolved.flatMap((r) => [
+        events: await this.withStatus(tx, sessionId, resolved.length > 0, resolved.flatMap((r) => [
           event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
           inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
-        ]).concat(
-          // In the same commit (#3255): a turn resumes on this commit alone.
-          resolved.length > 0 ? await this.statusRefresh(tx, sessionId) : [],
-        ),
+        ])),
       }
     })
     if (rows.length === 0) return 0
@@ -712,11 +715,10 @@ export class QuestionService {
       return row
         ? {
             value: row,
-            events: [
+            events: await this.withStatus(tx, sessionId, true, [
               event({ type: 'question.resolved', sessionId, id, answered: false, reason }),
               inputResolved(sessionId, `question:${id}`, 'answer', 'timed_out', reason),
-              ...(await this.statusRefresh(tx, sessionId)),
-            ],
+            ]),
           }
         : { value: undefined, events: [] }
     })
@@ -942,7 +944,8 @@ export class QuestionService {
         if (attention?.reason === 'done') return { value: { ...none, asked: true, superseded }, events: tail }
         // Only the parked turn itself moves the session to waiting_input, from
         // running or from an approval it is also waiting on (the latest wait is
-        // shown; each refreshStatus hands back to whichever is still pending).
+        // shown; approvals' refreshStatus and this service's statusRefresh each hand back
+        // to whichever is still pending).
         const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_input', updated_at = now()
           WHERE id = ${sessionId} AND turn_id = ${turnId} AND status <> 'waiting_input'`

@@ -59,7 +59,9 @@ export function traceparentOf(span: Span): string | undefined {
  * picker's re-arrange); both set, so one Tempo query reads both (#2891, #2892):
  * - `scadbuddy.output_id`: the arranged output, once saved;
  * - `scadbuddy.rerendered`: how many sources were re-rendered first;
- * - `scadbuddy.outcome` `nothing_arranged`: it ended with nothing arranged.
+ * - `scadbuddy.outcome` `nothing_arranged`: it ended with nothing arranged. Before
+ *   #3205 the picker recorded `rerender_failed` for this; a saved query on that value
+ *   now finds nothing, so query `nothing_arranged` (#3355).
  * What each knows of its sources differs: the dialog sets `scadbuddy.outputs` and
  * `scadbuddy.library_files` (counts), the picker `scadbuddy.source_output_id`.
  */

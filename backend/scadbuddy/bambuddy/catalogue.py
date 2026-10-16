@@ -153,6 +153,9 @@ async def read_catalogue(client: BambuddyClient) -> Catalogue:
 _parsed: dict[Path, tuple[int, _Catalogue]] = {}
 #: The background reads running in this process, one per file.
 _refreshing: dict[Path, asyncio.Task[None]] = {}
+#: The first reads running in this process, one per file with nothing kept yet, which
+#: every open of that file waits on (#2906).
+_reading: dict[Path, asyncio.Task[_Catalogue]] = {}
 
 
 async def cached_catalogue(client: BambuddyClient, cache: Path) -> _Catalogue:
@@ -162,20 +165,21 @@ async def cached_catalogue(client: BambuddyClient, cache: Path) -> _Catalogue:
     :data:`CATALOGUE_TTL` is read again in the background for the next open. So a
     profile imported in Bambuddy shows from the open after the one that started that
     read. Only the print dialog's choices read it: the check and the run, which slice
-    with what they resolve, still read the catalogue fresh. A failed read is not kept;
-    with nothing kept, the open waits for its own read and fails with it."""
+    with what they resolve, still read the catalogue fresh. A failed read is not kept.
+
+    With nothing kept, the opens of that file wait on one read and fail with it
+    (#2906), rather than each reading ``/slicer/presets`` (~6 s). The read is shielded
+    and has a client of its own, so an open given up on (``choices_for`` cancels its
+    catalogue read when another read fails first) does not take it from the others."""
     path = _path(cache, client.config)
     kept = await asyncio.to_thread(_load, path)
     if kept is None:
-        catalogue = await _catalogue(client)
-        try:
-            await asyncio.to_thread(_keep, path, catalogue)
-        except OSError as error:
-            # Kept or not, this open has its catalogue.
-            logger.warning(
-                "could not keep the preset catalogue", extra={"error": type(error).__name__}
-            )
-        return catalogue
+        reading = _reading.get(path)
+        if reading is None:
+            reading = asyncio.create_task(_first_read(client.config, path))
+            _reading[path] = reading
+            reading.add_done_callback(lambda done: _settle_first_read(path, done))
+        return await asyncio.shield(reading)
     age, catalogue = kept
     if age >= CATALOGUE_TTL and path not in _refreshing:
         task = asyncio.create_task(_refresh(client.config, path))
@@ -217,6 +221,28 @@ def _keep(path: Path, catalogue: _Catalogue) -> None:
         raise
 
 
+async def _first_read(config: BambuddyConfig, path: Path) -> _Catalogue:
+    """The read every open with nothing kept waits on, with a client of its own: the
+    open that started it may answer, or be given up on, before it ends."""
+    async with BambuddyClient(config) as client:
+        catalogue = await _catalogue(client)
+    try:
+        await asyncio.to_thread(_keep, path, catalogue)
+    except OSError as error:
+        # Kept or not, these opens have their catalogue.
+        logger.warning("could not keep the preset catalogue", extra={"error": type(error).__name__})
+    return catalogue
+
+
+def _settle_first_read(path: Path, done: asyncio.Task[_Catalogue]) -> None:
+    """Let the next open start a read of its own, and take the failure, so a read whose
+    every open was given up on is not logged as never retrieved."""
+    if _reading.get(path) is done:
+        del _reading[path]
+    if not done.cancelled():
+        done.exception()
+
+
 async def _refresh(config: BambuddyConfig, path: Path) -> None:
     """Read the catalogue again with a client of its own, since the request's closes
     when it answers. A failure keeps the old one for the next open to retry."""
@@ -243,7 +269,8 @@ async def stop_refreshes() -> None:
 def forget_catalogues() -> None:
     """Forget what this process parsed and stop its refreshes: each test starts with
     none. The files are each test's own, under its own ``cache``."""
-    for task in _refreshing.values():
+    for task in [*_refreshing.values(), *_reading.values()]:
         task.cancel()
     _refreshing.clear()
+    _reading.clear()
     _parsed.clear()

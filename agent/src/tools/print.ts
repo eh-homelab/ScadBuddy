@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ACCEPTING_MS, command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -307,7 +307,7 @@ export const printTools: Tool[] = [
         getChoices(ctx, source, args.printer_id),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
-          // #1814: only the error's name; its message can quote a connection string (telemetry/scrub.ts).
+          // #1814: the error's name and status, never its message, which can quote a connection string (telemetry/scrub.ts).
           console.warn(`get_print_choices: the plates could not be read (${errorName(err)})`)
           return []
         }),
@@ -1043,22 +1043,31 @@ export const printTools: Tool[] = [
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
-      const started = await reattach(
+      // A run no worker has picked up yet is a 202 followed to the run, not a 503
+      // re-sent (#2795): each re-send of a print is a chance to print twice.
+      const started = await reattachFollowing(
         ctx,
         () =>
+          // Only the preference, not `CommandHeaders`: a run keys on the body's
+          // `request_id`, never an `Idempotency-Key` (#3086).
           source.kind === 'library'
             ? backend.POST('/api/v1/print/library/{file_id}/run', {
                 params: { path: { file_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               })
             : backend.POST('/api/v1/print/outputs/{output_id}/run', {
                 params: { path: { output_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               }),
         `print ${sourceName(args)}`,
-        " The print may still have started: check Bambuddy's queue before printing again.",
+        ` The print may still have started (request ${requestId}): it has no run id yet for get_print_run. ` +
+          `get_print_progress for this ${source.kind === 'library' ? 'library file' : 'output'} is safe to repeat and ` +
+          "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
+          'print_output again would be a second print.',
       )
       return runOutcome(await waitForRun(ctx, started), ctx)
     },

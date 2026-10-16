@@ -4,28 +4,35 @@ the deadline, and ``GET /operations/{id}``."""
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
+import importlib
 import time
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from temporalio import activity
 
+import scadbuddy
 from scadbuddy.api import operations as operations_api
+from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.operations import IdempotencyKey, run_operation
 from scadbuddy.core.authorship import AUTHOR_HEADER, AUTHOR_SESSION_HEADER, current_author
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OPERATIONS, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, to_thread_to_end
+from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
@@ -116,6 +123,12 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         return {"principal": found and found.principal, "session": found and found.session}
 
     test_author_kind = OperationKind("test_author", check, author, queue="library")
+
+    async def unhurried_check(request: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(3)  # past a 1 s FAST_ACCEPT and a 1 s follow, not the 10 s
+        return {"checked": True}
+
+    test_unhurried_kind = OperationKind("test_unhurried", unhurried_check, run)
     ops = state.components.get(OPERATIONS)
     added = [
         OperationKind("test", check, run),
@@ -125,6 +138,7 @@ def client(app: FastAPI, counts: Counts) -> Iterator[TestClient]:
         test_slow_check_kind,
         test_library_kind,
         test_author_kind,
+        test_unhurried_kind,
     ]
     # Before the app starts, so its workers serve the kinds too.
     state.components.override(
@@ -461,3 +475,164 @@ def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
     assert operations_api.KEY_REQUIRED_PROBLEM in responses["428"]["description"]
     schema = responses["503"]["content"]["application/problem+json"]["schema"]
     assert "may_have_started" in schema["properties"]
+
+
+@pytest.fixture
+def short_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2794: a 1 s fast accept and a 1 s follow, so a 3 s check outlasts both."""
+    monkeypatch.setattr(operations_api, "FAST_ACCEPT", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
+
+
+@pytest.mark.usefixtures("short_waits")
+def test_an_operation_still_accepting_answers_202_to_a_client_that_follows(
+    client: TestClient, counts: Counts
+) -> None:
+    """#2794 (spec 2026-10-13): with `Prefer: respond-async`, an Update unanswered past
+    `FAST_ACCEPT` is a 202 `accepting` naming the request's key, not a 503 to send
+    again; following it answers the route's own body, and the operation ran once."""
+    key = uuid.uuid4().hex
+    started = client.post(
+        "/api/v1/test-op?kind=test_unhurried",
+        json={},
+        headers={"Idempotency-Key": key, "Prefer": "respond-async"},
+    )
+    assert started.status_code == 202, started.text
+    accepting = started.json()
+    assert accepting["status"] == "accepting"
+    assert accepting["update_id"] == key
+    assert accepting["workflow_id"].startswith("op-test_unhurried-")
+    assert started.headers["Preference-Applied"] == "respond-async"
+
+    answer = client.post(accepting["follow_url"])
+    deadline = time.monotonic() + 60
+    while answer.status_code == 202 and answer.json().get("status") == "accepting":
+        assert time.monotonic() < deadline, answer.text
+        answer = client.post(accepting["follow_url"])
+
+    if answer.status_code == 202:
+        # The route's own answer past its deadline: a run that outlasted it under load
+        # (CI, #2849) is a 202 Operation to follow, exactly as the route would answer.
+        op = follow_operation(client, answer.json())
+        assert op["status"] == "succeeded", op
+        assert op["result"] == {"done": True, "n": 1}
+    else:
+        assert answer.status_code == 200, answer.text
+        assert answer.json() == {"done": True, "n": 1}
+    assert counts.runs == 1
+
+
+@pytest.mark.usefixtures("short_waits")
+def test_without_the_preference_an_operation_under_the_deadline_answers_its_body(
+    client: TestClient,
+) -> None:
+    """Every client that does not follow a 202 keeps the re-send it knows (§5.1)."""
+    response = client.post("/api/v1/test-op?kind=test_unhurried", json={}, headers=press())
+    # The 10 s deadline outlasts the 3 s check: the body, as before this change.
+    assert response.status_code == 200, response.text
+
+
+def test_with_the_preference_a_fast_operation_is_its_body_at_once(client: TestClient) -> None:
+    """Review #2836: the preference alone never turns an answer inside `FAST_ACCEPT` into
+    a 202: the route's own 200, and no `Preference-Applied`."""
+    response = client.post(
+        "/api/v1/test-op",
+        json={},
+        headers={"Idempotency-Key": uuid.uuid4().hex, "Prefer": "respond-async"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"done": True, "n": 1}
+    assert "Preference-Applied" not in response.headers
+
+
+def test_following_an_operation_temporal_does_not_know_is_a_resend(client: TestClient) -> None:
+    response = client.post(f"/api/v1/commands/op-test-{'0' * 64}/updates/{uuid.uuid4().hex}")
+    assert response.status_code == 409, response.text
+    assert response.json()["type"] == COMMAND_RESEND_PROBLEM
+
+
+def test_only_an_operations_own_id_is_followed(client: TestClient) -> None:
+    response = client.post("/api/v1/commands/op-test-nothex/updates/k1")
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.usefixtures("short_waits")
+def test_a_followed_done_kind_still_running_is_its_operation_to_follow(
+    client: TestClient,
+) -> None:
+    """Review #2836: a `done` kind whose Update outlasts the follow's wait while its
+    record says `running` answers its 202 `OperationAccepted`, which the client follows
+    at /operations/{id}, as the route answers it."""
+    started = client.post(
+        "/api/v1/test-op?kind=test_unhurried",
+        json={"delay": 6},
+        headers={"Idempotency-Key": uuid.uuid4().hex, "Prefer": "respond-async"},
+    )
+    assert started.status_code == 202, started.text
+    follow_url = started.json()["follow_url"]
+
+    answer = client.post(follow_url)
+    deadline = time.monotonic() + 60
+    while answer.status_code == 202 and answer.json().get("status") == "accepting":
+        assert time.monotonic() < deadline, answer.text
+        answer = client.post(follow_url)
+
+    assert answer.status_code == 202, answer.text
+    running = answer.json()
+    assert running["status"] == "running" and running["repeated"] is False
+    # The route's own header for it too (review #2836).
+    assert answer.headers["Activity-Location"] == operations_api.activity_location(running["id"])
+    op = follow(client, running["id"], timeout=60)
+    assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
+
+
+@pytest.mark.usefixtures("short_waits")
+@pytest.mark.parametrize("key", ["a/b", ".", ".."])
+def test_a_key_the_follow_url_cannot_carry_keeps_the_resend(client: TestClient, key: str) -> None:
+    """Review #2836: a key with a `/` cannot be a path segment of the follow URL, so it
+    is never offered the 202 (that was a 500 after the operation had started); it is
+    answered as without the preference. A dot-only key is collapsed out of the path as
+    a dot segment, so it is not offered one either."""
+    response = client.post(
+        "/api/v1/test-op?kind=test_unhurried",
+        json={},
+        headers={"Idempotency-Key": key, "Prefer": "respond-async"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["done"] is True
+
+
+def _answer_models() -> list[type[BaseModel]]:
+    """Every model a route hands `operation_answer`, read from the routes' source."""
+    found: dict[str, type[BaseModel]] = {}
+    for path in sorted((Path(scadbuddy.__file__).parent / "api").glob("*.py")):
+        module = importlib.import_module(f"scadbuddy.api.{path.stem}")
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "operation_answer"
+                and len(node.args) == 2
+                and isinstance(node.args[1], ast.Name)
+            ):
+                model = getattr(module, node.args[1].id)
+                found[f"{model.__module__}.{model.__qualname__}"] = model
+    return list(found.values())
+
+
+def test_every_operation_answer_model_serialises_as_its_stored_result() -> None:
+    """Review #2836 (#3038): a follow sends an operation's stored ``result`` as it is,
+    where the route sends ``Model.model_validate(result)``. A kind's run stores the
+    model's ``model_dump(mode="json")`` (`OperationKind.run`), so an ``exclude`` field is
+    absent from both; the two still differ for a model that renames, computes or
+    re-serialises a field, so one that starts to is caught here rather than answering a
+    follow differently from the route."""
+    models = _answer_models()
+    assert len(models) > 10, models  # the scan found the routes
+    for model in models:
+        assert not model.model_computed_fields, model
+        assert not model.__pydantic_decorators__.field_serializers, model
+        assert not model.__pydantic_decorators__.model_serializers, model
+        for name, field in model.model_fields.items():
+            assert field.alias in (None, name), (model, name)
+            assert field.serialization_alias in (None, name), (model, name)

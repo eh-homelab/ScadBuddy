@@ -5,6 +5,7 @@ like the render worker, its workflows AUTO_UPGRADE."""
 from __future__ import annotations
 
 import asyncio
+import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,7 +39,7 @@ from scadbuddy.workflows.operation_models import (
 )
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.temporal import temporal_client
-from tests.test_worker import _free_port, _healthy
+from tests.test_worker import _healthy
 
 NOW = datetime(2026, 10, 4, tzinfo=UTC)
 
@@ -159,7 +160,10 @@ class Library:
 @pytest.mark.requires_postgres
 @pytest.mark.requires_temporal
 async def test_the_print_worker_is_current_serves_a_prelude_and_stops(
-    pg_conninfo: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    health_socket: socket.socket,
 ) -> None:
     """Made current as ``scadbuddy-print``, it serves the inbox step of a delete started
     on an unversioned (library) queue, and it stops on ``stop``."""
@@ -171,12 +175,12 @@ async def test_the_print_worker_is_current_serves_a_prelude_and_stops(
     settings = print_settings(
         pg_conninfo, tmp_path, temporal_task_queue_bambuddy=queue, revision=build_id
     )
-    port = _free_port()
+    port = health_socket.getsockname()[1]
     library = Library()
     async with temporal_client() as client:
         stop = asyncio.Event()
         worker = asyncio.create_task(
-            run_print_worker(settings, stop=stop, health_port=port, client=client)
+            run_print_worker(settings, stop=stop, health_port=health_socket, client=client)
         )
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
