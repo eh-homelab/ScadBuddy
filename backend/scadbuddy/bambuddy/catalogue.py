@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -17,6 +18,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -28,6 +31,7 @@ from scadbuddy.bambuddy.models import (
     PresetCatalogue,
     PresetRef,
 )
+from scadbuddy.core.secrets import Kek
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +138,13 @@ CATALOGUE_TTL = 120.0
 CATALOGUE_DIRNAME = "catalogues"
 #: Bumped when :class:`_Catalogue`'s shape changes, so an older file is never read.
 CATALOGUE_VERSION = 1
+#: How long a file in the directory may go unwritten before a keep removes it (#3423):
+#: one named for an old Bambuddy URL or key, or an older version, is never read again.
+#: A live one is rewritten every :data:`CATALOGUE_TTL` it is opened, so a removed live
+#: file costs only its next open a read.
+CATALOGUE_ORPHAN_AGE = 7 * 24 * 3600.0
+#: The HKDF label of :func:`catalogue_name_key`.
+NAME_KEY_INFO = b"scadbuddy:bambuddy:catalogue_name:v1"
 
 _ADAPTER = TypeAdapter(_Catalogue)
 
@@ -158,7 +169,18 @@ _refreshing: dict[Path, asyncio.Task[None]] = {}
 _reading: dict[Path, asyncio.Task[_Catalogue]] = {}
 
 
-async def cached_catalogue(client: BambuddyClient, cache: Path) -> _Catalogue:
+def catalogue_name_key(kek: Kek | None) -> bytes | None:
+    """The key a kept catalogue's file name is an HMAC under (#3313), derived from the
+    KEK so a listing of the shared volume cannot be tried against guessed API keys.
+    ``None`` without a KEK: then the API key is stored in the clear anyway."""
+    if kek is None:
+        return None
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=NAME_KEY_INFO).derive(kek.key)
+
+
+async def cached_catalogue(
+    client: BambuddyClient, cache: Path, *, name_key: bytes | None = None
+) -> _Catalogue:
     """:func:`_catalogue`, kept in a file under ``cache`` per Bambuddy (#2361, #2978).
 
     A kept catalogue answers at once, however old; one older than
@@ -166,12 +188,13 @@ async def cached_catalogue(client: BambuddyClient, cache: Path) -> _Catalogue:
     profile imported in Bambuddy shows from the open after the one that started that
     read. Only the print dialog's choices read it: the check and the run, which slice
     with what they resolve, still read the catalogue fresh. A failed read is not kept.
+    ``name_key`` is :func:`catalogue_name_key`'s.
 
     With nothing kept, the opens of that file wait on one read and fail with it
     (#2906), rather than each reading ``/slicer/presets`` (~6 s). The read is shielded
     and has a client of its own, so an open given up on (``choices_for`` cancels its
     catalogue read when another read fails first) does not take it from the others."""
-    path = _path(cache, client.config)
+    path = _path(cache, client.config, name_key)
     kept = await asyncio.to_thread(_load, path)
     if kept is None:
         reading = _reading.get(path)
@@ -188,9 +211,15 @@ async def cached_catalogue(client: BambuddyClient, cache: Path) -> _Catalogue:
     return catalogue
 
 
-def _path(cache: Path, config: BambuddyConfig) -> Path:
-    """One file per Bambuddy and key, named by a digest so the key never reaches a name."""
-    digest = hashlib.sha256(f"{config.base_url}\0{config.api_key or ''}".encode()).hexdigest()
+def _path(cache: Path, config: BambuddyConfig, name_key: bytes | None = None) -> Path:
+    """One file per Bambuddy and key, named by a digest so the key never reaches a name:
+    an HMAC under ``name_key`` when there is one (#3313)."""
+    message = f"{config.base_url}\0{config.api_key or ''}".encode()
+    digest = (
+        hmac.new(name_key, message, hashlib.sha256).hexdigest()
+        if name_key is not None
+        else hashlib.sha256(message).hexdigest()
+    )
     return cache / CATALOGUE_DIRNAME / f"v{CATALOGUE_VERSION}-{digest[:32]}.json"
 
 
@@ -216,9 +245,30 @@ def _keep(path: Path, catalogue: _Catalogue) -> None:
         partial.write_bytes(_ADAPTER.dump_json(catalogue))
         partial.replace(path)
     except OSError:
-        # Nothing sweeps this directory, so a write that failed part-way goes (#3447).
+        # A write that failed part-way goes at once (#3447).
         partial.unlink(missing_ok=True)
         raise
+    _sweep(path)
+
+
+def _sweep(kept: Path) -> None:
+    """Remove the files beside ``kept`` that have gone :data:`CATALOGUE_ORPHAN_AGE`
+    unwritten (#3423): an old URL's, key's or version's, or a crashed write's. Another
+    replica may remove the same file first, and a file that cannot go waits for the
+    next keep."""
+    cutoff = time.time() - CATALOGUE_ORPHAN_AGE
+    try:
+        entries = list(kept.parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name == kept.name:
+            continue
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
 
 
 async def _first_read(config: BambuddyConfig, path: Path) -> _Catalogue:
@@ -268,9 +318,11 @@ async def stop_refreshes() -> None:
 
 def forget_catalogues() -> None:
     """Forget what this process parsed and stop its refreshes: each test starts with
-    none. The files are each test's own, under its own ``cache``."""
+    none. The files are each test's own, under its own ``cache``. A read left by a
+    test whose event loop has closed is only dropped: cancelling it would raise (#3311)."""
     for task in [*_refreshing.values(), *_reading.values()]:
-        task.cancel()
+        if not task.get_loop().is_closed():
+            task.cancel()
     _refreshing.clear()
     _reading.clear()
     _parsed.clear()
