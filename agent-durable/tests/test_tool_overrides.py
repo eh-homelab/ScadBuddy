@@ -117,3 +117,26 @@ def test_a_tool_the_sdk_refuses_is_left_out_not_raised() -> None:
     )
     assert names == {"notes__post"}
     assert too_long not in offered
+
+
+def test_settings_still_raise_a_tool_whose_manifest_tier_is_not_a_tier() -> None:
+    """Review of #3882: a manifest tier that is not a tier is said once at parse time, but
+    kept as the manifest has it. Relabelled `outward` there, it outranked the override, so
+    a Settings raise to `outward` was dropped and the tool ran ungated."""
+    [odd] = tools.parse_manifest(
+        [
+            {
+                "name": "odd_tool",
+                "description": "odd",
+                "input_schema": {"type": "object"},
+                "tier": "admin",
+            }
+        ]
+    )
+    tiers, _ = tools.sanitise_overrides([odd], {"tool_tiers": {"odd_tool": "outward"}})
+    assert tiers == {"odd_tool": "outward"}
+    by_name = {t.name: t for t in tools.durable_tools([odd])}
+    tools.apply_overrides(by_name, [odd], tiers, set())
+    assert by_name["odd_tool"].needs_approval
+    assert by_name["odd_tool"].retry_policy is not None
+    assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
