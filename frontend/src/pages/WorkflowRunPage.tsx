@@ -448,7 +448,7 @@ function ProposedChange({ changes }: { changes: ReturnType<typeof proposalDiff> 
   if (changes.length === 0) return <p className="mb-2 text-[12px] text-muted-foreground">The proposal changes nothing.</p>
   return (
     <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
-      <thead>
+      <thead className="text-muted-foreground">
         <tr>
           <th className="pr-2 font-medium">Field</th>
           <th className="pr-2 font-medium">As called</th>

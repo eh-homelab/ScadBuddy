@@ -57,9 +57,10 @@ export interface TokenStore {
   approvalGrant(id: string, now?: Date): Promise<boolean>
   /**
    * The tier of the live (unrevoked, unexpired) token with this id, or null.
-   * What a resumed approval's turn is cut down to (#300, `liveTokenTiers`).
+   * What a resumed approval's turn is cut down to (#300, `liveTokenTiers`). Expiry is
+   * judged by Postgres's clock, never a replica's, so it takes no `now` (#3411).
    */
-  liveTier(id: string, now?: Date): Promise<Tier | null>
+  liveTier(id: string): Promise<Tier | null>
 }
 
 /** Recognisable in logs and secret scanners; the rest is 256 random bits. */
@@ -173,13 +174,13 @@ export class PostgresTokenStore implements TokenStore {
     return rows.length > 0
   }
 
-  /** Without `now`, expiry is judged by Postgres's clock, as escalation hops are (#3411). */
-  async liveTier(id: string, now?: Date): Promise<Tier | null> {
+  /** Expiry is judged by Postgres's clock, as escalation hops are (#3411). */
+  async liveTier(id: string): Promise<Tier | null> {
     if (!UUID.test(id)) return null
     const rows = await this.#sql<{ tier: Tier }[]>`
       SELECT tier FROM ai_mcp_tokens
        WHERE id = ${id} AND revoked_at IS NULL
-         AND (expires_at IS NULL OR expires_at > ${now ?? this.#sql`now()`})`
+         AND (expires_at IS NULL OR expires_at > now())`
     return rows[0]?.tier ?? null
   }
 }

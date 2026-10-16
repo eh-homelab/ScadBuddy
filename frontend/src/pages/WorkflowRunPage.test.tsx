@@ -164,6 +164,8 @@ describe('WorkflowRunPage', () => {
       'request.objects[0].count32',
       'request.objects[1]{"output_id":"b"}(removed)',
     ])
+    // Its header row is muted like every other table's on the page (#3494 review).
+    expect(proposal.querySelector('thead')).toHaveClass('text-muted-foreground')
     expect(card).toHaveTextContent('Narrowed by the starting session')
     // A person's to see and to approve: the assistant can neither read nor click it.
     expect(proposal.closest('[data-agent-user-only]')).not.toBeNull()
