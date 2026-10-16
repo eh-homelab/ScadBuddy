@@ -2,6 +2,7 @@ import { useRef, useState, type DragEvent } from 'react'
 import { api } from '../../api/client'
 import type { Asset, Param } from '../../api/types'
 import { imageAsPng } from '../../lib/mediaFiles'
+import { paramLabel } from '../../lib/params'
 import { useAsync } from '../../lib/useAsync'
 import { MediaPicker, type PickerItem, type PickerSection } from '../media/MediaPicker'
 import { mediaIdOf, mediaPickerItems } from '../media/pickerItems'
@@ -9,7 +10,6 @@ import { Hint } from '../Hint'
 import { Button } from '@/components/ui/button'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Field } from './Field'
-import { paramLabel } from '../../lib/params'
 
 const ASSET_ID = /^[0-9a-f]{64}$/
 

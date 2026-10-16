@@ -99,7 +99,8 @@ export function ColorWidget({
               label={paramLabel(param)}
               value={hex}
               onPick={(picked) => {
-                onChange(picked)
+                // Through commit: the swatch of the colour already set sends nothing.
+                commit(picked)
                 setOpen(false)
               }}
             />
