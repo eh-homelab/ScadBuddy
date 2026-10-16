@@ -744,3 +744,37 @@ describe("a durable handoff whose workflow cannot be reached", () => {
     }
   })
 })
+
+describe('a durable fork whose workflow cannot be read (#3739)', () => {
+  const id = 'a1b2c3d4-0000-4000-8000-000000000000'
+  function turnsFailing(err: Error): DurableTurns {
+    const client = {
+      withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
+      workflow: { getHandle: () => ({ query: () => Promise.reject(err) }) },
+    } as unknown as Client
+    return new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog })
+  }
+
+  it('logs why, and says when no worker answered in time', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // A gRPC DEADLINE_EXCEEDED (code 4), as the client raises it.
+      const deadline = Object.assign(new Error('4 DEADLINE_EXCEEDED: query timed out'), { code: 4, details: 'query timed out', metadata: {} })
+      await expect(turnsFailing(deadline).forkSource(id)).rejects.toMatchObject({
+        code: 'unavailable',
+        message: expect.stringContaining('no durable session worker answered'),
+      })
+      await expect(turnsFailing(new Error('nondeterminism in replay')).forkSource(id)).rejects.toMatchObject({
+        code: 'unavailable',
+        message: expect.stringContaining('could not be read to fork it'),
+      })
+      const lines = warn.mock.calls.map(([line]) => String(line))
+      expect(lines).toHaveLength(2)
+      expect(lines[0]).toContain(id)
+      expect(lines[0]).toContain('DEADLINE_EXCEEDED')
+      expect(lines[1]).toContain('nondeterminism in replay')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})

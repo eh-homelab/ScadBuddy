@@ -1,5 +1,6 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import {
+  isGrpcDeadlineError,
   type Client,
   WithStartWorkflowOperation,
   WorkflowExecutionAlreadyStartedError,
@@ -381,6 +382,12 @@ export class DurableTurns {
       }
     } catch (err) {
       if (err instanceof WorkflowNotFoundError) return undefined
+      // #3739: the cause is the one thing that says why a fork keeps failing, so it is
+      // logged; the caller hears only which of the two it was.
+      console.warn(`durable fork: session ${sessionId}'s workflow could not be read: ${String(err)}`)
+      if (isGrpcDeadlineError(err)) {
+        throw new SessionError('unavailable', `no durable session worker answered for session ${sessionId} in time to fork it; try again in a moment`)
+      }
       throw new SessionError('unavailable', `session ${sessionId}'s workflow could not be read to fork it; try again in a moment`)
     }
     throw new SessionError('busy', `session ${sessionId} kept moving while it was read; fork it again once its turn ends`)
