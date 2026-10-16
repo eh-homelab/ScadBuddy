@@ -24,7 +24,10 @@ from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.bambuddy import attachments
 from scadbuddy.bambuddy.attachments import (
     MAX_ATTACHMENTS,
+    AlreadyPromotedError,
     Attachment,
+    AttachmentGoneError,
+    PromoteInProgressError,
     TooManyAttachmentsError,
     file_path,
 )
@@ -54,6 +57,9 @@ if TYPE_CHECKING:
 WHERE = "the print in Bambuddy, and its project's Media folder"
 #: A promote's: the template's gallery, and the attachment's own mark of it.
 PROMOTE_WHERE = "the template's media, and the attachment's gallery list"
+#: How long a promote's claim holds off another: twice the run's timeout, since a run
+#: cancelled at its timeout still waits for its copy to end (`to_thread_to_end`).
+PROMOTE_LEASE = 2 * PIN_TIMEOUT
 ACCEPTED = "a PNG, JPEG or WebP photo, or an MP4 or WebM video"
 
 
@@ -258,9 +264,21 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
         route never saw the end, is still marked once the copy lands (#2831 review)."""
         found = await _promotable(request)
         slug = request["slug"]
-        # Marked before the copy, and unmarked if it does not land: marked after, a failure
-        # between the two left a copy that a second promote copied again (#3401).
-        await store.promoted(found.archive_id, found.id, slug)
+        # Claimed before the copy, under the row's lock, so a second promote sent while
+        # this one copies is refused (#3401, #3785 review); marked once the copy lands.
+        try:
+            token = await store.claim_promote(found.archive_id, found.id, slug, PROMOTE_LEASE)
+        except AlreadyPromotedError:
+            raise already_promoted(slug) from None
+        except PromoteInProgressError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, f"this attachment is being copied to {slug} already"
+            ) from None
+        except AttachmentGoneError:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"print {found.archive_id} has no attachment {found.id}",
+            ) from None
         staging = state.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
         staging.mkdir(parents=True)
         try:
@@ -283,10 +301,15 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
             # A git commit, and a move of up to a gigabyte: a cancel waits for both.
             record = await to_thread_to_end(partial(_add_media, slug, media, found.caption or ""))
         except BaseException:
-            await store.unpromoted(found.archive_id, found.id, slug)
+            try:
+                await store.release_promote(found.archive_id, found.id, slug, token)
+            except Exception:
+                # The copy's own error is the one to report; the claim lapses with its lease.
+                logger.exception("could not release the promote of attachment %s", found.id)
             raise
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, True)
+        await store.promote_landed(found.archive_id, found.id, slug, token)
         emit(state.events, ModelEvent(kind="model.updated", slug=slug))
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped

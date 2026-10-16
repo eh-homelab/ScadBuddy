@@ -21,8 +21,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 import weakref
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import IO, Literal
 
 from fastapi import status
@@ -54,6 +55,18 @@ ATTACHMENT_LOCK_CLASS = 0x5342_5041
 
 class TooManyAttachmentsError(Exception):
     """The print already keeps ``MAX_ATTACHMENTS``."""
+
+
+class AlreadyPromotedError(Exception):
+    """The template's gallery has a copy of the attachment already."""
+
+
+class PromoteInProgressError(Exception):
+    """Another promote of the attachment to the template holds a live claim."""
+
+
+class AttachmentGoneError(Exception):
+    """The attachment's row is gone."""
 
 
 class Attachment(BaseModel):
@@ -103,13 +116,29 @@ class AttachmentStore:
     ) -> Attachment | None:
         return await asyncio.to_thread(self._set_caption, archive_id, attachment_id, caption)
 
-    async def promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
-        """Note that ``slug``'s gallery has a copy."""
-        await asyncio.to_thread(self._promoted, archive_id, attachment_id, slug)
+    async def claim_promote(
+        self, archive_id: int, attachment_id: int, slug: str, lease: timedelta
+    ) -> str:
+        """Claim the copy of the attachment to ``slug``'s gallery: the claim's token.
 
-    async def unpromoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
-        """Take back ``promoted``: the copy did not land."""
-        await asyncio.to_thread(self._unpromoted, archive_id, attachment_id, slug)
+        Taken under the row's lock, so of two promotes only one copies (#3785 review).
+        Raises `AlreadyPromotedError` once the copy has landed, `PromoteInProgressError`
+        while another run's claim is younger than ``lease``, and `AttachmentGoneError`
+        when the row is gone. A claim older than ``lease`` is taken over: its run was
+        killed mid-copy and never let it go."""
+        return await asyncio.to_thread(self._claim_promote, archive_id, attachment_id, slug, lease)
+
+    async def promote_landed(
+        self, archive_id: int, attachment_id: int, slug: str, token: str
+    ) -> None:
+        """The copy is in ``slug``'s gallery: mark it, and let ``token``'s claim go."""
+        await asyncio.to_thread(self._promote_landed, archive_id, attachment_id, slug, token)
+
+    async def release_promote(
+        self, archive_id: int, attachment_id: int, slug: str, token: str
+    ) -> None:
+        """The copy did not land: let ``token``'s claim go, and only that one."""
+        await asyncio.to_thread(self._release_promote, archive_id, attachment_id, slug, token)
 
     async def remove(self, attachment_id: int) -> None:
         await asyncio.to_thread(self._remove, attachment_id)
@@ -188,20 +217,51 @@ class AttachmentStore:
             ).fetchone()
         return Attachment.model_validate(dict(row)) if row is not None else None
 
-    def _promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
-        with self._pool.connection() as conn:
+    def _claim_promote(
+        self, archive_id: int, attachment_id: int, slug: str, lease: timedelta
+    ) -> str:
+        token = uuid.uuid4().hex
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT promoted_to, promoting -> %s ->> 'at' AS claimed_at, now() AS now"
+                " FROM print_attachments WHERE archive_id = %s AND id = %s FOR UPDATE",
+                (slug, archive_id, attachment_id),
+            ).fetchone()
+            if row is None:
+                raise AttachmentGoneError
+            if slug in row["promoted_to"]:
+                raise AlreadyPromotedError
+            claimed_at = row["claimed_at"]
+            if claimed_at is not None and datetime.fromisoformat(claimed_at) > row["now"] - lease:
+                raise PromoteInProgressError
             conn.execute(
-                "UPDATE print_attachments SET promoted_to = array_append(promoted_to, %s)"
-                " WHERE archive_id = %s AND id = %s AND NOT (%s = ANY(promoted_to))",
-                (slug, archive_id, attachment_id, slug),
+                "UPDATE print_attachments SET promoting = promoting || jsonb_build_object("
+                "%s::text, jsonb_build_object('token', %s::text, 'at', now()))"
+                " WHERE archive_id = %s AND id = %s",
+                (slug, token, archive_id, attachment_id),
+            )
+        return token
+
+    def _promote_landed(self, archive_id: int, attachment_id: int, slug: str, token: str) -> None:
+        with self._pool.connection() as conn:
+            # Marked even when another run has taken the claim over: the copy is there.
+            conn.execute(
+                "UPDATE print_attachments SET"
+                " promoted_to = CASE WHEN %(slug)s = ANY(promoted_to) THEN promoted_to"
+                " ELSE array_append(promoted_to, %(slug)s) END,"
+                " promoting = CASE WHEN promoting -> %(slug)s ->> 'token' = %(token)s"
+                " THEN promoting - %(slug)s ELSE promoting END"
+                " WHERE archive_id = %(archive)s AND id = %(id)s",
+                {"slug": slug, "token": token, "archive": archive_id, "id": attachment_id},
             )
 
-    def _unpromoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+    def _release_promote(self, archive_id: int, attachment_id: int, slug: str, token: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE print_attachments SET promoted_to = array_remove(promoted_to, %s)"
-                " WHERE archive_id = %s AND id = %s",
-                (slug, archive_id, attachment_id),
+                "UPDATE print_attachments SET promoting = promoting - %(slug)s"
+                " WHERE archive_id = %(archive)s AND id = %(id)s"
+                " AND promoting -> %(slug)s ->> 'token' = %(token)s",
+                {"slug": slug, "token": token, "archive": archive_id, "id": attachment_id},
             )
 
     def _remove(self, attachment_id: int) -> None:

@@ -21,8 +21,14 @@ from scadbuddy import main
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
-from scadbuddy.bambuddy.attachments import MAX_ATTACHMENTS, Attachment
+from scadbuddy.bambuddy.attachments import (
+    MAX_ATTACHMENTS,
+    AlreadyPromotedError,
+    Attachment,
+    PromoteInProgressError,
+)
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.attachment_operations import PROMOTE_LEASE
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_media import WEBM
@@ -565,31 +571,36 @@ def test_a_blank_caption_is_stored_as_none_on_upload_too(client: TestClient, mod
     assert added.json()["caption"] is None
 
 
-@respx.mock
-def test_a_promote_whose_mark_fails_copies_nothing_and_can_be_sent_again(
-    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#3401: the mark goes first, so a promote that fails between mark and copy leaves no
-    unmarked copy for a second promote to copy again."""
+def _promote_ready(client: TestClient, model: str) -> tuple[dict[str, Any], str]:
+    """A linked print with one attachment whose bytes Bambuddy serves: it, and its URL."""
     linked(client, model)
     Bambuddy(media_exists=True)
     attachment = attach(client, "p.png", PNG, "Real print").json()
     respx.get(f"{API}/library/files/501/download").mock(
         return_value=httpx.Response(200, content=PNG)
     )
+    return attachment, f"{URL}/{attachment['id']}/promote"
+
+
+@respx.mock
+def test_a_promote_whose_claim_fails_copies_nothing_and_can_be_sent_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3401: the claim goes first, so a promote that fails before the copy leaves no
+    unmarked copy for a second promote to copy again."""
+    _, url = _promote_ready(client, model)
     store = _state(client).components.get(PRINT_ATTACHMENTS)
-    promoted = store.promoted
+    claim = store.claim_promote
     calls = 0
 
-    async def fails_once(archive_id: int, attachment_id: int, slug: str) -> None:
+    async def fails_once(*args: Any) -> str:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("the database went away")
-        await promoted(archive_id, attachment_id, slug)
+        return await claim(*args)
 
-    monkeypatch.setattr(store, "promoted", fails_once)
-    url = f"{URL}/{attachment['id']}/promote"
+    monkeypatch.setattr(store, "claim_promote", fails_once)
 
     failed = client.post(url, json={"slug": model}, headers=press())
     assert failed.status_code >= 500, failed.text
@@ -598,6 +609,98 @@ def test_a_promote_whose_mark_fails_copies_nothing_and_can_be_sent_again(
     again = client.post(url, json={"slug": model}, headers=press())
     assert again.status_code == 200, again.text
     assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+
+
+@respx.mock
+def test_a_promote_sent_while_another_is_copying_copies_nothing(
+    client: TestClient, model: str
+) -> None:
+    """#3785 review: two promotes can both pass the check before either copies; only the
+    one holding the claim copies, and the other is refused, not a silent second copy."""
+    attachment, url = _promote_ready(client, model)
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+    # The first promote, between its claim and its copy.
+    asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+
+    second = client.post(url, json={"slug": model}, headers=press())
+
+    assert second.status_code == 409, second.text
+    assert "being copied" in second.json()["detail"]
+    assert client.get(f"/api/v1/models/{model}").json()["media"] == []
+
+
+@respx.mock
+def test_a_promote_killed_mid_copy_can_be_sent_again_once_its_claim_lapses(
+    client: TestClient, model: str
+) -> None:
+    """#3785 review: a run killed between its claim and its copy never lets the claim go;
+    past the lease the claim is taken over, so the attachment is not stuck promoted."""
+    attachment, url = _promote_ready(client, model)
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+    asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_attachments SET promoting = jsonb_set(promoting, ARRAY[%s::text],"
+            " jsonb_build_object('token', 'killed', 'at', now() - %s - interval '1 second'))"
+            " WHERE id = %s",
+            (model, PROMOTE_LEASE, attachment["id"]),
+        )
+    assert client.get("/api/v1/prints/35").json()["media"]["attachments"][0]["promoted_to"] == []
+
+    again = client.post(url, json={"slug": model}, headers=press())
+
+    assert again.status_code == 200, again.text
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["media"]["attachments"][0]["promoted_to"] == [model]
+
+
+@respx.mock
+def test_a_failed_promote_releases_only_its_own_claim(client: TestClient, model: str) -> None:
+    """#3785 review: a run whose claim was taken over must not let the new one go."""
+    attachment, _ = _promote_ready(client, model)
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+    live = asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+
+    asyncio.run(store.release_promote(35, attachment["id"], model, "another-run"))
+    with pytest.raises(PromoteInProgressError):
+        asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+
+    asyncio.run(store.release_promote(35, attachment["id"], model, live))
+    mine = asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+    asyncio.run(store.promote_landed(35, attachment["id"], model, mine))
+    with pytest.raises(AlreadyPromotedError):
+        asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+
+
+@respx.mock
+def test_a_promote_whose_release_fails_still_reports_its_copy_s_error(
+    client: TestClient,
+    model: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3785 review: the release runs while the copy's error is in flight; its own failure
+    is logged and does not replace that error."""
+    caplog.set_level(logging.ERROR, logger="scadbuddy.library.attachment_operations")
+    _, url = _promote_ready(client, model)
+    state = _state(client)
+    store = state.components.get(PRINT_ATTACHMENTS)
+
+    def no_room(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no space left on device")
+
+    async def release_fails(*args: Any) -> None:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(state.catalogue, "add_media", no_room)
+    monkeypatch.setattr(store, "release_promote", release_fails)
+
+    failed = client.post(url, json={"slug": model}, headers=press())
+
+    assert failed.status_code >= 500, failed.text
+    assert "the database went away" not in failed.text
+    assert any("could not release" in r.getMessage() for r in caplog.records)
 
 
 @respx.mock
