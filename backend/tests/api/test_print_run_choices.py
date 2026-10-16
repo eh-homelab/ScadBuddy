@@ -1785,7 +1785,13 @@ def test_the_check_says_a_spool_is_not_loaded_and_the_plan_mixes_materials(
     upload_route()
     run_routes()
 
-    # Spool 9 is PETG, loaded in printer 1; spool 5 is PLA on the shelf.
+    # Spool 9 is PETG, loaded in printer 1; spool 5 is PLA on the shelf; spool 10 is
+    # PETG, loaded too. Read off the recordings, so a re-recording cannot change what
+    # this test means without failing here.
+    materials = {s["id"]: s["material"] for s in recording("inventory-spools.json")}
+    loaded = {a["spool_id"] for a in recording("inventory-assignments.json")}
+    assert (materials[9], materials[5], materials[10]) == ("PETG", "PLA", "PETG")
+    assert {9, 10} <= loaded and 5 not in loaded
     mixed = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
     assert mixed.status_code == 200, mixed.text
     found = [(w["kind"], w["slot_id"]) for w in mixed.json()["warnings"]]

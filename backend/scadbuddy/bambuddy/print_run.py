@@ -928,6 +928,9 @@ def plan_warnings(
             option = by_id.get(slot.spool_id)
             material = option.material if option else None
         named_family = family(material) if material else None
+        # Only a known family counts, toward the mix and the sides alike: a slot whose
+        # material cannot be read (an unknown spool, a tray with no status) is left out
+        # of both, so it never makes a plan "mixed" nor stops "a nozzle of its own".
         if not named_family:
             continue
         if named_family not in families:
