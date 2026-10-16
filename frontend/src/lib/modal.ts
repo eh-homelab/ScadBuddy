@@ -54,7 +54,12 @@ export function roomFor(companion: HTMLElement): number | null {
 /**
  * #1897 — a Radix dialog's `onInteractOutside`: a press on the shell's Assistant button
  * (raised above an open dialog, `data-modal-companion-toggle`) opens the assistant beside
- * the dialog rather than closing it.
+ * the dialog rather than closing it. ui/sheet and ui/dialog content call it for every
+ * dialog, but that alone leaves the panel unusable: a dialog that stays modal traps focus
+ * and hides the panel from assistive tech. A dialog meant to sit beside the assistant also
+ * takes `ModalCompanionContext` and `roomFor`, sets `modal={!beside}`, and leaves the
+ * companion's focus and Escape alone (`onOpenAutoFocus`, `onEscapeKeyDown`), as
+ * components/activity/ActivityDrawer does.
  */
 export function keepOpenOnCompanionToggle(event: { target: EventTarget | null; preventDefault(): void }) {
   const target = event.target

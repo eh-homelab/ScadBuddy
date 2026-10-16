@@ -106,17 +106,25 @@ function ActivityLinkItem({ link }: { link: ActivityDetail['links'][number] }) {
   return <a href={href} target="_blank" rel="noreferrer" className={cls}>{link.label}</a>
 }
 
-/** Which JSON blocks are closed, kept above the sheet: its content remounts when `modal` flips. */
-const JsonClosed = createContext<{ closed: Set<string>; toggle: (label: string, open: boolean) => void }>({
-  closed: new Set(),
+/**
+ * Which JSON blocks are closed, per row shown, kept above the sheet: its content remounts
+ * when `modal` flips.
+ */
+const JsonClosed = createContext<{ isOpen: (label: string) => boolean; toggle: (label: string, open: boolean) => void }>({
+  isOpen: () => true,
   toggle: () => {},
 })
 
+/** A JSON block's key in the drawer's closed set: the row shown, then its label. */
+function jsonKey(row: string, label: string): string {
+  return `${row}\n${label}`
+}
+
 function Json({ label, value }: { label: string; value: unknown }) {
-  const { closed, toggle } = useContext(JsonClosed)
+  const { isOpen, toggle } = useContext(JsonClosed)
   if (value === undefined) return null
   return (
-    <Collapsible open={!closed.has(label)} onOpenChange={(open) => toggle(label, open)} asChild>
+    <Collapsible open={isOpen(label)} onOpenChange={(open) => toggle(label, open)} asChild>
       <section>
         <CollapsibleTrigger className="group/json mb-1 flex items-center gap-1 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
           <ChevronRightIcon aria-hidden="true" className="size-3.5 transition-transform group-data-[state=open]/json:rotate-90" />
@@ -143,9 +151,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 /** One activity row's detail, in a drawer: Simple in words, Advanced with ids and raw JSON. */
 export function ActivityDrawer({ id, onClose }: Props) {
-  // A child opened from the list replaces the row shown, until the page names another.
-  const [trail, setTrail] = useState<{ from: string; ids: string[] }>({ from: id, ids: [] })
-  const ids = trail.from === id ? trail.ids : []
+  // A child opened from the list replaces the row shown; the page keys the drawer by row.
+  const [ids, setIds] = useState<string[]>([])
   const current = ids.at(-1) ?? id
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const view = useAsync(() => api.getActivity(current, advanced), [current, advanced], [`activity:${current}`])
@@ -165,15 +172,21 @@ export function ActivityDrawer({ id, onClose }: Props) {
   // Beside the assistant panel the drawer is not modal (#798): the panel stays usable.
   const beside = companion !== null && room !== 0
   const [closed, setClosed] = useState<Set<string>>(() => new Set())
-  const toggleJson = useCallback((label: string, open: boolean) => {
-    setClosed((current) => {
-      const next = new Set(current)
-      if (open) next.delete(label)
-      else next.add(label)
-      return next
-    })
-  }, [])
-  const jsonClosed = useMemo(() => ({ closed, toggle: toggleJson }), [closed, toggleJson])
+  const toggleJson = useCallback(
+    (label: string, open: boolean) => {
+      setClosed((was) => {
+        const next = new Set(was)
+        if (open) next.delete(jsonKey(current, label))
+        else next.add(jsonKey(current, label))
+        return next
+      })
+    },
+    [current],
+  )
+  const jsonClosed = useMemo(
+    () => ({ isOpen: (label: string) => !closed.has(jsonKey(current, label)), toggle: toggleJson }),
+    [closed, current, toggleJson],
+  )
 
   return (
     <JsonClosed.Provider value={jsonClosed}>
@@ -221,7 +234,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
           </SheetHeader>
           <div className="flex items-center gap-2 border-b px-4 py-2.5">
             {ids.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={() => setTrail({ from: id, ids: ids.slice(0, -1) })}>
+              <Button size="sm" variant="ghost" onClick={() => setIds(ids.slice(0, -1))}>
                 Back
               </Button>
             )}
@@ -313,7 +326,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
                             <Button
                               variant="link"
                               className="h-auto p-0 text-left whitespace-normal text-foreground"
-                              onClick={() => setTrail({ from: id, ids: [...ids, c.id] })}
+                              onClick={() => setIds([...ids, c.id])}
                             >
                               {c.title}
                             </Button>

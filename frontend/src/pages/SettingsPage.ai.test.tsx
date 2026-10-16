@@ -54,7 +54,7 @@ describe('SettingsPage and the AI availability gate', () => {
     await user.click(await within(auth).findByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(within(auth).getByRole('button', { name: 'Save' }))
     await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Turn authentication off' }),
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Turn authentication off' }),
     )
     const tokens = screen.getByRole('region', { name: 'MCP access tokens' })
     expect(await within(tokens).findByTestId('mcp-auth-note')).toHaveTextContent(
@@ -71,7 +71,7 @@ describe('SettingsPage and the AI availability gate', () => {
     await user.click(await within(auth).findByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(within(auth).getByRole('button', { name: 'Save' }))
     await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Turn authentication off' }),
+      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Turn authentication off' }),
     )
     const banner = await screen.findByTestId('mcp-auth-banner')
     expect(banner).toHaveTextContent('MCP authentication is off')

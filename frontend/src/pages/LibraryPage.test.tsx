@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
-import { libraryFiles } from '../mocks/features/library'
+import { libraryFiles, libraryFolders } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -810,6 +810,23 @@ describe('LibraryPage, folders and projects (#3650)', () => {
     await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\/Wands$/))
   })
 
+  it('counts a folder name in characters, as the backend does, up to 255 (#3733 review)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/MakerWorld' })
+    await screen.findByTestId('library-file-67')
+    await user.click(screen.getByTestId('library-new-folder'))
+    const dialog = await screen.findByRole('dialog', { name: 'New folder' })
+    const name = within(dialog).getByRole('textbox', { name: 'Folder name' })
+    const confirm = within(dialog).getByTestId('library-folder-name-confirm')
+
+    // An emoji is two UTF-16 units but one character: 255 of them are a usable name.
+    fireEvent.change(name, { target: { value: '🪄'.repeat(255) } })
+    expect(confirm).toBeEnabled()
+    fireEvent.change(name, { target: { value: '🪄'.repeat(256) } })
+    expect(confirm).toBeDisabled()
+    fireEvent.change(name, { target: { value: 'a/b' } })
+    expect(confirm).toBeDisabled()
+  })
+
   it('arranges a folder’s files from its menu', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')
@@ -843,6 +860,15 @@ describe('LibraryPage, folders and projects (#3650)', () => {
     expect(await screen.findByTestId('library-project-card-7')).toHaveTextContent('Desk lamp')
     await user.click(screen.getByRole('radio', { name: 'Folders' }))
     expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
+  })
+
+  it('says which folder a project of several shows (#3719 review)', async () => {
+    libraryFolders.push({ id: 14, name: 'Lamp parts', parent_id: null, depth: 0, file_count: 0, project_id: 7, project_name: 'Desk lamp' })
+    onTestFinished(() => void libraryFolders.pop())
+    renderPage(<LibraryPage />, { route: '/library?project=7' })
+    expect(await screen.findByTestId('library-file-130')).toBeInTheDocument()
+    expect(screen.getByTestId('library-project-folder-14')).toBeInTheDocument()
+    expect(screen.getByTestId('library-project-shown')).toHaveTextContent('Showing the files in Lamp.')
   })
 })
 

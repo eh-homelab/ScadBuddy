@@ -5,6 +5,7 @@ import { DownloadBlockedError, downloadBlob } from '../../lib/embed'
 import { formatBytes, timeAgo } from '../../lib/format'
 import { fileReference, sourceLabel, uploadPath } from '../../lib/workspaceFiles'
 import { useAsync } from '../../lib/useAsync'
+import { useLatest } from '../../lib/useLatest'
 import { DownloadIcon, EyeIcon, Trash2Icon, UploadIcon } from 'lucide-react'
 import {
   AlertDialog,
@@ -37,6 +38,7 @@ interface Props {
 /** #2329 — the session view's Files: the assistant's workspace for this session. */
 export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Props) {
   const { data, error, refresh, setData } = useAsync(() => api.listAiSessionFiles(sessionId), [sessionId])
+  const latest = useLatest(data)
   const readAt = useRef(refreshKey)
   useEffect(() => {
     if (Object.is(readAt.current, refreshKey)) return
@@ -49,7 +51,8 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   const [uploading, setUploading] = useState(0)
   const [errors, setErrors] = useState<string[]>([])
   const [confirming, setConfirming] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState(false)
+  /** The files whose delete is in flight: each one's confirm stays open, its Delete disabled, until answered. */
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(() => new Set())
   /** The Delete that asked for the confirm: focus goes back to it on Cancel. */
   const deleteButton = useRef<HTMLElement | null>(null)
   const [preview, setPreview] = useState<{ path: string; url: string } | null>(null)
@@ -123,19 +126,27 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
   }
 
   async function remove(file: WorkspaceFile) {
-    setDeleting(true)
+    setDeleting((was) => new Set(was).add(file.path))
     setErrors([])
     try {
       await api.deleteAiSessionFile(sessionId, file.path)
       if (preview?.path === file.path) setPreview(null)
-      if (data) setData({ ...data, files: data.files.filter((f) => f.path !== file.path) })
+      // From the latest list: another delete may have finished while this one ran.
+      const now = latest.current
+      // Supersede: another delete's read still in flight would show this file again.
+      if (now) setData({ ...now, files: now.files.filter((f) => f.path !== file.path) }, { supersede: true })
       setAnnouncement(`Deleted ${file.path}.`)
       refresh()
     } catch (caught) {
       setErrors([`${file.path} was not deleted: ${why(caught)}`])
     } finally {
-      setDeleting(false)
-      setConfirming(null)
+      setDeleting((was) => {
+        const next = new Set(was)
+        next.delete(file.path)
+        return next
+      })
+      // Only its own confirm: another file's may have been opened while this one ran.
+      setConfirming((was) => (was === file.path ? null : was))
     }
   }
 
@@ -306,7 +317,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
             <AlertDialogAction
               variant="destructive"
               data-agent-user-only=""
-              disabled={deleting}
+              disabled={confirming !== null && deleting.has(confirming)}
               onClick={(event) => {
                 // Open until the delete is answered, as the credential and Undo dialogs are.
                 event.preventDefault()
