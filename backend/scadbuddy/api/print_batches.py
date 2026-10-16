@@ -31,7 +31,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
 from scadbuddy.api.printing import ACCEPT_BUDGET
-from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.runs import PrintRun, PrintRunStore
 from scadbuddy.batches.component import PrintBatchesDep
 from scadbuddy.batches.store import (
     BatchChoice,
@@ -367,6 +367,8 @@ async def _queue_one(
             budget=budget,
             downloads=downloads,
         )
+        # Started with no `http`, so never the 202 to follow (#2793): always the run.
+        assert isinstance(run, PrintRun)
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
         # may have started. The same request_id sent again follows that run.

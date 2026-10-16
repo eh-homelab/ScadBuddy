@@ -69,8 +69,13 @@ def test_no_redirect_leaves_the_origin(spa_client: TestClient, method: str, path
     assert _origin(target) == ORIGIN, f"{method} {path} -> {response.status_code} {location}"
 
 
-#: Modules allowed to build a redirect, each with why it stays on the origin. Empty today.
-REVIEWED: dict[str, str] = {}
+#: Modules allowed to build a redirect, each with why it stays on the origin.
+REVIEWED: dict[str, str] = {
+    "api/accepting.py": (
+        "the 202 `accepting` (#2340) names its follow route in Location; a 202 is not a"
+        " redirect, and the URL is `url_for(...).path` under the app's own /api/v1 prefix"
+    ),
+}
 
 REDIRECT = re.compile(
     r"RedirectResponse|status_code\s*=\s*30[1278]|[\"']Location[\"']\s*:|headers\[[\"']location[\"']\]\s*="
