@@ -62,19 +62,3 @@ export function sessionToRestore(
     }) ?? null
   )
 }
-
-/**
- * The chat a panel opens on once the list is in. A reloaded tab gets `sessionToRestore`'s
- * answer. A tab that was not reloaded keeps only the chat it showed: its panel was
- * remounted on the same page (the assistant switched off and on), and falling back to
- * a chat under way there is what a new tab must not do (#3164, #3249 review).
- */
-export function chatToRestore(
-  reloaded: boolean,
-  remembered: string | null,
-  order: readonly string[],
-  sessions: Parameters<typeof sessionToRestore>[2],
-): string | null {
-  if (reloaded) return sessionToRestore(remembered, order, sessions)
-  return remembered && sessions[remembered] ? remembered : null
-}

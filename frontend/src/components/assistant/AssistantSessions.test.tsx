@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage, ServerEvent } from '../../agent/chat/protocol'
@@ -12,7 +12,29 @@ import { AppShell } from '../AppShell'
 // switcher (#795): forks nested under their parent, spend, last activity and status,
 // rename and mark done. Design: docs/superpowers/specs/2026-10-09-session-switcher-design.md.
 
-vi.mock('../../agent/chat/availability', () => ({ useAiAvailability: () => ({ available: true }) }))
+// On unless a test switches it off (#3871 review: the assistant off and on again).
+const availability = vi.hoisted(() => {
+  const on = { available: true }
+  let value: Record<string, unknown> = on
+  const listeners = new Set<() => void>()
+  return {
+    on,
+    get: () => value,
+    set(next: Record<string, unknown>) {
+      value = next
+      listeners.forEach((listener) => listener())
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  }
+})
+vi.mock('../../agent/chat/availability', async () => {
+  const { useSyncExternalStore } = await import('react')
+  return { useAiAvailability: () => useSyncExternalStore(availability.subscribe, availability.get) }
+})
+afterEach(() => availability.set(availability.on))
 
 const PARENT = 'Tune the gridfinity bin'
 const PARENT_REPLY = 'Done: the bin is now 3 units (21 mm) tall.'
@@ -453,6 +475,23 @@ describe('a reload (#2372)', () => {
     renderShell(undefined, noChats)
     expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeVisible()
     await waitFor(() => expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).toBeNull())
+  })
+})
+
+describe('the assistant switched off and on again (#3871 review)', () => {
+  it('opens on a new chat: off forgets the chat the tab showed (#2372)', async () => {
+    const { user } = await openParent()
+    expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).toBe(EXTERNAL_SESSION_ID)
+
+    act(() => availability.set({ available: false, state: 'not_configured' }))
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Assistant' })).toBeNull())
+    expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).toBeNull()
+
+    act(() => availability.set(availability.on))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: /^Sessions/ }))
+    expect(await within(picker()).findByRole('button', { name: new RegExp(`^${PARENT}`) })).toBeInTheDocument()
+    expect(screen.queryByTestId('active-session-title')).toBeNull()
   })
 })
 
