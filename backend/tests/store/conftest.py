@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import socket
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 
 from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
-from tests.support.store import store_pool
+from scadbuddy.store.s3 import S3ContentBackend
+from tests.support.store import local_content, s3_content, store_pool
 
 
 @pytest.fixture
@@ -41,3 +44,20 @@ def s3() -> Iterator[S3Settings]:
         # moto's state is the process's, not the server's: the next test starts empty.
         httpx.post(f"{settings.endpoint}/moto-api/reset").raise_for_status()
         server.stop()
+
+
+@pytest.fixture(params=["local", "s3"], ids=["local", "s3"])
+async def content(
+    request: pytest.FixtureRequest, tmp_path: Path, pool: Pool
+) -> AsyncIterator[ContentStore]:
+    """A content store over a directory, then over moto's S3."""
+    if request.param == "local":
+        store = local_content(tmp_path / "remote", pool)
+    else:
+        store = s3_content(request.getfixturevalue("s3"), pool)
+    try:
+        yield store
+    finally:
+        await store.aclose()
+        if isinstance(store.backend, S3ContentBackend):
+            await store.backend.aclose()

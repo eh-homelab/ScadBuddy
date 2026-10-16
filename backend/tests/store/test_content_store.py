@@ -35,20 +35,28 @@ from scadbuddy.store.content import (
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.refs import BlobRefs
-from tests.support.store import local_content
+from tests.support.store import local_content, object_id, overwrite_object
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
 
 
-async def test_put_then_read_and_the_same_bytes_are_stored_once(tmp_path: Path, pool: Pool) -> None:
-    store = local_content(tmp_path / "remote", pool)
+async def test_put_then_read_and_the_same_bytes_are_stored_once(
+    content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = content
     first = await store.put("asset", b"<svg/>", name="a.svg", scope=SCOPE)
-    stored = tmp_path / "remote" / first.backend_id
-    os.utime(stored, ns=(1_000_000_000, 1_000_000_000))
+    uploads: list[str] = []
+    upload = store.backend.upload
+
+    async def counting(*args: Any, **kwargs: Any) -> str:
+        uploads.append(args[0])
+        return await upload(*args, **kwargs)
+
+    monkeypatch.setattr(store.backend, "upload", counting)
     again = await store.put("asset", b"<svg/>", name="b.svg", scope=SCOPE)
     assert first == again
-    assert stored.stat().st_mtime_ns == 1_000_000_000  # not uploaded a second time
+    assert uploads == []  # not uploaded a second time
     assert await store.read(first) == b"<svg/>"
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})
@@ -100,36 +108,34 @@ async def test_put_refuses_past_the_byte_cap_except_a_re_put(tmp_path: Path, poo
     await store.put("asset", b"abc", name="1 again", scope=SCOPE)
 
 
-async def test_altered_or_missing_bytes_are_reported_not_returned(
-    tmp_path: Path, pool: Pool
-) -> None:
-    store = local_content(tmp_path / "remote", pool)
+async def test_altered_or_missing_bytes_are_reported_not_returned(content: ContentStore) -> None:
+    store = content
     ref = await store.put("piece", b"real", name="p.zip", scope=SCOPE, key="k")
-    (tmp_path / "remote" / ref.backend_id).write_bytes(b"fake")
+    await overwrite_object(store, ref.backend_id, b"fake")
     with pytest.raises(BlobCorruptError):
         await store.read(ref)
-    (tmp_path / "remote" / ref.backend_id).unlink()
+    await store.backend.remove(ref.backend_id)
     with pytest.raises(BlobMissingError):
         await store.read(ref)
     assert await store.stat("k") is None  # a vanished object drops its index row
     assert store.index.get("k") is None
 
 
-async def test_replace_is_a_compare_and_swap(tmp_path: Path, pool: Pool) -> None:
-    store = local_content(tmp_path / "remote", pool)
+async def test_replace_is_a_compare_and_swap(content: ContentStore) -> None:
+    store = content
     v1 = await store.replace("k", "piece", b"v1", name="p", scope=SCOPE, expected=None)
     assert v1 is not None
     lost = await store.replace("k", "piece", b"other", name="p", scope=SCOPE, expected=None)
     assert lost is None
-    assert not (tmp_path / "remote" / "piece" / hashlib.sha256(b"other").hexdigest()).exists()
+    assert not await store.backend.exists(object_id(store, "piece", b"other"))
     v2 = await store.replace("k", "piece", b"v2", name="p", scope=SCOPE, expected=v1.sha256)
     assert v2 is not None
-    assert not (tmp_path / "remote" / v1.backend_id).exists()  # the superseded object is gone
+    assert not await store.backend.exists(v1.backend_id)  # the superseded object is gone
     stale = await store.replace("k", "piece", b"v3", name="p", scope=SCOPE, expected=v1.sha256)
     assert stale is None
     named = store.index.get("k")
     assert named is not None and named.ref.sha256 == v2.sha256
-    assert not (tmp_path / "remote" / "piece" / hashlib.sha256(b"v3").hexdigest()).exists()
+    assert not await store.backend.exists(object_id(store, "piece", b"v3"))
 
 
 async def test_delete_keeps_an_object_another_key_still_names(tmp_path: Path, pool: Pool) -> None:
@@ -143,9 +149,9 @@ async def test_delete_keeps_an_object_another_key_still_names(tmp_path: Path, po
 
 
 async def test_sweep_takes_only_unreferenced_stale_pieces_and_snapshots(
-    tmp_path: Path, pool: Pool
+    content: ContentStore, pool: Pool
 ) -> None:
-    store = local_content(tmp_path / "remote", pool)
+    store = content
     refs = BlobRefs(pool)
     for key in ("kept", "fresh", "stale"):
         await store.put("piece", key.encode(), name=key, scope=SCOPE, key=key)
@@ -159,7 +165,7 @@ async def test_sweep_takes_only_unreferenced_stale_pieces_and_snapshots(
         )
     assert await sweep_content(store, refs, grace=3600, now=time.time()) == ["stale"]
     assert {s.key for s in store.index.stats(None)} == {"kept", "fresh", "asset-x"}
-    assert not (tmp_path / "remote" / "piece" / hashlib.sha256(b"stale").hexdigest()).exists()
+    assert not await store.backend.exists(object_id(store, "piece", b"stale"))
 
 
 def _age(pool: Pool, *keys: str) -> None:

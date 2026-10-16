@@ -32,7 +32,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
 from tests.support.activities import demo_paths, piece_request, worker_deps
-from tests.support.store import local_content
+from tests.support.store import overwrite_object
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
@@ -45,11 +45,6 @@ def worker(root: Path, content: ContentStore, **kw: float) -> CachedBlobStore:
         max_bytes=int(kw.get("max_bytes", 1 << 30)),
         min_age=kw.get("min_age", 0.0),
     )
-
-
-@pytest.fixture
-def content(tmp_path: Path, pool: Pool) -> ContentStore:
-    return local_content(tmp_path / "remote", pool)
 
 
 async def test_a_published_piece_is_fetched_once_on_another_worker(
@@ -112,8 +107,10 @@ async def test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again(
         await a.publish(key, scope=SCOPE)
         stat = content.index.get(key)
         assert stat is not None
-        path = tmp_path / "remote" / stat.ref.backend_id
-        path.unlink() if damage == "delete" else path.write_bytes(b"someone else's")
+        if damage == "delete":
+            await content.backend.remove(stat.ref.backend_id)
+        else:
+            await overwrite_object(content, stat.ref.backend_id, b"someone else's")
         b = worker(tmp_path / f"b-{key}", content)
         assert await b.fetch(key) is False
         assert content.index.get(key) is None  # forgotten: the next render stores it again
