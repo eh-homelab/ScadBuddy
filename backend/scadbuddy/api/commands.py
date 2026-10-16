@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -14,17 +14,21 @@ from scadbuddy.api.accepting import CommandAccepting, accepting, resend
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PrintRunsDep, RenderDep
 from scadbuddy.api.jobs import RenderAccepted, submit_problems
+from scadbuddy.api.operations import ACTIVITY_LOCATION, activity_location, follow_operation
 from scadbuddy.api.printing import follow_run
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.workflows.commands import CommandResendError, CommandStillAcceptingError
 
 router = APIRouter(prefix="/commands", tags=["commands"])
 
-#: A render's execution (`workflow_id_for_key`), and a print run's (`accept_run`); the
-#: Operation kinds follow in a later step (spec §6).
+#: The executions this route follows: a render's (`workflow_id_for_key`), a print
+#: run's (`accept_run`) and an operation's (`_run_operation`).
 RENDER_PREFIX = "render-"
 PRINT_PREFIX = "print-"
+OPERATION_PREFIX = "op-"
 
 WorkflowIdPath = Annotated[str, Path(max_length=200)]
 UpdateIdPath = Annotated[str, Path(max_length=128)]
@@ -37,8 +41,12 @@ UpdateIdPath = Annotated[str, Path(max_length=128)]
     summary="Follow a command answered 202",
     responses={
         status.HTTP_202_ACCEPTED: {
-            "model": CommandAccepting,
-            "description": "still accepting: follow again after `Retry-After` seconds",
+            "model": CommandAccepting | OperationAccepted,
+            "description": (
+                "`CommandAccepting` (`status: accepting`): still accepting, follow again."
+                " `OperationAccepted` (an operation's `status`, never `accepting`): the"
+                " operation answered and is still running; follow GET /operations/{id}"
+            ),
         },
         status.HTTP_404_NOT_FOUND: {"description": "not a command this route follows"},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {
@@ -57,23 +65,47 @@ async def follow_command(
     workflow_id: WorkflowIdPath,
     update_id: UpdateIdPath,
     request: Request,
+    response: Response,
     render: RenderDep,
     runs: PrintRunsDep,
+    ops: OperationsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     supersedes: Annotated[str | None, Query(max_length=64)] = None,
 ) -> RenderAccepted | PrintRun | JSONResponse:
     """Waits up to `FOLLOW_WAIT` on the Update, then answers it as the route that answered
-    202 would have: a render's job (`RenderAccepted`) or a print's run (`PrintRun`),
-    or the refusal. An answer is always **200**: a print run answers 200 here whether
-    its own route would have said 202 (a new run) or 200 (a repeat); its ``repeated``
-    says which. ``supersedes`` is a render's only (§5.3). The answer is attributed in
-    Activity as the route attributes it, since that route answered 202 first and
-    attributed nothing (#2805, #2834)."""
-    if workflow_id.startswith(PRINT_PREFIX):
-        if supersedes is not None:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "only a render's follow supersedes a job"
+    202 would have: a render's job (`RenderAccepted`), a print's run (`PrintRun`), an
+    operation's body or its 202 `OperationAccepted` to follow at ``/operations/{id}``,
+    or the refusal. An answer is 200 whatever the route's own success status: a print
+    run's 202 (a new run) or 200 (a repeat), whose ``repeated`` says which; an
+    operation's 201, or 204 with no body, as the record keeps the body, not the status,
+    and a client that follows reads the body (review #2836). An operation's body is its
+    stored result as it is, which its kind's run stores as the route model's dump
+    (`OperationKind.run`, #3038). ``supersedes`` is a render's only (§5.3). The
+    answer is attributed in Activity as the route attributes it, since that route
+    answered 202 first (#2834)."""
+    if supersedes is not None and workflow_id.startswith((PRINT_PREFIX, OPERATION_PREFIX)):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "only a render's follow supersedes a job"
+        )
+    if workflow_id.startswith(OPERATION_PREFIX):
+        try:
+            result = await follow_operation(ops, response, workflow_id, update_id)
+        except CommandStillAcceptingError:
+            return accepting(request, workflow_id, update_id)
+        except CommandResendError:
+            raise resend() from None
+        # The headers the route sets as it answers (its 202's Activity location), not
+        # the empty sub-response's own length (review #2836).
+        headers = {k: v for k, v in response.headers.items() if k != "content-length"}
+        if isinstance(result, OperationAccepted):
+            headers[ACTIVITY_LOCATION.lower()] = activity_location(result.id)
+            return JSONResponse(
+                result.model_dump(mode="json"),
+                status_code=status.HTTP_202_ACCEPTED,
+                headers=headers,
             )
+        return JSONResponse(result, headers=headers)
+    if workflow_id.startswith(PRINT_PREFIX):
         try:
             run = await follow_run(runs, workflow_id, update_id)
         except CommandStillAcceptingError:
