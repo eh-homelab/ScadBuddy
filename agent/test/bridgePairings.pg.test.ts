@@ -139,6 +139,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       await locked
       // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
       expect(sent).toHaveLength(1)
+      // No rows: this test's agent has no paired tab, so the read that finished finds none.
       await expect(sent[0]).resolves.toEqual([])
       await expect.poll(async () => (await admin`
         SELECT 1 FROM pg_stat_activity
