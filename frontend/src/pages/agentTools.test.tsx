@@ -236,7 +236,7 @@ describe('settings tools', () => {
       expect(screen.getByLabelText('Show dimensions in')).not.toBeVisible()
       await bridge.call('set_field', { field: 'display_unit', value: 'in' })
       await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toBeVisible())
-      expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+      expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     } finally {
       localStorage.clear()
     }

@@ -238,7 +238,9 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       // Measured while its section was folded, the group had no box; laid out, it has one,
       // and the section nav's resize follow-up scrolls the pane there.
       tops['assistant-mcp'] = 7000
-      act(() => observers.at(-1)!.fire())
+      act(() => {
+        for (const observer of observers) if (!observer.disconnected) observer.fire()
+      })
       expect(scrolls.at(-1)).toBe(6992)
     } finally {
       restore()
