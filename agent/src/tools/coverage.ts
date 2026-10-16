@@ -40,6 +40,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'timelapse itself through get_print_timelapse.',
   },
   {
+    operation: 'POST /api/v1/commands/{workflow_id}/updates/{update_id}',
+    reason:
+      'Follows a command the backend answered 202 `accepting` (spec 2026-10-13). The web client follows it ' +
+      "itself; the agent's command tools keep the 503 re-send until they opt in (#2795). It is not an action of its own.",
+  },
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
     reason:
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +

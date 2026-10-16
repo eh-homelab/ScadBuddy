@@ -149,6 +149,7 @@ import type {
   ProjectView,
   RememberedChoices,
   RenderAccepted,
+  CommandAccepting,
   SendRequest,
   SendResult,
   Settings,
@@ -591,6 +592,68 @@ async function reattach<T>(
       }
     }
   }
+}
+
+/** #2340 — the Update a 202 `accepting` named is not known: send the request again, same key. */
+export const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
+
+function isAccepting(body: unknown): body is CommandAccepting {
+  return typeof body === 'object' && body !== null && (body as { status?: unknown }).status === 'accepting'
+}
+
+/**
+ * #2340 — a command sent with `Prefer: respond-async` (spec 2026-10-13): a 202
+ * `accepting` is followed through its `follow_url` to the answer the route would have
+ * given, instead of sending the request again every few seconds. A follow answered 409
+ * `command-resend` (the Update was never kept, or a closing run rejected it) sends the
+ * request again with its key. Followed for up to `acceptingMs`, as the re-sends were.
+ * `signal` aborting sends one last follow at once, which names a claim already made.
+ */
+async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signal?: AbortSignal): Promise<T> {
+  const began = performance.now()
+  let answer = await send()
+  let last = false
+  let followed = false
+  while (isAccepting(answer)) {
+    // The last follow after an abort named no claim yet: the abort it is, so a caller
+    // that keeps a superseded action quiet still can (review #2805).
+    if (last) throw signal?.reason
+    if (performance.now() - began >= printRunPoll.acceptingMs) {
+      throw new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Still starting',
+        status: 503,
+        detail: 'ScadBuddy is still starting this. It may start anyway.',
+      })
+    }
+    // The server's `retry_after` is advisory here and not waited: the follow is itself
+    // a long-poll that waits for the answer, so waiting first only delays it (review
+    // #2849). The first follow goes at once; after
+    // a follow that came back 202, `intervalMs` keeps a floor (review #2805).
+    if (followed) {
+      try {
+        await wait(printRunPoll.intervalMs, signal)
+      } catch {
+        last = true
+      }
+    } else if (signal?.aborted) {
+      last = true
+    }
+    followed = true
+    const url = answer.follow_url.startsWith(API_BASE) ? answer.follow_url.slice(API_BASE.length) : answer.follow_url
+    try {
+      // A POST (#2782 review): a render's follow makes its supersede, a change the
+      // cross-site gate must see.
+      // `finish`, as the POST's own re-send has: a follow in flight when the signal aborts
+      // may have made the supersede's release, so an unanswered one is sent once more to
+      // learn what it claimed, never dropped (#3576).
+      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal, { finish: true })
+    } catch (caught) {
+      if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
+      answer = await send()
+    }
+  }
+  return answer
 }
 
 /**
@@ -1270,23 +1333,25 @@ export const api = {
     signal?: AbortSignal,
     requestId: string = newRequestId(),
   ) => {
-    // Sent again while the server is still accepting it (#1053), with one
-    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': requestId }
-    return reattach(
-      () =>
-        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            inputs,
-            version: version ?? null,
-            ...(supersedes ? { supersedes } : {}),
+    // One `Idempotency-Key` (#1053): the server counts a re-send as this one request's
+    // claim. A start still accepting is answered 202 and its Update followed (#2340).
+    const headers = { 'Idempotency-Key': requestId, Prefer: 'respond-async' }
+    const send = () =>
+      reattach(
+        () =>
+          request<RenderAccepted | CommandAccepting>(`/models/${seg(slug)}/render`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              inputs,
+              version: version ?? null,
+              ...(supersedes ? { supersedes } : {}),
+            }),
           }),
-        }),
-      signal,
-      { finish: true },
-    )
+        signal,
+        { finish: true },
+      )
+    return untilAccepted<RenderAccepted>(send, signal)
   },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),

@@ -395,3 +395,43 @@ def test_a_post_whose_pending_job_does_not_validate_queues_a_new_one(
     again = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert again.status_code == 202, again.text
     assert bad == []  # the guard did read the bad row, and re-queued instead of a 500
+
+
+def test_a_render_still_accepting_for_a_client_that_follows_is_the_503(
+    client: TestClient, app: FastAPI, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2340 review: the backfill answers a job, so a render it starts that is still
+    accepting stays the 503 to send again, even for a request that asked to follow a
+    202 (`Prefer: respond-async`); nothing is recorded as queued."""
+    output_id = legacy_output(client, app)
+
+    async def slow(*args: object, **kwargs: object) -> Job:
+        raise CommandStillAcceptingError("render-abc")
+
+    monkeypatch.setattr(RenderService, "submit", slow)
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/backfill", headers={"Prefer": "respond-async"}
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert _state(app).outputs.backfill(output_id) is None
+
+
+def test_a_backfill_asked_to_respond_async_keeps_the_default_accept_deadline(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3042: the backfill cannot hand its caller a 202 to follow, so the caller's
+    `Prefer: respond-async` must not shorten its render's accept to `FAST_ACCEPT`, which
+    would only fail it sooner."""
+    output_id = legacy_output(client, app)
+    seen: dict[str, object] = {}
+
+    async def slow(*args: object, **kwargs: object) -> Job:
+        seen.update(kwargs)
+        raise CommandStillAcceptingError("render-abc")
+
+    monkeypatch.setattr(RenderService, "submit", slow)
+    client.post(f"/api/v1/outputs/{output_id}/backfill", headers={"Prefer": "respond-async"})
+
+    assert "accept_within" in seen
+    assert seen["accept_within"] is None
