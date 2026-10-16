@@ -2,10 +2,9 @@ import dollhouseUi from './ui/dollhouse-kit/index.js?raw'
 import dollhousePieces from './ui/dollhouse-kit/pieces.js?raw'
 import mazeUi from './ui/maze-puzzle.js?raw'
 
-/** Template UI modules the msw API serves (spec 2026-09-27 §4). */
-export const UI_MODULES: Record<string, Record<string, string>> = {
-  'ui-demo': {
-    'index.js': `
+/** The ui-demo template's interface, which the unmigrated template (#3777) shows too. */
+const UI_DEMO: Record<string, string> = {
+  'index.js': `
 import { GREETING } from './greeting.js'
 export function mount(root, host) {
   const title = document.createElement('p')
@@ -21,8 +20,14 @@ export function mount(root, host) {
   return () => root.replaceChildren()
 }
 `,
-    'greeting.js': `export const GREETING = 'Hello from the template'\n`,
-  },
+  'greeting.js': `export const GREETING = 'Hello from the template'\n`,
+}
+
+/** Template UI modules the msw API serves (spec 2026-09-27 §4). */
+export const UI_MODULES: Record<string, Record<string, string>> = {
+  'ui-demo': UI_DEMO,
+  // #3777 — the unmigrated template's page slot shows the ui-demo interface.
+  'ui-unmigrated': UI_DEMO,
   'ui-broken': {
     'index.js': `export function mount() { throw new Error('the template UI is broken on purpose') }\n`,
   },
@@ -32,5 +37,3 @@ export function mount(root, host) {
   // Copies of models/dollhouse-kit/ui/ (#1737), kept byte-identical the same way.
   'builtin:dollhouse-kit': { 'index.js': dollhouseUi, 'pieces.js': dollhousePieces },
 }
-// #3777 — the unmigrated template's page slot shows the ui-demo interface.
-UI_MODULES['ui-unmigrated'] = UI_MODULES['ui-demo']!

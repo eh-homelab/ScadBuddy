@@ -180,8 +180,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #3164 — read before the `[open]` effect below saves the panel as open: the panel is
   // a lazy chunk, so its chat first renders after that write and cannot read it itself.
   // Once per page load on purpose: a panel remounted later on the same page (the assistant
-  // switched off and on) restores as the reload did, since this tab showed those chats;
-  // one not reloaded keeps the chat it showed (`chatToRestore`).
+  // switched off and on) finds the chat forgotten (the `[off]` effect above), so it
+  // opens on a new one however the page was loaded.
   const [wasReloaded] = useState(reloaded)
   useEffect(() => {
     if (reopen.current === null || !ai.available) return
