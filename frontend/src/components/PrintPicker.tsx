@@ -878,6 +878,7 @@ export function PrintPicker({
    */
   const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
   const { askPrinter, changeNozzles, changeQuality, setPlate } = picker
+  const restoreProfiles = filamentProfiles.restore
   useEffect(() => {
     const seed = batch?.seed
     if (!seed || seeding.current === 'done' || !choices) return
@@ -912,7 +913,15 @@ export function PrintPicker({
     setOptions(seed.options ?? {})
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
     if (seed.print_sequence) setPrintSequence(seed.print_sequence)
-    if (batch.seedIsOwn) setPlate(seed.all_plates ? 'all' : seed.plate_ids?.length ? seed.plate_ids : [seed.plate_id ?? 1])
+    if (batch.seedIsOwn) {
+      // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
+      // the step again without them would queue it without the supports, tower or
+      // profiles the user chose.
+      setPlate(seed.all_plates ? 'all' : seed.plate_ids?.length ? seed.plate_ids : [seed.plate_id ?? 1])
+      setSupports(seed.supports ?? null)
+      setPrimeTower(seed.prime_tower ?? null)
+      restoreProfiles(seed.filament_profiles ?? [])
+    }
   }, [
     batch,
     choices,
@@ -928,6 +937,7 @@ export function PrintPicker({
     changeQuality,
     setPlan,
     setPlate,
+    restoreProfiles,
   ])
 
   /** #2672 — this step's run request, what the review lists, and what the check refuses. */

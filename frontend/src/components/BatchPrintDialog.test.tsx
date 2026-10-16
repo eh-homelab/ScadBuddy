@@ -295,6 +295,30 @@ describe('BatchPrintDialog (#2672)', () => {
     await waitFor(() => expect(Number(slot1().checked.value)).toBe(REQUEST.filament_plan.slots?.[0]?.spool_id))
   })
 
+  it('keeps a step\'s supports and prime tower through Edit and Review (#2718 review)', async () => {
+    const batch = await newBatch(89, 91)
+    const chosen = {
+      ...REQUEST,
+      supports: { enabled: true, type: 'tree' as const, on_build_plate_only: true },
+      prime_tower: { enabled: true, no_sparse_layers: true },
+    }
+    await api.putPrintBatchItem(batch.id, 0, { request: chosen, skipped: false, removed: false })
+    await api.putPrintBatchItem(batch.id, 1, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchStep(batch.id, 2)
+    const saved = watchItems()
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+
+    await user.click(within(screen.getByTestId('batch-row-0')).getByRole('button', { name: /^Edit / }))
+    await step(1, 2)
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('batch-next')).toBeEnabled())
+    await user.click(screen.getByTestId('batch-next'))
+
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0]?.request).toMatchObject({ supports: chosen.supports, prime_tower: chosen.prime_tower })
+  })
+
   it('resumes where it was left after a reload', async () => {
     const batch = await newBatch(89, 91)
     await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
