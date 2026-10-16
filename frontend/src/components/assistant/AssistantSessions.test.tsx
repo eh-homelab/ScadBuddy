@@ -301,6 +301,21 @@ describe('archive (#1885)', () => {
     expect(screen.queryByText(/This chat is archived/)).toBeNull()
   })
 
+  it("archives the open chat from its header, where the user's own chat offers it (#3738)", async () => {
+    const { user } = await openParent()
+    const header = () => screen.getByTestId('active-session-header')
+    // The desktop agent's chat is not the user's to archive.
+    expect(within(header()).queryByRole('button', { name: 'Archive' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+
+    await user.click(within(header()).getByRole('button', { name: 'Archive' }))
+    expect(sessionWrites().at(-1)).toEqual({ method: 'PATCH', path: expect.stringMatching(/^\/sessions\//), body: { archived: true } })
+    await waitFor(() => expect(composerBox()).toBeDisabled())
+    expect(screen.getByText(/This chat is archived/)).toBeInTheDocument()
+    expect(within(header()).queryByRole('button', { name: 'Archive' })).toBeNull()
+  })
+
   it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
     const { user } = await ownChat()
     await rowAction(user, OWN, `Archive ${OWN}`)
@@ -320,6 +335,7 @@ describe('archive (#1885)', () => {
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
     await user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
     await screen.findByRole('button', { name: 'Stop' })
+    expect(within(screen.getByTestId('active-session-header')).queryByRole('button', { name: 'Archive' })).toBeNull()
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
     expect(await offers(user, 'hello', /^Archive /)).toBe(false)
   })

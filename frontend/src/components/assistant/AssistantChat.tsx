@@ -255,7 +255,7 @@ export function AssistantChat({
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   const filterId = useId()
-  /** #1885 — a refused Unarchive, shown for that chat only. */
+  /** #1885 — a refused Archive (#3738) or Unarchive, shown for that chat only. */
   const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -740,6 +740,25 @@ export function AssistantChat({
               Fork
             </Button>
           </Tip>
+          {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
+              went unfound. Offered as there, to the owner, while no turn runs or waits. */}
+          {owned && !busy && !archived && (
+            <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => {
+                  setArchiveError(null)
+                  updateSession(active.id, { archived: true }).catch((caught: unknown) =>
+                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) }),
+                  )
+                }}
+              >
+                Archive
+              </Button>
+            </Tip>
+          )}
           {/* Disclosures of the panels below the header (#931, #2329). */}
           <Tip content="What this session's tool calls created, changed or deleted">
             <Button
@@ -786,6 +805,11 @@ export function AssistantChat({
                 <span className="truncate">Forked from {parent?.title ?? 'an earlier chat'}</span>
               </Button>
             </div>
+          )}
+          {!archived && archiveError?.id === active.id && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not archived: {archiveError.message}
+            </p>
           )}
           {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
