@@ -293,7 +293,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               // permanent tabIndex would let any click on a bare spot of the page focus
               // <main>, leaving document.activeElement on it instead of the body.
               const main = mainElement.current
-              if (!main) return
+              // Already there: its blur listener is set, and another would only stack up.
+              if (!main || document.activeElement === main) return
               main.tabIndex = -1
               main.addEventListener('blur', () => main.removeAttribute('tabindex'), { once: true })
               main.focus()
