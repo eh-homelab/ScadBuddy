@@ -32,9 +32,12 @@ import { traceAction, type Within } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { CopyColours } from './CopyColours'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Spinner } from './ui/spinner'
 
 type Props = {
   open: boolean
@@ -78,14 +81,18 @@ function slugOf(name: string): string {
     .replace(/(^-|-$)/g, '')
 }
 
-/** `stem`, or `stem 2`, `stem 3`…: the first name whose slug no model has. */
-function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): string {
+/** `base`, or `base 2`, `base 3`… */
+function numbered(base: string, n: number): string {
+  return n === 1 ? base : `${base} ${n}`
+}
+
+/** The name to try (`stem`, else `fallback`) and the first number whose slug no model has. */
+function freeName(stem: string, models: Pick<ModelSummary, 'slug'>[], fallback: string): { base: string; n: number } {
   const base = slugOf(stem) ? stem : fallback
   const taken = new Set(models.map((model) => model.slug))
-  for (let n = 1; ; n += 1) {
-    const name = n === 1 ? base : `${base} ${n}`
-    if (!taken.has(slugOf(name))) return name
-  }
+  let n = 1
+  while (taken.has(slugOf(numbered(base, n)))) n += 1
+  return { base, n }
 }
 
 /** #3637 — a copy added to a row, in other colours. */
@@ -552,7 +559,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             for (let attempt = 0; made === undefined; attempt += 1) {
               // Refused as taken (a model the list did not show): the server's own check,
               // so the next try numbers the name on rather than guessing slugs again.
-              const name = attempt === 0 ? first : `${first} ${attempt + 1}`
+              const name = numbered(first.base, first.n + attempt)
               try {
                 made = await within(() =>
                   api.createMeshModel({
@@ -680,36 +687,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   return (
     <Dialog
       open={open}
-      title="Arrange"
-      onClose={onClose}
-      footer={
-        <>
-          {/* #2286 — a visible way out besides Escape and the backdrop. */}
-          <Button variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
-            disabled={
-              busy ||
-              asking ||
-              reading.length > 0 ||
-              // #3638 — which model is the file's own is known only once the list is read.
-              (homeFile !== undefined && models === null) ||
-              (anyTemplate && templates.length === 0) ||
-              (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
-            }
-            aria-busy={busy}
-          >
-            Arrange
-          </Button>
-        </>
-      }
+      onOpenChange={(next) => {
+        if (!next) onClose()
+      }}
     >
+      <DialogContent showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+        <DialogHeader className="shrink-0 border-b px-5 py-4">
+          <DialogTitle>Arrange</DialogTitle>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
-          <p role="status" className="text-[12px] text-muted">
+          <p role="status" className="text-[12px] text-subtle">
             {backfillNote(unusable.map(refOf))}
           </p>
         )}
@@ -724,7 +713,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           </p>
         )}
         {(unreadable.length > 0 || unread.length > 0) && (
-          <Button size="sm" className="self-start" onClick={readAgain} disabled={busy}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={readAgain} disabled={busy}>
             Read them again
           </Button>
         )}
@@ -784,15 +773,17 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 )
               })}
               {row.colours.length > 0 && (
-                <button
+                <Button
                   type="button"
+                  variant="link"
+                  size="xs"
                   onClick={() => addCopy(row.key)}
                   disabled={busy || asking}
                   aria-label={`Add a copy of ${row.label} in other colours`}
-                  className="self-start text-[12px] text-accent hover:underline disabled:opacity-50"
+                  className="self-start px-0"
                 >
                   + Add a copy in other colours
-                </button>
+                </Button>
               )}
             </li>
           ))}
@@ -804,10 +795,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 <span className="min-w-0 flex-1">
                   {label} <span className="text-[12px] text-warn">needs a re-render</span>
                 </span>
-                <Button size="sm" aria-label={`Re-render ${label}`} disabled={busy || asking} onClick={() => void rerender(output)}>
+                <Button type="button" variant="outline" size="sm" aria-label={`Re-render ${label}`} disabled={busy || asking} onClick={() => void rerender(output)}>
                   Re-render
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="ghost"
                   aria-label={`Remove ${label}`}
@@ -822,16 +814,16 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </ul>
         {/* #2286 — a mis-clicked Remove is undone here, not by closing and starting over. */}
         {removed.length > 0 && (
-          <Button size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy || asking}>
+          <Button type="button" size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy || asking}>
             {`Restore ${removed.length} removed ${removed.length === 1 ? 'row' : 'rows'}`}
           </Button>
         )}
         {adding === null && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => setAdding('files')} disabled={busy || asking}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setAdding('files')} disabled={busy || asking}>
               Add files
             </Button>
-            <Button size="sm" onClick={() => setAdding('model')} disabled={busy || asking}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setAdding('model')} disabled={busy || asking}>
               Add from a model
             </Button>
           </div>
@@ -865,50 +857,49 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         {/* Shown whenever there is a choice, a library file in the mix too (#2284). */}
         {(templates.length > 1 || anyTemplate) && templates.length > 0 && (
           <>
-            <label htmlFor="arrange-filing" className="text-[12px] text-muted">
+            <Label htmlFor="arrange-filing" className="text-[12px] font-normal text-muted-foreground">
               File under
-            </label>
-            <select
-              id="arrange-filing"
-              value={filing && templates.includes(filing) ? filing : templates[0]}
-              onChange={(event) => setFiling(event.target.value)}
-              className="sb-field"
-            >
-              {templates.map((slug) => (
-                <option key={slug} value={slug}>
-                  {modelName(slug)}
-                </option>
-              ))}
-            </select>
+            </Label>
+            <Select value={filing && templates.includes(filing) ? filing : templates[0]} onValueChange={setFiling}>
+              <SelectTrigger id="arrange-filing" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {templates.map((slug) => (
+                  <SelectItem key={slug} value={slug}>
+                    {modelName(slug)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </>
         )}
-        <label htmlFor="arrange-goal" className="text-[12px] text-muted">
+        <Label htmlFor="arrange-goal" className="text-[12px] font-normal text-muted-foreground">
           Goal
-        </label>
-        <select
-          id="arrange-goal"
-          value={goal}
-          onChange={(event) => setGoal(event.target.value as ArrangeGoal)}
-          className="sb-field"
-        >
-          {Object.entries(GOAL_LABELS).map(([value, text]) => (
-            <option key={value} value={value}>
-              {text}
-            </option>
-          ))}
-        </select>
-        <label htmlFor="arrange-name" className="text-[12px] text-muted">
+        </Label>
+        <Select value={goal} onValueChange={(next) => setGoal(next as ArrangeGoal)}>
+          <SelectTrigger id="arrange-goal" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.entries(GOAL_LABELS).map(([value, text]) => (
+              <SelectItem key={value} value={value}>
+                {text}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Label htmlFor="arrange-name" className="text-[12px] font-normal text-muted-foreground">
           Name
-        </label>
+        </Label>
         {/* #2286 — focus starts here, not on Add files; empty, it saves as the placeholder. */}
-        <input
+        <Input
           id="arrange-name"
           value={name}
           placeholder={defaultName || undefined}
           maxLength={MAX_ARRANGE_NAME}
           autoFocus
           onChange={(event) => setName(event.target.value)}
-          className="sb-field"
         />
         <BackfillProgress outputs={outputs.map(refOf)} progress={backfill} />
         <p className="flex items-center gap-2 text-[12px] text-faint">
@@ -927,14 +918,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           </p>
         )}
         {error && retryable && !busy && (
-          <Button size="sm" className="self-start" onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}>
             Try again
           </Button>
         )}
         {/* #2286 — re-renders that failed are tried again from here, not by guessing. Straight
             to submit, with no BackfillPrompt: the user already confirmed these re-renders. */}
         {failures && !error && !busy && !asking && unusable.length > 0 && (
-          <Button size="sm" className="self-start" onClick={() => void submit(unusable)}>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={() => void submit(unusable)}>
             Re-render again
           </Button>
         )}
@@ -942,6 +933,30 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           <BackfillPrompt outputs={unusable.map(refOf)} onConfirm={() => void submit(unusable)} onCancel={() => setAsking(false)} />
         )}
       </div>
+        </div>
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">
+              {/* #2286 — a visible way out besides Escape and the backdrop. */}
+              <Button type="button" variant="ghost" onClick={onClose}>
+                Close
+              </Button>
+              <Button
+                type="button"
+                onClick={() => (unusable.length > 0 ? setAsking(true) : void submit([]))}
+                disabled={
+                  busy ||
+                  asking ||
+                  reading.length > 0 ||
+                  // #3638 — which model is the file's own is known only once the list is read.
+                  (homeFile !== undefined && models === null) ||
+                  (anyTemplate && templates.length === 0) ||
+                  (rows.length === 0 && fileRows.length === 0 && unusable.length === 0)
+                }
+                aria-busy={busy}
+              >
+                Arrange
+              </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -977,18 +992,18 @@ function ArrangeRow({
         <span>{label}</span>
         <span className="flex items-center gap-2">
           {onRemove && (
-            <Button size="sm" variant="ghost" aria-label={`Remove ${label}`} disabled={locked} onClick={onRemove}>
+            <Button type="button" size="sm" variant="ghost" aria-label={`Remove ${label}`} disabled={locked} onClick={onRemove}>
               Remove
             </Button>
           )}
-          <input
+          <Input
             type="number"
             min={0}
             max={500}
             aria-label={`Copies of ${label}`}
             value={count}
             onChange={(event) => onCount(Math.max(0, Number(event.target.value) || 0))}
-            className="sb-field sb-num w-20"
+            className="sb-num w-20"
           />
         </span>
       </div>

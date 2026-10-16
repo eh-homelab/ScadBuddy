@@ -16,7 +16,8 @@ from urllib.parse import quote
 from pydantic import BaseModel, Field, ValidationError
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, TimeoutType
+from temporalio.exceptions import TimeoutError as ActivityTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     import jsonschema
@@ -181,6 +182,11 @@ TURN_TOOL_PREFIX = "turn:"
 TURN_TOOL_SEPARATOR = "__"
 #: tool(...) reaches the turn tools (#2320); runs recorded before refuse such a name.
 FLOW_TURN_TOOLS_PATCH = "flow-turn-tools-2320"
+#: A turn tool's call on one agent replica's own queue (#2937): an approved call asks
+#: the agent for that queue again once approved, not before it parked, and a call there
+#: waits `host_queue_start_s` for a worker, then fails as that replica gone. Runs
+#: recorded before kept the queue from before the park and waited without limit.
+FLOW_HOST_QUEUE_PATCH = "flow-host-queue-2937"
 #: The agent's own tools' tiers as the agent resolves them when the call is made
 #: (agent/src/temporal/flowTools.ts, #2704): runs recorded before take the run's start's.
 FLOW_TOOL_TIER = "flow_tool_tier"
@@ -610,18 +616,31 @@ async def _call_tool(
     attempts: int,
     activity: str | None = None,
     queue: str | None = None,
+    approved: bool = False,
 ) -> ToolResult:
     """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
     activity id `tool-<call id>` the agent reads the call (and its approval) from. A turn
     tool's call is the activity `turn:<name>`, on the queue `turn_tool_tier` named."""
     owner: StepOwner = workflow.instance()
+    task_queue = queue or owner.tools_queue
+    # A replica's own queue has no worker once that replica is gone (a deploy replaces
+    # it), and an activity, its retries included, never moves queue (#2937).
+    # An approved call waits longer: a live replica with every slot busy frees one, and
+    # failing it would ask the person to approve it a second time (#3420).
+    start_s = owner.approved_queue_start_s if approved else owner.host_queue_start_s
+    to_start = (
+        timedelta(seconds=start_s)
+        if task_queue != owner.tools_queue and workflow.patched(FLOW_HOST_QUEUE_PATCH)
+        else None
+    )
     try:
         # Untyped: a string, or `{text, images}` (#2477); a history from before either replays.
         answer: Any = await workflow.execute_activity(
             activity or name,
             args,
             activity_id=f"{TOOL_PREFIX}{call_id}",
-            task_queue=queue or owner.tools_queue,
+            task_queue=task_queue,
+            schedule_to_start_timeout=to_start,
             start_to_close_timeout=_TOOL_TIMEOUT,
             retry_policy=RetryPolicy(
                 maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
@@ -630,6 +649,20 @@ async def _call_tool(
     except ActivityError as err:
         if isinstance(err.cause, ApplicationError):
             raise ToolFailedError(err.cause.message) from None
+        if (
+            isinstance(err.cause, ActivityTimeoutError)
+            and err.cause.type == TimeoutType.SCHEDULE_TO_START
+        ):
+            # Gone in a deploy, or alive with every slot busy: either way nothing ran.
+            again = (
+                "Call it again; the new call needs approving again."
+                if approved
+                else "Call it again."
+            )
+            raise ToolFailedError(
+                f"{name} was not run: no worker on the agent replica that holds its state "
+                f"picked it up in {start_s}s (the replica may be gone or busy). {again}"
+            ) from None
         raise
     return _tool_result(answer)
 
@@ -650,16 +683,37 @@ async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResul
 async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> ToolResult:
     """An outward plugin or http_request call, run once a person approved it, at most once."""
     await _approved(call)
+    if workflow.patched(FLOW_HOST_QUEUE_PATCH):
+        # The replica that tiered it may have gone while it waited (#2937): ask again. Only
+        # the queue is taken: a tier raised since is the `turn:` activity's to refuse,
+        # which checks the call again when it runs. A tool no longer offered at all (its
+        # plugin or setting turned off while it waited) is refused here (#3420).
+        try:
+            queue = await _turn_queue(name, args)
+        except ValueError as err:
+            raise ToolFailedError(
+                f"{name} was not run: it is no longer offered since it was approved ({err})."
+            ) from None
+        except ToolFailedError as err:
+            # The approval is spent either way: say the next call is asked again (#3003).
+            raise ToolFailedError(
+                f"{name} was not run: {err} The new call needs approving again."
+            ) from None
     return await _call_tool(
-        call, name, args, attempts=1, activity=f"{TURN_TOOL_PREFIX}{name}", queue=queue
+        call,
+        name,
+        args,
+        attempts=1,
+        activity=f"{TURN_TOOL_PREFIX}{name}",
+        queue=queue,
+        approved=True,
     )
 
 
-async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
-    """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
-    `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
-    The agent tiers it from its input as the run's starter, and refuses one no enabled
-    plugin or setting offers before anything is called."""
+async def _turn_tier(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """The agent's `turn_tool_tier` answer for a call: its tier, and the queue of the
+    replica a pinned server's call runs on. One no enabled plugin or setting offers is
+    refused."""
     owner: StepOwner = workflow.instance()
     try:
         tiered: dict[str, Any] = await workflow.execute_activity(
@@ -676,6 +730,23 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
         if isinstance(err.cause, ApplicationError):
             raise ToolFailedError(err.cause.message) from None
         raise
+    return tiered
+
+
+async def _turn_queue(name: str, args: dict[str, Any]) -> str:
+    """The queue a turn tool's call runs on: a server whose state lives on one agent
+    replica (http_request's saved bodies) names that replica's."""
+    owner: StepOwner = workflow.instance()
+    return str((await _turn_tier(name, args)).get("task_queue") or owner.tools_queue)
+
+
+async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
+    """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
+    `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
+    The agent tiers it from its input as the run's starter, and refuses one no enabled
+    plugin or setting offers before anything is called."""
+    owner: StepOwner = workflow.instance()
+    tiered = await _turn_tier(name, args)
     tier = str(tiered.get("tier"))
     # A server whose state lives on one agent replica (http_request's saved bodies) names it.
     queue = str(tiered.get("task_queue") or owner.tools_queue)
@@ -1055,16 +1126,56 @@ def inputs_tool(schema: dict[str, Any], values: dict[str, Any] | None = None) ->
     return agent.tool_defn(inherently_safe=True)(_inputs)
 
 
+class ModelChanged(BaseModel):
+    """A template's new revision was committed."""
+
+    kind: Literal["model.changed"]
+    slug: str
+    commit: str
+
+
+class RenderFinished(BaseModel):
+    """A render finished."""
+
+    kind: Literal["render.finished"]
+    slug: str
+    job_id: str
+
+
+def trigger_tool(event: dict[str, Any] | None = None) -> Any:
+    """`trigger()` (#2666): the event a trigger fired this run on, as the fire recorded
+    it, or None. It reads the run's own message, so it records no step. Data only: who
+    the run acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4)."""
+
+    async def trigger() -> ModelChanged | RenderFinished | None:
+        """The event that started this run: a template changed (`commit`) or a render
+        finished (`job_id`), with its template's `slug`. None for a run started by hand
+        or on a schedule."""
+        if event is None:
+            return None
+        if event.get("kind") == "model.changed":
+            return ModelChanged.model_validate(event)
+        return RenderFinished.model_validate(event)
+
+    return agent.tool_defn(inherently_safe=True)(trigger)
+
+
+#: Every host function a script of a flow without inputs may call, as the type check and
+#: the editor see them.
+HOST_FUNCTIONS: list[Any] = [*SCRIPT_TOOLS, trigger_tool()]
+
+
 def run_flow_tool(
     runner: AgentWorkflowRunner | None = None,
     inputs_schema: dict[str, Any] | None = None,
     inputs: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
 ) -> Any:
-    """The Code Mode tool over the host functions a script may call, with `inputs()`
-    when the flow declares inputs. Outside a workflow (the type check) no runner is
-    injected."""
+    """The Code Mode tool over the host functions a script may call, with `trigger()`,
+    and `inputs()` when the flow declares inputs. Outside a workflow (the type check) no
+    runner is injected."""
     injections = {"runner": runner} if runner is not None else None
-    tools = SCRIPT_TOOLS
+    tools = [*SCRIPT_TOOLS, trigger_tool(event)]
     if inputs_schema is not None:
-        tools = [*SCRIPT_TOOLS, inputs_tool(inputs_schema, inputs)]
+        tools.append(inputs_tool(inputs_schema, inputs))
     return agent.code_mode_tool(tools, name="run_flow", injections=injections)

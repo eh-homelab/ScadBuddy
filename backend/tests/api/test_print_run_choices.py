@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
+from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -954,6 +955,40 @@ def test_the_all_plates_local_read_combines_every_plates_slots(
     assert slots("&plate_id=2") == [2]
     assert slots("&all_plates=true") == [1, 2]
     assert not uploaded.called
+
+
+@respx.mock
+def test_the_chosen_plates_filament_read_offers_just_those_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3652: a repeated ``plate_ids`` answers for those plates only, in any order: the
+    rows are plates 1 and 3's slots, never slot 2, which only plate 2 uses. Past
+    ``MAX_PLATES`` entries the read is refused."""
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    colours = ["#FF0000", "#0047BB", "#FFFFFF"]
+    box = trimesh.creation.box(extents=(10, 10, 2))
+    write_plates_3mf(
+        [
+            PlateParts((ColourPart(slot, f"Part {slot}", colours[slot - 1], box),), (slot,))
+            for slot in (1, 2, 3)
+        ],
+        colours,
+        output_3mf,
+        thumbnails=None,
+    )
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+    url = f"/api/v1/print/outputs/{output_id}/filaments"
+
+    chosen = client.get(url, params=[("printer_id", 1), ("plate_ids", 3), ("plate_ids", 1)])
+    too_many = client.get(url, params=[("plate_ids", 1)] * (MAX_PLATES + 1))
+
+    assert chosen.status_code == 200, chosen.text
+    assert [slot["slot_id"] for slot in chosen.json()["slots"]] == [1, 3]
+    assert too_many.status_code == 422, too_many.text
 
 
 @respx.mock

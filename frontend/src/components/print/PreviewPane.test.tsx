@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { NozzlePlan, SlicePreview, SlotNeed } from '../../api/types'
 import { PreviewPane } from './PreviewPane'
@@ -161,3 +162,18 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
   })
 })
 
+
+describe('PreviewPane: a colour tried on the preview (#3669)', () => {
+  it('opens from the slot chip, tries the colour, and Undo puts the spool back', async () => {
+    const user = userEvent.setup()
+    pane(null)
+    await user.click(screen.getByRole('button', { name: 'Try a colour for slot 2' }))
+    const field = await screen.findByLabelText('Colour for slot 2')
+    fireEvent.input(field, { target: { value: '#00ff00' } })
+    expect(screen.getByText('colour tried here, not a spool')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByLabelText('Colour for slot 2')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Undo' }))
+    expect(screen.queryByText('colour tried here, not a spool')).toBeNull()
+  })
+})

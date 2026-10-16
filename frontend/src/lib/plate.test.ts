@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import type { Job, Param, Plate, PlateFit } from '../api/types'
-import { boundByPlate, fitLabel, fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
+import { boundByPlate, fitLabel, fitMessages, fitTargets, plateLabel, platesFitMessages, worstFit } from './plate'
+
+describe('plateLabel', () => {
+  it('names a plate by what it holds, with its number when another plate shares the name (#3652)', () => {
+    const plates = [
+      { index: 1, has_thumbnail: true, name: 'Side' },
+      { index: 2, has_thumbnail: true, name: 'Side' },
+      { index: 3, has_thumbnail: true, name: 'Roller Bolt' },
+      { index: 4, has_thumbnail: true },
+    ]
+    expect(plateLabel(plates, 1)).toBe('Side (plate 1)')
+    expect(plateLabel(plates, 2)).toBe('Side (plate 2)')
+    expect(plateLabel(plates, 3)).toBe('Roller Bolt')
+    expect(plateLabel(plates, 4)).toBe('Plate 4')
+  })
+})
 
 const H2C: Plate = {
   model: 'Bambu Lab H2C',

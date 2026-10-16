@@ -2,8 +2,9 @@ import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { SaveFooter, SettingBody, SettingCard, SuggestInput } from './settings/form'
 
 /** Claude Code's model aliases: each names that family's latest model. */
 const ALIASES = ['opus', 'sonnet', 'haiku'] as const
@@ -50,43 +51,52 @@ export function ModelSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant model</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={save}>
-        <label className="flex flex-col gap-1 text-[13px]">
-          Claude model
-          <input
-            type="text"
-            list="assistant-model-options"
-            value={text}
-            onChange={(event) => {
-              setDraft(event.target.value)
-              setSaved(false)
-            }}
-            placeholder="Claude Code’s default"
-            spellCheck={false}
-            autoCapitalize="off"
-            autoComplete="off"
-            className="sb-field sb-num w-72 max-w-full"
-            aria-describedby="assistant-model-help"
-          />
-          <datalist id="assistant-model-options">
-            {ALIASES.map((alias) => (
-              <option key={alias} value={alias} />
-            ))}
-          </datalist>
-        </label>
-        <p id="assistant-model-help" className="text-[12px] text-muted">
-          An alias (<span className="sb-num">opus</span>, <span className="sb-num">sonnet</span>,{' '}
-          <span className="sb-num">haiku</span>) follows that family&rsquo;s latest model; a full model id
-          such as <span className="sb-num">claude-sonnet-5</span> stays on it. Leave it empty for Claude
-          Code&rsquo;s default. Every chat uses it from its next reply, and Test connection checks it.
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
+    <SettingCard title="Assistant model">
+      <form className="contents" onSubmit={save}>
+        <SettingBody className="space-y-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="assistant-model" className="font-normal">
+              Claude model
+            </Label>
+            <SuggestInput
+              id="assistant-model"
+              type="text"
+              value={text}
+              onChange={(event) => {
+                setDraft(event.target.value)
+                setSaved(false)
+              }}
+              suggestions={ALIASES.map((alias) => ({ value: alias, label: `latest ${alias}` }))}
+              onPick={(alias) => {
+                setDraft(alias)
+                setSaved(false)
+              }}
+              suggestionsLabel="Model aliases"
+              placeholder="Claude Code’s default"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoComplete="off"
+              className="sb-num w-72 max-w-full"
+              aria-describedby="assistant-model-help"
+            />
+          </div>
+          <p id="assistant-model-help" className="text-xs text-muted-foreground">
+            An alias (<span className="sb-num">opus</span>, <span className="sb-num">sonnet</span>,{' '}
+            <span className="sb-num">haiku</span>) follows that family&rsquo;s latest model; a full model id
+            such as <span className="sb-num">claude-sonnet-5</span> stays on it. Leave it empty for Claude
+            Code&rsquo;s default. Every chat uses it from its next reply, and Test connection checks it.
+          </p>
+        </SettingBody>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={
+            saved && !changed
+              ? `Saved. ${stored ? `Replies use ${stored}.` : 'Replies use Claude Code’s default.'}`
+              : null
+          }
+          error={error}
+        >
           <Button
             type="button"
             size="sm"
@@ -97,18 +107,8 @@ export function ModelSetting() {
           >
             Use the default
           </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. {stored ? `Replies use ${stored}.` : 'Replies use Claude Code’s default.'}
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
-          </p>
-        )}
+        </SaveFooter>
       </form>
-    </section>
+    </SettingCard>
   )
 }

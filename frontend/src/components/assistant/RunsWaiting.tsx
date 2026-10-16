@@ -17,7 +17,7 @@ export function RunsWaiting() {
       <ul aria-label="Flow runs waiting for you" className="flex flex-col gap-1">
         {waiting.map((run) => (
           <li key={run.id}>
-            <Link to={flowRunPath(run.id)} className="text-accent hover:underline">
+            <Link to={flowRunPath(run.id)} className="text-primary hover:underline">
               {run.name}
             </Link>{' '}
             waits for you on {run.waiting === 1 ? 'a call' : `${run.waiting} calls`}

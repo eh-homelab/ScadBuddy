@@ -231,24 +231,24 @@ describe('Preview scene (#364)', () => {
     scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
     const user = userEvent.setup()
     const { rerender } = render(<Preview job={job('a', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
-    const picker = screen.getByRole('group', { name: 'Plates shown' })
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     const all = scene.camera.position.length()
 
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
-    expect(screen.getByRole('button', { name: 'Plate 2 alone' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Plate 2 alone' })).toHaveAttribute('aria-checked', 'true')
     // Plate 2's own mesh (the only one with a 280 mm box), framed, with no outlines.
     expect(scene.camera.position.length()).toBeLessThan(all / 2)
     expect(screen.queryAllByTestId('plate-label')).toHaveLength(0)
 
-    await user.click(screen.getByRole('button', { name: 'All plates' }))
+    await user.click(screen.getByRole('radio', { name: 'All plates' }))
     expect(screen.getAllByTestId('plate-label')).toHaveLength(3)
 
     // A new render shows every plate again, whatever was chosen for the last one.
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
     rerender(<Preview job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     expect(picker).toBeInTheDocument()
   })
 
@@ -264,10 +264,10 @@ describe('Preview scene (#364)', () => {
     const user = userEvent.setup()
     render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
-    const picker = screen.getByRole('group', { name: 'Plates shown' })
-    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['All', '2', '5'])
-    await user.click(screen.getByRole('button', { name: 'Plate 5 alone' }))
-    expect(screen.getByRole('button', { name: 'Plate 5 alone' })).toHaveAttribute('aria-pressed', 'true')
+    const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
+    expect(within(picker).getAllByRole('radio').map((b) => b.textContent)).toEqual(['All', '2', '5'])
+    await user.click(screen.getByRole('radio', { name: 'Plate 5 alone' }))
+    expect(screen.getByRole('radio', { name: 'Plate 5 alone' })).toHaveAttribute('aria-checked', 'true')
   })
 
   it('goes back to every plate when one plate cannot be shown alone, and says so (#2914)', async () => {
@@ -282,16 +282,16 @@ describe('Preview scene (#364)', () => {
     const user = userEvent.setup()
     render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
     expect(await screen.findByRole('status')).toHaveTextContent('Plate 2 could not be shown alone; showing all plates.')
-    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     expect(screen.getAllByTestId('plate-label')).toHaveLength(2)
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
   it('offers no plate picker for a one-plate render', () => {
     render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
-    expect(screen.queryByRole('group', { name: 'Plates shown' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radiogroup', { name: 'Plates shown' })).not.toBeInTheDocument()
   })
 })

@@ -26,7 +26,7 @@ export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; si
   const box = size === 'sm' ? 'size-14' : 'size-24'
   return (
     <figure aria-label="Plates" className="mt-1.5">
-      <figcaption className="sb-num text-[12px] text-muted">
+      <figcaption className="sb-num text-[12px] text-subtle">
         {plates.length} {plates.length === 1 ? 'plate' : 'plates'}
       </figcaption>
       <ul className="mt-1 flex flex-wrap gap-2">

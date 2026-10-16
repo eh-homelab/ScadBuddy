@@ -93,7 +93,11 @@ PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
 PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
 #: #2715: remove what a print run's lost slice start sliced (`bambuddy.lost_slices`).
 #: Its own sweep, out of `PREVIEWS_SWEEP`, so it stays on the prune Schedule: Bambuddy
-#: keeps a finished job only 30 minutes. Behind its own patch.
+#: keeps a finished job only 30 minutes. Behind its own patch. With the sweeps on it
+#: runs from both Schedules, whose overlap SKIP is each its own, so two may overlap:
+#: harmless, since a file is deleted only while it still has its job's name (a second
+#: delete finds it gone, warns and settles on the next tick) and finishing a lost start
+#: is an idempotent update.
 LOST_SLICES_SWEEP = "housekeeping_sweep_lost_slices"
 LOST_SLICES_PATCH = "housekeeping-sweep-lost-slices"
 #: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile

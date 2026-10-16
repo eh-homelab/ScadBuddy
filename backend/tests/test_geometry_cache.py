@@ -37,10 +37,11 @@ from scadbuddy.render.geometry_cache import (
     scene_classes,
 )
 from scadbuddy.render.glb import COLOUR_EXTRA
-from scadbuddy.render.jobs import LAYOUT_NAME
+from scadbuddy.render.jobs import LAYOUT_NAME, finish_piece_stage
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.geometry import GeometryIndex
+from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import PgPool
@@ -227,6 +228,14 @@ def test_only_a_layout_every_colour_of_which_is_a_class_is_reusable() -> None:
     assert reusable(_layout("#FF0000", uncoloured=True), ["#FF0000"])
 
 
+def test_a_painted_layout_is_never_reusable() -> None:
+    """A carried painting's file keeps the palette it was painted in, which a recolour
+    would not swap: its colour, also a class, would no longer be a filament."""
+    layout = _layout("#FF0000", "#00FF00")
+    layout["plates"][0]["parts"][0]["paint"] = "paint-1-1.json"
+    assert not reusable(layout, ["#FF0000", "#00FF00"])
+
+
 # ── the activities ─────────────────────────────────────────────────────────────
 
 #: An openscad that exports the mesh model's one exposed number, and as its model one
@@ -409,6 +418,48 @@ async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
         ("#FFFF00", 1),
         ("#00FF00", 2),
     ]
+
+
+@pytest.mark.requires_postgres
+async def test_a_painted_piece_is_rendered_again_not_recoloured(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+) -> None:
+    acts, _, _ = geometry_acts
+    env = ActivityEnvironment()
+    first = _piece(acts, 1, _scene(), width=12)
+    await _render(acts, first)
+    # As `paint_layout` leaves a piece whose painting it carried.
+    path = acts.deps.blobs.dir_for(first.piece_key) / LAYOUT_NAME
+    layout = json.loads(path.read_text())
+    layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+    path.write_text(json.dumps(layout))
+
+    second = _piece(acts, 2, _scene("#0000FF"), width=12)
+    prepared = await env.run(acts.prepare, second)
+    assert await env.run(acts.reuse_geometry, second, prepared) is None
+
+
+@pytest.mark.requires_postgres
+async def test_a_painted_piece_is_never_recorded_as_a_geometry_source(
+    geometry_acts: tuple[RenderActivities, str, GeometryIndex],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reusable` would refuse it, but only after a recolour fetched it: no row, no fetch."""
+    acts, _, index = geometry_acts
+
+    async def painted(*args: Any, **kwargs: Any) -> Any:
+        result = await finish_piece_stage(*args, **kwargs)
+        # As `paint_layout` leaves a piece whose painting it carried.
+        path = args[2] / LAYOUT_NAME
+        layout = json.loads(path.read_text())
+        layout["plates"][0]["parts"][1]["paint"] = "paint-1-2.json"
+        path.write_text(json.dumps(layout))
+        return result
+
+    monkeypatch.setattr(activities_module, "finish_piece_stage", painted)
+    prepared, _, _ = await _render(acts, _piece(acts, 1, _scene(), width=12))
+    assert prepared.geometry_key is not None
+    assert index.get(prepared.geometry_key) is None
 
 
 @pytest.mark.requires_postgres

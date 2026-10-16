@@ -1,13 +1,17 @@
 import { Suspense, lazy, useState, type ReactNode } from 'react'
 import { api } from '../../api/client'
-import type { Job, PrintDetail } from '../../api/types'
+import type { Job, ParamValue, PrintDetail } from '../../api/types'
 import { DownloadBlockedError, downloadBlob } from '../../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
+import { CheckIcon, CopyIcon, DownloadIcon } from 'lucide-react'
 import { Swatch } from '../print/Swatch'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
-import { Spinner } from '../ui/Spinner'
+import { Hint } from '../Hint'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Spinner } from '../ui/spinner'
 
 const Preview = lazy(async () => ({ default: (await import('../Preview')).Preview }))
 
@@ -124,7 +128,7 @@ function FileIcon({ kind }: { kind: Kind }) {
       aria-hidden
       data-testid={`file-icon-${kind}`}
       viewBox="0 0 20 20"
-      className="size-5 shrink-0 text-muted"
+      className="size-5 shrink-0 text-muted-foreground"
       fill="none"
       stroke="currentColor"
       strokeWidth="1.4"
@@ -132,14 +136,6 @@ function FileIcon({ kind }: { kind: Kind }) {
       strokeLinecap="round"
     >
       {path[kind]}
-    </svg>
-  )
-}
-
-function DownloadIcon() {
-  return (
-    <svg aria-hidden viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <path d="M8 2v8 M4.5 7 8 10.5 11.5 7 M3 13.5h10" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
@@ -184,48 +180,50 @@ export function PrintFiles({ print }: { print: PrintDetail }) {
       <ul aria-label="Files" className="space-y-1">
         {rows.map((entry) => (
           <li key={entry.key} className="flex items-center gap-2">
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               aria-label={`${FILE_LABELS[entry.kind]}, ${entry.name}, open`}
               onClick={() => setOpened(entry)}
-              className="flex min-w-0 flex-1 items-center gap-3 rounded-[6px] px-2 py-1.5 text-left hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+              className="h-auto min-w-0 flex-1 justify-start gap-3 px-2 py-1.5 text-left font-normal whitespace-normal"
             >
               <FileIcon kind={entry.kind} />
               <span className="min-w-0 flex-1">
-                <span className="block text-[13px] text-ink">{FILE_LABELS[entry.kind]}</span>
-                <span title={entry.name} className="sb-num block truncate text-[12px] text-faint">
-                  {entry.name}
-                </span>
+                <span className="block text-[13px]">{FILE_LABELS[entry.kind]}</span>
+                <Hint content={entry.name}>
+                  <span className="sb-num block truncate text-xs text-muted-foreground">{entry.name}</span>
+                </Hint>
               </span>
               {entry.size !== null && (
-                <span className="sb-num shrink-0 text-[12px] text-faint">{formatBytes(entry.size)}</span>
+                <span className="sb-num shrink-0 text-xs text-muted-foreground">{formatBytes(entry.size)}</span>
               )}
-            </button>
-            <Button
-              size="sm"
-              aria-label={entry.kind === 'parameters' ? 'Download parameters as JSON' : `Download ${entry.name}`}
-              title="Download"
-              onClick={() => void save(entry)}
-              disabled={busy !== null}
-            >
-              {busy === entry.key ? <Spinner /> : <DownloadIcon />}
             </Button>
+            <Hint content="Download">
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label={entry.kind === 'parameters' ? 'Download parameters as JSON' : `Download ${entry.name}`}
+                onClick={() => void save(entry)}
+                disabled={busy !== null}
+              >
+                {busy === entry.key ? <Spinner /> : <DownloadIcon aria-hidden="true" />}
+              </Button>
+            </Hint>
           </li>
         ))}
       </ul>
       {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
+        <p role="alert" className="mt-2 text-xs text-warn">
           {error}
         </p>
       )}
-      <Dialog
-        open={opened !== null}
-        title={opened ? FILE_LABELS[opened.kind] : ''}
-        description={opened?.name}
-        onClose={() => setOpened(null)}
-        size="wide"
-      >
-        {opened && <FileView print={print} entry={opened} />}
+      <Dialog open={opened !== null} onOpenChange={(next) => !next && setOpened(null)}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>{opened ? FILE_LABELS[opened.kind] : ''}</DialogTitle>
+            <DialogDescription className="sb-num break-all">{opened?.name}</DialogDescription>
+          </DialogHeader>
+          {opened && <FileView print={print} entry={opened} />}
+        </DialogContent>
       </Dialog>
     </>
   )
@@ -266,7 +264,13 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
     async () => (print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
     [print.output_id],
   )
-  if (output.loading) return <Spinner />
+  if (output.loading) {
+    return (
+      <div role="status" aria-label="Loading the 3D preview">
+        <Skeleton className="aspect-[4/3] w-full rounded-lg" />
+      </div>
+    )
+  }
   const job: Job = {
     id: print.output_id ?? `print-${print.archive_id}`,
     slug: print.slug ?? '',
@@ -277,7 +281,7 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
     colors: output.data?.colors ?? null,
   }
   return (
-    <div data-testid="file-mesh" className="aspect-[4/3] w-full overflow-hidden rounded-[4px]">
+    <div data-testid="file-mesh" className="aspect-[4/3] w-full overflow-hidden rounded-lg">
       <Suspense fallback={null}>
         <Preview job={job} rendering={false} />
       </Suspense>
@@ -297,7 +301,7 @@ function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | n
     <div className="space-y-3">
       {meshUrl && <MeshView print={print} url={meshUrl} />}
       {colours.length > 0 && (
-        <p className="flex items-center gap-2 text-[12px] text-muted">
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
           Colours
           {colours.map((colour) => (
             <Swatch key={colour} colour={colour} size="sm" />
@@ -307,11 +311,11 @@ function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | n
       {(plates.data ?? []).length > 1 && (
         <ul aria-label="Plates" className="flex flex-wrap gap-2">
           {(plates.data ?? []).map((plate) => (
-            <li key={plate.index} className="text-center text-[12px] text-muted">
+            <li key={plate.index} className="text-center text-xs text-muted-foreground">
               <img
                 src={api.outputPlateThumbnailUrl(id, plate.index)}
                 alt={`Plate ${plate.index}`}
-                className="h-28 w-auto rounded-[4px] bg-surface-2"
+                className="h-28 w-auto rounded-lg bg-muted"
               />
               Plate {plate.index}
             </li>
@@ -330,11 +334,11 @@ function SlicedView({ print }: { print: PrintDetail }) {
       {media.plate_thumbnails.length > 0 && (
         <ul aria-label="Plates as sliced" className="flex flex-wrap gap-2">
           {media.plate_thumbnails.map((plate) => (
-            <li key={plate.index} className="text-center text-[12px] text-muted">
+            <li key={plate.index} className="text-center text-xs text-muted-foreground">
               <img
                 src={plate.url}
                 alt={plate.name ?? `Plate ${plate.index}`}
-                className="h-48 w-auto rounded-[4px] bg-surface-2"
+                className="h-48 w-auto rounded-lg bg-muted"
               />
               {plate.name ?? `Plate ${plate.index}`}
             </li>
@@ -344,8 +348,8 @@ function SlicedView({ print }: { print: PrintDetail }) {
       <dl aria-label="Slicing summary" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]">
         {outcome.estimated_time_seconds !== null && (
           <>
-            <dt className="text-faint">Print time</dt>
-            <dd className="sb-num text-ink">{formatDuration(outcome.estimated_time_seconds)}</dd>
+            <dt className="text-muted-foreground">Print time</dt>
+            <dd className="sb-num">{formatDuration(outcome.estimated_time_seconds)}</dd>
           </>
         )}
         {(slicing?.filament_slots ?? []).map((slot) => (
@@ -365,8 +369,8 @@ function SlicedView({ print }: { print: PrintDetail }) {
 function FragmentRow({ label, value }: { label: string; value: string }) {
   return (
     <>
-      <dt className="text-faint">{label}</dt>
-      <dd className="sb-num text-ink">{value}</dd>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="sb-num">{value}</dd>
     </>
   )
 }
@@ -379,23 +383,12 @@ function ParametersView({ print }: { print: PrintDetail }) {
   const changed = new Set(Object.keys(print.params_diff ?? {}))
   const json = JSON.stringify(params, null, 2) + '\n'
   return (
-    <div className="space-y-2">
-      <table aria-label="Parameters" className="w-full text-[12px]">
-        <tbody>
-          {Object.entries(params).map(([name, value]) => (
-            <tr key={name} className="border-t border-line" data-changed={changed.has(name) || undefined}>
-              <th scope="row" className="py-1 pr-3 text-left font-normal text-muted">
-                {name}
-              </th>
-              <td className={`sb-num py-1 ${changed.has(name) ? 'font-medium text-accent' : 'text-ink'}`}>
-                {formatValue(value)}
-                {changed.has(name) && <span className="sr-only"> (changed from the default)</span>}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-3">
+      <Card size="sm" className="gap-0 py-0">
+        <ParamsTable label="Parameters" params={params} changed={changed} />
+      </Card>
       <Button
+        variant="outline"
         size="sm"
         onClick={() => {
           // No clipboard on an insecure origin, and some frames refuse it: say so.
@@ -409,13 +402,49 @@ function ParametersView({ print }: { print: PrintDetail }) {
           )
         }}
       >
+        {copied === 'copied' ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
         {copied === 'copied' ? 'Copied' : 'Copy JSON'}
       </Button>
       {copied === 'failed' && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-xs text-warn">
           The parameters could not be copied here. Download them as JSON instead.
         </p>
       )}
     </div>
+  )
+}
+
+/**
+ * A print's parameters as a table, in a card the caller gives it: those in `changed`
+ * (differing from the template's defaults) marked.
+ */
+export function ParamsTable({
+  label,
+  params,
+  changed,
+}: {
+  label: string
+  params: Record<string, ParamValue>
+  changed?: ReadonlySet<string>
+}) {
+  return (
+    <table aria-label={label} className="w-full text-xs">
+      <tbody className="divide-y">
+        {Object.entries(params).map(([name, value]) => {
+          const differs = changed?.has(name) ?? false
+          return (
+            <tr key={name} data-changed={differs || undefined}>
+              <th scope="row" className="py-1.5 pr-3 pl-3 text-left font-normal text-muted-foreground">
+                {name}
+              </th>
+              <td className={`sb-num py-1.5 pr-3 ${differs ? 'font-medium text-primary' : ''}`}>
+                {formatValue(value)}
+                {differs && <span className="sr-only"> (changed from the default)</span>}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
   )
 }

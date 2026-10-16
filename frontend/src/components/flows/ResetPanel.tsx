@@ -1,14 +1,18 @@
 import { useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { FlowResetPreview, FlowStep } from '../../api/types'
-import { USER_ONLY } from '../../agent/dom'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
-import { Spinner } from '../ui/Spinner'
+import { ChevronRightIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Confirm } from './Confirm'
 
 const RESET_CHANGED = 'https://scadbuddy.dev/problems/flow-reset-changed'
-const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]'
 
 interface Again {
   key: string
@@ -42,16 +46,25 @@ function runsAgain(steps: FlowStep[], firstStep: number | null | undefined, prev
 export function ResetPanel({ runId, steps, onReset }: { runId: string; steps: FlowStep[]; onReset: () => void }) {
   const [open, setOpen] = useState(false)
   return (
-    <section aria-label="Reset" className="mt-4 rounded-[8px] border border-line p-3">
-      <div className="flex items-center gap-2">
-        <h2 className="text-[13px] font-medium">Reset</h2>
-        <p className="text-[12.5px] text-muted">Run the flow again from an earlier point.</p>
-        <Button size="sm" className="ml-auto" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-          {open ? 'Hide' : 'Preview a reset'}
-        </Button>
-      </div>
-      {open && <ResetChooser runId={runId} steps={steps} onReset={onReset} />}
-    </section>
+    <Card size="sm" role="region" aria-label="Reset" className="mt-4">
+      <CardContent>
+        <Collapsible open={open} onOpenChange={setOpen}>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-[13px] font-medium">Reset</h2>
+            <p className="text-[12.5px] text-muted-foreground">Run the flow again from an earlier point.</p>
+            <CollapsibleTrigger asChild>
+              <Button variant="outline" size="sm" className="ml-auto">
+                <ChevronRightIcon className={`transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
+                {open ? 'Hide' : 'Preview a reset'}
+              </Button>
+            </CollapsibleTrigger>
+          </div>
+          <CollapsibleContent>
+            <ResetChooser runId={runId} steps={steps} onReset={onReset} />
+          </CollapsibleContent>
+        </Collapsible>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -122,23 +135,30 @@ function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowSte
   }
 
   const shown = notice && (
-    <p role="status" className="mt-2 text-[13px] text-warn">
+    <p role="status" className="mt-2 text-[13px] text-destructive">
       {notice}
     </p>
   )
   if (points.error) {
     return (
-      <p role="alert" className="mt-2 text-[13px] text-warn">
+      <p role="alert" className="mt-2 text-[13px] text-destructive">
         {points.error.message}
       </p>
     )
   }
-  if (!points.data) return <p className="mt-2 text-[13px] text-muted">Loading the points a reset can go back to…</p>
+  if (!points.data) {
+    return (
+      <div role="status" aria-label="Loading the points a reset can go back to" className="mt-3 flex flex-col gap-2">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="h-8 w-full" />
+      </div>
+    )
+  }
   if (points.data.points.length === 0) {
     return (
       <>
         {shown}
-        <p className="mt-2 text-[13px] text-muted">There is no point to reset this run to yet.</p>
+        <p className="mt-2 text-[13px] text-muted-foreground">There is no point to reset this run to yet.</p>
       </>
     )
   }
@@ -147,110 +167,101 @@ function ResetChooser({ runId, steps, onReset }: { runId: string; steps: FlowSte
   return (
     <div className="mt-3 flex flex-col gap-3">
       {shown}
-      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
-        Reset to
-        <select
-          aria-label="Reset point"
-          className={FIELD}
-          value={eventId ?? ''}
-          onChange={(e) => void choose(Number(e.target.value))}
-        >
-          <option value="" disabled>
-            Choose a point…
-          </option>
-          {points.data.points.map((p) => {
-            const step = p.first_step != null ? byStep.get(p.first_step) : undefined
-            const where =
-              p.first_step == null
-                ? 'after the last step'
-                : `before step ${p.first_step}${step ? ` (${step.fn})` : ''}`
-            return (
-              <option key={p.event_id} value={p.event_id}>
-                {`Event ${p.event_id}: ${where}`}
-              </option>
-            )
-          })}
-        </select>
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor={`reset-point-${runId}`} className="text-[12.5px] font-normal text-muted-foreground">
+          Reset to
+        </Label>
+        <Select value={eventId === undefined ? '' : String(eventId)} onValueChange={(next) => void choose(Number(next))}>
+          <SelectTrigger id={`reset-point-${runId}`} aria-label="Reset point" className="w-full">
+            <SelectValue placeholder="Choose a point…" />
+          </SelectTrigger>
+          <SelectContent>
+            {points.data.points.map((p) => {
+              const step = p.first_step != null ? byStep.get(p.first_step) : undefined
+              const where =
+                p.first_step == null
+                  ? 'after the last step'
+                  : `before step ${p.first_step}${step ? ` (${step.fn})` : ''}`
+              return (
+                <SelectItem key={p.event_id} value={String(p.event_id)}>
+                  {`Event ${p.event_id}: ${where}`}
+                </SelectItem>
+              )
+            })}
+          </SelectContent>
+        </Select>
+      </div>
       {previewError && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-[13px] text-destructive">
           {previewError}
         </p>
       )}
-      {eventId !== undefined && !again && !previewError && <p className="text-[13px] text-muted">Reading the preview…</p>}
+      {eventId !== undefined && !again && !previewError && (
+        <div role="status" aria-label="Reading the preview" className="flex flex-col gap-1.5">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="h-3 w-40" />
+        </div>
+      )}
       {preview && again && !preview.valid && (
-        <p className="text-[13px] text-warn">A reset can&apos;t go back to this point any more. Choose another.</p>
+        <p className="text-[13px] text-destructive">A reset can&apos;t go back to this point any more. Choose another.</p>
       )}
       {preview && again && preview.valid && (
         <>
           <div>
             <h3 className="mb-1 text-[12.5px] font-medium">Runs again</h3>
             {again.length === 0 ? (
-              <p className="text-[13px] text-muted">No recorded call runs again.</p>
+              <p className="text-[13px] text-muted-foreground">No recorded call runs again.</p>
             ) : (
               <ul aria-label="Calls that run again" className="flex flex-col gap-1 text-[12.5px]">
                 {again.map((a) => (
                   <li key={a.key} data-outward={a.outward || undefined} className="flex items-center gap-2">
                     <span className="font-mono">{a.label}</span>
                     {a.outward && (
-                      <span className="rounded-[4px] border border-warn/50 px-1.5 text-[11px] text-warn">
-                        Outward: sent again
-                      </span>
+                      <Badge variant="destructive">Outward: sent again</Badge>
                     )}
                   </li>
                 ))}
               </ul>
             )}
-            <p className="mt-2 text-[12.5px] text-muted">
+            <p className="mt-2 text-[12.5px] text-muted-foreground">
               Answers and approvals given after this point are undone, so those calls wait for you again.
             </p>
           </div>
           <div>
-            <Button variant="danger" size="sm" onClick={() => setConfirming(true)}>
-              Reset to this point…
-            </Button>
+            <Confirm
+              trigger={
+                <Button variant="destructive" size="sm">
+                  Reset to this point…
+                </Button>
+              }
+              open={confirming}
+              onOpenChange={setConfirming}
+              title="Reset this run?"
+              action="Reset run"
+              busy={busy}
+              error={error}
+              onAction={() => void reset()}
+            >
+              <p>The run continues from event {eventId}, on the same script, and every call after it runs again.</p>
+              {outward.length > 0 ? (
+                <>
+                  <p className="text-destructive">
+                    {outward.length === 1 ? 'This outward call is' : `These ${outward.length} outward calls are`} sent
+                    again, as new effects:
+                  </p>
+                  <ul aria-label="Outward calls sent again" className="list-disc pl-5 font-mono text-[12.5px]">
+                    {outward.map((a) => (
+                      <li key={a.key}>{a.label}</li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>No outward call (a print, an arrange) is sent again.</p>
+              )}
+            </Confirm>
           </div>
         </>
       )}
-      <Dialog
-        open={confirming}
-        title="Reset this run?"
-        onClose={() => !busy && setConfirming(false)}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setConfirming(false)} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void reset()} disabled={busy} {...USER_ONLY}>
-              {busy ? <Spinner /> : 'Reset run'}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-2 text-[13px] text-muted">
-          <p>The run continues from event {eventId}, on the same script, and every call after it runs again.</p>
-          {outward.length > 0 ? (
-            <>
-              <p className="text-warn">
-                {outward.length === 1 ? 'This outward call is' : `These ${outward.length} outward calls are`} sent again,
-                as new effects:
-              </p>
-              <ul aria-label="Outward calls sent again" className="list-disc pl-5 font-mono text-[12.5px]">
-                {outward.map((a) => (
-                  <li key={a.key}>{a.label}</li>
-                ))}
-              </ul>
-            </>
-          ) : (
-            <p>No outward call (a print, an arrange) is sent again.</p>
-          )}
-          {error && (
-            <p role="alert" className="text-warn">
-              {error}
-            </p>
-          )}
-        </div>
-      </Dialog>
     </div>
   )
 }

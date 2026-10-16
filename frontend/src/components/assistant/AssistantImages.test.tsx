@@ -275,7 +275,8 @@ describe('assistant images (#1866)', () => {
     await view.user.click(thumb)
 
     const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
-    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    // Modal: Radix's (SentImages.test.tsx checks the panel is hidden behind it).
+    expect(dialog).toHaveAttribute('data-modal')
     // The turn names the image the agent stored (the msw store serves it); jsdom loads no
     // images, so the load is the test's to fire.
     const full = within(dialog).getByAltText('Image 1 of 1, as sent')
@@ -291,6 +292,6 @@ describe('assistant images (#1866)', () => {
     await view.user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toBeVisible()
-    expect(thumb).toHaveFocus()
+    await waitFor(() => expect(thumb).toHaveFocus())
   })
 })

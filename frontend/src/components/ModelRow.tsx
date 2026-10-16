@@ -10,6 +10,9 @@ import { namedSlides, type Slide } from './media/slides'
 import { ModelOrigin } from './ModelOrigin'
 import { ModelThumbnail } from './ModelThumbnail'
 import { UpstreamBadge } from './UpstreamUpdate'
+import { PlayIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Card } from '@/components/ui/card'
 
 interface Props {
   model: ModelSummary
@@ -42,18 +45,15 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
   const origin = safeHttpUrl(model.origin_url)
 
   return (
-    <li
-      data-model-card={model.slug}
-      data-model-row
-      className="flex items-center gap-3 rounded-[6px] border border-line bg-surface p-2 transition-colors hover:border-line-strong"
-    >
+    <li data-model-card={model.slug} data-model-row>
+      <Card size="sm" className="flex-row items-center gap-3 px-2 py-2 transition-shadow hover:ring-foreground/25">
       <div className="relative w-20 shrink-0 sm:w-24">
         {slides.length > 0 ? (
           <button
             type="button"
             aria-label={`View media of ${model.name}${slides.length > 1 ? ` (${slides.length})` : ''}`}
             onClick={() => onOpen(slides, coverIndex >= 0 ? coverIndex : 0)}
-            className="block w-full cursor-zoom-in rounded-[4px] focus-visible:outline-2 focus-visible:outline-accent"
+            className="block w-full cursor-zoom-in rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             {src ? (
               <ModelThumbnail src={src} alt="" />
@@ -63,23 +63,21 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
               <span
                 data-testid="video-tile"
                 aria-hidden="true"
-                className="relative flex aspect-[4/3] w-full items-center justify-center rounded-[4px] bg-surface-2"
+                className="relative flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-muted"
               >
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white">
-                  <svg viewBox="0 0 16 16" className="ml-0.5 h-3.5 w-3.5">
-                    <path d="M4 2.5v11l9-5.5z" fill="currentColor" />
-                  </svg>
-                </span>
+                <Badge className="size-7 rounded-full bg-black/60 p-0 text-white">
+                  <PlayIcon className="ml-0.5 fill-current" />
+                </Badge>
               </span>
             )}
             {slides.length > 1 && (
-              <span
+              <Badge
                 data-testid="media-count"
                 aria-hidden="true"
-                className="sb-num absolute right-1 bottom-1 rounded-[3px] bg-black/70 px-1 text-[10px] leading-4 text-white"
+                className="sb-num absolute right-1 bottom-1 h-4 rounded-sm bg-black/70 px-1 text-[10px] text-white"
               >
                 {slides.length}
-              </span>
+              </Badge>
             )}
           </button>
         ) : (
@@ -92,23 +90,20 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <h2 className="min-w-0 truncate text-[14px] font-medium">
-            <Link to={modelPath(model.slug)} className="hover:underline focus-visible:rounded-[3px]">
+          <h2 className="min-w-0 truncate text-sm font-medium">
+            <Link to={modelPath(model.slug)} className="underline-offset-4 hover:underline focus-visible:rounded-sm">
               {model.name}
             </Link>
           </h2>
           <UpstreamBadge state={model.upstream_state} />
           {model.origin === 'builtin' && (
-            <span
-              data-testid="builtin-badge"
-              className="hidden shrink-0 text-[11px] text-faint sm:inline"
-            >
+            <Badge data-testid="builtin-badge" variant="secondary" className="hidden sm:inline-flex">
               Built-in — read-only
-            </span>
+            </Badge>
           )}
         </div>
         {model.description && (
-          <p className="mt-0.5 hidden truncate text-[13px] text-muted sm:block">
+          <p className="mt-0.5 hidden truncate text-sm text-muted-foreground sm:block">
             {model.description}
           </p>
         )}
@@ -122,26 +117,29 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
           <ul className="mt-1.5 flex flex-wrap gap-1">
             {tags.map((tag) => (
               <li key={tag}>
-                <button
-                  type="button"
-                  aria-label={`Filter by ${tag}`}
-                  onClick={() => onTag(tag)}
-                  className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-surface-3 hover:text-ink"
-                >
-                  {tag}
-                </button>
+                <Badge variant="secondary" asChild>
+                  <button
+                    type="button"
+                    aria-label={`Filter by ${tag}`}
+                    onClick={() => onTag(tag)}
+                    className="cursor-pointer hover:bg-accent hover:text-accent-foreground"
+                  >
+                    {tag}
+                  </button>
+                </Badge>
               </li>
             ))}
           </ul>
         )}
       </div>
 
-      <p className="hidden shrink-0 text-[12px] text-faint md:block">
+      <p className="hidden shrink-0 text-xs text-muted-foreground md:block">
         Updated {timeAgo(model.updated_at)}
       </p>
       <span className="shrink-0">
         <DuplicateModelButton slug={model.slug} name={model.name} />
       </span>
+      </Card>
     </li>
   )
 }

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -37,12 +37,14 @@ async function loaded() {
 }
 
 /** Slot 1's checked spool, and one that is not. */
+/** Slot 1's spools, its list opened: shadcn radios are buttons, checked by `aria-checked`. */
 function slot1() {
-  const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
-  return {
-    checked: radios.find((radio) => radio.checked) as HTMLInputElement,
-    other: radios.find((radio) => !radio.checked) as HTMLInputElement,
+  if (screen.getByTestId('change-slot-1').getAttribute('aria-expanded') === 'false') {
+    fireEvent.click(screen.getByTestId('change-slot-1'))
   }
+  const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLButtonElement[]
+  const isChecked = (radio: HTMLElement) => radio.getAttribute('aria-checked') === 'true'
+  return { checked: radios.find(isChecked)!, other: radios.find((radio) => !isChecked(radio))! }
 }
 
 beforeEach(() => resetMockState())
@@ -59,7 +61,6 @@ describe('BatchPrintDialog (#2672)', () => {
     await step(1, 2)
     await loaded()
     expect(screen.getByTestId('batch-strip')).toHaveTextContent(name(89))
-    await user.click(screen.getByTestId('change-slot-1'))
     const spool = Number(slot1().other.value)
     await user.click(slot1().other)
     await user.click(screen.getByTestId('batch-next'))
@@ -117,7 +118,6 @@ describe('BatchPrintDialog (#2672)', () => {
     await step(1, 2)
     await loaded()
     const suggested = Number(slot1().checked.value)
-    await user.click(screen.getByTestId('change-slot-1'))
     await user.click(slot1().other)
     await user.click(screen.getByTestId('batch-next'))
 
@@ -295,6 +295,30 @@ describe('BatchPrintDialog (#2672)', () => {
     await waitFor(() => expect(Number(slot1().checked.value)).toBe(REQUEST.filament_plan.slots?.[0]?.spool_id))
   })
 
+  it('keeps a step\'s supports and prime tower through Edit and Review (#2718 review)', async () => {
+    const batch = await newBatch(89, 91)
+    const chosen = {
+      ...REQUEST,
+      supports: { enabled: true, type: 'tree' as const, on_build_plate_only: true },
+      prime_tower: { enabled: true, no_sparse_layers: true },
+    }
+    await api.putPrintBatchItem(batch.id, 0, { request: chosen, skipped: false, removed: false })
+    await api.putPrintBatchItem(batch.id, 1, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchStep(batch.id, 2)
+    const saved = watchItems()
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+
+    await user.click(within(screen.getByTestId('batch-row-0')).getByRole('button', { name: /^Edit / }))
+    await step(1, 2)
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('batch-next')).toBeEnabled())
+    await user.click(screen.getByTestId('batch-next'))
+
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0]?.request).toMatchObject({ supports: chosen.supports, prime_tower: chosen.prime_tower })
+  })
+
   it('resumes where it was left after a reload', async () => {
     const batch = await newBatch(89, 91)
     await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
@@ -432,7 +456,6 @@ describe('BatchPrintDialog (#2672)', () => {
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
     await step(1, 2)
     await loaded()
-    await user.click(screen.getByTestId('change-slot-1'))
     const spool = Number(slot1().other.value)
     await user.click(slot1().other)
 

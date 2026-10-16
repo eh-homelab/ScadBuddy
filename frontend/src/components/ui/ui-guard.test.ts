@@ -14,28 +14,34 @@ function files(dir: string): string[] {
   })
 }
 
-/** The shadcn components: lower-case files, as the CLI names them. */
-const generated = readdirSync(ui).filter((name) => /^[a-z][\w-]*\.tsx$/.test(name))
+/** Every source file under src, the mocks and tests included, but not this one. */
+const sources = files(src).filter((path) => /\.(?:tsx?|css)$/.test(path) && !path.endsWith('ui-guard.test.ts'))
+
+function matches(pattern: RegExp): string[] {
+  return sources.flatMap((path) => [...readFileSync(path, 'utf8').matchAll(pattern)].map((m) => `${relative(src, path)}: ${m[0]}`))
+}
 
 describe('the shadcn components (src/components/ui)', () => {
-  it('share no name, ignoring case, with a legacy primitive', () => {
-    // `./ui/Button` finds button.tsx before Button/index.tsx on a case-insensitive file
-    // system (macOS, Windows): shadcn's button and dialog are shadcn-button.tsx and
-    // shadcn-dialog.tsx until the legacy ones go (vite.config.ts `alias`).
+  it('share no name, ignoring case', () => {
+    // On a case-insensitive file system (macOS, Windows) `./ui/Button` would find
+    // button.tsx: the legacy Button/ and Dialog/ were the last such pair.
     const names = readdirSync(ui).map((name) => name.replace(/\.tsx?$/, '').toLowerCase())
     expect(names.filter((name, i) => names.indexOf(name) !== i)).toEqual([])
   })
+})
 
-  it('use ui-accent and ui-muted for shadcn’s accent and muted surfaces', () => {
-    // index.css: `bg-accent` is still ScadBuddy's amber and `text-muted` its secondary
-    // text while unconverted pages use them; a component added with `shadcn add` comes
-    // with shadcn's meaning and must be rewritten.
-    const clashes = generated.flatMap((name) =>
-      [...readFileSync(join(ui, name), 'utf8').matchAll(/(?<![\w-])bg-(accent|muted)(?![\w-])/g)].map(
-        (m) => `${name}: ${m[0]}`,
-      ),
-    )
-    expect(clashes).toEqual([])
+describe('the colour names', () => {
+  it('keeps no ui-accent or ui-muted, the names shadcn’s surfaces had during the conversion', () => {
+    expect(matches(/(?<![\w-])[\w:-]*ui-(?:accent|muted)(?![\w-])/g)).toEqual([])
+  })
+
+  it('uses accent and muted only as shadcn’s surfaces, never as text or a line', () => {
+    // `accent` was ScadBuddy's amber and `muted` its secondary text; both are shadcn's
+    // surfaces now (index.css). The amber is `primary` and the secondary text `subtle`,
+    // so a `text-muted` left over would be a surface colour used as text.
+    expect(
+      matches(/(?<![\w-])(?:text|border|ring|outline|decoration|fill|stroke)-(?:accent|muted)(?:\/\d+)?(?![\w-])/g),
+    ).toEqual([])
   })
 })
 
@@ -54,20 +60,34 @@ const HAND_ROLLED = [
 ]
 
 /**
- * TODO(#3653): turn on when the last area's conversion lands. Until then it would fail
- * on every page not yet converted; run it by hand to see what is left.
+ * Each file allowed a match, by the pattern it may match, with why: a role set on a
+ * shadcn component, not a control built by hand.
  */
-const GUARD_ON = false
+const ALLOWED: Record<string, RegExp> = {
+  // `role="alertdialog"` on the companion-aware DialogContent: Radix's AlertDialog is
+  // always modal, and the assistant panel must stay usable beside a flow's confirmation
+  // (#798), so it is the dialog primitive with the alert dialog's role.
+  [join('components', 'flows', 'Confirm.tsx')]: HAND_ROLLED[0]!,
+}
 
-describe.skipIf(!GUARD_ON)('no hand-rolled controls outside src/components/ui (#3653)', () => {
+describe('no hand-rolled controls outside src/components/ui (#3653)', () => {
   it('finds none', () => {
     const found = files(src)
       .filter((path) => /\.tsx$/.test(path))
       .filter((path) => !path.startsWith(ui) && !/\.test\.tsx$/.test(path) && !path.includes(`${join(src, 'mocks')}`))
       .flatMap((path) => {
+        const name = relative(src, path)
         const text = readFileSync(path, 'utf8')
-        return HAND_ROLLED.filter((pattern) => pattern.test(text)).map((pattern) => `${relative(src, path)}: ${pattern.source}`)
+        return HAND_ROLLED.filter((pattern) => pattern !== ALLOWED[name] && pattern.test(text)).map(
+          (pattern) => `${name}: ${pattern.source}`,
+        )
       })
     expect(found).toEqual([])
+  })
+
+  it('allows only files that still need it', () => {
+    // An exception outlives its reason unnoticed otherwise.
+    const stale = Object.entries(ALLOWED).filter(([name, pattern]) => !pattern.test(readFileSync(join(src, name), 'utf8')))
+    expect(stale).toEqual([])
   })
 })

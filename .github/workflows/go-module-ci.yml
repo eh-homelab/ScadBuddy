@@ -221,8 +221,8 @@ jobs:
           fi
 
       # Each CLI's image (tools/go/<m>/Dockerfile, the repo root as context),
-      # built and run once, as build-go-image.yml will publish it. amd64 only;
-      # the publish adds arm64. Every CLI must have a Dockerfile, as there.
+      # built and run once, as build-go-image.yml will publish it (amd64, the
+      # only platform it publishes). Every CLI must have a Dockerfile, as there.
       - name: Build and run each CLI image
         if: ${{ !cancelled() && inputs.run == 'true' }}
         run: |

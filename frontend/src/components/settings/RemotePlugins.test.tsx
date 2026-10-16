@@ -5,6 +5,7 @@ import { setRemotePluginProblem } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
+import { choose, optionsOf } from '../../test/select'
 
 describe('RemotePluginsPanel', () => {
   it('lists endpoints with the header name and last four only', async () => {
@@ -64,16 +65,16 @@ describe('RemotePluginsPanel', () => {
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     expect(await within(card).findByRole('status')).toHaveTextContent('connected; 3 tools')
-    expect(within(card).getByLabelText('Tier of recall')).toHaveValue('read')
-    expect(within(card).getByLabelText('Tier of retain')).toHaveValue('outward')
+    expect(within(card).getByLabelText('Tier of recall')).toHaveTextContent('read')
+    expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('outward')
     expect(within(card).getByLabelText('Tier of files.list')).toBeDisabled()
     expect(within(card).getByText('(server suggests read)')).toBeInTheDocument()
 
-    await user.selectOptions(within(card).getByLabelText('Tier of retain'), 'write')
-    await user.click(within(card).getByLabelText('Hide files.list'))
+    await choose(user, within(card).getByLabelText('Tier of retain'), 'write')
+    await user.click(within(card).getByLabelText('Show files.list'))
     await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
-    await waitFor(() => expect(within(card).getByLabelText('Tier of retain')).toHaveValue('write'))
+    await waitFor(() => expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('write'))
 
     await waitFor(() => expect(within(card).getByRole('button', { name: 'Enable' })).toBeEnabled())
     await user.click(within(card).getByRole('button', { name: 'Enable' }))
@@ -86,13 +87,13 @@ describe('RemotePluginsPanel', () => {
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     const fold = await within(card).findByRole('button', { name: /connected; 3 tools/ })
     expect(fold).toHaveAttribute('aria-expanded', 'true')
-    await user.selectOptions(within(card).getByLabelText('Tier of retain'), 'write')
+    await choose(user, within(card).getByLabelText('Tier of retain'), 'write')
 
     // Folded by hand, an unsaved change is kept.
     await user.click(fold)
     expect(within(card).getByLabelText('Tier of retain')).not.toBeVisible()
     await user.click(fold)
-    expect(within(card).getByLabelText('Tier of retain')).toHaveValue('write')
+    expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('write')
 
     await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
     await waitFor(() => expect(fold).toHaveAttribute('aria-expanded', 'false'))
@@ -105,7 +106,7 @@ describe('RemotePluginsPanel', () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await user.click(within(card).getByRole('button', { name: 'Remove' }))
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove endpoint' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove endpoint' }))
     expect(await screen.findByText('No plugin endpoints.')).toBeInTheDocument()
   })
 
@@ -131,15 +132,14 @@ describe('RemotePluginsPanel', () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Built-in tools scadbuddy' })
     await user.click(within(card).getByRole('button', { name: 'Review tools' }))
-    const options = (label: string) =>
-      within(within(card).getByLabelText(label)).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)
-    expect(options('Tier of list_models')).toEqual(['read', 'write', 'outward'])
-    expect(options('Tier of save_model')).toEqual(['write', 'outward'])
-    expect(options('Tier of send_to_printer')).toEqual(['outward'])
-    expect(within(card).getByLabelText('Tier of save_model')).toHaveValue('write')
+    const options = (label: string) => optionsOf(user, within(card).getByLabelText(label))
+    expect(await options('Tier of list_models')).toEqual(['read', 'write', 'outward (asks first)'])
+    expect(await options('Tier of save_model')).toEqual(['write', 'outward (asks first)'])
+    expect(await options('Tier of send_to_printer')).toEqual(['outward (asks first)'])
+    expect(within(card).getByLabelText('Tier of save_model')).toHaveTextContent('write')
 
-    await user.selectOptions(within(card).getByLabelText('Tier of list_models'), 'outward')
-    await user.click(within(card).getByLabelText('Disable save_model'))
+    await choose(user, within(card).getByLabelText('Tier of list_models'), 'outward (asks first)')
+    await user.click(within(card).getByLabelText('Enable save_model'))
     await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
     await waitFor(() => expect(sent).toEqual({ tool_tiers: { list_models: 'outward' }, disabled_tools: ['save_model'] }))
     expect(await within(card).findByText(/1 raised, 1 disabled/)).toBeInTheDocument()

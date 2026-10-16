@@ -2,7 +2,7 @@
 name: GHCR Cleanup
 
 # Prunes old untagged versions of ghcr.io/eh-homelab/scadbuddy. Every
-# build-image.yml run pushes a full set of new blobs for TWO architectures;
+# build-image.yml run pushes a full set of new blobs;
 # nothing else ever deletes the superseded versions, so untagged manifests
 # accumulate indefinitely in GHCR and, downstream, keep the Nexus ghcr-proxy
 # blob store growing.

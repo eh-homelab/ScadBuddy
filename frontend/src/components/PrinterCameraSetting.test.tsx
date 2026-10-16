@@ -11,7 +11,7 @@ const LABEL = 'Let the assistant see printers’ cameras'
 describe('PrinterCameraSetting (#1911)', () => {
   it('is on by default, and turns off and on at once', async () => {
     const { user } = renderPage(<PrinterCameraSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     expect(box).toBeChecked()
 
     await user.click(box)
@@ -25,7 +25,7 @@ describe('PrinterCameraSetting (#1911)', () => {
 
   it('is for the user only: an agent cannot turn the camera on for itself', async () => {
     renderPage(<PrinterCameraSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     expect(box.closest('[data-agent-user-only]')).not.toBeNull()
   })
 
@@ -36,7 +36,7 @@ describe('PrinterCameraSetting (#1911)', () => {
       ),
     )
     const { user } = renderPage(<PrinterCameraSetting />)
-    const box = await screen.findByRole('checkbox', { name: LABEL })
+    const box = await screen.findByRole('switch', { name: LABEL })
     await user.click(box)
     expect(await screen.findByRole('alert')).toHaveTextContent('must come from the ScadBuddy UI')
     expect(box).toBeChecked()

@@ -25,6 +25,8 @@ type PrintRunRequest struct {
 	options PrintOptionsable
 	// The plate_id property
 	plate_id *int32
+	// The plate_ids property
+	plate_ids PrintRunRequest_PrintRunRequest_plate_idsable
 	// The prime_tower property
 	prime_tower PrimeTowerChoiceable
 	// The print_sequence property
@@ -127,6 +129,98 @@ func (m *PrintRunRequest_PrintRunRequest_copies) SetInteger(value *int32) {
 // SetPrintRunRequestCopiesMember1 sets the PrintRunRequest_copiesMember1 property value. Composed type representation for type PrintRunRequest_copiesMember1able
 func (m *PrintRunRequest_PrintRunRequest_copies) SetPrintRunRequestCopiesMember1(value PrintRunRequest_copiesMember1able) {
 	m.printRunRequest_copiesMember1 = value
+}
+
+// PrintRunRequest_PrintRunRequest_plate_ids composed type wrapper for classes PrintRunRequest_plate_idsMember1able, []int32
+type PrintRunRequest_PrintRunRequest_plate_ids struct {
+	// Composed type representation for type []int32
+	integer []int32
+	// Composed type representation for type PrintRunRequest_plate_idsMember1able
+	printRunRequest_plate_idsMember1 PrintRunRequest_plate_idsMember1able
+}
+
+// NewPrintRunRequest_PrintRunRequest_plate_ids instantiates a new PrintRunRequest_PrintRunRequest_plate_ids and sets the default values.
+func NewPrintRunRequest_PrintRunRequest_plate_ids() *PrintRunRequest_PrintRunRequest_plate_ids {
+	m := &PrintRunRequest_PrintRunRequest_plate_ids{}
+	return m
+}
+
+// CreatePrintRunRequest_PrintRunRequest_plate_idsFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintRunRequest_PrintRunRequest_plate_idsFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintRunRequest_PrintRunRequest_plate_ids()
+	if parseNode != nil {
+		if val, err := parseNode.GetObjectValue(CreatePrintRunRequest_plate_idsMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintRunRequest_plate_idsMember1able); ok {
+				result.SetPrintRunRequestPlateIdsMember1(cast)
+			}
+		} else if val, err := parseNode.GetCollectionOfPrimitiveValues("int32"); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			cast := make([]int32, len(val))
+			for i, v := range val {
+				if v != nil {
+					cast[i] = *(v.(*int32))
+				}
+			}
+			result.SetInteger(cast)
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type []int32
+// returns a []int32 when successful
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) GetInteger() []int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintRunRequestPlateIdsMember1 gets the PrintRunRequest_plate_idsMember1 property value. Composed type representation for type PrintRunRequest_plate_idsMember1able
+// returns a PrintRunRequest_plate_idsMember1able when successful
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) GetPrintRunRequestPlateIdsMember1() PrintRunRequest_plate_idsMember1able {
+	return m.printRunRequest_plate_idsMember1
+}
+
+// Serialize serializes information the current object
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetPrintRunRequestPlateIdsMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintRunRequestPlateIdsMember1())
+		if err != nil {
+			return err
+		}
+	} else if m.GetInteger() != nil {
+		err := writer.WriteCollectionOfInt32Values("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetInteger sets the integer property value. Composed type representation for type []int32
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) SetInteger(value []int32) {
+	m.integer = value
+}
+
+// SetPrintRunRequestPlateIdsMember1 sets the PrintRunRequest_plate_idsMember1 property value. Composed type representation for type PrintRunRequest_plate_idsMember1able
+func (m *PrintRunRequest_PrintRunRequest_plate_ids) SetPrintRunRequestPlateIdsMember1(value PrintRunRequest_plate_idsMember1able) {
+	m.printRunRequest_plate_idsMember1 = value
 }
 
 // PrintRunRequest_PrintRunRequest_print_sequence composed type wrapper for classes PrintRunRequest_print_sequenceMember1able, string
@@ -653,6 +747,14 @@ type PrintRunRequest_PrintRunRequest_copiesable interface {
 	SetPrintRunRequestCopiesMember1(value PrintRunRequest_copiesMember1able)
 }
 
+type PrintRunRequest_PrintRunRequest_plate_idsable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetInteger() []int32
+	GetPrintRunRequestPlateIdsMember1() PrintRunRequest_plate_idsMember1able
+	SetInteger(value []int32)
+	SetPrintRunRequestPlateIdsMember1(value PrintRunRequest_plate_idsMember1able)
+}
+
 type PrintRunRequest_PrintRunRequest_print_sequenceable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetPrintRunRequestPrintSequenceMember1() PrintRunRequest_print_sequenceMember1able
@@ -822,6 +924,16 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["plate_ids"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintRunRequest_PrintRunRequest_plate_idsFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPlateIds(val.(PrintRunRequest_PrintRunRequest_plate_idsable))
+		}
+		return nil
+	}
 	res["prime_tower"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrimeTowerChoiceFromDiscriminatorValue)
 		if err != nil {
@@ -929,6 +1041,12 @@ func (m *PrintRunRequest) GetPlateId() *int32 {
 	return m.plate_id
 }
 
+// GetPlateIds gets the plate_ids property value. The plate_ids property
+// returns a PrintRunRequest_PrintRunRequest_plate_idsable when successful
+func (m *PrintRunRequest) GetPlateIds() PrintRunRequest_PrintRunRequest_plate_idsable {
+	return m.plate_ids
+}
+
 // GetPrimeTower gets the prime_tower property value. The prime_tower property
 // returns a PrimeTowerChoiceable when successful
 func (m *PrintRunRequest) GetPrimeTower() PrimeTowerChoiceable {
@@ -1017,6 +1135,12 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteInt32Value("plate_id", m.GetPlateId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("plate_ids", m.GetPlateIds())
 		if err != nil {
 			return err
 		}
@@ -1118,6 +1242,11 @@ func (m *PrintRunRequest) SetPlateId(value *int32) {
 	m.plate_id = value
 }
 
+// SetPlateIds sets the plate_ids property value. The plate_ids property
+func (m *PrintRunRequest) SetPlateIds(value PrintRunRequest_PrintRunRequest_plate_idsable) {
+	m.plate_ids = value
+}
+
 // SetPrimeTower sets the prime_tower property value. The prime_tower property
 func (m *PrintRunRequest) SetPrimeTower(value PrimeTowerChoiceable) {
 	m.prime_tower = value
@@ -1168,6 +1297,7 @@ type PrintRunRequestable interface {
 	GetFilamentProfiles() []string
 	GetOptions() PrintOptionsable
 	GetPlateId() *int32
+	GetPlateIds() PrintRunRequest_PrintRunRequest_plate_idsable
 	GetPrimeTower() PrimeTowerChoiceable
 	GetPrinterId() PrintRunRequest_PrintRunRequest_printer_idable
 	GetPrintSequence() PrintRunRequest_PrintRunRequest_print_sequenceable
@@ -1183,6 +1313,7 @@ type PrintRunRequestable interface {
 	SetFilamentProfiles(value []string)
 	SetOptions(value PrintOptionsable)
 	SetPlateId(value *int32)
+	SetPlateIds(value PrintRunRequest_PrintRunRequest_plate_idsable)
 	SetPrimeTower(value PrimeTowerChoiceable)
 	SetPrinterId(value PrintRunRequest_PrintRunRequest_printer_idable)
 	SetPrintSequence(value PrintRunRequest_PrintRunRequest_print_sequenceable)

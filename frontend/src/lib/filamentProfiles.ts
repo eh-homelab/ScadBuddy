@@ -47,7 +47,18 @@ export function useFilamentProfiles({
   const [previews, setPreviews] = useState<Record<string, ProfilePreview>>({})
   const [previewFailed, setPreviewFailed] = useState(false)
   const [off, setOff] = useState<ReadonlySet<string>>(new Set())
-  const reset = useCallback(() => setOff((current) => (current.size === 0 ? current : new Set())), [])
+  /** The only profiles on, once restored from a saved request; `null` is every one on but `off`. */
+  const [onlyOn, setOnlyOn] = useState<ReadonlySet<string> | null>(null)
+  const reset = useCallback(() => {
+    setOff((current) => (current.size === 0 ? current : new Set()))
+    setOnlyOn(null)
+  }, [])
+  /** A saved request's profiles back, before the profiles that match are known: a batch
+   * step reopened from its own choices (#2718 review). Stable, as `reset` is. */
+  const restore = useCallback((active: readonly string[]) => {
+    setOff(new Set())
+    setOnlyOn(new Set(active))
+  }, [])
 
   useEffect(() => {
     let live = true
@@ -97,7 +108,7 @@ export function useFilamentProfiles({
       slots,
       preview,
       unchecked: preview === null && previewFailed,
-      on: !off.has(profile.id) && preview?.applicable !== false,
+      on: (onlyOn ? onlyOn.has(profile.id) : !off.has(profile.id)) && preview?.applicable !== false,
     }
   })
 
@@ -106,15 +117,19 @@ export function useFilamentProfiles({
     /** The ids to send: every suggestion left on. One not yet previewed is sent; if it
      * cannot apply, the server skips it and the run's warnings say so. */
     active: suggestions.filter((entry) => entry.on).map((entry) => entry.profile.id),
-    toggle: (id: string, on: boolean) =>
-      setOff((current) => {
+    toggle: (id: string, on: boolean) => {
+      const flip = (current: ReadonlySet<string>, add: boolean) => {
         const next = new Set(current)
-        if (on) next.delete(id)
-        else next.add(id)
+        if (add) next.add(id)
+        else next.delete(id)
         return next
-      }),
+      }
+      if (onlyOn) setOnlyOn((current) => current && flip(current, on))
+      else setOff((current) => flip(current, !on))
+    },
     /** Every profile back on: a switch-off is for one output, as the print sequence and
      * supports are (#2804 review). Stable, so the dialog's reset effect can call it. */
     reset,
+    restore,
   }
 }

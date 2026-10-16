@@ -106,7 +106,7 @@ class TriggerFires:
         if claimed.outcome not in ("pending", "admitted"):
             return claimed.outcome  # a retry, or the same event heard twice
         try:
-            outcome, reason = await self._decide(trigger_id, fire_key, run_id, event is None)
+            outcome, reason = await self._decide(trigger_id, fire_key, run_id, event)
         except Exception:
             # The last attempt: settled, so an admitted fire that never started does
             # not hold the overlap or count toward the rate cap.
@@ -117,7 +117,7 @@ class TriggerFires:
         return outcome
 
     async def _decide(
-        self, trigger_id: str, fire_key: str, run_id: str, scheduled: bool
+        self, trigger_id: str, fire_key: str, run_id: str, event: dict[str, Any] | None
     ) -> tuple[FireOutcome, str | None]:
         trigger = await self.store.get(trigger_id)
         if trigger is None:
@@ -157,7 +157,7 @@ class TriggerFires:
         # admitting nothing yet: there is no file or copy to start it with.
         tool_tiers = await flows.agent_tools.tool_tiers()
         # Admitted again on a retry too: paused or changed since, it starts nothing.
-        admitted = await self.store.admit(trigger_id, fire_key, cap, checked, scheduled)
+        admitted = await self.store.admit(trigger_id, fire_key, cap, checked, event is None)
         if admitted is not None:
             return "skipped", admitted
         started_by = runs_as(trigger.created_by)
@@ -180,6 +180,7 @@ class TriggerFires:
             inputs=inputs,
             approval_timeout_s=approval_timeout(flows, definition, trigger.approval_timeout_s),
             tool_tiers=tool_tiers,
+            event=event,
         )
         return "started", None
 

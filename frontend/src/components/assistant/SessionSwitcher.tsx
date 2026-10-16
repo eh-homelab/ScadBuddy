@@ -2,7 +2,17 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type R
 import { statusLabel } from '../../agent/chat/labels'
 import { type HandoffOffer, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import { timeAgo } from '../../lib/format'
-import { Button } from '../ui/Button'
+import { ArchiveIcon, CheckIcon, EllipsisIcon, PencilIcon, Undo2Icon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { OfferBadge, OriginBadge, OwnerBadge } from './badges'
 import { usd } from './SessionBudget'
 
@@ -60,7 +70,8 @@ function grouped(sessions: SessionState[]): { root: SessionState; forks: Session
 
 export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, onArchive, onCancelOffer }: Props) {
   return (
-    <ul className="max-h-56 overflow-y-auto py-1">
+    <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-56">
+    <ul className="flex flex-col gap-0.5 p-1.5">
       {grouped(sessions).map(({ root, forks }) => (
         <SessionRow
           key={root.id}
@@ -73,7 +84,7 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
           onCancelOffer={onCancelOffer}
         >
           {forks.length > 0 && (
-            <ul aria-label={`Forks of ${root.title}`} className="ml-3 border-l border-line">
+            <ul aria-label={`Forks of ${root.title}`} className="mt-0.5 ml-3 flex flex-col gap-0.5 border-l border-border pl-1.5">
               {forks.map((fork) => (
                 <SessionRow
                   key={fork.id}
@@ -91,6 +102,7 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, 
         </SessionRow>
       ))}
     </ul>
+    </ScrollArea>
   )
 }
 
@@ -139,13 +151,15 @@ function SessionRow({
   const [draft, setDraft] = useState(s.title)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const renameButton = useRef<HTMLButtonElement>(null)
-  /** The editor closed: focus goes back to Rename, which it replaced, once that is rendered. */
+  const menuButton = useRef<HTMLButtonElement>(null)
+  /** The editor closed: focus goes back to the row's menu, which opened it, once that is rendered. */
   const refocus = useRef(false)
+  /** Rename was picked: focus goes to the editor, not back to the menu's button. */
+  const toEditor = useRef(false)
   useEffect(() => {
     if (!editing && refocus.current) {
       refocus.current = false
-      renameButton.current?.focus()
+      menuButton.current?.focus()
     }
   }, [editing])
   const open = s.id === activeId
@@ -196,102 +210,127 @@ function SessionRow({
     }
   }
 
+  const label = (action: string, about: string) => (
+    <span className="flex min-w-0 flex-col">
+      <span>{action}</span>
+      <span className="text-xs text-muted-foreground">{about}</span>
+    </span>
+  )
+
   return (
     <li>
-      <div className="flex items-start">
+      <div
+        className={`group/row flex items-start gap-0.5 rounded-md hover:bg-muted ${open ? 'bg-muted' : ''}`}
+      >
         <button
           type="button"
           aria-current={open ? 'true' : undefined}
           onClick={() => onOpen(s.id)}
-          className={`flex min-w-0 flex-1 flex-col gap-1 border-l-2 px-3 py-1.5 text-left hover:bg-surface-3 ${
-            open ? 'border-accent bg-surface-3' : 'border-transparent'
+          className={`flex min-w-0 flex-1 flex-col gap-1 rounded-md border-l-2 px-2.5 py-1.5 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${
+            open ? 'border-primary' : 'border-transparent'
           }`}
         >
-          <span className="truncate text-[12.5px]">{s.title}</span>
+          <span className="truncate text-[13px]">{s.title}</span>
           <span className="flex flex-wrap items-center gap-1.5">
-            {open && <span className="rounded-[4px] bg-accent/15 px-1 text-[10.5px] font-medium text-accent">Open</span>}
-            {s.parentId && <span className="text-[10.5px] text-faint">fork</span>}
+            {open && <Badge className="h-[18px] px-1.5 text-[10.5px]">Open</Badge>}
+            {s.parentId && <span className="text-[10.5px] text-muted-foreground">fork</span>}
             <OriginBadge origin={s.origin} />
             <OwnerBadge owner={s.owner} />
             {offer && <OfferBadge offer={offer} />}
-            <span className="text-[11px] text-faint">{outOfBudget(s) ? 'Out of budget' : statusLabel(s.status)}</span>
+            <span className="text-[11px] text-muted-foreground">{outOfBudget(s) ? 'Out of budget' : statusLabel(s.status)}</span>
             {s.budget && (
-              <span className="text-[11px] text-faint">
+              <span className="text-[11px] text-muted-foreground">
                 {usd(s.budget.costUsd)} of {usd(s.budget.budgetUsd)}
               </span>
             )}
             {s.updatedAt && (
-              <time dateTime={s.updatedAt} className="text-[11px] text-faint">
+              <time dateTime={s.updatedAt} className="text-[11px] text-muted-foreground">
                 {timeAgo(s.updatedAt)}
               </time>
             )}
           </span>
         </button>
         {mine && !editing && (
-          <span className="flex shrink-0 items-center gap-0.5 px-1 pt-1">
-            <Button
-              ref={renameButton}
-              variant="ghost"
-              size="sm"
-              aria-label={`Rename ${s.title}`}
-              data-agent-user-only=""
-              onClick={() => {
-                setDraft(s.title)
-                setError(null)
-                setEditing(true)
+          // #3673 — the row's actions in one menu, so a fork's row fits the panel at phone width.
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                ref={menuButton}
+                variant="ghost"
+                size="icon-sm"
+                className="mt-1 mr-1 shrink-0"
+                aria-label={`Actions for ${s.title}`}
+                data-agent-user-only=""
+              >
+                <EllipsisIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="w-64"
+              onCloseAutoFocus={(event) => {
+                if (!toEditor.current) return
+                toEditor.current = false
+                event.preventDefault()
               }}
             >
-              Rename
-            </Button>
-            {canFinish && (
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-label={`Mark ${s.title} done`}
-                title="End this chat: it takes no more messages, and Fork still continues it"
+              <DropdownMenuItem
+                aria-label={`Rename ${s.title}`}
                 data-agent-user-only=""
-                onClick={() => void act(onDone)}
+                onSelect={() => {
+                  toEditor.current = true
+                  setDraft(s.title)
+                  setError(null)
+                  setEditing(true)
+                }}
               >
-                Done
-              </Button>
-            )}
-            {offer && (
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-label={`Cancel the offer of ${s.title}`}
-                title="Withdraw the handoff offer: the chat stays yours"
-                data-agent-user-only=""
-                onClick={() => void act(onCancelOffer)}
-              >
-                Cancel offer
-              </Button>
-            )}
-            {canArchive && (
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-label={`Archive ${s.title}`}
-                title="Put this chat away: it leaves this list for Archived, read-only, until you unarchive it"
-                data-agent-user-only=""
-                onClick={() => void act(onArchive)}
-              >
-                Archive
-              </Button>
-            )}
-          </span>
+                <PencilIcon />
+                Rename
+              </DropdownMenuItem>
+              {canFinish && (
+                <DropdownMenuItem
+                  aria-label={`Mark ${s.title} done`}
+                  data-agent-user-only=""
+                  onSelect={() => void act(onDone)}
+                >
+                  <CheckIcon />
+                  {label('Done', 'End this chat: it takes no more messages, and Fork still continues it')}
+                </DropdownMenuItem>
+              )}
+              {offer && (
+                <DropdownMenuItem
+                  aria-label={`Cancel the offer of ${s.title}`}
+                  data-agent-user-only=""
+                  onSelect={() => void act(onCancelOffer)}
+                >
+                  <Undo2Icon />
+                  {label('Cancel offer', 'Withdraw the handoff offer: the chat stays yours')}
+                </DropdownMenuItem>
+              )}
+              {canArchive && (
+                <DropdownMenuItem
+                  aria-label={`Archive ${s.title}`}
+                  data-agent-user-only=""
+                  onSelect={() => void act(onArchive)}
+                >
+                  <ArchiveIcon />
+                  {label('Archive', 'Put this chat away: it leaves this list for Archived, read-only, until you unarchive it')}
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
       {editing && (
-        <form onSubmit={(event) => void submit(event)} className="flex items-center gap-1 px-3 pb-1.5" data-agent-user-only="">
-          <input
+        <form onSubmit={(event) => void submit(event)} className="flex items-center gap-1 px-2.5 py-1.5" data-agent-user-only="">
+          <Input
             aria-label="Chat title"
             value={draft}
             maxLength={200}
             autoFocus
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={onEditorKey}
-            className="min-w-0 flex-1 rounded-[4px] border border-line bg-bg px-1.5 py-0.5 text-[12.5px] outline-none focus:border-line-strong"
+            className="h-7 min-w-0 flex-1 text-[13px] md:text-[13px]"
           />
           <Button type="submit" size="sm" disabled={saving}>
             Save
@@ -302,7 +341,7 @@ function SessionRow({
         </form>
       )}
       {error && (
-        <p role="alert" className="px-3 pb-1.5 text-[12px] text-warn">
+        <p role="alert" className="px-2.5 pb-1.5 text-xs text-warn">
           {error}
         </p>
       )}
