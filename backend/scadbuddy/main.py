@@ -151,6 +151,8 @@ EXCLUDED_URLS: Final = ",".join(
 #: How long a batch print nobody touches is kept (#2718 review): long past any print
 #: it started, which Bambuddy's queue and the print runs keep on their own.
 BATCH_TTL = timedelta(days=7)
+#: A batch with a file still `pending` is what follows that run (#3798): kept longer.
+PENDING_BATCH_TTL = timedelta(days=30)
 
 logger = logging.getLogger(__name__)
 
@@ -634,9 +636,17 @@ async def _sweep_claims_and_batches_logged(state: AppState) -> None:
         failed = err
     try:
         # #2718 review: a batch print closed without Cancel or Done stays otherwise.
-        pruned = await state.components.get(PRINT_BATCHES).prune(BATCH_TTL)
-        if pruned:
-            logger.info("forgot batch prints left untouched", extra={"count": pruned})
+        pruned = await state.components.get(PRINT_BATCHES).prune(
+            BATCH_TTL, pending_older_than=PENDING_BATCH_TTL
+        )
+        if pruned.count:
+            logger.info("forgot batch prints left untouched", extra={"count": pruned.count})
+        if pruned.pending:
+            # #3798: each still followed a file's run, so a new batch could send it again.
+            logger.warning(
+                "forgot batch prints with a file still being checked",
+                extra={"batches": pruned.pending},
+            )
     except Exception as err:
         logger.exception("could not prune batch prints")
         failed = failed or err

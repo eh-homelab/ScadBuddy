@@ -590,6 +590,10 @@ function batchHandlers() {
       const item = batch.items.find((row) => row.position === Number(params['position']))
       if (!item) return problem(404, 'Not Found', 'The batch print has no such file.')
       const choice = (await request.json()) as BatchChoice
+      // A refusal of other choices than these says so, as the backend marks it (#3798).
+      if (item.outcome?.status === 'refused' && JSON.stringify(choice.request ?? null) !== JSON.stringify(item.request)) {
+        item.outcome = { ...item.outcome, stale: true }
+      }
       Object.assign(item, {
         request: choice.request ?? null,
         skipped: choice.skipped ?? false,
@@ -606,13 +610,13 @@ function batchHandlers() {
       for (const item of batch.items) {
         if (item.skipped || item.removed || item.outcome?.status === 'started') continue
         if (!item.request) {
-          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.', attempt: 0 }
+          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.', attempt: 0, stale: false }
           continue
         }
         const refused = libraryRefusal(item.library_file_id)
         item.outcome = refused
-          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0 }
-          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null, attempt: 0 }
+          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0, stale: false }
+          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null, attempt: 0, stale: false }
       }
       // Open until every file kept has started, as the backend leaves it (#2718 review).
       const kept = batch.items.filter((item) => !item.skipped && !item.removed)
