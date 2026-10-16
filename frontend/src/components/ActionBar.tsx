@@ -770,7 +770,8 @@ function GenerateMenu({
   onColours?: (() => void) | undefined
 }) {
   // The dialog opens once the menu has closed and put the focus back on its button, so
-  // the dialog returns it there when it closes in turn.
+  // the dialog returns it there when it closes in turn. A task, not a microtask: Radix
+  // returns the focus after the click's microtasks. Harmless if the bar unmounts first.
   const after = (open: () => void) => () => setTimeout(open, 0)
   const [open, setOpen] = useState(false)
   return (
