@@ -822,7 +822,7 @@ describe('the page slot', () => {
     expect(saved).not.toHaveClass('shrink-0')
     // But not to nothing: a long error shrinks its own text first, and the saved inputs
     // keep three lines (#3624 review).
-    expect(saved).toHaveClass('min-h-[3lh]')
+    expect(saved).toHaveClass('min-h-[calc(3lh_+_1rem_+_2px)]')
     expect(saved).not.toHaveClass('min-h-0')
     for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
       expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)

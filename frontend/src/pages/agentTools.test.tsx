@@ -88,7 +88,7 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 8')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 9')
   })
 
   it('answers with the route the page settles on, even when asked between its two commits (#761)', async () => {
