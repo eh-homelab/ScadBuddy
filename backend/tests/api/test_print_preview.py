@@ -548,12 +548,10 @@ def test_a_plate_too_big_to_read_is_refused_as_a_library_plate_is(
     def oom(*_: object) -> object:
         raise MemoryError
 
-    # Out of memory inside the read itself: plate_glb maps it, the route only refuses.
-    # Only this patch is undone: the autouse fixtures' patches stay for the read after.
+    # Out of memory inside the read itself: plate_glb maps it (test_library_view.py), the
+    # route only refuses. Only this patch is undone: the autouse fixtures' patches stay.
     with monkeypatch.context() as patched:
         patched.setattr(library_view, "read_plate_parts", oom)
-        with pytest.raises(ReadOutOfMemoryError):
-            library_view.plate_glb(b"", 1)
         response = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
     assert response.status_code == 422, response.text
     assert response.json()["detail"] == str(ReadOutOfMemoryError())
