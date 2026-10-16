@@ -558,7 +558,12 @@ def _anchor_family(
 ) -> set[str]:
     """The family an all-undeclared plate is suggested in (#2850): the one whose
     spools match the most slots with a loaded spool, then the most slots at all, then
-    the best single match."""
+    the best single match.
+
+    It counts slots, not spools: one loaded spool whose colour fits three slots beats
+    two loaded spools that fit two, since an undeclared slot can share a loaded spool.
+    A spool with no material is the family ``""``; if that wins, only material-less
+    spools are suggested for the undeclared slots."""
     loaded: dict[str, set[int]] = {}
     matched: dict[str, set[int]] = {}
     best: dict[str, tuple[float, int]] = {}

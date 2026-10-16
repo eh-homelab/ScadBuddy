@@ -785,6 +785,17 @@ def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoic
     return built.suggested
 
 
+def _undeclared(shelf: list[Spool], loaded: list[SpoolAssignment], *colours: str) -> dict[int, int]:
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=loaded,
+        requirements=[SlotNeed(slot_id=n, colour=c) for n, c in enumerate(colours, start=1)],
+        printer=printer(),
+    )
+    return {choice.slot_id: choice.spool_id for choice in built.suggested}
+
+
 def test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu() -> None:
     """#2461: slot 2 fell through to an unloaded TPU 95A in an all-PLA print, because the
     loaded PLA Black was taken by slot 1 and an undeclared slot took any material."""
@@ -962,8 +973,9 @@ def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> N
 
 
 def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
-    """#2850: with a slot declaring PLA, an undeclared one is suggested a PLA, not the
-    PETG that matches its colour exactly."""
+    """Regression cover for the declared path beside #2850's fix: with a slot declaring
+    PLA, an undeclared one is suggested a PLA, not the PETG that matches its colour
+    exactly. The anchor never runs here, so this passed before the fix too."""
     shelf = [
         _spool(1, "1A1A1AFF"),  # PLA black, loaded
         _spool(3, "3F8E43FF"),  # PLA green, on the shelf
@@ -994,3 +1006,38 @@ async def test_a_shared_status_read_without_its_printer_is_refused(
         await filament_options(bambuddy, cast(PrintSource, _ReadSource()), status=reading)
     reading.cancel()
     assert not anything.called
+
+
+def test_the_anchor_family_is_first_the_one_matching_most_slots_with_a_loaded_spool() -> None:
+    """#3028 review: one loaded PLA fitting one slot outweighs shelf PETGs fitting all
+    three."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(2, "1A1A1AFF", "PETG"),
+        _spool(3, "C02E20FF", "PETG"),
+        _spool(4, "3F8E43FF", "PETG"),
+    ]
+    assert _undeclared(shelf, [_loaded(1, 0)], "#1A1A1A", "#C12E1F", "#3F8E43") == {1: 1}
+
+
+def test_with_no_loaded_spools_the_anchor_family_matches_the_most_slots() -> None:
+    """#3028 review: on a loaded-count tie, two PLAs fitting two slots beat a PETG that
+    is the closest match for the third."""
+    shelf = [
+        _spool(1, "C02E20FF"),  # PLA red
+        _spool(2, "3F8E43FF"),  # PLA green
+        _spool(3, "1A1A1AFF", "PETG"),  # PETG black, an exact match
+    ]
+    assert _undeclared(shelf, [], "#1A1A1A", "#C12E1F", "#3F8E43") == {2: 1, 3: 2}
+
+
+def test_on_a_slot_count_tie_the_anchor_family_has_the_best_single_match() -> None:
+    """#3028 review: equal loaded and matched slots, so the exact PETG black beats the
+    near PLA black. Both shelf orders (#3497 review): `min` keeps the first family it
+    met on a full tie, so one order alone passes without the best-match level."""
+    shelf = [
+        _spool(1, "101010FF"),  # PLA near-black
+        _spool(2, "1A1A1AFF", "PETG"),  # PETG black, an exact match
+    ]
+    assert _undeclared(shelf, [], "#1A1A1A") == {1: 2}
+    assert _undeclared(shelf[::-1], [], "#1A1A1A") == {1: 2}
