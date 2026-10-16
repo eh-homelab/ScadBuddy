@@ -483,12 +483,38 @@ def test_the_sweep_forgets_the_attachments_of_an_archive_bambuddy_deleted(
     respx.get(f"{API}/archives/36").mock(
         return_value=httpx.Response(404, json={"detail": "Archive not found"})
     )
+    library_delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
 
     asyncio.run(main._sweep_print_attachments_logged(state))
 
     store = state.components.get(PRINT_ATTACHMENTS)
     assert [a.archive_id for a in asyncio.run(store.for_archive(35))] == [35]
     assert asyncio.run(store.for_archive(36)) == []
+    # Only the rows go: the copies in the project's Media/ stay in Bambuddy's library.
+    assert not library_delete.called
+
+
+@respx.mock
+def test_an_archive_bambuddy_cannot_answer_for_does_not_hold_up_the_others(
+    client: TestClient,
+) -> None:
+    """#3846 review: the sweep goes on past an archive whose read fails, and fails at
+    the end, so one archive that keeps failing does not keep the others' rows forever."""
+    configure(client)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    _attach(state, 36)
+    _attach(state, 37)
+    respx.get(f"{API}/archives/36").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/37").mock(
+        return_value=httpx.Response(404, json={"detail": "Archive not found"})
+    )
+
+    with pytest.raises(ApiError):
+        asyncio.run(main._sweep_print_attachments_logged(state))
+
+    store = state.components.get(PRINT_ATTACHMENTS)
+    assert len(asyncio.run(store.for_archive(36))) == 1
+    assert asyncio.run(store.for_archive(37)) == []
 
 
 @pytest.mark.parametrize(

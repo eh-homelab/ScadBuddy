@@ -212,17 +212,33 @@ class AttachmentStore:
 
 
 async def sweep_gone_archives(client: BambuddyClient, store: AttachmentStore) -> int:
-    """#3047: forget the attachments of each archive Bambuddy no longer has. The photos
-    went with the archive; a promoted copy is the template's own now, and stays. Only
-    Bambuddy's own "Archive not found" is "gone" (`BambuddyClient.archive_deleted`):
-    any other answer, a 404 that is not Bambuddy's included, stops the sweep, which the
-    next tick runs again, so a wrong URL or an outage never forgets anything. Returns
-    how many archives it forgot."""
+    """#3047: forget the attachments of each archive Bambuddy no longer has: how many
+    archives it forgot.
+
+    Only the rows go. The archive photos went with the archive; each copy in the
+    project's ``Media/`` folder (every video, and each photo's copy) is a library file,
+    which deleting the archive leaves in Bambuddy's library, and it stays there,
+    untracked. A promoted copy is the template's own now, and stays too.
+
+    Only Bambuddy's own "Archive not found" is "gone" (`BambuddyClient.archive_deleted`).
+    Any other answer, a 404 that is not Bambuddy's included, forgets nothing for that
+    archive: it is logged, the sweep goes on to the next, and the first such error is
+    raised once every archive has been asked, so one archive that keeps failing neither
+    blocks the others nor passes unnoticed. A wrong URL or an outage forgets nothing."""
     gone = 0
+    failed: Exception | None = None
     for archive_id in await store.archive_ids():
-        if await client.archive_deleted(archive_id):
+        try:
+            deleted = await client.archive_deleted(archive_id)
+        except Exception as error:
+            logger.warning("could not tell whether archive %s is gone", archive_id, exc_info=True)
+            failed = failed or error
+            continue
+        if deleted:
             await store.forget_archive(archive_id)
             gone += 1
+    if failed is not None:
+        raise failed
     return gone
 
 
