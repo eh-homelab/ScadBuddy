@@ -150,3 +150,28 @@ describe('Dialog placement', () => {
     expect(panel.parentElement?.className).toContain('justify-end')
   })
 })
+
+// #2386 — a dialog with no actions of its own (Colours, the font picker, Media) still has a
+// labelled way out that is not Esc or the backdrop, and it does not take the first focus.
+describe('Dialog close button', () => {
+  function Bare() {
+    const [open, setOpen] = useState(true)
+    return (
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogTitle>Choose a font</DialogTitle>
+          <input aria-label="Search fonts" />
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  it('has a labelled Close by default, which closes it, while the first field takes focus', async () => {
+    const user = userEvent.setup()
+    render(<Bare />)
+    const dialog = screen.getByRole('dialog', { name: 'Choose a font' })
+    expect(screen.getByLabelText('Search fonts')).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Close' }))
+    expect(dialog).not.toBeInTheDocument()
+  })
+})
