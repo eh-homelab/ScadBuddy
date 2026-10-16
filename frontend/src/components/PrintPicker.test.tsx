@@ -149,12 +149,22 @@ async function showAdvanced() {
   await screen.findByRole('group', { name: /nozzles/i })
 }
 
+/** Every `watch` of the running test: `afterEach` waits until each request it saw has ended.
+ *  Only these: a request no `watch` matches (the ad-hoc `request:start` listeners below,
+ *  any route not watched) can still outlive its test. The two tests with such listeners
+ *  (#2292, #2891) end on "Arranged onto 1 plate.", shown once the arrange and its save
+ *  have been answered. */
+const watching: { urls: string[]; ended: number }[] = []
+
 /** The matching requests' URLs and bodies as they start, in order, and how many have
- *  been answered (under `/print/` by default; `/analyzers/run` is not one): a test that
- *  ends on a request waits for its answer, or the request is aborted at teardown and
- *  the next test's fetch can miss MSW. */
+ *  been answered (under `/print/` by default; `/analyzers/run` is not one). A request
+ *  still in flight when a test ends is aborted at teardown and the next test's fetch
+ *  can miss MSW (it showed "could not reach its server"), so `afterEach` waits for
+ *  every watched request to end. A watched route must therefore always end: never watch
+ *  one held by `delay('infinite')` or a request the component aborts. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
-  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
+  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0, ended: 0 }
+  watching.push(seen)
   const matches = (request: Request) => {
     const path = new URL(request.url).pathname
     return request.method === method && path.startsWith(prefix) && path.endsWith(suffix)
@@ -168,13 +178,31 @@ function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   server.events.on('response:mocked', ({ request }) => {
     if (matches(request)) seen.answered += 1
   })
+  server.events.on('request:end', ({ request }) => {
+    if (matches(request)) seen.ended += 1
+  })
   return seen
 }
 
 beforeEach(() => resetMockState())
-afterEach(() => {
-  server.events.removeAllListeners()
-  vi.restoreAllMocks()
+// Runs before Testing Library's cleanup unmounts the dialog (registered earlier, in
+// vitest.setup.ts): vitest's default `sequence.hooks: 'stack'` runs afterEach hooks in
+// reverse order. Under another order the wait would come after the unmount.
+afterEach(async () => {
+  try {
+    // The wait is `asyncUtilTimeout` (3 s, vitest.setup.ts), as for any find in a test.
+    await waitFor(() => {
+      // Names the requests still in flight (the last to start, as most end in order).
+      for (const seen of watching) {
+        expect(seen.urls.slice(seen.ended), 'a watched request never ended: held, or aborted?').toEqual([])
+      }
+    })
+  } finally {
+    // Even when a request never ends: only the test that left it fails, not every later one.
+    watching.length = 0
+    server.events.removeAllListeners()
+    vi.restoreAllMocks()
+  }
 })
 
 describe('PrintPicker', () => {
@@ -1875,6 +1903,54 @@ describe('PrintPicker · the nozzles as sliced (#2703)', () => {
     expect(screen.getByRole('button', { name: 'Preview Plate 2' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:')
     expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
+  }, 20000)
+
+  it("drops plate 1's sides as sliced once plate 2 is the one to print (#3595 review)", async () => {
+    // Only the first slice (plate 1's) lands; the rest stay running, so nothing else
+    // could put an as-sliced line back.
+    let first: string | null = null
+    server.use(
+      http.get('/api/v1/print/library/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) => {
+        first ??= String(params['job'])
+        return HttpResponse.json(
+          String(params['job']) === first
+            ? {
+                job_id: Number(params['job']),
+                status: 'completed',
+                print_time_seconds: 2843,
+                filament_used_g: 15.5,
+                slots: [
+                  { slot_id: 1, grams: 12.4, side: 'L' },
+                  { slot_id: 2, grams: 3.1, side: 'R' },
+                ],
+                filament_changes: 1,
+              }
+            : { job_id: Number(params['job']), status: 'running', slots: [] },
+        )
+      }),
+    )
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+
+    await user.click(within(screen.getByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await user.click(await screen.findByRole('button', { name: 'Preview Plate 1' }))
+    expect(screen.getByRole('button', { name: 'Preview Plate 1' })).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).not.toHaveTextContent('Nozzles, as sliced:'))
   }, 20000)
 })
 
