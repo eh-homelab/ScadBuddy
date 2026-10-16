@@ -59,6 +59,7 @@ from scadbuddy.worker import (
     MAKE_CURRENT_ERROR_AFTER,
     MAKE_CURRENT_EVERY,
     _drain,
+    _health_server,
     _on_signal,
     _poll,
     deployment_writes,
@@ -87,11 +88,24 @@ from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
+async def test_the_health_server_serves_on_the_socket_it_is_handed(
+    settings: Settings, health_socket: socket.socket
+) -> None:
+    """#3807: on a socket already bound, not a port it binds again later, so nothing
+    else can take the port in between."""
+    server = _health_server(settings, Metrics(), None, health_socket, "q")
+    serving = asyncio.create_task(server.serve())
+    try:
+        port = health_socket.getsockname()[1]
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+            assert await _healthy(http, serving) == {
+                "ok": True,
+                "build_id": settings.revision,
+                "task_queue": "q",
+            }
+    finally:
+        server.should_exit = True
+        await serving
 
 
 async def _healthy(http: httpx.AsyncClient, worker: asyncio.Task[None]) -> dict[str, Any]:
@@ -114,7 +128,12 @@ async def _healthy(http: httpx.AsyncClient, worker: asyncio.Task[None]) -> dict[
 @pytest.mark.requires_temporal
 @pytest.mark.requires_git
 async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
-    settings: Settings, paths: DataPaths, model: str, pg_conninfo: str, tmp_path: Path
+    settings: Settings,
+    paths: DataPaths,
+    model: str,
+    pg_conninfo: str,
+    tmp_path: Path,
+    health_socket: socket.socket,
 ) -> None:
     queue = f"t-{uuid.uuid4().hex[:8]}"
     build_id = f"test-{uuid.uuid4().hex[:8]}"
@@ -128,7 +147,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     # The template at a revision, so the piece is keyed by one.
     revision = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX).ensure_repo()
     assert revision is not None
-    port = _free_port()
+    port = health_socket.getsockname()[1]
     params: dict[str, Any] = {"width": 12}
     job = Job(
         id=uuid.uuid4().hex,
@@ -144,7 +163,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         async with temporal_client() as client:
             stop = asyncio.Event()
             worker = asyncio.create_task(
-                run_worker(cfg, stop=stop, health_port=port, client=client)
+                run_worker(cfg, stop=stop, health_port=health_socket, client=client)
             )
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
