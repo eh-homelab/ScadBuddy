@@ -6,6 +6,8 @@ import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
+import { mergeCards, type NowCard } from './nowCards'
+import { PlateWarning } from './PlateWarning'
 
 /** How often the printers are read while the page is visible. */
 export const NOW_POLL_MS = 15_000
@@ -26,7 +28,7 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
  * `NOW_POLL_MS` while the page is visible, and at once when it becomes visible again.
  */
 export function NowPrinting() {
-  const [printers, setPrinters] = useState<PrinterNow[] | null>(null)
+  const [cards, setCards] = useState<NowCard[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** #981 — the printer whose camera is open, by id, so its status stays current. */
   const [watching, setWatching] = useState<number | null>(null)
@@ -43,11 +45,14 @@ export function NowPrinting() {
         .getPrintersNow()
         .then((now) => {
           if (!current()) return
-          setPrinters(now.printers ?? [])
+          setCards((previous) => mergeCards(previous, now.printers ?? [], Date.now()))
           setError(null)
         })
         .catch((cause: unknown) => {
-          if (current()) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
+          if (!current()) return
+          const why = cause instanceof ApiError ? cause.detail : 'The printers could not be read.'
+          setError(why)
+          setCards((previous) => previous && previous.map((card) => ({ ...card, stale: card.stale ?? why })))
         })
     }
     read()
@@ -61,45 +66,64 @@ export function NowPrinting() {
   }, [])
 
   // #2752 review: a printer that drops out closes its camera for good; it does not
-  // reopen on its own when the printer comes back.
+  // reopen on its own when the printer comes back. One whose card went stale has
+  // dropped out as far as the camera is concerned.
   useEffect(() => {
-    if (watching !== null && printers !== null && !printers.some((printer) => printer.printer_id === watching)) {
+    if (
+      watching !== null &&
+      cards !== null &&
+      !cards.some((card) => card.printer.printer_id === watching && card.stale === null)
+    ) {
       setWatching(null)
     }
-  }, [printers, watching])
+  }, [cards, watching])
 
-  if (printers === null && error === null) return null
-  if (printers !== null && printers.length === 0) return null
+  if (cards !== null && cards.length === 0 && error === null) return null
+  // #3632 — a placeholder while the first read is out, so the strip is visibly coming
+  // rather than absent: that read waits on Bambuddy for every printer.
+  const loading = cards === null && error === null
   return (
-    <section aria-labelledby="now-printing-heading" className="mb-6" data-testid="now-printing">
+    <section
+      aria-labelledby="now-printing-heading"
+      aria-busy={loading || undefined}
+      className="mb-6"
+      data-testid="now-printing"
+    >
       <h2 id="now-printing-heading" className="mb-2 text-[13px] font-medium text-ink">
         Now printing
       </h2>
+      {loading && (
+        <div className="grid gap-2 sm:grid-cols-2" data-testid="now-printing-loading">
+          <div className="h-[72px] animate-pulse rounded-[6px] border border-line bg-surface-2" />
+          <span className="sr-only">Reading the printers</span>
+        </div>
+      )}
       {error && (
         <p className="mb-2 text-[12px] text-muted" data-testid="now-printing-error">
           {error}
         </p>
       )}
-      {printers && (
+      {cards && cards.length > 0 && (
         <ul className="grid gap-2 sm:grid-cols-2" aria-label="Printers">
-          {printers.map((printer) => (
-            <PrinterCard key={printer.printer_id} printer={printer} onCamera={() => setWatching(printer.printer_id)} />
+          {cards.map((card) => (
+            <PrinterCard key={card.printer.printer_id} card={card} onCamera={() => setWatching(card.printer.printer_id)} />
           ))}
         </ul>
       )}
       <CameraDialog
-        printer={printers?.find((printer) => printer.printer_id === watching) ?? null}
+        printer={cards?.find((card) => card.printer.printer_id === watching)?.printer ?? null}
         onClose={() => setWatching(null)}
       />
     </section>
   )
 }
 
-function PrinterCard({ printer, onCamera }: { printer: PrinterNow; onCamera: () => void }) {
+function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }) {
+  const { printer, stale } = card
   const activity = ACTIVITY[printer.activity]
   return (
     <li
-      className="min-w-0 rounded-[6px] border border-line bg-surface px-3 py-2 text-[12.5px]"
+      className={`min-w-0 rounded-[6px] border bg-surface px-3 py-2 text-[12.5px] ${stale ? 'border-dashed border-line-strong' : 'border-line'}`}
       data-testid={`printer-now-${printer.printer_id}`}
     >
       <div className="flex items-center justify-between gap-2">
@@ -108,8 +132,13 @@ function PrinterCard({ printer, onCamera }: { printer: PrinterNow; onCamera: () 
           {activity.label}
         </span>
       </div>
+      {stale && (
+        <p className="mt-0.5 text-[11.5px] text-faint" data-testid={`printer-now-stale-${printer.printer_id}`}>
+          Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
+        </p>
+      )}
       <JobStatus printer={printer} />
-      {printer.activity !== 'offline' && !printer.error && (
+      {printer.activity !== 'offline' && !printer.error && !stale && (
         <Button variant="ghost" size="sm" onClick={onCamera} className="mt-1.5" aria-label={`Camera of ${printer.name}`}>
           Camera
         </Button>
@@ -154,9 +183,7 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
           </p>
         </>
       )}
-      {printer.awaiting_plate_clear && (
-        <p className="mt-1 text-[12px] text-muted">Clear the plate before the next print.</p>
-      )}
+      <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id}`} />
       {hms.length > 0 && (
         <ul
           className={`mt-1.5 space-y-0.5 text-[12px] ${printer.activity === 'paused' ? 'text-warn' : 'text-muted'}`}

@@ -6,7 +6,9 @@ import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import type * as Embed from '../../lib/embed'
+import type { PrinterNow } from '../../api/types'
 import { NOW_POLL_MS, NowPrinting } from './NowPrinting'
+import { mergeCards } from './nowCards'
 
 const frame = vi.hoisted(() => ({ embedded: false }))
 vi.mock('../../lib/embed', async (original) => ({
@@ -265,5 +267,100 @@ describe('NowPrinting (#977)', () => {
     })
     expect(await screen.findByTestId('printer-now-2')).toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: 'Workshop camera' })).toBeNull()
+  })
+
+  describe('the plate warning (#3632)', () => {
+    const finished = PRINTERS_NOW.map((printer) =>
+      printer.printer_id === 3
+        ? { ...printer, activity: 'finished' as const, state: 'FINISH', awaiting_plate_clear: true }
+        : printer,
+    )
+    const poll = async () => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+      })
+    }
+
+    it('shows a placeholder while the first read is out, not nothing', async () => {
+      const gate: { release?: () => void } = {}
+      server.use(
+        http.get('/api/v1/print/printers/now', async () => {
+          await new Promise<void>((resolve) => (gate.release = resolve))
+          return HttpResponse.json({ printers: finished })
+        }),
+      )
+      renderPage(<NowPrinting />)
+      expect(screen.getByTestId('now-printing')).toHaveAttribute('aria-busy', 'true')
+      expect(screen.getByTestId('now-printing-loading')).toBeInTheDocument()
+      await waitFor(() => expect(gate.release).toBeDefined())
+      gate.release?.()
+      expect(await screen.findByTestId('printer-now-plate-3')).toBeInTheDocument()
+      expect(screen.queryByTestId('now-printing-loading')).toBeNull()
+    })
+
+    it('is a warning, not a footnote', async () => {
+      setPrintersNow(finished)
+      renderPage(<NowPrinting />)
+      const warning = await screen.findByTestId('printer-now-plate-3')
+      expect(warning).toHaveTextContent('Clear the plate of Spare before the next print.')
+      expect(warning).toHaveClass('text-warn')
+    })
+
+    it('asks for a look when Bambuddy could not say', async () => {
+      setPrintersNow(
+        finished.map((printer) => (printer.printer_id === 3 ? { ...printer, awaiting_plate_clear: null } : printer)),
+      )
+      renderPage(<NowPrinting />)
+      expect(await screen.findByTestId('printer-now-plate-3')).toHaveTextContent(
+        'could not tell whether the plate of Spare is clear',
+      )
+      expect(screen.queryByTestId('printer-now-plate-1')).toBeNull()
+    })
+
+    it('keeps the last card through an empty read, a failed status read and a failed request', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      setPrintersNow(finished)
+      renderPage(<NowPrinting />)
+      expect(await screen.findByTestId('printer-now-plate-3')).toBeInTheDocument()
+
+      setPrintersNow([])
+      await poll()
+      expect(await screen.findByTestId('printer-now-stale-3')).toHaveTextContent('did not list this printer')
+      expect(screen.getByTestId('printer-now-3')).toHaveTextContent('Finished')
+      expect(screen.getByTestId('printer-now-plate-3')).toBeInTheDocument()
+
+      setPrintersNow(
+        finished.map((printer) =>
+          printer.printer_id === 3
+            ? { ...printer, activity: 'unknown' as const, awaiting_plate_clear: null, error: 'Bambuddy timed out' }
+            : printer,
+        ),
+      )
+      await poll()
+      await waitFor(() => expect(screen.getByTestId('printer-now-stale-3')).toHaveTextContent('Bambuddy timed out'))
+      expect(screen.getByTestId('printer-now-3')).toHaveTextContent('Finished')
+      expect(screen.getByTestId('printer-now-plate-3')).toHaveTextContent('Clear the plate of Spare')
+
+      server.use(
+        http.get('/api/v1/print/printers/now', () => HttpResponse.json({ detail: 'no Bambuddy' }, { status: 502 })),
+      )
+      await poll()
+      expect(await screen.findByTestId('now-printing-error')).toHaveTextContent('no Bambuddy')
+      expect(screen.getByTestId('printer-now-plate-3')).toBeInTheDocument()
+
+      server.resetHandlers()
+      setPrintersNow(PRINTERS_NOW)
+      await poll()
+      await waitFor(() => expect(screen.queryByTestId('printer-now-stale-3')).toBeNull())
+      expect(screen.queryByTestId('printer-now-plate-3')).toBeNull()
+    })
+
+    it('replaces a failed card with the next one when there is no good one to keep', () => {
+      const failed: PrinterNow = { ...(PRINTERS_NOW[0] as PrinterNow), activity: 'unknown', error: 'boom' }
+      const first = mergeCards(null, [failed], 1)
+      expect(first).toEqual([{ printer: failed, seenAt: 1, stale: null }])
+      const again = { ...failed, error: 'boom again' }
+      expect(mergeCards(first, [again], 2)).toEqual([{ printer: again, seenAt: 2, stale: null }])
+    })
   })
 })

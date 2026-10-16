@@ -5,6 +5,7 @@ import type { FilamentOptions, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
+import { Dialog } from './ui/Dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
 function Harness({
@@ -205,6 +206,27 @@ describe('FilamentPicker', () => {
     await user.click(within(slot(1)).getByTestId('spool-9'))
     expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
     expect(within(slot(1)).getByTestId('spool-9')).toBeChecked()
+  })
+
+  it('closes only the open list on Escape, not the print dialog around it (#3636)', async () => {
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <Dialog open title="Print" onClose={onClose}>
+        <Harness options={fixtures.filamentOptions} />
+      </Dialog>,
+    )
+    await expand(user, 1)
+    within(slot(1)).getByTestId('spool-9').focus()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+    expect(screen.getByTestId('change-slot-1')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('change-slot-1')).toHaveFocus()
+
+    // With nothing open, Escape is the dialog's again.
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a slot with nothing chosen open', () => {
