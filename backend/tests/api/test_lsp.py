@@ -377,15 +377,18 @@ def test_a_server_that_crashes_is_logged(
 def _pidfd_child_watcher() -> bool:
     """Whether asyncio watches children with a pidfd, which leaves an exited child a
     zombie until the loop reads it. Without one (gVisor, an old kernel) a watcher thread
-    reaps it at once, and the test below has no zombie to find (#3378)."""
+    reaps it at once, and the test below has no zombie to find (#3378). Only called on
+    Linux, so the Unix-only module is imported here."""
+    import asyncio.unix_events
+
     can_use_pidfd = getattr(asyncio.unix_events, "can_use_pidfd", None)
     return can_use_pidfd is not None and bool(can_use_pidfd())
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="reads /proc/<pid>/stat")
 @pytest.mark.skipif(
-    platform.system() == "Linux" and not _pidfd_child_watcher(),
-    reason="asyncio's child watcher has no pidfd, so it reaps the child itself (lsp.kill)",
+    platform.system() != "Linux" or not _pidfd_child_watcher(),
+    reason="reads /proc/<pid>/stat, and needs asyncio's pidfd child watcher, which leaves"
+    " an exited child for the loop to reap (lsp.kill)",
 )
 async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
     """#1613: a server that exited before asyncio's child watcher read it is killed
