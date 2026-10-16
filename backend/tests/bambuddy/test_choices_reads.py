@@ -135,7 +135,13 @@ async def test_the_printer_reads_do_not_wait_on_the_preset_catalogue(
 
     async with asyncio.timeout(5):
         view = await choices_for(
-            bambuddy, _source(), StoredSettings(), remembered=None, printer_id=1, cache=tmp_path
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=1,
+            cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert view.printer_id == 1
@@ -274,12 +280,19 @@ async def test_a_keep_removes_the_files_left_unwritten_past_the_orphan_age(
     for orphan in orphans:
         orphan.write_text("{}", encoding="utf-8")
         os.utime(orphan, (old, old))
+    # The file this Bambuddy's catalogue was kept in under the KEK before a rotation:
+    # named under another key, it is never read again and goes the same way (#3816 review).
+    rotated = catalogue._path(tmp_path, bambuddy.config, b"k" * 32)
+    orphans.append(rotated)
+    rotated.write_text("{}", encoding="utf-8")
+    os.utime(rotated, (old, old))
     recent = directory / "v1-fedcba9876543210fedcba9876543210.json"
     recent.write_text("{}", encoding="utf-8")
 
     await cached_catalogue(bambuddy, tmp_path)
 
     kept = catalogue._path(tmp_path, bambuddy.config)
+    assert kept != rotated
     assert sorted(directory.iterdir()) == sorted([kept, recent])
 
 
@@ -510,6 +523,7 @@ async def test_a_failing_catalogue_still_beats_the_filament_steps_failure(
             remembered=None,
             printer_id=1,
             cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert "slicer presets" in raised.value.detail
@@ -538,6 +552,7 @@ async def test_a_failing_catalogue_beats_the_filament_steps_failure_with_no_prin
             remembered=None,
             printer_id=None,
             cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert "slicer presets" in raised.value.detail
@@ -594,7 +609,13 @@ async def test_stalled_archives_cost_the_plate_preselection_not_the_dialog(
 
     async with asyncio.timeout(5):
         view = await choices_for(
-            bambuddy, _source(), StoredSettings(), remembered=None, printer_id=1, cache=tmp_path
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=1,
+            cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert view.last_bed_type is None
