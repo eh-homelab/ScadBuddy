@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
   AnalysisTarget,
+  BatchSummary,
+  FilamentOptions,
   FilamentWarning,
   NozzlePlan as NozzlePlanView,
   Output,
@@ -32,7 +34,7 @@ import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
-import { firstPlate, offeredChoice, plateFields, plateKey, singlePlate, withPlate } from '../lib/plateChoice'
+import { firstPlate, offeredChoice, plateFields, plateKey, platesSummary, singlePlate, withPlate } from '../lib/plateChoice'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { useFilamentProfiles } from '../lib/filamentProfiles'
@@ -53,7 +55,7 @@ import { usePreviewSlice } from '../lib/usePreviewSlice'
 import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
-import { useRunPrint } from '../lib/useRunPrint'
+import { printRunBody, useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
@@ -140,8 +142,55 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  */
 const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
 
+/**
+ * #2672 — the dialog as one step of a batch print: Back, Skip and Next in place of Print,
+ * the step strip above the choices, and the choices it opens on.
+ */
+/** What a batch step saves: its run request, what the review lists, what the check refuses. */
+export interface BatchStepChoice {
+  request: PrintRunRequest
+  summary: BatchSummary
+  problems: string[]
+}
+
+export interface BatchStep {
+  /** "File 2 of 5 — name". */
+  title: string
+  /** The files strip, given `jump`: a strip button leaves through it, so the step's
+   * choices are saved as Next saves them (#2718 review). */
+  strip: (jump: (step: number) => void) => ReactNode
+  /**
+   * What the step opens on: this file's own saved choices, or the last file's carried
+   * forward. A carried printer always applies; the spools, nozzles, quality and options
+   * only when this file's slots are the same as the one they were chosen for.
+   */
+  seed: PrintRunRequest | null
+  /** `seed` is this file's own (a resume, or Edit from the review): applied whatever its slots. */
+  seedIsOwn: boolean
+  /** The slots a carried `seed` was chosen for, as `slotKeys` makes them. */
+  seedSlots: string[]
+  onBack: (() => void) | null
+  onSkip: () => void
+  onNext: (choice: BatchStepChoice) => void
+  /** A strip button: to `step`, with this step's choices when it has any to save. */
+  onJump: (step: number, choice: BatchStepChoice | null) => void
+  /** The last file: Next goes to the review. */
+  last: boolean
+  /** A step's save in flight. */
+  busy: boolean
+}
+
+/** #2672 — a file's slots, what decides whether the last file's spools carry to it. */
+function slotKeys(filaments: FilamentOptions): string[] {
+  return (filaments.slots ?? [])
+    .map((slot) => `${slot.slot_id}:${slot.material ?? ''}:${(slot.colour ?? '').toUpperCase()}`)
+    .sort()
+}
+
 interface Props {
   open: boolean
+  /** #2672 — one step of a batch print, which never runs a print itself. */
+  batch?: BatchStep
   /** #313 — an output ScadBuddy rendered, or a file in Bambuddy's library. */
   source: PrintSource | undefined
   onClose: () => void
@@ -182,6 +231,7 @@ export function PrintPicker({
   onPrinterModel,
   project,
   printSettings,
+  batch,
   queue = false,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
@@ -848,6 +898,118 @@ export function PrintPicker({
     </>
   )
 
+  /**
+   * #2672 — a batch step's seed, applied once: the printer first (its choices are read
+   * again for it), then, once this file's spools are known, the rest.
+   */
+  const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
+  const { askPrinter, changeNozzles, changeQuality, setPlate } = picker
+  const restoreProfiles = filamentProfiles.restore
+  useEffect(() => {
+    const seed = batch?.seed
+    if (!seed || seeding.current === 'done' || !choices) return
+    const wanted = seed.printer_id ?? null
+    const known = wanted !== null && printers.some((entry) => entry.id === wanted)
+    if (seeding.current === 'printer') {
+      seeding.current = 'rest'
+      if (known && wanted !== printerId) {
+        askPrinter(wanted)
+        return
+      }
+    }
+    if ((known && printerId !== wanted) || !filaments || !planReady || (!project && ownProjects.loading)) return
+    seeding.current = 'done'
+    if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
+    const chosen = seed.filament_plan.slots ?? []
+    const mine = slotKeys(filaments)
+    const same = mine.length === batch.seedSlots.length && mine.every((key, at) => key === batch.seedSlots[at])
+    if (!batch.seedIsOwn && !same) return
+    const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
+    setPlan((current) =>
+      current.map((choice) => {
+        const pick = chosen.find((entry) => entry.slot_id === choice.slot_id)
+        return pick && inventory.has(pick.spool_id) ? { ...pick } : choice
+      }),
+    )
+    const seedChoices = seed.choices
+    if (!sliced && seedChoices) {
+      if ((seedChoices.nozzles ?? []).length > 0) changeNozzles(seedChoices.nozzles ?? [])
+      changeQuality({ tier: seedChoices.tier ?? null, processName: seedChoices.process_name ?? null })
+    }
+    setOptions(seed.options ?? {})
+    if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
+    if (seed.print_sequence) setPrintSequence(seed.print_sequence)
+    if (batch.seedIsOwn) {
+      // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
+      // the step again without them would queue it without the supports, tower or
+      // profiles the user chose.
+      setPlate(seed.all_plates ? 'all' : seed.plate_ids?.length ? seed.plate_ids : [seed.plate_id ?? 1])
+      setSupports(seed.supports ?? null)
+      setPrimeTower(seed.prime_tower ?? null)
+      restoreProfiles(seed.filament_profiles ?? [])
+    }
+  }, [
+    batch,
+    choices,
+    printers,
+    printerId,
+    filaments,
+    planReady,
+    project,
+    ownProjects.loading,
+    sliced,
+    askPrinter,
+    changeNozzles,
+    changeQuality,
+    setPlan,
+    setPlate,
+    restoreProfiles,
+  ])
+
+  /** #2672 — this step's run request, what the review lists, and what the check refuses. */
+  function stepChoice(): BatchStepChoice | null {
+    if (!batch || !printChoices) return null
+    const request = printRunBody({
+      printerId,
+      plan,
+      printChoices,
+      copies,
+      plate,
+      projectId,
+      options: sentOptions,
+      printSequence,
+      // What Print would send (#1899, #3628, #717): a batch step keeps them for Queue all.
+      supports,
+      primeTower,
+      filamentProfiles: filamentProfiles.active,
+      rackPosition,
+      rackAlgorithm: chosenAlgorithm,
+    })
+    const spools = filaments?.spools ?? []
+    const estimate = sliced ? slicedEstimate(sliced, first, filaments, single ?? 'all') : previewSlice.result
+    const summary: BatchSummary = {
+      printer: printer?.name ?? null,
+      plate: single === null ? platesSummary(plate, plates) : plateLabel(plates, single),
+      spools: plan.map((choice) => {
+        const spool = spools.find((entry) => entry.spool_id === choice.spool_id)
+        const name = spool ? [spool.material, spool.color_name ?? spool.colour].filter(Boolean).join(' ') : `spool ${choice.spool_id}`
+        return `Slot ${choice.slot_id}: ${name}`
+      }),
+      print_seconds: estimate?.print_time_seconds ?? null,
+      filament_g: estimate?.filament_used_g ?? null,
+      slots: filaments ? slotKeys(filaments) : [],
+      warnings: check.current ? shown(check.verdict?.warnings).map((warning) => warning.message) : [],
+    }
+    // A sliced file is never refused (#2671): what its check says is only ever a warning.
+    const problems = check.current && !sliced ? (check.verdict?.errors ?? []) : []
+    return { request, summary, problems }
+  }
+
+  function nextStep() {
+    const choice = stepChoice()
+    if (batch && choice) batch.onNext(choice)
+  }
+
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
@@ -882,7 +1044,30 @@ export function PrintPicker({
           ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
           : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
   const split = (choices || source) && !result && unanswered === null
-  const footer = result ? (
+  const footer = batch ? (
+          <>
+            <Button type="button" variant="outline" onClick={close} disabled={batch.busy || projectCreating}>
+              Cancel
+            </Button>
+            {batch.onBack && (
+              <Button type="button" variant="outline" onClick={batch.onBack} disabled={batch.busy}>
+                Back
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={batch.onSkip} disabled={batch.busy} data-testid="batch-skip">
+              Skip
+            </Button>
+            <Button
+              type="button"
+              onClick={nextStep}
+              disabled={batch.busy || loading || !choices || !planReady || ownProjects.loading || projectCreating}
+              data-testid="batch-next"
+            >
+              {batch.busy && <Spinner />}
+              {batch.last ? 'Review' : 'Next'}
+            </Button>
+          </>
+        ) : result ? (
           <>
             <Button type="button" variant="outline" onClick={close}>
               Done
@@ -954,7 +1139,7 @@ export function PrintPicker({
         className={cn('flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0', split ? 'sm:max-w-[1120px]' : 'sm:max-w-lg')}
       >
         <DialogHeader className="shrink-0 border-b px-5 py-4">
-          <DialogTitle>{queue ? 'Queue' : 'Print'}</DialogTitle>
+          <DialogTitle>{batch ? batch.title : queue ? 'Queue' : 'Print'}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -975,6 +1160,7 @@ export function PrintPicker({
         </p>
       ) : (
         <>
+          {batch?.strip((step) => batch.onJump(step, stepChoice()))}
           {loading && !choices && (
             <div className="mb-4 space-y-2" data-testid="print-loading">
               <p className="text-sm text-muted-foreground">Reading the printer and the inventory</p>

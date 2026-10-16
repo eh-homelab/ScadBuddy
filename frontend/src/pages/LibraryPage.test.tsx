@@ -127,6 +127,48 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
   })
 
+  it('offers a batch kept for a file still being checked, to resume (#2718 review)', async () => {
+    const batch = await api.createPrintBatch([
+      { library_file_id: 89, filename: 'a.3mf', sliced: false },
+      { library_file_id: 91, filename: 'b.3mf', sliced: false },
+    ])
+    const pending = { status: 'pending', run_id: null, detail: null, attempt: 0 }
+    server.use(
+      http.get('/api/v1/print/batches', () =>
+        HttpResponse.json([{ ...batch, items: [batch.items[0], { ...batch.items[1], outcome: pending }] }]),
+      ),
+    )
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+
+    const offer = await screen.findByTestId(`library-kept-batch-${batch.id}`)
+    expect(offer).toHaveTextContent('A batch print of 2 files has a file still being checked.')
+    await user.click(within(offer).getByRole('button', { name: 'Resume it' }))
+
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`?batch=${batch.id}`))
+    expect(screen.queryByTestId(`library-kept-batch-${batch.id}`)).toBeNull()
+  })
+
+  it('prints the ticked files as one batch, and a reload resumes it (#2672)', async () => {
+    const { user, unmount } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const print = screen.getByTestId('library-print-selected')
+    expect(print).toBeDisabled()
+    const boxes = screen.getAllByRole('checkbox', { name: /^Select / })
+    await user.click(boxes[0] as HTMLElement)
+    expect(print).toBeDisabled()
+    await user.click(boxes[1] as HTMLElement)
+    expect(print).toHaveTextContent('Print 2 files')
+    const created = vi.spyOn(api, 'createPrintBatch')
+    await user.click(print)
+    expect(await screen.findByRole('dialog', { name: /^File 1 of 2 — / })).toBeInTheDocument()
+    const batch = await (created.mock.results[0]?.value as ReturnType<typeof api.createPrintBatch>)
+    await api.putPrintBatchStep(batch.id, 1)
+    unmount()
+
+    renderPage(<LibraryPage />, { route: `/library?batch=${batch.id}` })
+    expect(await screen.findByRole('dialog', { name: /^File 2 of 2 — / })).toBeInTheDocument()
+  })
+
   it('says a ticked sliced file is left out of Arrange (#2286)', async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')

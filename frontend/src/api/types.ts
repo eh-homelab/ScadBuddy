@@ -227,6 +227,15 @@ export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
 /** #2671 — what a sliced library file was sliced for, read from the file itself. */
 export type SlicedProfile = Schemas['SlicedProfile']
+/** #2672 — a batch print, kept in Postgres so a reload resumes it. */
+export type PrintBatch = Schemas['PrintBatch']
+export type BatchItem = Schemas['BatchItem']
+export type BatchChoice = Schemas['BatchChoice']
+export type BatchSummary = Schemas['BatchSummary']
+export type BatchOutcome = Schemas['BatchOutcome']
+export type NewBatchFile = Schemas['NewBatchFile']
+/** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
+export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>

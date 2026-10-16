@@ -64,6 +64,7 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -146,6 +147,10 @@ API_PREFIX = "/api/v1"
 EXCLUDED_URLS: Final = ",".join(
     f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
 )
+
+#: How long a batch print nobody touches is kept (#2718 review): long past any print
+#: it started, which Bambuddy's queue and the print runs keep on their own.
+BATCH_TTL = timedelta(days=7)
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +508,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        await _heartbeating(_sweep_claims_logged(state))
+        await _heartbeating(_sweep_claims_and_batches_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -615,12 +620,28 @@ async def _prune_jobs_logged(state: AppState) -> None:
         raise
 
 
-async def _sweep_claims_logged(state: AppState) -> None:
+async def _sweep_claims_and_batches_logged(state: AppState) -> None:
+    """The claims sweep, which also forgets batch prints left untouched for `BATCH_TTL`:
+    both are a delete on the prune cadence (`PRUNE_SWEEPS`), so the batch prune rides
+    this activity rather than adding a sweep a replica on an older build could not run
+    (#2718 review). Its failure is logged as the batch prune's own."""
+    # Each its own: one failing never starves the other, as the flow sweeps.
+    failed: Exception | None = None
     try:
         await asyncio.to_thread(ClaimStore(state.paths.claims).sweep)
-    except Exception:
+    except Exception as err:
         logger.exception("could not sweep operation claims")
-        raise
+        failed = err
+    try:
+        # #2718 review: a batch print closed without Cancel or Done stays otherwise.
+        pruned = await state.components.get(PRINT_BATCHES).prune(BATCH_TTL)
+        if pruned:
+            logger.info("forgot batch prints left untouched", extra={"count": pruned})
+    except Exception as err:
+        logger.exception("could not prune batch prints")
+        failed = failed or err
+    if failed is not None:
+        raise failed
 
 
 async def _sweep_flow_runs_logged(state: AppState) -> None:
