@@ -1,11 +1,25 @@
-import { useRef, useState, type DragEvent } from 'react'
+import { useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { PrintAttachment, PrintDetail } from '../../api/types'
 import { formatBytes } from '../../lib/format'
 import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../../lib/mediaFiles'
 import { modelPath } from '../../lib/deeplink'
-import { Button } from '../ui/Button'
+import { CameraIcon, ImagePlusIcon, Trash2Icon } from 'lucide-react'
+import { Hint } from '../Hint'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { cn } from '@/lib/utils'
 import { Spinner } from '../ui/Spinner'
 
 type Upload = { id: number; name: string; fraction: number }
@@ -71,33 +85,51 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
         }}
         onDragLeave={() => setOver(false)}
         onDrop={dropped}
-        className={`flex flex-wrap items-center gap-2 rounded-[6px] border border-dashed p-3 text-[13px] text-muted ${
-          over ? 'border-accent bg-accent/8' : 'border-line'
-        }`}
+        className={cn(
+          'flex flex-wrap items-center gap-2 rounded-xl border border-dashed p-3 text-[13px] text-muted-foreground transition-colors',
+          over && 'border-primary bg-ui-muted',
+        )}
       >
         <span className="mr-auto">Drop photos or videos of the finished print here, or</span>
-        <FilePick label="Take a photo" accept="image/*" capture onPick={(files) => void add(files)} />
-        <FilePick label="Choose files" accept={MEDIA_ACCEPT} multiple onPick={(files) => void add(files)} />
+        <FilePick
+          label="Take a photo"
+          icon={<CameraIcon aria-hidden="true" />}
+          accept="image/*"
+          capture
+          onPick={(files) => void add(files)}
+        />
+        <FilePick
+          label="Choose files"
+          icon={<ImagePlusIcon aria-hidden="true" />}
+          accept={MEDIA_ACCEPT}
+          multiple
+          onPick={(files) => void add(files)}
+        />
       </div>
       {uploads.length > 0 && (
-        <ul aria-label="Uploading" className="space-y-1 text-[12px] text-muted">
+        <ul aria-label="Uploading" className="space-y-1 text-xs text-muted-foreground">
           {uploads.map((upload) => (
             <li key={upload.id} className="flex items-center gap-2">
               <Spinner /> {upload.name}
-              <progress max={1} value={upload.fraction} aria-label={`Uploading ${upload.name}`} className="flex-1" />
+              <progress
+                max={1}
+                value={upload.fraction}
+                aria-label={`Uploading ${upload.name}`}
+                className="h-1.5 flex-1 overflow-hidden rounded-full accent-primary"
+              />
             </li>
           ))}
         </ul>
       )}
       {errors.length > 0 && (
-        <ul role="alert" className="space-y-0.5 text-[12px] text-warn">
+        <ul role="alert" className="space-y-0.5 text-xs text-warn">
           {errors.map((error) => (
             <li key={error}>{error}</li>
           ))}
         </ul>
       )}
       {attachments.length === 0 ? (
-        <p className="text-[13px] text-muted">No photos or videos added yet.</p>
+        <p className="text-[13px] text-muted-foreground">No photos or videos added yet.</p>
       ) : (
         <ul aria-label="Added photos and videos" className="grid gap-3 sm:grid-cols-2">
           {attachments.map((attachment) => (
@@ -111,35 +143,47 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
 
 function FilePick({
   label,
+  icon,
   accept,
   capture,
   multiple,
   onPick,
 }: {
   label: string
+  icon: ReactNode
   accept: string
   capture?: boolean
   multiple?: boolean
   onPick: (files: File[]) => void
 }) {
   return (
-    <label className="inline-flex cursor-pointer items-center rounded-[6px] border border-line px-2.5 py-1 text-[12px] text-ink hover:bg-surface-2 focus-within:ring-2 focus-within:ring-accent">
-      {label}
-      <input
-        type="file"
-        aria-label={label}
-        accept={accept}
-        multiple={multiple}
-        // A phone opens its camera rather than the photo library.
-        capture={capture ? 'environment' : undefined}
-        className="sr-only"
-        onChange={(event) => {
-          const files = [...(event.target.files ?? [])]
-          event.target.value = ''
-          onPick(files)
-        }}
-      />
-    </label>
+    // The file input inside it is what takes focus and opens the picker, so the ring
+    // follows its focus.
+    <Button
+      asChild
+      variant="outline"
+      size="sm"
+      className="cursor-pointer has-focus-visible:border-ring has-focus-visible:ring-3 has-focus-visible:ring-ring/50"
+    >
+      <label>
+        {icon}
+        {label}
+        <input
+          type="file"
+          aria-label={label}
+          accept={accept}
+          multiple={multiple}
+          // A phone opens its camera rather than the photo library.
+          capture={capture ? 'environment' : undefined}
+          className="sr-only"
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])]
+            event.target.value = ''
+            onPick(files)
+          }}
+        />
+      </label>
+    </Button>
   )
 }
 
@@ -166,6 +210,7 @@ function AttachmentItem({
       await call()
       if (what === 'promote') setPromoted(true)
       else onChanged()
+      if (what === 'delete') setConfirming(false)
     } catch (caught) {
       setError(failure(caught))
     } finally {
@@ -175,89 +220,111 @@ function AttachmentItem({
 
   const changed = caption.trim() !== (attachment.caption ?? '')
   return (
-    <li aria-label={name} className="flex flex-col gap-2 rounded-[6px] border border-line p-2">
-      {attachment.kind === 'video' ? (
-        <video
-          src={attachment.url}
-          controls
-          playsInline
-          preload="metadata"
-          aria-label={name}
-          className="aspect-video w-full rounded-[4px] bg-black"
-        />
-      ) : (
-        <img src={attachment.url} alt={name} className="aspect-video w-full rounded-[4px] object-cover" />
-      )}
-      <span className="sb-num truncate text-[11px] text-faint" title={attachment.filename}>
-        {attachment.filename} · {formatBytes(attachment.size_bytes)}
-      </span>
-      <form
-        className="flex gap-1.5"
-        onSubmit={(event) => {
-          event.preventDefault()
-          void act('caption', () => api.captionPrintAttachment(print.archive_id, attachment.id, caption.trim()))
-        }}
-      >
-        <input
-          value={caption}
-          onChange={(event) => setCaption(event.target.value)}
-          aria-label={`Caption for ${attachment.filename}`}
-          placeholder="Caption"
-          maxLength={MAX_CAPTION_CHARS}
-          className="min-w-0 flex-1 rounded-[6px] border border-line bg-surface px-2 py-1 text-[13px]"
-        />
-        {changed && (
-          <Button size="sm" type="submit" disabled={busy !== null}>
-            {busy === 'caption' && <Spinner />}
-            Save
-          </Button>
+    <li aria-label={name} className="min-w-0">
+      <Card size="sm" className="h-full gap-2 pt-0">
+        {attachment.kind === 'video' ? (
+          <video
+            src={attachment.url}
+            controls
+            playsInline
+            preload="metadata"
+            aria-label={name}
+            className="aspect-video w-full rounded-t-xl bg-black"
+          />
+        ) : (
+          <img src={attachment.url} alt={name} className="aspect-video w-full object-cover" />
         )}
-      </form>
-      <div className="flex flex-wrap items-center gap-1.5">
-        {print.slug && (
-          <Button
-            size="sm"
-            disabled={busy !== null || promoted}
-            onClick={() =>
-              void act('promote', () => api.promotePrintAttachment(print.archive_id, attachment.id, print.slug!))
-            }
+        <div className="flex min-w-0 flex-col gap-2 px-3">
+          <Hint content={attachment.filename}>
+            <span className="sb-num truncate text-[11px] text-muted-foreground">
+              {attachment.filename} · {formatBytes(attachment.size_bytes)}
+            </span>
+          </Hint>
+          <form
+            className="flex gap-1.5"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void act('caption', () => api.captionPrintAttachment(print.archive_id, attachment.id, caption.trim()))
+            }}
           >
-            {busy === 'promote' && <Spinner />}
-            {promoted ? 'Added to the gallery' : 'Add to the template’s gallery'}
-          </Button>
-        )}
-        {promoted && print.slug && (
-          <Link to={modelPath(print.slug)} className="text-[12px] text-accent underline">
-            See the gallery
-          </Link>
-        )}
-        {confirming ? (
-          <>
-            <span className="ml-auto text-[12px] text-muted">Delete it from ScadBuddy and Bambuddy?</span>
+            <Input
+              value={caption}
+              onChange={(event) => setCaption(event.target.value)}
+              aria-label={`Caption for ${attachment.filename}`}
+              placeholder="Caption"
+              maxLength={MAX_CAPTION_CHARS}
+              className="h-7 min-w-0 flex-1"
+            />
+            {changed && (
+              <Button size="sm" type="submit" disabled={busy !== null}>
+                {busy === 'caption' && <Spinner />}
+                Save
+              </Button>
+            )}
+          </form>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {print.slug && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy !== null || promoted}
+                onClick={() =>
+                  void act('promote', () => api.promotePrintAttachment(print.archive_id, attachment.id, print.slug!))
+                }
+              >
+                {busy === 'promote' && <Spinner />}
+                {promoted ? 'Added to the gallery' : 'Add to the template’s gallery'}
+              </Button>
+            )}
+            {promoted && print.slug && (
+              <Button asChild variant="link" size="sm" className="px-1">
+                <Link to={modelPath(print.slug)}>See the gallery</Link>
+              </Button>
+            )}
             <Button
               size="sm"
-              variant="danger"
+              variant="ghost"
+              className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              onClick={() => {
+                setError(null)
+                setConfirming(true)
+              }}
+            >
+              <Trash2Icon aria-hidden="true" />
+              Remove
+            </Button>
+        </div>
+        {error && !confirming && (
+          <p role="alert" className="text-xs text-warn">
+            {error}
+          </p>
+        )}
+        </div>
+      </Card>
+      <AlertDialog open={confirming} onOpenChange={(next) => !next && busy !== 'delete' && setConfirming(false)}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Remove ${name}?`}</AlertDialogTitle>
+            <AlertDialogDescription>Delete it from ScadBuddy and Bambuddy?</AlertDialogDescription>
+          </AlertDialogHeader>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy === 'delete'}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
               disabled={busy !== null}
               onClick={() => void act('delete', () => api.deletePrintAttachment(print.archive_id, attachment.id))}
             >
               {busy === 'delete' && <Spinner />}
               Delete
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setConfirming(true)}>
-            Remove
-          </Button>
-        )}
-      </div>
-      {error && (
-        <p role="alert" className="text-[12px] text-warn">
-          {error}
-        </p>
-      )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </li>
   )
 }
