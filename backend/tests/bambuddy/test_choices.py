@@ -111,10 +111,10 @@ class _NoArchives:
 
 
 async def test_plan_runs_plate_check_takes_the_runs_printer_model() -> None:
-    """#3783 review: through ``_hardware_warnings``, the path plan_run takes, a run with
-    no printer model claims nothing of its plate, and one with the H2C's does."""
+    """#3783 review: ``_hardware_warnings``, the path plan_run takes, forwards the run's
+    printer model: none claims nothing of the plate, and the H2C's warns. (That an older
+    run carries none is the test above's.)"""
     choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")], bed_type="Cool Plate")
-    old = PreparedPlates.model_validate({"plate_ids": [1], "printer_id": 1})
 
     async def kinds(model: str | None) -> list[str]:
         found = await _hardware_warnings(
@@ -127,7 +127,7 @@ async def test_plan_runs_plate_check_takes_the_runs_printer_model() -> None:
         )
         return [warning.kind for warning in found]
 
-    assert await kinds(old.printer_model) == []
+    assert await kinds(None) == []
     assert await kinds("H2C") == ["plate-not-listed"]
 
 
