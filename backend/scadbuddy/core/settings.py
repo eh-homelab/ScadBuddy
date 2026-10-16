@@ -145,6 +145,18 @@ class Settings(BaseSettings):
     # Settings wins. Render workers read them from there (spec §9).
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
+    # SCADBUDDY_STORE_S3_*: the S3 store (`store_backend` s3), seeded like the render key
+    # and read by render workers from the stored values. The endpoint is Garage, MinIO or
+    # any S3-compatible service; path-style addressing (`store_s3_path_style`) unless the
+    # service wants the bucket in the hostname. Objects go under `store_s3_prefix` in
+    # `store_s3_bucket`. The secret access key is sealed at rest like the Bambuddy keys.
+    store_s3_endpoint: str | None = None
+    store_s3_region: str = "us-east-1"
+    store_s3_bucket: str | None = None
+    store_s3_prefix: str = "scadbuddy"
+    store_s3_access_key_id: str | None = None
+    store_s3_secret_access_key: str | None = Field(default=None, repr=False)
+    store_s3_path_style: bool = True
     # SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT: the store's caps (spec §6.2); a put
     # past either is refused unless the content is already stored. 0 is no limit.
     store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
@@ -561,7 +573,12 @@ ENV_SEEDED: Final = tuple(name for name in Settings.model_fields if name not in 
 
 #: Env-seeded fields that are credentials: written, never read back (only "set").
 SECRET_FIELDS: Final = frozenset(
-    {"bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"}
+    {
+        "bambuddy_api_key",
+        "bambuddy_render_api_key",
+        "google_fonts_api_key",
+        "store_s3_secret_access_key",
+    }
 )
 
 Applies = Literal["live", "restart"]
@@ -624,6 +641,13 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # the store each process opens, its caps, and the key workers fetch with.
         "store_backend": "restart",
         "bambuddy_render_api_key": "restart",
+        "store_s3_endpoint": "restart",
+        "store_s3_region": "restart",
+        "store_s3_bucket": "restart",
+        "store_s3_prefix": "restart",
+        "store_s3_access_key_id": "restart",
+        "store_s3_secret_access_key": "restart",
+        "store_s3_path_style": "restart",
         "store_max_total_bytes": "restart",
         "store_max_count": "restart",
         "worker_cache_max_bytes": "restart",

@@ -28,6 +28,7 @@ from scadbuddy.library.settings_store import (
     STORE_READINESS_LOCK,
     ModelPrintChoices,
     RenderStoreSettings,
+    S3Settings,
     SettingsPatch,
     SettingsStore,
     StoredSettings,
@@ -469,6 +470,71 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "bambuddy"
     store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "local"
+
+
+S3_PATCH = SettingsPatch(
+    store_s3_endpoint="http://garage:3900",
+    store_s3_bucket="sb",
+    store_s3_prefix="prod",
+    store_s3_access_key_id="GK1",
+    store_s3_secret_access_key="s3cr3t",
+)
+
+
+def test_s3_backend_needs_endpoint_bucket_and_keys(store: SettingsStore) -> None:
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_backend="s3"))
+    store.save(SettingsPatch(store_s3_endpoint="http://garage:3900", store_s3_bucket="sb"))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_backend="s3", store_s3_access_key_id="GK1"))
+    assert store.load().store_backend == "local"
+
+
+def test_s3_backend_saves_once_its_fields_are_set(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    saved = store.save(SettingsPatch(store_backend="s3"))
+    assert saved.store_backend == "s3"
+    assert saved.s3_settings() == S3Settings(
+        endpoint="http://garage:3900",
+        bucket="sb",
+        prefix="prod",
+        access_key_id="GK1",
+        secret_access_key="s3cr3t",
+    )
+    assert "s3cr3t" not in repr(saved.s3_settings())
+
+
+def test_s3_settings_are_none_until_endpoint_bucket_and_keys_are_set(
+    store: SettingsStore,
+) -> None:
+    assert store.load().s3_settings() is None
+    store.save(S3_PATCH.model_copy(update={"store_s3_secret_access_key": None}))
+    assert store.load().s3_settings() is None
+
+
+def test_clearing_an_s3_field_while_on_the_s3_store_is_refused(store: SettingsStore) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3"))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_s3_bucket=None))
+    with pytest.raises(StoreNotReadyError, match="endpoint, bucket, access key"):
+        store.save(SettingsPatch(store_s3_secret_access_key=""))
+    assert store.load().store_s3_bucket == "sb"
+
+
+def test_render_store_settings_carry_s3(store: SettingsStore, settings: Settings) -> None:
+    store.save(S3_PATCH)
+    store.save(SettingsPatch(store_backend="s3", store_s3_path_style=False))
+    current = load_render_store_settings(store.pool, settings)
+    assert current.store_backend == "s3"
+    assert current.s3 == S3Settings(
+        endpoint="http://garage:3900",
+        bucket="sb",
+        prefix="prod",
+        access_key_id="GK1",
+        secret_access_key="s3cr3t",
+        path_style=False,
+    )
 
 
 def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
