@@ -627,14 +627,17 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   it('keeps a re-pairing to the same tab made while its compare-and-set was out (#3787 review)', async () => {
     const { rows } = sharedRows()
     let release!: () => void
+    const writes: string[] = []
     const store: SessionTabStore = {
       set: async (sessionId, tabId) => {
+        writes.push(`set ${tabId}`)
         rows.set(sessionId, tabId)
       },
       get: async (sessionId) => rows.get(sessionId),
       setIf: async (sessionId, tabId, seen) => {
         await new Promise<void>((resolve) => (release = resolve))
         if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        writes.push(`setIf ${tabId}`)
         rows.set(sessionId, tabId)
         return true
       },
@@ -651,6 +654,8 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect(await paired).toBe(true)
     await tick()
     expect(rows.get('s-aba')).toBe(OTHER_TAB) // its write was queued after the compare-and-set
+    // The order the map's choice rests on: the compare-and-set landed, then the re-pairing's write (#3825 review).
+    expect(writes).toEqual([`set ${OTHER_TAB}`, `setIf ${TAB}`, `set ${OTHER_TAB}`])
     rows.delete('s-aba')
     expect((await here.sessionTab('s-aba')).tabId).toBe(OTHER_TAB)
   })

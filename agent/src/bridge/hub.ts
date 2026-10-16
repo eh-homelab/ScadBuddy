@@ -298,13 +298,15 @@ export class TabHub implements BrowserTabs {
     this.#sessionTabs.delete(sessionId)
     this.#sessionTabs.set(sessionId, tabId)
     this.#sessionTabSeqs.set(sessionId, ++this.#pairSeq)
-    while (this.#sessionTabs.size > MAX_SESSION_TABS) {
-      const oldest = this.#sessionTabs.keys().next().value as string
-      this.#sessionTabs.delete(oldest)
-      this.#sessionTabSeqs.delete(oldest)
-      this.#sessionTabsUnstored.delete(oldest)
-    }
+    while (this.#sessionTabs.size > MAX_SESSION_TABS) this.#forgetSessionTab(this.#sessionTabs.keys().next().value as string)
     if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
+  }
+
+  /** Drops a session from the map and from what is kept beside it, together, so none outlives the others (#3825 review). */
+  #forgetSessionTab(sessionId: string): void {
+    this.#sessionTabs.delete(sessionId)
+    this.#sessionTabSeqs.delete(sessionId)
+    this.#sessionTabsUnstored.delete(sessionId)
   }
 
   #sessionTabBack(sessionId: string): void {
