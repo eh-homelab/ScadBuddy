@@ -279,6 +279,34 @@ function matchesOf(text: string, re: RegExp, whole: boolean, deadline: number): 
   }
 }
 
+// A newline written in a pattern: \n, \x0a, \u000a, \cJ, or octal \012 or \12 (hex
+// digits and the control letter in either case; \N is just N), or the character itself.
+// A class range that spans a newline without naming it ([\t-\r]) is not caught; it can
+// only answer "No matches found".
+const NEWLINE_ESCAPE = /^(?:n|x0[aA]|u000[aA]|c[jJ]|012|12(?!\d))/
+
+/** Whether pattern can match a newline by naming one: anywhere but in a negated class
+ * ([^\n] never matches one). Read token by token, so an escaped \\ or \[ is literal,
+ * and in a class [ is only a character ([a[^\n]] is the class "a[^\n" then "]"). */
+function namesNewline(pattern: string): boolean {
+  let negated: boolean | undefined
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!
+    if (c === '\\') {
+      if (NEWLINE_ESCAPE.test(pattern.slice(i + 1)) && !negated) return true
+      i++
+    } else if (c === '\n') {
+      if (!negated) return true
+    } else if (negated === undefined && c === '[') {
+      negated = pattern[i + 1] === '^'
+      if (negated) i++
+    } else if (negated !== undefined && c === ']') {
+      negated = undefined
+    }
+  }
+  return false
+}
+
 export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinResult> {
   return guarded(async () => {
     // Each line is matched on its own unless multiline is set (matchesOf), so ^ and $
@@ -287,10 +315,8 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
     if (input['-i']) flags += 'i'
     if (input.multiline) flags += 'ms'
     // Each line is matched alone, so a newline in the pattern could never match; ripgrep
-    // refuses it rather than answer "No matches found". An escaped backslash (\\n) is
-    // not a newline, and a negated class ([^\n]) never matches one, so both are allowed.
-    const outsideNegated = input.pattern.replace(/\[\^(?:\\.|[^\]\\])*\]/g, '')
-    if (!input.multiline && (outsideNegated.includes('\n') || /(?<!\\)(?:\\\\)*\\n/.test(outsideNegated))) {
+    // refuses it rather than answer "No matches found".
+    if (!input.multiline && namesNewline(input.pattern)) {
       throw new BuiltinError('The literal "\\n" is not allowed in a regex unless multiline is set; set multiline: true to match across lines')
     }
     let re: RegExp
