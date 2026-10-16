@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import uuid
 import weakref
 from datetime import datetime, timedelta
 from typing import IO, Literal
@@ -117,16 +116,17 @@ class AttachmentStore:
         return await asyncio.to_thread(self._set_caption, archive_id, attachment_id, caption)
 
     async def claim_promote(
-        self, archive_id: int, attachment_id: int, slug: str, lease: timedelta
-    ) -> str:
-        """Claim the copy of the attachment to ``slug``'s gallery: the claim's token.
+        self, archive_id: int, attachment_id: int, slug: str, token: str, lease: timedelta
+    ) -> None:
+        """Claim the copy of the attachment to ``slug``'s gallery for ``token``'s run.
 
         Taken under the row's lock, so of two promotes only one copies (#3785 review).
         Raises `AlreadyPromotedError` once the copy has landed, `PromoteInProgressError`
         while another run's claim is younger than ``lease``, and `AttachmentGoneError`
         when the row is gone. A claim older than ``lease`` is taken over: its run was
-        killed mid-copy and never let it go."""
-        return await asyncio.to_thread(self._claim_promote, archive_id, attachment_id, slug, lease)
+        killed mid-copy and never let it go. A claim that is already ``token``'s is taken
+        back at once: the same operation, retried."""
+        await asyncio.to_thread(self._claim_promote, archive_id, attachment_id, slug, token, lease)
 
     async def promote_landed(
         self, archive_id: int, attachment_id: int, slug: str, token: str
@@ -218,21 +218,23 @@ class AttachmentStore:
         return Attachment.model_validate(dict(row)) if row is not None else None
 
     def _claim_promote(
-        self, archive_id: int, attachment_id: int, slug: str, lease: timedelta
-    ) -> str:
-        token = uuid.uuid4().hex
+        self, archive_id: int, attachment_id: int, slug: str, token: str, lease: timedelta
+    ) -> None:
         with self._pool.connection() as conn, conn.transaction():
+            # The lease is read in SQL, so the claim's time is never parsed out of jsonb.
             row = conn.execute(
-                "SELECT promoted_to, promoting -> %s ->> 'at' AS claimed_at, now() AS now"
-                " FROM print_attachments WHERE archive_id = %s AND id = %s FOR UPDATE",
-                (slug, archive_id, attachment_id),
+                "SELECT %(slug)s = ANY(promoted_to) AS promoted,"
+                " promoting -> %(slug)s ->> 'token' AS holder,"
+                " (promoting -> %(slug)s ->> 'at')::timestamptz > now() - %(lease)s AS live"
+                " FROM print_attachments WHERE archive_id = %(archive)s AND id = %(id)s"
+                " FOR UPDATE",
+                {"slug": slug, "lease": lease, "archive": archive_id, "id": attachment_id},
             ).fetchone()
             if row is None:
                 raise AttachmentGoneError
-            if slug in row["promoted_to"]:
+            if row["promoted"]:
                 raise AlreadyPromotedError
-            claimed_at = row["claimed_at"]
-            if claimed_at is not None and datetime.fromisoformat(claimed_at) > row["now"] - lease:
+            if row["live"] and row["holder"] != token:
                 raise PromoteInProgressError
             conn.execute(
                 "UPDATE print_attachments SET promoting = promoting || jsonb_build_object("
@@ -240,7 +242,6 @@ class AttachmentStore:
                 " WHERE archive_id = %s AND id = %s",
                 (slug, token, archive_id, attachment_id),
             )
-        return token
 
     def _promote_landed(self, archive_id: int, attachment_id: int, slug: str, token: str) -> None:
         with self._pool.connection() as conn:

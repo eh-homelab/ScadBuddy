@@ -47,7 +47,12 @@ from scadbuddy.library.media import (
 )
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
-from scadbuddy.operations.kinds import OperationKind, to_thread_to_end, waiting_on_bambuddy
+from scadbuddy.operations.kinds import (
+    OPERATION_RUN,
+    OperationKind,
+    to_thread_to_end,
+    waiting_on_bambuddy,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -259,6 +264,19 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
                 f"a template holds at most {MAX_MEDIA_ITEMS} media items",
             ) from None
 
+    async def _settle(found: Attachment, slug: str, token: str, *, landed: bool) -> None:
+        """A promote that raised: marked if its copy landed all the same (a cancel during
+        the commit, or the mark itself failing), released if not. Best-effort, so the
+        run's own error is the one reported; a claim left behind lapses with its lease."""
+        try:
+            if landed:
+                await store.promote_landed(found.archive_id, found.id, slug, token)
+                emit(state.events, ModelEvent(kind="model.updated", slug=slug))
+            else:
+                await store.release_promote(found.archive_id, found.id, slug, token)
+        except Exception:
+            logger.exception("could not settle the promote of attachment %s", found.id)
+
     async def promote_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The copy and its mark in one run, so a promote answered with 202, or one whose
         route never saw the end, is still marked once the copy lands (#2831 review)."""
@@ -266,8 +284,11 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
         slug = request["slug"]
         # Claimed before the copy, under the row's lock, so a second promote sent while
         # this one copies is refused (#3401, #3785 review); marked once the copy lands.
+        # The operation's, so its own retry takes the claim back (#3785 review); a run
+        # outside an operation (a test calling it directly) gets one of its own.
+        token = OPERATION_RUN.get() or uuid.uuid4().hex
         try:
-            token = await store.claim_promote(found.archive_id, found.id, slug, PROMOTE_LEASE)
+            await store.claim_promote(found.archive_id, found.id, slug, token, PROMOTE_LEASE)
         except AlreadyPromotedError:
             raise already_promoted(slug) from None
         except PromoteInProgressError:
@@ -279,6 +300,7 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
                 status.HTTP_404_NOT_FOUND,
                 f"print {found.archive_id} has no attachment {found.id}",
             ) from None
+        landed: list[ModelRecord] = []
         staging = state.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
         staging.mkdir(parents=True)
         try:
@@ -298,18 +320,18 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
                     f"a template's image is at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB",
                 )
             media = StagedMedia(path=staged, kind=media_kind, extension=extension)
-            # A git commit, and a move of up to a gigabyte: a cancel waits for both.
-            record = await to_thread_to_end(partial(_add_media, slug, media, found.caption or ""))
+            # A git commit, and a move of up to a gigabyte: a cancel waits for both, and
+            # `landed` still sees the copy a cancel raised past (#3785 review).
+            record = await to_thread_to_end(
+                partial(_add_media, slug, media, found.caption or ""), landed=landed.append
+            )
+            # Marked before the staging is cleaned up, so a cancel there cannot skip it.
+            await store.promote_landed(found.archive_id, found.id, slug, token)
         except BaseException:
-            try:
-                await store.release_promote(found.archive_id, found.id, slug, token)
-            except Exception:
-                # The copy's own error is the one to report; the claim lapses with its lease.
-                logger.exception("could not release the promote of attachment %s", found.id)
+            await _settle(found, slug, token, landed=bool(landed))
             raise
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, True)
-        await store.promote_landed(found.archive_id, found.id, slug, token)
         emit(state.events, ModelEvent(kind="model.updated", slug=slug))
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped

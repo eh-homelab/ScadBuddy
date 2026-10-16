@@ -285,11 +285,12 @@ class PrintLinkStore:
                 "DELETE FROM print_links WHERE subject = ANY(%s) RETURNING archive_id", (keys,)
             ).fetchall()
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
-            conn.execute(
-                "DELETE FROM print_attachments AS a WHERE a.archive_id = ANY(%s)"
-                " AND NOT EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
-                (sorted({row["archive_id"] for row in unlinked}),),
-            )
+            if unlinked:
+                conn.execute(
+                    "DELETE FROM print_attachments AS a WHERE a.archive_id = ANY(%s) AND NOT"
+                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
+                    (sorted({row["archive_id"] for row in unlinked}),),
+                )
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:

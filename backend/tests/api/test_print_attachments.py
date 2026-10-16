@@ -7,9 +7,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import threading
 import time
 from datetime import timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,6 +32,8 @@ from scadbuddy.bambuddy.attachments import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.attachment_operations import PROMOTE_LEASE
+from scadbuddy.library.media import MEDIA_UPLOAD_PREFIX
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_media import WEBM
@@ -593,12 +598,12 @@ def test_a_promote_whose_claim_fails_copies_nothing_and_can_be_sent_again(
     claim = store.claim_promote
     calls = 0
 
-    async def fails_once(*args: Any) -> str:
+    async def fails_once(*args: Any) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("the database went away")
-        return await claim(*args)
+        await claim(*args)
 
     monkeypatch.setattr(store, "claim_promote", fails_once)
 
@@ -620,7 +625,7 @@ def test_a_promote_sent_while_another_is_copying_copies_nothing(
     attachment, url = _promote_ready(client, model)
     store = _state(client).components.get(PRINT_ATTACHMENTS)
     # The first promote, between its claim and its copy.
-    asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+    asyncio.run(store.claim_promote(35, attachment["id"], model, "first", PROMOTE_LEASE))
 
     second = client.post(url, json={"slug": model}, headers=press())
 
@@ -637,7 +642,7 @@ def test_a_promote_killed_mid_copy_can_be_sent_again_once_its_claim_lapses(
     past the lease the claim is taken over, so the attachment is not stuck promoted."""
     attachment, url = _promote_ready(client, model)
     store = _state(client).components.get(PRINT_ATTACHMENTS)
-    asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+    asyncio.run(store.claim_promote(35, attachment["id"], model, "killed", PROMOTE_LEASE))
     with store._pool.connection() as conn:
         conn.execute(
             "UPDATE print_attachments SET promoting = jsonb_set(promoting, ARRAY[%s::text],"
@@ -656,21 +661,108 @@ def test_a_promote_killed_mid_copy_can_be_sent_again_once_its_claim_lapses(
 
 
 @respx.mock
+def test_a_promote_cancelled_while_its_copy_commits_is_still_marked(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3785 review: a cancel during the commit (the run's timeout, say) waits for the
+    copy, which lands; the run marks it rather than releasing its claim, so the next
+    Promote is refused, not a second copy."""
+    attachment, url = _promote_ready(client, model)
+    state = _state(client)
+    kind = state.components.get(OPERATIONS).kinds["print_attachment_promote"]
+    started, go_on = threading.Event(), threading.Event()
+    add_media = state.catalogue.add_media
+
+    def slowly(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        go_on.wait(30)
+        return add_media(*args, **kwargs)
+
+    monkeypatch.setattr(state.catalogue, "add_media", slowly)
+    request = {"archive_id": 35, "attachment_id": attachment["id"], "slug": model}
+
+    async def cancel_mid_commit() -> None:
+        run = asyncio.ensure_future(kind.run(request, {}))
+        deadline = time.monotonic() + 30
+        while not started.is_set():
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        run.cancel()
+        await asyncio.sleep(0.05)
+        go_on.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    asyncio.run(cancel_mid_commit())
+
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["media"]["attachments"][0]["promoted_to"] == [model]
+    again = client.post(url, json={"slug": model}, headers=press())
+    assert again.status_code == 409, again.text
+    assert "gallery already" in again.json()["detail"]
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+
+
+@respx.mock
+def test_a_promote_cancelled_while_it_cleans_up_is_still_marked(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3785 review: the mark comes before the staging is cleaned up, so a cancel during
+    the cleanup does not leave a landed copy unmarked."""
+    attachment, _ = _promote_ready(client, model)
+    state = _state(client)
+    kind = state.components.get(OPERATIONS).kinds["print_attachment_promote"]
+    rmtree = shutil.rmtree
+
+    def cancelled(path: Any, *args: Any, **kwargs: Any) -> None:
+        # Only the promote's staging: the cancel lands at its cleanup, nowhere else.
+        if Path(path).name.startswith(MEDIA_UPLOAD_PREFIX):
+            raise asyncio.CancelledError
+        rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", cancelled)
+    request = {"archive_id": 35, "attachment_id": attachment["id"], "slug": model}
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(kind.run(request, {}))
+
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["media"]["attachments"][0]["promoted_to"] == [model]
+
+
+@respx.mock
 def test_a_failed_promote_releases_only_its_own_claim(client: TestClient, model: str) -> None:
     """#3785 review: a run whose claim was taken over must not let the new one go."""
     attachment, _ = _promote_ready(client, model)
     store = _state(client).components.get(PRINT_ATTACHMENTS)
-    live = asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+    aid = attachment["id"]
 
-    asyncio.run(store.release_promote(35, attachment["id"], model, "another-run"))
+    def claim(token: str) -> None:
+        asyncio.run(store.claim_promote(35, aid, model, token, PROMOTE_LEASE))
+
+    claim("live")
+    asyncio.run(store.release_promote(35, aid, model, "another-run"))
     with pytest.raises(PromoteInProgressError):
-        asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+        claim("third")
 
-    asyncio.run(store.release_promote(35, attachment["id"], model, live))
-    mine = asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
-    asyncio.run(store.promote_landed(35, attachment["id"], model, mine))
+    asyncio.run(store.release_promote(35, aid, model, "live"))
+    claim("mine")
+    asyncio.run(store.promote_landed(35, aid, model, "mine"))
     with pytest.raises(AlreadyPromotedError):
-        asyncio.run(store.claim_promote(35, attachment["id"], model, PROMOTE_LEASE))
+        claim("third")
+
+
+@respx.mock
+def test_an_operation_s_own_retry_takes_its_claim_back(client: TestClient, model: str) -> None:
+    """#3785 review: the claim is the operation's, so its retry after a worker crash is
+    not refused as "being copied already" by the claim its first attempt left."""
+    attachment, _ = _promote_ready(client, model)
+    store = _state(client).components.get(PRINT_ATTACHMENTS)
+
+    asyncio.run(store.claim_promote(35, attachment["id"], model, "op-1", PROMOTE_LEASE))
+    asyncio.run(store.claim_promote(35, attachment["id"], model, "op-1", PROMOTE_LEASE))
+    with pytest.raises(PromoteInProgressError):
+        asyncio.run(store.claim_promote(35, attachment["id"], model, "op-2", PROMOTE_LEASE))
 
 
 @respx.mock
@@ -700,7 +792,7 @@ def test_a_promote_whose_release_fails_still_reports_its_copy_s_error(
 
     assert failed.status_code >= 500, failed.text
     assert "the database went away" not in failed.text
-    assert any("could not release" in r.getMessage() for r in caplog.records)
+    assert any("could not settle" in r.getMessage() for r in caplog.records)
 
 
 @respx.mock
