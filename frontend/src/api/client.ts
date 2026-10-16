@@ -310,6 +310,8 @@ export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/** No Bambuddy URL is set (`bambuddy/errors.py` `NOT_CONFIGURED_PROBLEM`). */
+export const BAMBUDDY_NOT_CONFIGURED = 'https://scadbuddy.dev/problems/bambuddy-not-configured'
 /**
  * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
  * `needs_backfill` and `output_ids` names every one, to re-render before arranging.

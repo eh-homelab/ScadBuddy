@@ -42,7 +42,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
 import { retryFailedPages } from '../lib/lazyRetry'
-import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
+import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { Toasts } from './ui/Toasts'
@@ -177,6 +177,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #2372 — a reload reopens the panel this tab had open, once the assistant is known to
   // be there, without taking the focus from the page. Remembered from then on.
   const reopen = useRef<boolean | null>(panelWasOpen())
+  // #3164 — read before the `[open]` effect below saves the panel as open: the panel is
+  // a lazy chunk, so its chat first renders after that write and cannot read it itself.
+  // Once per page load on purpose: a panel remounted later on the same page (the assistant
+  // switched off and on) restores as the reload did, since this tab showed those chats.
+  const [wasReloaded] = useState(reloaded)
   useEffect(() => {
     if (reopen.current === null || !ai.available) return
     if (reopen.current) {
@@ -283,7 +288,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             href="#main"
             onClick={(event) => {
               event.preventDefault()
-              mainElement.current?.focus()
+              // Focusable only while the skip link has sent focus there (#3393): a
+              // permanent tabIndex would let any click on a bare spot of the page focus
+              // <main>, leaving document.activeElement on it instead of the body.
+              const main = mainElement.current
+              if (!main) return
+              main.tabIndex = -1
+              main.addEventListener('blur', () => main.removeAttribute('tabindex'), { once: true })
+              main.focus()
             }}
             className="sr-only z-50 rounded-md bg-popover px-3 py-2 text-sm text-popover-foreground focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:ring-2 focus:ring-ring"
           >
@@ -388,13 +400,12 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               <main
                 id="main"
                 ref={mainElement}
-                tabIndex={-1}
                 className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
               >
                 {/* #361 — the last resort: one page that throws never blanks the app, and
                     leaving it clears the error. What lands here is mostly a lazy chunk that
                     failed; `retryFailedPages` drops that failure, so coming back to the
-                    page imports it again (#3241). PageFailed's Reload does it at once. */}
+                    page imports it again (#3241). PageFailed's Reload reloads the whole page. */}
                 <ErrorBoundary
                   resetKey={location.pathname}
                   fallback={() => <PageFailed />}
@@ -426,6 +437,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                         embedded={embedded}
                         openRequest={openRequest}
                         onOpenHandled={openHandled}
+                        reloaded={wasReloaded}
                       />
                     </Suspense>
                   </ErrorBoundary>

@@ -1136,7 +1136,7 @@ async def _end_lost_runs_until(
     store: PrintRunStore,
     operations: OperationStore,
     stop: asyncio.Event,
-    where: Mapping[str, str] | None = None,
+    where: Mapping[str, str],
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one

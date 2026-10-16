@@ -7,8 +7,8 @@ import { libraryFiles, libraryFolders } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
-import { renderPage } from '../test/utils'
 import { NARROW_QUERY } from '../lib/useMediaQuery'
+import { renderPage } from '../test/utils'
 import { LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
@@ -566,6 +566,39 @@ describe('LibraryPage, item context (#975)', () => {
     expect(screen.getByTestId('library-folder-12')).toHaveAttribute('aria-selected', 'true')
     // The other MakerWorld, at the top, stays where it is.
     expect(screen.getByTestId('library-folder-1')).toHaveAttribute('aria-selected', 'false')
+  })
+
+  it('on a phone, reopening the folder tree puts its tab stop back on the open folder', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === NARROW_QUERY,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    try {
+      const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
+      expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+      const toggle = screen.getByRole('button', { name: /^Folder: Spec \/ MakerWorld \/ Work/ })
+      const tabStop = () =>
+        within(screen.getByRole('tree', { name: 'Library folders' }))
+          .getAllByRole('treeitem')
+          .find((item) => item.tabIndex === 0)
+
+      await user.click(toggle)
+      const open = tabStop()
+      expect(open).toHaveAttribute('aria-selected', 'true')
+      open!.focus()
+      await user.keyboard('{ArrowUp}')
+      expect(tabStop()).not.toBe(open)
+
+      // Folded with the button, not by choosing: reopening starts on the open folder again.
+      await user.click(toggle)
+      await user.click(toggle)
+      expect(tabStop()).toHaveAttribute('aria-selected', 'true')
+      expect(tabStop()?.dataset.testid).toBe(open?.dataset.testid)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('on a phone, folds the folder tree behind a button naming the open folder (#2368)', async () => {

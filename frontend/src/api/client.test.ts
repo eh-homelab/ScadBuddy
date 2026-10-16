@@ -1588,7 +1588,7 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
         // Only the settings reads count: another request first would take the hold (#3398).
         const url = input instanceof Request ? input.url : String(input)
-        if (new URL(url, 'http://x').pathname === '/api/v1/settings' && ++settingsSent === 1) {
+        if (new URL(url, location.href).pathname === '/api/v1/settings' && ++settingsSent === 1) {
           await new Promise((resolve) => setTimeout(resolve, 20))
         }
         return realFetch(input, init)

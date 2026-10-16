@@ -1,5 +1,5 @@
 import type { Sql } from 'postgres'
-import { type AuditContext, type AuditLog, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
+import { type AuditContext, type AuditSink, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { inputResolved } from '../gate/classic.js'
 import { isDoneSummary } from '../questions/waiting.js'
 import type { EventLog } from './eventLog.js'
@@ -31,7 +31,7 @@ export type SessionEditsDeps = {
   sql: Sql
   events: Pick<EventLog, 'append' | 'committed'>
   get: (id: string, principal: Owner) => Promise<SessionRecord>
-  audit?: AuditLog
+  audit?: AuditSink
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
   /** Ends a session's background tasks (src/background/) when it is archived or marked done. */

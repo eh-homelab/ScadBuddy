@@ -25,7 +25,7 @@ from test_session_runner import KEK, insert_gateway, running
 
 from scadbuddy_durable.secrets import Kek
 from scadbuddy_durable.session import subagents
-from scadbuddy_durable.session.runner import ScadBuddyRunner
+from scadbuddy_durable.session.runner import ScadBuddyRunner, _http_url, _url_problem
 
 # agent/src/temporal/subagentToken.ts with the key bytes 0..31, measured 2026-10-11 (tsx).
 TS_KEY = "bc894da44adc3eb7b9ae28157c522fa844548a85811fd015f3d5203ab63f4aa3"
@@ -382,3 +382,31 @@ async def test_a_workflow_agents_chat_runs_as_its_subagent_type(
     finally:
         fake.close()
         await asyncio.sleep(0)
+
+
+# _url_problem: why a stored subagent URL was refused (#3054). It is only for a URL
+# _http_url refused, which its one caller holds; pinned here, not asserted (#3765).
+@pytest.mark.parametrize(
+    ("value", "problem"),
+    [
+        ("file:///etc/passwd", "scheme 'file'"),
+        ("javascript:alert(1)", "scheme 'javascript'"),
+        ("ws://agent.svc/mcp", "scheme 'ws'"),
+        # urlsplit reads `localhost:8081/mcp`'s host as its scheme: not named.
+        ("localhost:8081/mcp", "no scheme"),
+        ("agent.svc/mcp", "no scheme"),
+        ("http:///mcp", "no host"),
+        ("http://[::1/mcp", "unparseable"),
+    ],
+)
+def test_url_problem_names_why_a_refused_url_was_refused(value: str, problem: str) -> None:
+    assert not _http_url(value)
+    assert _url_problem(value) == problem
+
+
+@pytest.mark.parametrize(
+    "value", ["http://agent.svc/mcp", "https://agent.svc:8443/internal/durable/mcp"]
+)
+def test_url_problem_is_never_needed_for_an_accepted_url(value: str) -> None:
+    """Accepted, so the worker never asks why: on one, it would wrongly read "no host"."""
+    assert _http_url(value)

@@ -76,6 +76,41 @@ describe('sweepErrorText', () => {
     expect(sweepErrorText(new Error('plain'))).toBe('plain')
     expect(sweepErrorText('text')).toBe('text')
   })
+
+  it('says how many more failed when a sweep threw several', () => {
+    const first = Object.assign(new Error('boom'), { query: 'UPDATE ai_approvals SET x = $1', parameters: ['secret-ish'] })
+    const several = new AggregateError([first, new Error('two'), new Error('three')], '3 approvals failed to expire')
+    expect(sweepErrorText(several)).toBe('boom (in: UPDATE ai_approvals SET x = $1) (and 2 more)')
+    expect(sweepErrorText(several)).not.toContain('secret-ish')
+  })
+})
+
+describe('the approval sweeper', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('skips a tick while the last sweep is still running', async () => {
+    vi.useFakeTimers()
+    let sweeps = 0
+    let finish: () => void = () => {}
+    const service = Object.create(ApprovalService.prototype) as ApprovalService
+    service.expireDue = () => {
+      sweeps += 1
+      return new Promise<number>((resolve) => {
+        finish = () => resolve(0)
+      })
+    }
+    const stop = service.startSweeper(100)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(sweeps).toBe(1)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(sweeps).toBe(1)
+    finish()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(sweeps).toBe(2)
+    stop()
+  })
 })
 
 describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
@@ -168,6 +203,50 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     // The failed one is tried again on the next sweep.
     expect(await m.approvals.expireDue()).toBe(1)
     expect((await decisions())[first.approval.id]).toBe('expired')
+  })
+
+  // #2382: a page of rows that keep failing never holds back the ones after it.
+  it('pages past due approvals that keep failing to the ones after them', async () => {
+    const stuck = [await orphan(), await orphan(agentB)]
+    const later = await orphan()
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id IN ${db.sql(stuck.map((o) => o.approval.id))}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
+    const failing = new Set(stuck.map((o) => o.session.id))
+    const append = m.events.append.bind(m.events)
+    m.events.append = async (sessionId, events, tx) => {
+      if (sessionId && failing.has(sessionId)) throw new Error('boom')
+      return append(sessionId, events, tx)
+    }
+    const thrown = await m.approvals.expireDue(2).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toHaveLength(2)
+    const [row] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${later.approval.id}`
+    expect(row!.decision).toBe('expired')
+  })
+
+  // #2949 review: one sweep takes a bounded number of pages; the next takes the rest.
+  it('leaves what is past its page budget to the next sweep, and says so', async () => {
+    const made = []
+    for (let i = 0; i < 5; i += 1) made.push(await orphan(i % 2 ? agentB : agentA))
+    // Oldest first: the last made is the newest due, and the one left over.
+    for (const [i, o] of made.entries()) {
+      await db.sql`UPDATE ai_approvals SET expires_at = now() - make_interval(secs => ${10 - i}) WHERE id = ${o.approval.id}`
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await m.approvals.expireDue(2, 2)).toBe(4)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('stopped at its cap of 2 pages of 2'))
+      const pending = await db.sql<{ id: string }[]>`SELECT id FROM ai_approvals WHERE decision IS NULL`
+      expect(pending.map((r) => r.id)).toEqual([made[4]!.approval.id])
+      warn.mockClear()
+      expect(await m.approvals.expireDue(2, 2)).toBe(1)
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {

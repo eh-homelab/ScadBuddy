@@ -12,6 +12,11 @@ import { pinnedFetch } from '../http/pinned.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
+import { SpanStatusCode } from '@opentelemetry/api'
+import { withSpan } from '../telemetry/trace.js'
+
+/** A recall's span, as the bank was asked (#2981 review). */
+export const RECALL_SPAN = 'agent.memory.recall'
 
 // Automatic Hindsight memory for assistant sessions: recall at each user
 // prompt, retain at each turn's end, without the model having to call the
@@ -696,7 +701,12 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       if (recalled && !recalled.failed) return recalled.output
       const mine: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } = {
         prompt: input.prompt,
-        output: recall(input, signal).then(({ output, failed }) => {
+        // Its own span, under the run: the turn's `memory` step only sets the hooks up (#2981 review).
+        output: withSpan(RECALL_SPAN, {}, async (span) => {
+          const answered = await recall(input, signal)
+          if (answered.failed) span.setStatus({ code: SpanStatusCode.ERROR })
+          return answered
+        }).then(({ output, failed }) => {
           if (failed) mine.failed = true
           return output
         }),

@@ -303,21 +303,15 @@ def test_a_replaced_state_keeps_its_components(
     assert copy.components.get(probe) == "probe"
 
 
-def test_the_lifespan_enters_a_discovered_components_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
-) -> None:
+def _lifespan_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str) -> FastAPI:
+    """An app for a lifespan test: no ``SCADBUDDY_*`` from the environment, the test
+    database, and a Temporal that is never reached."""
     for name in list(os.environ):
         if name.startswith("SCADBUDDY_"):
             monkeypatch.delenv(name)
-    log: list[str] = []
-    probe: Key[str] = Key("probe")
-    component = Component(
-        probe, build=lambda core, components: "probe", run=lambda value: _run(log, value)
-    )
-    monkeypatch.setattr(deps, "discover_components", lambda: [component])
     seed = tmp_path / "seed"
     seed.mkdir()
-    app = create_app(
+    return create_app(
         Settings(
             openscad=str(tmp_path / "no-openscad"),
             data_dir=tmp_path / "data",
@@ -328,6 +322,18 @@ def test_the_lifespan_enters_a_discovered_components_run(
             preview_renders=False,
         )
     )
+
+
+def test_the_lifespan_enters_a_discovered_components_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    log: list[str] = []
+    probe: Key[str] = Key("probe")
+    component = Component(
+        probe, build=lambda core, components: "probe", run=lambda value: _run(log, value)
+    )
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
     # Built with the state, before the app starts; run only once it does.
     assert state.components.get(probe) == "probe"
@@ -342,9 +348,6 @@ def test_a_component_that_raises_on_exit_still_lets_the_core_close(
 ) -> None:
     """#653: the error is raised, after the render queue's pool, the projection's and
     the settings store's are closed."""
-    for name in list(os.environ):
-        if name.startswith("SCADBUDDY_"):
-            monkeypatch.delenv(name)
     probe: Key[str] = Key("probe")
 
     @asynccontextmanager
@@ -354,19 +357,7 @@ def test_a_component_that_raises_on_exit_still_lets_the_core_close(
 
     component = Component(probe, build=lambda core, components: "probe", run=raises_on_exit)
     monkeypatch.setattr(deps, "discover_components", lambda: [component])
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    app = create_app(
-        Settings(
-            openscad=str(tmp_path / "no-openscad"),
-            data_dir=tmp_path / "data",
-            seed_models_dir=seed,
-            frontend_dir=Path("/nonexistent"),
-            database_url=pg_conninfo,
-            temporal_address=UNUSED_TEMPORAL_ADDRESS,
-            preview_renders=False,
-        )
-    )
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
     with pytest.raises(RuntimeError, match="on the way out"), TestClient(app):
         assert not state.projection._pool.closed
@@ -379,22 +370,7 @@ def test_a_core_close_that_raises_still_lets_the_rest_close(
 ) -> None:
     """#653 review: not only a component's exit; the render queue's close raising
     still closes the projection's pool and the settings store's after it."""
-    for name in list(os.environ):
-        if name.startswith("SCADBUDDY_"):
-            monkeypatch.delenv(name)
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    app = create_app(
-        Settings(
-            openscad=str(tmp_path / "no-openscad"),
-            data_dir=tmp_path / "data",
-            seed_models_dir=seed,
-            frontend_dir=Path("/nonexistent"),
-            database_url=pg_conninfo,
-            temporal_address=UNUSED_TEMPORAL_ADDRESS,
-            preview_renders=False,
-        )
-    )
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
     close_render = state.render.aclose
 
@@ -413,22 +389,7 @@ def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
 ) -> None:
     """#3125: stopping the in-process worker raising still closes the pools after it."""
-    for name in list(os.environ):
-        if name.startswith("SCADBUDDY_"):
-            monkeypatch.delenv(name)
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    app = create_app(
-        Settings(
-            openscad=str(tmp_path / "no-openscad"),
-            data_dir=tmp_path / "data",
-            seed_models_dir=seed,
-            frontend_dir=Path("/nonexistent"),
-            database_url=pg_conninfo,
-            temporal_address=UNUSED_TEMPORAL_ADDRESS,
-            preview_renders=False,
-        )
-    )
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
 
     async def idles(
