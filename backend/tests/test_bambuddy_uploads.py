@@ -11,7 +11,6 @@ import pytest
 
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
-    DatabaseRequiredError,
     LibraryCopy,
     SlicedCopy,
 )
@@ -147,14 +146,6 @@ async def test_deleting_an_output_deletes_only_its_rows(
     assert row is not None and row[0] == 0
 
 
-async def test_without_a_database_every_use_says_so() -> None:
-    uploads = BambuddyUploadStore(None)
-    with pytest.raises(DatabaseRequiredError, match="SCADBUDDY_DATABASE_URL"):
-        await uploads.for_output(OUTPUT)
-    with pytest.raises(DatabaseRequiredError):
-        await uploads.record(OUTPUT, copy(11))
-
-
 @pytest.mark.requires_postgres
 async def test_delete_outputs_takes_several_at_once(uploads: BambuddyUploadStore) -> None:
     await uploads.record(OUTPUT, copy(11))
@@ -168,3 +159,62 @@ async def test_delete_outputs_takes_several_at_once(uploads: BambuddyUploadStore
         OTHER: [],
         "c" * 32: [copy(13)],
     }
+
+
+@pytest.mark.requires_postgres
+async def test_a_library_file_resolves_to_the_output_that_uploaded_it(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#1864: Arrange reads a generated library file's objects through its output; a
+    file two outputs record is the later upload's."""
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record(OTHER, copy(12))
+    await uploads.record(OUTPUT, copy(12))
+
+    assert await uploads.outputs_for_files([11, 12, 13]) == {11: OUTPUT, 12: OUTPUT}
+    assert await uploads.outputs_for_files([]) == {}
+
+
+@pytest.mark.requires_postgres
+async def test_folderless_projects_match_by_name_and_parent_newest_first(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2263: a project created here whose folder failed, found again by the create it
+    came from — the same name under the same parent, a top-level one included."""
+    await uploads.remember_folderless(7, "Fidget", None)
+    await uploads.remember_folderless(8, "Fidget", None)
+    await uploads.remember_folderless(9, "Fidget", 2)
+
+    assert await uploads.folderless("Fidget", None) == [8, 7]
+    assert await uploads.folderless("Fidget", 2) == [9]
+    assert await uploads.folderless("Gifts", None) == []
+
+    await uploads.forget_folderless(8)
+    await uploads.forget_folderless(8)  # forgetting one not recorded is not an error
+    assert await uploads.folderless("Fidget", None) == [7]
+
+
+@pytest.mark.requires_postgres
+async def test_copies_are_found_by_what_they_hold_and_told_apart_when_shared(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2476: identical outputs' copies are found by content, and a copy recorded under
+    two outputs is shared; re-recording without a key keeps the one it had."""
+    await uploads.record("a" * 32, copy(41).model_copy(update={"content_key": "sha256:x"}))
+    await uploads.record("b" * 32, copy(42).model_copy(update={"content_key": "sha256:y"}))
+    await uploads.record(
+        "c" * 32, copy(43, folder_id=3).model_copy(update={"content_key": "sha256:x"})
+    )
+    found = await uploads.same_content(2, "H2D", "sha256:x")
+    assert [(owner, found.id) for owner, found in found] == [("a" * 32, 41)]
+    assert await uploads.same_content(2, "H2C", "sha256:x") == []
+
+    await uploads.record("b" * 32, copy(41))
+    # Of each output's own copies, those another output has too.
+    assert await uploads.shared([41], "a" * 32) == {41}
+    assert await uploads.shared([42], "b" * 32) == set()
+    [kept] = [c for c in await uploads.for_output("b" * 32) if c.id == 41]
+    assert kept.content_key is None
+    await uploads.record("a" * 32, copy(41))
+    [still] = await uploads.same_content(2, "H2D", "sha256:x")
+    assert still[1].content_key == "sha256:x"

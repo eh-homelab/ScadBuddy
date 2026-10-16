@@ -1,7 +1,9 @@
 import { z } from 'zod'
 import { PairingError } from '../bridge/pairings.js'
-import type { BrowserTarget, HubErrorCode } from '../bridge/hub.js'
+import { type BrowserStatus, type BrowserTarget, CALL_TIMEOUT_MS, type HubErrorCode } from '../bridge/hub.js'
+import { TAB_WAIT_S } from '../sessions/manager.js'
 import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
+import { errorName } from '../telemetry/scrub.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
 // ScadBuddy tab, driven through the same handlers user input goes through
@@ -25,8 +27,8 @@ import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolCo
 // (frontend dom.ts `USER_ONLY`), so a human presses them, exactly as in the UI.
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
-// tab on purpose. And not the headless browser (#349, harness/headlessBrowser.ts),
-// a separate Chromium that never sees the user's tab.
+// tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
+// Settings → Plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =
@@ -41,6 +43,7 @@ export type TabTool =
   | 'navigate'
   | 'snapshot'
   | 'click'
+  | 'highlight'
   | 'fill'
   | 'search'
   | 'open_model'
@@ -101,13 +104,48 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
     ...(spec.summarize ? { summarize: spec.summarize } : {}),
     routes: [],
     source: SOURCE,
+    // The call, a wait for the tab to come back, and the call once more (#815 §2).
+    waitsMs: (args) => {
+      const input = args as Record<string, unknown>
+      const call = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : CALL_TIMEOUT_MS
+      return 2 * call + TAB_WAIT_S * 1000
+    },
     handler: async (args, ctx) => {
       const input = args as Record<string, unknown>
       const wait = typeof input.timeout_ms === 'number' ? input.timeout_ms + ROUND_TRIP_MARGIN_MS : undefined
-      const outcome = await tabs(ctx).call(target(ctx), spec.tool, input, {
-        signal: ctx.signal,
-        ...(wait === undefined ? {} : { timeoutMs: wait }),
-      })
+      const call = () =>
+        tabs(ctx).call(target(ctx), spec.tool, input, { signal: ctx.signal, ...(wait === undefined ? {} : { timeoutMs: wait }) })
+      let outcome = await call()
+      // #815 §2: in a session the user owns, a call that finds no tab waits for
+      // it as an attention request. When the tab is back, a read runs once more
+      // (once only: a tab that came back and dropped again is not waited for twice).
+      // A write or outward call is never re-run: the page may have reloaded or
+      // changed while the tab was away, and an outward call's approval was given
+      // for the page as it was. The model re-checks the page and calls again.
+      if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
+        const waited = await ctx.waitForTab({
+          tool: `browser_${spec.tool}`,
+          toolUseId: ctx.toolUseId,
+          signal: ctx.signal,
+          isBack: async (signal) => (await tabs(ctx).status(target(ctx), { signal })).attached,
+        })
+        if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
+        if (spec.risk !== 'read') {
+          // reconnected() runs on whichever replica saw the tab, so "reconnected"
+          // here does not mean this replica has it. Inviting a retry would only
+          // open a wait that cannot end reconnected here (#1393): say so instead,
+          // in the hub's own words for why there is none (#1410).
+          if (waited.why === 'reconnected') {
+            const here = await statusHere(ctx)
+            if (here && !here.attached) throw new ToolError(`${here.reason} ${WHY_STILL_GONE.reconnected}`)
+          }
+          throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
+        }
+        outcome = await call()
+        if (!outcome.ok && outcome.error.code === 'no_browser') {
+          throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
+        }
+      }
       if (outcome.ok) return json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).
@@ -116,6 +154,42 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       throw new ToolError(`the tab answered ${spec.tool} with ${code}`, undefined, detail)
     },
   })
+}
+
+/**
+ * The tab's status here, or undefined when the check itself failed (a pool or
+ * connection error in the pairing lookup, #1410). A failed re-check must not
+ * turn the not-run guidance into an unexpected error: the caller then words it
+ * as if the tab might be here, and the model re-checks with browser_status.
+ */
+async function statusHere(ctx: ToolContext): Promise<BrowserStatus | undefined> {
+  try {
+    return await tabs(ctx).status(target(ctx), { signal: ctx.signal })
+  } catch (err) {
+    if (ctx.signal.aborted) throw err
+    // #1814: a pool that keeps failing re-checks shows in the logs. Only the error's
+    // name: its message can quote a connection string or a query (telemetry/scrub.ts).
+    console.warn(`browser tools: re-checking the tab after its wait failed (${errorName(err)})`)
+    return undefined
+  }
+}
+
+/** #815 §2: a write or outward call that waited for the tab is not re-run when it is back. */
+export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): string {
+  const ended =
+    why === 'reconnected' ? 'the session has a connected tab again' : 'the user said they are back (a tab may not be attached yet)'
+  return (
+    `${ended}, but ${tool} was not run: the page may have reloaded or changed while the tab was away. ` +
+    `Re-check the page (browser_status, then browser_snapshot) and call ${tool} again if it is still what you want.`
+  )
+}
+
+/** Why a read retried after a tab wait can still find no tab here. */
+const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
+  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #1916), so it dropped again,
+  // or the replica holding it did not answer.
+  reconnected: 'The session\'s tab reconnected, but it cannot be reached now: it may have dropped again.',
+  user_back: 'The user said they were back, but no tab is attached here yet.',
 }
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */
@@ -227,6 +301,19 @@ export const browserTools: Tool[] = [
     risk: 'write',
   }),
   forwarded({
+    tool: 'highlight',
+    description:
+      PREFIX +
+      'point at the visible element with this ARIA role and accessible name: it scrolls into view and is ' +
+      'outlined for a moment, so the user can see what you are explaining. Changes nothing.',
+    input: z.object({
+      role: z.string().min(1).describe('ARIA role, e.g. "button", "link", "tab", "checkbox"'),
+      name: z.string().describe('Accessible name, matched exactly (case-insensitive)'),
+      index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
+    }),
+    risk: 'read',
+  }),
+  forwarded({
     tool: 'fill',
     description:
       PREFIX +
@@ -306,8 +393,16 @@ export const browserTools: Tool[] = [
     description:
       PREFIX +
       'in the customizer, save the settled render as an output (the Generate button). Needed before the print ' +
-      'or send dialog can open.',
-    input: z.object({ timeout_ms: waitMs(120_000, 30_000) }),
+      'or send dialog can open. A result with superseded: true was saved, but the template UI state moved ' +
+      "while it saved, so it is not the output on screen: generate again once the inputs are settled. It files " +
+      "the 3MF in the Project picker's project; when that is not the project this model (with the preset in " +
+      'use) was last filed in, it saves nothing and the error names both: call again with project_id set to ' +
+      'the one meant (null for no project; an id list_print_projects does not list is refused), which also ' +
+      'moves the picker there.',
+    input: z.object({
+      timeout_ms: waitMs(120_000, 30_000),
+      project_id: z.number().int().nullable().optional().describe('The project to file in, past the remembered-project check'),
+    }),
     risk: 'write',
   }),
   forwarded({

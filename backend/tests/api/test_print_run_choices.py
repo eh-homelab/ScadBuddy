@@ -25,6 +25,9 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
+from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
+from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
@@ -36,6 +39,7 @@ from tests.api.test_print_filaments import (
     prepared,
     queue_route,
     slice_routes,
+    slots_from_bambuddy,
 )
 from tests.api.test_send import (
     BASE,
@@ -46,6 +50,7 @@ from tests.api.test_send import (
     upload_route,
 )
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 # A run and the dialog both read or record the output's upload copies (#316), which
@@ -118,8 +123,10 @@ def allow_reprints(client: TestClient) -> None:
     state.print_runs.store.repeat_window = timedelta(0)
 
 
-def follow_run(client: TestClient, run_id: str, *, timeout: float = 10.0) -> dict[str, Any]:
-    """Read ``GET /print/runs/{id}`` until the run has ended; its last answer (#470)."""
+def follow_run(client: TestClient, run_id: str, *, timeout: float = 60.0) -> dict[str, Any]:
+    """Read ``GET /print/runs/{id}`` until the run has ended; its last answer (#470).
+    ``timeout`` only catches a run that never ends: a loaded machine takes far longer
+    than an idle one, and the test asserts the end, not how soon it came."""
     deadline = time.monotonic() + timeout
     while True:
         response = client.get(f"/api/v1/print/runs/{run_id}")
@@ -131,15 +138,29 @@ def follow_run(client: TestClient, run_id: str, *, timeout: float = 10.0) -> dic
         time.sleep(0.02)
 
 
+#: How many times `run_print` sends a run again that the route answers still-accepting:
+#: counted, not timed, as this host's clocks step.
+STILL_ACCEPTING_RESENDS = 30
+
+
 def run_print(client: TestClient, output_id: str, *, json: dict[str, Any]) -> httpx.Response:
     """``POST .../run``, followed to its end, answered as the route did before #470.
 
     A refusal made before the 202 comes back as it is. A run that succeeds is its
     ``result`` with a 200, and one that failed is its ``error``, with the status that
     error carries, so a test reads the outcome the same way whichever side of the 202
-    decided it.
+    decided it. A ``command-still-accepting`` 503 is sent again, as the clients do:
+    on a loaded host the last run's execution may outlive the route's wait for it to
+    close (``CLOSING_WAIT``), and the request that follows starts the new run.
     """
-    started: httpx.Response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=json)
+    for resends in range(STILL_ACCEPTING_RESENDS + 1):
+        started: httpx.Response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=json)
+        still_accepting = (
+            started.status_code == 503 and started.json().get("type") == STILL_ACCEPTING_PROBLEM
+        )
+        if not still_accepting or resends == STILL_ACCEPTING_RESENDS:
+            break
+        time.sleep(float(started.headers.get("retry-after", "1")))
     if started.status_code not in (200, 202):
         return started
     run = follow_run(client, started.json()["id"])
@@ -190,6 +211,10 @@ def test_a_templates_print_settings_reach_the_slice(
     declare_print_settings(paths, model, {"enable_support": "0", "enable_prime_tower": "1"})
     upload_route()
     run_routes()
+    # A support setting is written in the preset's shape, so the preset is read (#1899).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {"enable_support": "0"}})
+    )
     sliced = slice_routes()
     queue_route()
 
@@ -223,6 +248,27 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
         "enable_prime_tower": "1",
         "print_sequence": "by object",
     }
+
+
+@respx.mock
+def test_a_templates_by_object_default_is_checked_as_by_object(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2976: a template that prints by object, with nothing chosen in the dialog, is
+    checked by object: its objects are counted, as a by-layer print's are not."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    by_layer = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    declare_print_settings(paths, model, {"print_sequence": "by object"})
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert by_layer.status_code == 200, by_layer.text
+    assert by_layer.json()["objects"] is None
+    assert check.status_code == 200, check.text
+    assert check.json()["objects"] == 1
+    assert "print_sequence" not in body()
 
 
 @respx.mock
@@ -354,13 +400,15 @@ def test_every_slot_refused_is_a_422_with_nothing_sliced(client: TestClient, mod
 
 
 @respx.mock
-def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
+def test_high_flow_slices_as_high_flow_with_bambus_own_preset(
     client: TestClient, model: str
 ) -> None:
-    """Spec §4.1: Bambuddy refuses a ScadBuddy-made printer preset, so High Flow slices
-    as Bambu's own 0.4 preset, and the result carries the warning."""
+    """#484: Bambuddy refuses a ScadBuddy-made printer preset (spec §4.1), so High Flow
+    still names Bambu's own 0.4 preset; the flow goes in the uploaded 3MF, per extruder
+    in the slicer's order (the dialog's left first), as Bambu Studio writes it. Nothing
+    says it slices as Standard any more."""
     output_id = prepared(client, model)
-    upload_route()
+    upload = upload_route()
     run_routes()
     sliced = slice_routes()
     queue_route()
@@ -376,7 +424,8 @@ def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
         "source": "cloud",
         "id": "GM041",
     }
-    assert "hf-unsupported" in {warning["kind"] for warning in response.json()["warnings"]}
+    assert _uploaded_settings(upload)["nozzle_volume_type"] == ["High Flow", "Standard"]
+    assert not NOZZLE_KINDS & {warning["kind"] for warning in response.json()["warnings"]}
 
 
 @respx.mock
@@ -714,7 +763,9 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
         "job_id"
     ]
     wait_for_job(client, job_id)
-    output_id = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()["id"]
+    output_id = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
     upload = upload_route()
     slice_routes()
     queue_route()
@@ -829,10 +880,11 @@ def two_plate_output(client: TestClient, model: str, paths: DataPaths) -> str:
 
 @respx.mock
 def test_the_all_plates_filament_read_offers_every_plates_slots(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Spec §2 step 1: one row per colour in the model. Plate 1 alone would never show
     slot 2, which only plate 2 uses."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -849,11 +901,68 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
-def test_the_all_plates_filament_read_reads_the_spools_once(
+def test_the_all_plates_filament_read_offers_every_plates_slots_from_the_outputs_own_3mf(
     client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720: an output's slots are read per plate from its own 3MF, with nothing
+    uploaded to Bambuddy and none of its per-plate reads asked. The demo model is one
+    colour and ``add_plate``'s second plate is empty, so the file says slot 1 for every
+    plate; ``split_plates_routes`` would have answered slot 2 for plate 2 had it been asked."""
+    output_id = two_plate_output(client, model, paths)
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    one = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    every = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    ).json()
+
+    assert [slot["slot_id"] for slot in one["slots"]] == [1]
+    assert [slot["slot_id"] for slot in every["slots"]] == [1]
+    assert not uploaded.called
+    assert not [c for c in respx.calls if c.request.url.path.endswith("/filament-requirements")]
+
+
+@respx.mock
+def test_the_all_plates_local_read_combines_every_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720, the #2780 review: plate 1 uses slot 1 and plate 2 slot 2, so the whole
+    file's read from the output's own 3MF must offer both, and each plate its own."""
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    body = ColourPart(1, "Body", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
+    lid = ColourPart(2, "Lid", "#0047BB", trimesh.creation.box(extents=(12, 12, 2)))
+    write_plates_3mf(
+        [PlateParts((body,), (1,)), PlateParts((lid,), (2,))],
+        ["#FF0000", "#0047BB"],
+        output_3mf,
+        thumbnails=None,
+    )
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    def slots(query: str) -> list[int]:
+        answer = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1{query}")
+        assert answer.status_code == 200, answer.text
+        return [slot["slot_id"] for slot in answer.json()["slots"]]
+
+    assert slots("&plate_id=1") == [1]
+    assert slots("&plate_id=2") == [2]
+    assert slots("&all_plates=true") == [1, 2]
+    assert not uploaded.called
+
+
+@respx.mock
+def test_the_all_plates_filament_read_reads_the_spools_once(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two plates, one spool inventory: the spools are the same for every plate, so an
     all-plates read asks for them once (#480)."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -1126,8 +1235,11 @@ def test_one_matching_nozzle_prints_two_colours_whose_spools_are_on_its_side(
 
     assert response.status_code == 200, response.text
     assert upload.called
-    # Every filament on one extruder, as Bambu Studio saved the test print (#768).
-    assert _uploaded_settings(upload)["filament_map"] == ["1", "1"]
+    # Every filament on the one nozzle of the size (#768), stated in Manual mode (#2166):
+    # the slicer numbers its extruders left (1) then right (2).
+    settings = _uploaded_settings(upload)
+    assert settings["filament_map"] == ["2", "2"]
+    assert settings["filament_map_mode"] == "Manual"
     assert not NOZZLE_KINDS & _kinds(response)
 
 
@@ -1223,50 +1335,130 @@ def test_a_single_nozzle_printers_other_size_is_not_refused(client: TestClient, 
     assert upload.called
 
 
-HF_LEFT = (
-    "The left nozzle is High Flow and this print is sliced for Standard flow (High Flow "
-    "slicing isn't supported yet, #484), so if it prints on the left, the printer pauses "
-    'at the first layer ("the left nozzle is not matched with slicing file"). Fit a '
-    "standard nozzle there before it starts."
-)
+def _run_on(
+    client: TestClient, model: str, paths: DataPaths, status: dict[str, Any], **choices: Any
+) -> tuple[httpx.Response, respx.Route]:
+    """:func:`_two_colour_run` on printer 1 reporting ``status``, set after the routes
+    that record its own."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**status)
+    slice_routes()
+    queue_route()
+    response = run_print(
+        client, output_id, json={**body(tier="standard", **choices), "filament_plan": BOTH_ON_RIGHT}
+    )
+    return response, upload
 
 
 @respx.mock
-def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_not_refused(
+def test_a_mounted_high_flow_nozzle_the_slice_is_not_offered_is_not_warned_about(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#723, kept by the owner's ruling on #772: queue item 149 paused on a High Flow
-    left sliced as standard. A print may be set up before its nozzle is fitted, so it is
-    a warning, and the only mounted-nozzle one left."""
-    _status(**BOTH_04_LEFT_HF)
-    response, _ = _two_colour_run(
-        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
-    )
+    """#484: queue item 149 paused on a High Flow left sliced as Standard (#723, #797).
+    The file now states the flow, and with Standard chosen it offers the slicer only the
+    standard right (#834), so the left is never printed with and nothing is warned of."""
+    response, upload = _run_on(client, model, paths, BOTH_04_LEFT_HF, nozzles=[{"size": "0.4"}])
 
     assert response.status_code == 200, response.text
-    warnings = [(w["kind"], w["message"]) for w in response.json()["warnings"]]
-    assert ("hf-mounted", HF_LEFT) in warnings
-    assert "side-unknown" not in _kinds(response)
+    assert not NOZZLE_KINDS & _kinds(response)
+    settings = _uploaded_settings(upload)
+    assert settings["nozzle_volume_type"] == ["Standard", "Standard"]
+    assert settings["extruder_nozzle_stats"] == ["Standard#0", "Standard#1"]
 
 
 @respx.mock
-def test_the_high_flow_warning_changes_nothing_the_run_sends(
+def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#797: the advisory never refuses, and the upload is the one a standard left gets."""
-    _status(**{**BOTH_04_LEFT_HF, "nozzles": [BOTH_04_LEFT_HF["nozzles"][0]] * 2})
-    _, upload = _two_colour_run(
-        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
-    )
-    standard = _uploaded_settings(upload)
-    _status(**BOTH_04_LEFT_HF)
-    response, upload = _two_colour_run(
-        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
+    """#484 on queue item 149's printer: High Flow for the left, whose HH01 0.4 is the
+    flow chosen, and Standard for the right, whose HS01 and rack spares are. Both sides
+    can print as chosen, so the High Flow left is the side offered: left to choose, the
+    slicer put the print on the Standard right (live slices, 2026-10-06). The file says
+    which flow each side is."""
+    response, upload = _run_on(
+        client,
+        model,
+        paths,
+        BOTH_04_LEFT_HF,
+        nozzles=[{"size": "0.4", "flow": "high_flow"}, {"size": "0.4", "flow": "standard"}],
     )
 
     assert response.status_code == 200, response.text
-    assert "hf-mounted" in _kinds(response)
-    assert _uploaded_settings(upload) == standard
+    assert not NOZZLE_KINDS & _kinds(response)
+    settings = _uploaded_settings(upload)
+    assert settings["nozzle_volume_type"] == ["High Flow", "Standard"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        assert "Metadata/slice_info.config" not in archive.namelist()
+
+
+def _mounted(right: tuple[str, str], left: tuple[str, str]) -> dict[str, Any]:
+    """Status changes that mount ``right`` and ``left`` (a nozzle type and size each), the
+    rack saying the same of its two mounted hotends (ids 0 and 1). Its spares stay the
+    recorded 0.4s."""
+    nozzles = [{"nozzle_type": kind, "nozzle_diameter": size} for kind, size in (right, left)]
+    rack: list[dict[str, Any]] = recording("printer-status-rack.json")["nozzle_rack"]
+    for entry in rack:
+        if entry["id"] in (RIGHT, LEFT):
+            entry.update(nozzles[entry["id"]])
+    return {"nozzles": nozzles, "nozzle_rack": rack}
+
+
+#: The review of #1582: (a) Standard chosen, and the one side with a 0.2 has it High
+#: Flow, so that side is offered (#834); (b) High Flow chosen for the left and Standard
+#: for the right, with the 0.2s mounted the other way round, so neither side has its
+#: flow and the slicer may use either. Each: the status, the nozzles chosen, the sides
+#: warned of with the flow sliced there, and the file's nozzle stats and flows.
+FLOW_MISMATCHES = [
+    pytest.param(
+        _mounted(("HS01", "0.6"), ("HH01", "0.2")),
+        [{"size": "0.2"}],
+        [(LEFT, "standard")],
+        ["Standard#1", "Standard#0"],
+        ["Standard", "Standard"],
+        id="the-one-side-of-the-size",
+    ),
+    pytest.param(
+        _mounted(("HH01", "0.2"), ("HS00", "0.2")),
+        [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "standard"}],
+        [(RIGHT, "standard"), (LEFT, "high_flow")],
+        None,
+        ["High Flow", "Standard"],
+        id="neither-side-of-its-flow",
+    ),
+]
+
+
+def _high_flow(warnings: list[dict[str, Any]]) -> list[str]:
+    return [warning["message"] for warning in warnings if warning["kind"] == "hf-mounted"]
+
+
+@respx.mock
+@pytest.mark.parametrize(("status", "nozzles", "warned", "stats", "flows"), FLOW_MISMATCHES)
+def test_the_run_warns_of_a_side_it_may_print_on_whose_nozzle_is_the_other_flow(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    status: dict[str, Any],
+    nozzles: list[dict[str, str]],
+    warned: list[tuple[int, FlowType]],
+    stats: list[str] | None,
+    flows: list[str],
+) -> None:
+    """#723, #797 after #484: the file states each side's flow as chosen, and a side the
+    slicer may still use has the size mounted in the other flow, so the printer would
+    pause there at the first layer. A warning, and the file is the one sent anyway."""
+    response, upload = _run_on(client, model, paths, status, nozzles=nozzles)
+
+    assert response.status_code == 200, response.text
+    assert _high_flow(response.json()["warnings"]) == [
+        high_flow_warning(side, flow).message for side, flow in warned
+    ]
+    settings = _uploaded_settings(upload)
+    assert settings.get("extruder_nozzle_stats") == stats
+    assert settings["nozzle_volume_type"] == flows
 
 
 @respx.mock
@@ -1352,91 +1544,56 @@ def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response
 
 
 @respx.mock
-def test_the_check_carries_the_high_flow_warning(
-    client: TestClient, model: str, paths: DataPaths
+@pytest.mark.parametrize("flow", ["standard", "high_flow"])
+@pytest.mark.parametrize(
+    "status",
+    [BOTH_04_LEFT_HF, {"nozzles": [BOTH_04_LEFT_HF["nozzles"][0]] * 2}],
+    ids=["left-high-flow", "both-standard"],
+)
+def test_the_check_says_nothing_of_the_mounted_nozzles_flow(
+    client: TestClient, model: str, paths: DataPaths, status: dict[str, Any], flow: str
 ) -> None:
-    """#723, #797: a mounted High Flow nozzle of the chosen size is said before Print,
-    as a warning that holds nothing."""
+    """#484: the slice states the flow chosen and is offered a side with it (#834), or the
+    rack picks the right a hotend of it (#1238), so neither the mounted High Flow nozzle
+    (#723, #797) nor a High Flow choice (#862) is warned about before Print."""
     output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
-    _status(**BOTH_04_LEFT_HF)
+    _status(**status)
 
-    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "standard"}])
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": flow}])
 
     assert check.status_code == 200, check.text
-    assert (check.json()["errors"], check.json()["warnings"]) == (
-        [],
-        [{"kind": "hf-mounted", "slot_id": None, "message": HF_LEFT}],
-    )
+    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
     assert not upload.called
 
 
 @respx.mock
-def test_the_check_says_nothing_of_standard_mounted_nozzles(
-    client: TestClient, model: str, paths: DataPaths
+@pytest.mark.parametrize(("status", "nozzles", "warned", "stats", "flows"), FLOW_MISMATCHES)
+def test_the_check_warns_of_a_side_the_slice_may_use_whose_nozzle_is_the_other_flow(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    status: dict[str, Any],
+    nozzles: list[dict[str, str]],
+    warned: list[tuple[int, FlowType]],
+    stats: list[str] | None,
+    flows: list[str],
 ) -> None:
+    """The run's warning above, said before Print, and nothing refused (#797)."""
     output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
     run_routes()
-    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
+    _status(**status)
 
-    check = _check(client, output_id, nozzles=[{"size": "0.4"}])
+    check = _check(client, output_id, nozzles=nozzles)
 
     assert check.status_code == 200, check.text
-    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
-
-
-@respx.mock
-def test_the_check_carries_the_high_flow_warning_when_high_flow_is_chosen(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
-    of a mounted High Flow nozzle of the chosen size."""
-    output_id = two_colour_output(client, model, paths)
-    run_routes()
-    _status(**BOTH_04_LEFT_HF)
-
-    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
-
-    assert check.status_code == 200, check.text
-    assert "hf-mounted" in {warning["kind"] for warning in check.json()["warnings"]}
-
-
-@respx.mock
-def test_the_check_does_not_carry_the_resolvers_high_flow_note(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """#862: the resolver's own ``hf-unsupported`` note (Bambuddy always slices High
-    Flow as Standard) is left to the run and the nozzle step, not the pre-Print check —
-    with Standard nozzles mounted, the check says nothing even when High Flow is
-    chosen."""
-    output_id = two_colour_output(client, model, paths)
-    run_routes()
-    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
-
-    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
-
-    assert check.status_code == 200, check.text
-    assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
-
-
-@respx.mock
-def test_the_runs_result_still_carries_the_resolvers_high_flow_note(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """#862: unlike the check above, the run itself still says it, from the resolver."""
-    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
-    response, _ = _two_colour_run(
-        client,
-        model,
-        paths,
-        BOTH_ON_RIGHT,
-        nozzles=[{"size": "0.4", "flow": "high_flow"}],
-        tier="standard",
-    )
-
-    assert response.status_code == 200, response.text
-    assert "hf-unsupported" in _kinds(response)
+    assert check.json()["errors"] == []
+    assert _high_flow(check.json()["warnings"]) == [
+        high_flow_warning(side, flow).message for side, flow in warned
+    ]
+    assert not upload.called
 
 
 @respx.mock
@@ -1478,7 +1635,13 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
 
     assert check.status_code == 200, check.text
     assert run.status_code == 422, run.text
-    assert check.json() == {"errors": [run.json()["detail"]], "warnings": [], "rack": None}
+    assert check.json() == {
+        "errors": [run.json()["detail"]],
+        "warnings": [],
+        "rack": None,
+        "nozzle_plan": None,
+        "objects": None,
+    }
     assert not uploaded.called
     assert not sliced.called
 
@@ -1504,6 +1667,43 @@ def test_the_check_gives_the_runs_printer_refusal_word_for_word(
         "Workshop is deactivated in Bambuddy. Activate it there, or pick another printer."
     ]
     assert not uploaded.called
+
+
+@pytest.mark.parametrize("plate", ["Cool Plate", "Smooth PEI Plate", "High Temp Plate"])
+@respx.mock
+def test_the_check_warns_of_a_plate_the_printer_does_not_take(
+    client: TestClient, model: str, plate: str
+) -> None:
+    """#2366: the check answered nothing for a plate the H2C does not take."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type=plate))
+
+    assert check.status_code == 200, check.text
+    assert [w["kind"] for w in check.json()["warnings"]].count("plate-not-listed") == 1
+    fine = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type="Supertack Plate")
+    )
+    assert "plate-not-listed" not in [w["kind"] for w in fine.json()["warnings"]]
+
+
+@respx.mock
+def test_a_run_records_a_plate_the_printer_does_not_take(client: TestClient, model: str) -> None:
+    """#2858: the run's warnings, not only the check's, name a plate the H2C does not
+    take, judged against the printer's model as the run resolved it."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(bed_type="Cool Plate"))
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "plate-not-listed"]
+    assert "does not list Cool Plate among its plates" in warning["message"]
 
 
 @respx.mock
@@ -1670,3 +1870,87 @@ def test_a_rack_warning_repeated_on_every_plate_is_shown_once(
     kinds = [w["kind"] for w in response.json()["warnings"]]
     assert kinds.count("rack-unsafe-material") == 1
     assert "rack-left-to-bambuddy" not in kinds
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("plan", "overrides", "detail"),
+    [
+        ([], {}, "Slot 1 has no spool chosen."),
+        ([{"slot_id": 1, "spool_id": 9}], {}, "Slot 2 has no spool chosen."),
+        (
+            [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 99999}],
+            {},
+            "Slot 2 has no spool chosen.",
+        ),
+        (None, {"1": {"source": "cloud", "id": "NOPE"}}, "slot 1"),
+    ],
+    ids=["no-slot-picked", "slot-2-unpicked", "unknown-spool", "unknown-override"],
+)
+def test_a_slot_error_is_the_checks_error_too(
+    client: TestClient,
+    model: str,
+    plan: list[dict[str, int]] | None,
+    overrides: dict[str, Any],
+    detail: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1050: ``/check`` judged only what the choices decide, so a plan the run refuses
+    by its slots (no spool, a spool Bambuddy lacks, an override it lacks) passed the
+    check, and the run then uploaded the file and failed after its 202. The check now
+    makes the run's own slot refusal, in the run's words."""
+    slots_from_bambuddy(monkeypatch)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    request = body(filament_overrides=overrides)
+    if plan is not None:
+        request["filament_plan"] = {"slots": plan}
+    # The dialog reads the choices first, which gives Bambuddy the copy the check reads.
+    read = client.get(f"/api/v1/print/outputs/{output_id}/filaments", params={"printer_id": 1})
+    assert read.status_code == 200, read.text
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    run = run_print(client, output_id, json=request)
+
+    assert run.status_code == 422, run.text
+    assert detail in run.json()["detail"]
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [run.json()["detail"]]
+    assert not sliced.called
+
+
+@respx.mock
+def test_the_check_judges_an_outputs_slots_with_nothing_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """#2720: the check read slots only from a copy the dialog's choices had uploaded,
+    and passed a plan it could not judge. An output's slots are its own 3MF's now, so
+    it judges them with no copy in Bambuddy and uploads nothing."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(), "filament_plan": {"slots": []}}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == ["Slot 1 has no spool chosen."]
+    assert not upload.called
+
+
+@respx.mock
+def test_a_plan_the_run_accepts_has_no_check_error(client: TestClient, model: str) -> None:
+    """#1050: the slot judgement adds no error to a plan every slot of which resolves."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    read = client.get(f"/api/v1/print/outputs/{output_id}/filaments", params={"printer_id": 1})
+    assert read.status_code == 200, read.text
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []

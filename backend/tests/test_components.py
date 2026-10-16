@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import sys
 import textwrap
 from collections.abc import AsyncIterator, Iterator
@@ -15,9 +17,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy
-from scadbuddy.api import deps
+from scadbuddy import main
+from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.components import (
     Component,
     ComponentCycleError,
@@ -29,8 +32,11 @@ from scadbuddy.core.components import (
 )
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import operations as library_operations
 from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.operations.kinds import DuplicateKindError, OperationKind, build_kinds
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 #: A stand-in: these tests only check that `build` is handed the core it was given.
@@ -214,12 +220,6 @@ def _app(registry: Components) -> FastAPI:
     def word(value: Annotated[str, component_dep(WORD)]) -> str:
         return value
 
-    @app.get("/maybe")
-    def maybe(
-        value: Annotated[str, component_dep(MAYBE, required="maybe needs a database")],
-    ) -> str:
-        return value
-
     return app
 
 
@@ -232,20 +232,6 @@ def test_component_dep_reads_the_registry_and_honours_dependency_overrides() -> 
         assert client.get("/word").json() == "built"
         app.dependency_overrides[getter_for(WORD)] = lambda: "overridden"
         assert client.get("/word").json() == "overridden"
-
-
-def test_a_required_component_that_is_none_answers_503() -> None:
-    registry = Components(CORE, [Component(MAYBE, build=lambda core, components: None)])
-    app = _app(registry)
-    with TestClient(app) as client:
-        response = client.get("/maybe")
-        assert response.status_code == 503
-        problem = response.json()
-        assert problem["type"] == DATABASE_REQUIRED_PROBLEM
-        assert problem["detail"] == "maybe needs a database"
-        # The required dependency reads the key's one getter, so its override counts too.
-        app.dependency_overrides[getter_for(MAYBE)] = lambda: "present"
-        assert client.get("/maybe").json() == "present"
 
 
 @pytest.fixture
@@ -349,3 +335,190 @@ def test_the_lifespan_enters_a_discovered_components_run(
     with TestClient(app):
         assert log == ["enter probe"]
     assert log == ["enter probe", "exit probe"]
+
+
+def test_a_component_that_raises_on_exit_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653: the error is raised, after the render queue's pool, the projection's and
+    the settings store's are closed."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    probe: Key[str] = Key("probe")
+
+    @asynccontextmanager
+    async def raises_on_exit(_value: str) -> AsyncIterator[None]:
+        yield
+        raise RuntimeError("lost its connection on the way out")
+
+    component = Component(probe, build=lambda core, components: "probe", run=raises_on_exit)
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    with pytest.raises(RuntimeError, match="on the way out"), TestClient(app):
+        assert not state.projection._pool.closed
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_a_core_close_that_raises_still_lets_the_rest_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653 review: not only a component's exit; the render queue's close raising
+    still closes the projection's pool and the settings store's after it."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    close_render = state.render.aclose
+
+    async def raises() -> None:
+        await close_render()
+        raise RuntimeError("render pool lost on the way out")
+
+    monkeypatch.setattr(state.render, "aclose", raises)
+    with pytest.raises(RuntimeError, match="render pool lost"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#3125: stopping the in-process worker raising still closes the pools after it."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+
+    async def idles(
+        _settings: object, _deps: object, _temporal: object, stop: asyncio.Event
+    ) -> None:
+        await stop.wait()
+
+    async def fails_to_stop(*_args: object) -> None:
+        raise RuntimeError("the worker would not stop")
+
+    async def no_queue_workers(_state: object, stop: asyncio.Event, _name: str) -> None:
+        await stop.wait()
+
+    # Only the in-process render worker runs; the queue workers stand down.
+    monkeypatch.setattr(state, "temporal", object())
+    monkeypatch.setattr(main, "_connect_until", no_queue_workers)
+    monkeypatch.setattr(main, "worker_deps_from_state", lambda _state: None)
+    monkeypatch.setattr(main, "run_inprocess_worker", idles)
+    monkeypatch.setattr(main, "_stop_worker", fails_to_stop)
+    with pytest.raises(RuntimeError, match="would not stop"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_build_state_alone_registers_every_features_operation_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 4: the kinds come from the features' registrations as the operations
+    component builds, so a state that never went through ``create_app`` has them."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    state = deps.build_state(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url="postgresql://unused@127.0.0.1:1/unused",
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    kinds = state.components.get(OPERATIONS).kinds
+    assert {"send", "reprint", "attach_project", "register_sidebar"} <= set(kinds)
+    with pytest.raises(TypeError):
+        kinds["late"] = kinds["send"]  # type: ignore[index]
+
+
+def test_two_features_claiming_one_kind_name_are_refused() -> None:
+    def kind(name: str) -> OperationKind:
+        async def step(*args: object) -> dict[str, object]:
+            return {}
+
+        return OperationKind(name, step, step)
+
+    with pytest.raises(DuplicateKindError, match="'send'"):
+        build_kinds(CORE, Components(CORE, []), [lambda c, cs: [kind("send")]] * 2)
+
+
+def test_the_model_kinds_refuse_a_core_that_is_not_the_app_state() -> None:
+    """Review #1126 1.2: their runs are the routes' bodies, which read services the
+    ``Core`` does not name; a core without them is refused when the kinds are built,
+    not with an ``AttributeError`` inside an operation."""
+    with pytest.raises(TypeError, match="AppState"):
+        library_operations.OPERATION_KINDS(CORE, Components(CORE, []))
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_a_kind_whose_effect_could_retry_forever_is_refused(attempts: int) -> None:
+    """Review #1063 fourth review 2: Temporal reads ``maximum_attempts=0`` as unlimited."""
+
+    async def step(*args: object) -> dict[str, object]:
+        return {}
+
+    with pytest.raises(ValueError, match="run_attempts"):
+        OperationKind("send", step, step, run_attempts=attempts)
+
+
+def test_the_docstrings_example_alias_exists() -> None:
+    """The module docstring shows a real feature's alias, not a removed one (#1706)."""
+    example = re.search(r"^\s+(\w+Dep) = Annotated\[", components.__doc__ or "", re.MULTILINE)
+    assert example is not None
+    aliases = {
+        line.split(" = ")[0]
+        for path in Path(scadbuddy.__file__).parent.glob("*/component.py")
+        for line in path.read_text().splitlines()
+        if " = Annotated[" in line
+    }
+    assert example.group(1) in aliases

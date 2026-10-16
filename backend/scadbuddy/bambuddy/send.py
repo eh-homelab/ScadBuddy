@@ -9,28 +9,42 @@ a FastAPI app, and so the route stays a thin adapter. The send bar only uploads
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
+import json
 import logging
 import weakref
-from collections.abc import Sequence
+import zipfile
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal, NamedTuple
 
 from fastapi import status
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
-from scadbuddy.bambuddy.models import ExternalLink
+from scadbuddy.bambuddy.extruders import VOLUME_TYPE
+from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, download_filename
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import replate_3mf
+from scadbuddy.render.bambu3mf import (
+    PROJECT_SETTINGS_NAME,
+    ArchiveTooLargeError,
+    FilamentMap,
+    layout_of,
+    replate_3mf,
+    state_nozzles,
+)
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
+from scadbuddy.render.provenance import content_key
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import normalise_colour
 
@@ -63,6 +77,8 @@ class SendResult(BaseModel):
     bambuddy_url: str | None = None
     #: The "Edit in ScadBuddy" link attached to the library file, when one is known.
     edit_url: str | None = None
+    #: Uploaded by this send, rather than a copy already in the inbox reused (#931).
+    created: bool
 
 
 class SidebarLink(BaseModel):
@@ -78,19 +94,60 @@ class SidebarLink(BaseModel):
     embed_path: str
 
 
-def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
-    path: Path = store.directory(meta.id) / MODEL_NAME
-    if not path.is_file():
+async def read_3mf(store: OutputFiles, meta: OutputMeta) -> bytes:
+    payload = await store.model_3mf(meta.id)
+    if payload is None:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"output {meta.id!r} has no 3MF to send",
             type_=NOT_FOUND_PROBLEM,
         )
-    return path.read_bytes()
+    return payload
+
+
+@dataclass(frozen=True)
+class Printable:
+    """What a print's copies in Bambuddy's library are made of (#1752): the 3MF,
+    however it is obtained, and what its copies are recorded and named under.
+
+    An output and a library file differ only in :attr:`fetch`. Every copy below is
+    found, laid out (:func:`_laid_out_for`), uploaded, reused and superseded the same
+    way for both, and recorded in :class:`BambuddyUploadStore` under :attr:`key`."""
+
+    #: What the copies are recorded under: the print subject's ``run_subject``, an
+    #: output's bare id (as every copy before #1752 was) or ``library:<file id>``.
+    key: str
+    #: One per filament, in slot order: the file's own colors.
+    colours: tuple[str, ...]
+    #: The copy's name in the inbox.
+    inbox_name: str
+    #: The 3MF's bytes.
+    fetch: Callable[[], Awaitable[bytes]]
+    #: The library file the 3MF came from (``None`` for an output). Never one of its
+    #: copies: not taken for one an earlier attempt left unrecorded, so never superseded
+    #: or deleted, and read as it is when no copy is recorded.
+    origin_id: int | None = None
+
+    @classmethod
+    def of_output(cls, store: OutputFiles, meta: OutputMeta) -> Printable:
+        async def fetch() -> bytes:
+            return await read_3mf(store, meta)
+
+        return cls(
+            key=meta.id,
+            colours=tuple(meta.colors),
+            inbox_name=download_filename(meta),
+            fetch=fetch,
+        )
 
 
 #: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
 _RECOLORED = "~"
+#: The flow the slicer assumes when the file states none (#484). So an all-Standard
+#: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
+#: bytes differ under one key, and reusing either is right only while Standard stays
+#: the slicer's default.
+_STANDARD = VOLUME_TYPE["standard"]
 
 
 @dataclass(frozen=True)
@@ -107,6 +164,12 @@ class Target:
     #: Which extruders have the nozzle, in the slicer's order (#834). ``None`` — no run,
     #: or a printer whose status says nothing either way — lets the slicer choose.
     nozzle_stats: tuple[str, ...] | None = None
+    #: Each extruder's flow, in the slicer's order (#484). ``None`` — the send bar,
+    #: which chooses none — states none, and the slicer slices Standard.
+    nozzle_volume_type: tuple[str, ...] | None = None
+    #: ScadBuddy's filament→extruder map (#2166), written in Manual mode. ``None`` leaves
+    #: the file's own.
+    filament_map: FilamentMap | None = None
 
     @property
     def key(self) -> str:
@@ -122,6 +185,17 @@ class Target:
             # A file that lets the slicer use either side must not be reused for one
             # that must keep to one side, nor the other way round.
             key = f"{key}^{','.join(self.nozzle_stats)}"
+        if self.nozzle_volume_type is not None and any(
+            flow != _STANDARD for flow in self.nozzle_volume_type
+        ):
+            # A High Flow file must not be reused for Standard, nor the other way round.
+            # All Standard is what the slicer assumes without the key, so it keeps the key
+            # it had, and a file recorded before #484 is still reused.
+            key = f"{key}%{','.join(self.nozzle_volume_type)}"
+        if self.filament_map is not None:
+            # A file mapped to other sides must not be reused for this map.
+            extruders = ",".join(self.filament_map.extruders)
+            key = f"{key}>{extruders}:{','.join(self.filament_map.volumes)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -135,7 +209,13 @@ class Target:
         that project reuses it when its spools are the model's own colours; spools in
         other colours get a copy in theirs (#476).
         """
-        return Target(self.plate, self.nozzle_diameter, nozzle_stats=self.nozzle_stats).key
+        return Target(
+            self.plate,
+            self.nozzle_diameter,
+            nozzle_stats=self.nozzle_stats,
+            nozzle_volume_type=self.nozzle_volume_type,
+            filament_map=self.filament_map,
+        ).key
 
 
 async def target_for(
@@ -146,6 +226,8 @@ async def target_for(
     nozzle_diameter: str | None = None,
     colours: Sequence[str] | None = None,
     nozzle_stats: Sequence[str] | None = None,
+    nozzle_volume_type: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -155,17 +237,19 @@ async def target_for(
     2026-09-27 §4), the send bar does not. ``colours`` are the chosen spools' (#476),
     and only the print run has any. ``nozzle_stats`` (#834) are not the print run's
     alone: Generate's ``generate_target`` computes them too, so the file Generate lays
-    out is the one the project's next print reuses.
+    out is the one the project's next print reuses. So are ``nozzle_volume_type``
+    (#484), each extruder's flow.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
+    flows = tuple(nozzle_volume_type) if nozzle_volume_type is not None else None
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats)
+        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats)
+    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -179,23 +263,72 @@ def _plate_for_model(model: str | None) -> PlateGeometry:
 
 
 def _laid_out_for(payload: bytes, target: Target) -> bytes:
-    """Re-place the 3MF for ``target``, refusing here rather than at the slicer.
+    """Lay the 3MF out for ``target`` as whoever laid it out allows (:func:`layout_of`),
+    the same for a render and a library file (#1752).
 
-    The 3MF was written at render time, when no printer was chosen, so the plate
-    it carries is the fallback. Moving it now is what puts the object — and the
-    prime tower a multi-colour print needs — where every extruder can reach them.
+    ScadBuddy's own is re-placed, refusing here rather than at the slicer: it was
+    written at render time, when no printer was chosen, so the plate it carries is the
+    fallback. Moving it now is what puts the object — and the prime tower a
+    multi-colour print needs — where every extruder can reach them. An author's file
+    keeps its placement and every plate it lays out; only the nozzles and colours are
+    stated (:func:`state_nozzles`). Anything else comes back unchanged.
     """
+    layout = layout_of(payload)
+    if layout == "as_is":
+        return payload
+    colours = _colours_for(payload, target.colours)
+    if layout == "author":
+        try:
+            return state_nozzles(
+                payload,
+                nozzle_stats=target.nozzle_stats,
+                nozzle_volume_type=target.nozzle_volume_type,
+                filament_colour=colours,
+                filament_map=target.filament_map,
+            )
+        except ArchiveTooLargeError:
+            # layout_of has bounded it already, so this is a defence in depth: the file
+            # prints as it is.
+            logger.warning("the 3MF inflates past the cap; printing it as it is")
+            return payload
     try:
         payload = replate_3mf(
             payload,
             target.plate,
             nozzle_diameter=target.nozzle_diameter,
             nozzle_stats=target.nozzle_stats,
+            nozzle_volume_type=target.nozzle_volume_type,
+            filament_map=target.filament_map,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
-    return recolour_3mf(payload, target.colours) if target.colours is not None else payload
+    return recolour_3mf(payload, colours) if colours is not None else payload
+
+
+def nozzles_stated(payload: bytes) -> bool:
+    """Whether :func:`_laid_out_for` states the nozzle side (#834) and each side's
+    flow (#484) in ``payload``: anything but a file laid out ``as_is``, which the slicer
+    slices as Standard (``extruders.high_flow_warnings``)."""
+    return layout_of(payload) != "as_is"
+
+
+def _colours_for(payload: bytes, chosen: Sequence[str] | None) -> list[str] | None:
+    """``chosen``, with the file's own colour where one is unknown (``""``: a library
+    file whose filament Bambuddy read no colour for), or ``None`` to leave the file's
+    colours: none chosen, or not one per filament of the file. Only for a file
+    :func:`layout_of` has bounded."""
+    if chosen is None:
+        return None
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        current = json.loads(archive.read(PROJECT_SETTINGS_NAME)).get("filament_colour") or []
+    if len(current) != len(chosen):
+        logger.warning(
+            "the spools chosen are not one per filament of the 3MF; keeping its colours",
+            extra={"filaments": len(current), "chosen": len(chosen)},
+        )
+        return None
+    return [colour or own for colour, own in zip(chosen, current, strict=True)]
 
 
 def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:
@@ -227,33 +360,29 @@ class EnsuredCopy(NamedTuple):
 
 
 async def project_filename(
-    client: BambuddyClient,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    key: str,
     folder_id: int,
+    listed: Sequence[LibraryFile | LibraryListRow] | None,
     stem: str,
     target: Target,
 ) -> str:
-    """``<stem>.3mf``, made unique among the files already in ``folder_id`` (#317).
+    """``<stem>.3mf``, made unique among ``listed``, the files already in ``folder_id``
+    (#317).
 
-    When this output already has a copy in the folder — laid out for another printer
-    model, or it would have been reused — the new one is named after its model
-    (``Name sign — Reagan (H2D).3mf``) so the two are told apart. Anything else that
-    collides is numbered from 2.
+    When the copies recorded under ``key`` already have one in the folder — laid out for
+    another printer model, or it would have been reused — the new one is named after
+    its model (``Name sign — Reagan (H2D).3mf``) so the two are told apart. Anything
+    else that collides is numbered from 2.
 
-    A listing that fails (a timeout, a 5xx, a body that is not a list) leaves the name
-    unchecked rather than failing the print: naming is never worth the print.
+    A listing that failed (``None``: a timeout, a 5xx, a body that is not a list) leaves
+    the name unchecked rather than failing the print: naming is never worth the print.
     """
-    try:
-        taken = {row.filename.casefold() for row in await client.library_files(folder_id)}
-    except (ApiError, ValueError) as error:
-        logger.warning(
-            "could not list the project folder; naming the copy without checking it",
-            extra={"folder_id": folder_id, "error": str(error)},
-        )
+    if listed is None:
         return f"{stem}.3mf"
+    taken = {row.filename.casefold() for row in listed}
     candidates = [f"{stem}.3mf"]
-    ours = any(copy.folder_id == folder_id for copy in await uploads.for_output(meta.id))
+    ours = any(copy.folder_id == folder_id for copy in await uploads.for_output(key))
     if ours and target.plate.model:
         # The profile names the vendor too ("Bambu Lab H2D"); the model is what differs.
         candidates.append(f"{stem} ({target.plate.model.removeprefix('Bambu Lab ')}).3mf")
@@ -266,31 +395,34 @@ async def project_filename(
     return f"{stem} ({number}).3mf"
 
 
-async def upload_output(
+async def upload_copy(
     client: BambuddyClient,
-    store: OutputStore,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    printable: Printable,
     settings: StoredSettings,
     *,
     target: Target | None = None,
     folder_id: int | None = None,
     stem: str | None = None,
-) -> tuple[int, str]:
-    """Upload a new copy of ``model.3mf`` into ``folder_id`` (the inbox when ``None``);
-    returns its library file id and file name.
+) -> tuple[int, str, bool]:
+    """Upload a new copy of the 3MF, laid out for ``target``, into ``folder_id`` (the
+    inbox when ``None``); returns its library file id, its file name, and whether it was
+    uploaded (rather than an identical one taken, #2476).
 
-    In a project's folder, ``stem`` names the file (:func:`project_filename`, #317): the
-    template and the params that differ from its defaults, made unique in the folder.
-    The inbox keeps :func:`download_filename`.
+    In a project's folder, ``stem`` names the file (:func:`project_filename`, #317): for
+    an output, the template and the params that differ from its defaults, made unique in
+    the folder. The inbox keeps :attr:`Printable.inbox_name`.
 
     A folder carries ``project_id``, so the folder is what files the copy under a
     project (#79) and puts it on Bambuddy's project page.
 
-    Only in the inbox does the new copy *supersede* anything: every other copy already
-    in the inbox is deleted, so the inbox holds one copy per output rather than one per
-    printer it was ever aimed at. A copy in a project's folder is never deleted, even
-    when this upload is for another printer — that project printed from it (#316).
+    In the inbox the new copy *supersedes* every other copy already there, so the inbox
+    holds one copy per output (or library file) rather than one per printer it was ever
+    aimed at. In a project's folder it supersedes only this output's copies nothing was
+    printed from (:func:`_supersede_unprinted`, #2476); a copy the project printed from
+    is never deleted, even when this upload is for another printer (#316). A project
+    folder that already holds the same 3MF for the same target, filed by an identical
+    output, gets nothing new (:func:`_same_content`).
 
     The order matters. The plate fit is decided before anything touches Bambuddy, so a
     model that cannot be laid out refuses with every copy intact. The upload comes
@@ -299,37 +431,244 @@ async def upload_output(
     recorded* — the send itself succeeded, and forgetting the id would strand the file
     in Bambuddy with nothing pointing at it. It is tried again the next time an upload
     supersedes it.
+
+    A file an earlier attempt uploaded and never recorded is taken instead of a second
+    upload (:func:`_left_unrecorded`, #1145, #1127), so a retried send or print leaves
+    no duplicate in the folder.
     """
     target = target if target is not None else await target_for(client, settings)
-    payload = _laid_out_for(_read_3mf(store, meta), target)
+    # Traced (#2720): the read and the layout were a ~20 s gap with no span in Tempo.
+    with span("upload.fetch", attributes={"scadbuddy.subject": printable.key}):
+        fetched = await printable.fetch()
+    # Re-plating is mesh work that took ~23 s on a big output, on the event loop every
+    # other request shares (#2354).
+    with span("upload.layout", attributes={"scadbuddy.subject": printable.key}):
+        payload = await asyncio.to_thread(_laid_out_for, fetched, target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-
-    filename = (
-        await project_filename(client, uploads, meta, folder, stem, target)
-        if stem is not None and folder is not None and not is_inbox(folder, settings)
-        else download_filename(meta)
+    project_stem = (
+        stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
-    uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
+
+    content = (
+        await asyncio.to_thread(content_key, payload)
+        if project_stem is not None and folder is not None
+        else None
+    )
+    if content is not None:
+        same = await _same_content(client, uploads, printable.key, folder, target.key, content)
+        if same is not None:
+            return same.id, same.filename, False
+    listed = await _listing(client, folder)
+    uploaded = await _left_unrecorded(
+        client, uploads, listed, payload, project_stem, printable.inbox_name, printable.origin_id
+    )
+    if uploaded is None:
+        filename = (
+            await project_filename(uploads, printable.key, folder, listed, project_stem, target)
+            if project_stem is not None and folder is not None
+            else printable.inbox_name
+        )
+        # A project's folder `folder_for` made moments ago may not be committed yet
+        # (#2263): the upload waits for it rather than failing the file.
+        uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
-        meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
+        printable.key,
+        LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key, content_key=content),
     )
     if is_inbox(folder, settings):
-        for copy in await uploads.for_output(meta.id):
+        for copy in await uploads.for_output(printable.key):
             if copy.id == uploaded.id or copy.folder_id != folder:
                 continue
-            await _delete_copy(client, uploads, meta, copy.id, strict=False)
-    return uploaded.id, uploaded.filename
+            await _delete_copy(client, uploads, printable.key, copy.id, strict=False)
+        return uploaded.id, uploaded.filename, True
+    filename = await _supersede_unprinted(client, uploads, printable.key, folder, uploaded)
+    return uploaded.id, filename, True
+
+
+async def _same_content(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    folder: int | None,
+    target_key: str,
+    content: str,
+) -> LibraryFile | None:
+    """A copy another output put in ``folder`` for the same target, holding the same
+    3MF but for the stamp naming the output (#2476): an identical re-Generate files
+    nothing new, and the copy is recorded under ``key`` too. ``None`` when there is
+    none Bambuddy still has."""
+    for owner, copy in await uploads.same_content(folder, target_key, content):
+        try:
+            found = await client.library_file(copy.id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                # Not worth failing a print or a filing over: a new copy is uploaded.
+                logger.warning(
+                    "could not check an identical project copy; uploading another",
+                    extra={"library_file_id": copy.id, "status": error.status},
+                )
+                return None
+            await uploads.forget(owner, copy.id)
+            continue
+        if owner != key:
+            await uploads.record(key, copy)
+        return found
+    return None
+
+
+async def _supersede_unprinted(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    key: str,
+    folder: int | None,
+    uploaded: LibraryFile,
+) -> str:
+    """Replace ``key``'s other copies in the project's ``folder`` that nothing printed
+    from with ``uploaded`` (#2476); its file name, which takes theirs.
+
+    Generate files a copy laid out for its best guess at the printer; a print on another
+    printer or nozzle then adds its own. Rather than leave both (and a third, its slice)
+    with no way to tell which printed, the guess makes way: it is deleted (into
+    Bambuddy's trash), and the print's copy takes its name and its "Edit in ScadBuddy"
+    note. A copy anything was sliced from, or that another output shares, stays.
+    """
+    unprinted = [
+        copy
+        for copy in await uploads.for_output(key)
+        if copy.folder_id == folder and copy.id != uploaded.id and not copy.sliced
+    ]
+    shared = await uploads.shared([copy.id for copy in unprinted], key)
+    filename = uploaded.filename
+    notes = uploaded.notes
+    for copy in unprinted:
+        if copy.id in shared:
+            continue
+        try:
+            old = await client.library_file(copy.id)
+        except ApiError as error:
+            if error.status == status.HTTP_404_NOT_FOUND:
+                await uploads.forget(key, copy.id)
+                continue
+            logger.warning(
+                "could not read a project copy to replace; it stays",
+                extra={"library_file_id": copy.id, "status": error.status},
+            )
+            continue
+        if not await _delete_copy(client, uploads, key, copy.id, strict=False):
+            continue
+        if filename == uploaded.filename and old.filename != filename:
+            try:
+                filename = (await client.rename_library_file(uploaded.id, old.filename)).filename
+            except ApiError as error:
+                logger.warning(
+                    "could not give a print's copy the name of the one it replaced",
+                    extra={"library_file_id": uploaded.id, "status": error.status},
+                )
+        if old.notes and not notes:
+            try:
+                notes = (await client.annotate_library_file(uploaded.id, old.notes)).notes
+            except ApiError as error:
+                logger.warning(
+                    "could not carry the replaced copy's note over",
+                    extra={"library_file_id": uploaded.id, "status": error.status},
+                )
+    return filename
+
+
+async def _listing(
+    client: BambuddyClient, folder: int | None
+) -> list[LibraryFile] | list[LibraryListRow] | None:
+    """The files directly in ``folder`` (the library root for ``None``), read once per
+    upload for :func:`_left_unrecorded` and :func:`project_filename`. ``None`` when the
+    read fails: the upload goes on without either check."""
+    try:
+        if folder is not None:
+            return await client.library_files(folder)
+        rows = await client.library_listing(folder_id=None)
+    except (ApiError, ValueError) as error:
+        logger.warning(
+            "could not list the folder; uploading without checking it",
+            extra={"folder_id": folder, "error": str(error)},
+        )
+        return None
+    return [row for row in rows if row.folder_id is None]
+
+
+async def _left_unrecorded(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    listed: Sequence[LibraryFile | LibraryListRow] | None,
+    payload: bytes,
+    project_stem: str | None,
+    inbox_name: str,
+    origin_id: int | None = None,
+) -> LibraryFile | None:
+    """The file an earlier attempt uploaded into the folder ``listed`` lists and died
+    before recording, or ``None`` (#1145, #1127).
+
+    An attempt can die after Bambuddy stored the upload and before :func:`upload_copy`
+    recorded it: a timeout, a lost worker. Its retry finds no recorded copy and would
+    upload a duplicate. So the folder's files are searched first, for one nothing
+    records as a copy and that is not ``origin_id``, the library file being printed,
+    named as this upload would be (``inbox_name``, or in a project's folder a
+    name made from ``project_stem``) and of the payload's size; only those are read, for a
+    ``file_hash`` that is the sha256 of ``payload``: the same bytes, laid out for the same
+    target. A listing (``None``) or a read that failed leaves it to the upload: a
+    duplicate is not worth failing the send or the print over.
+    """
+    if listed is None:
+        return None
+
+    def named(filename: str) -> bool:
+        name = filename.casefold()
+        if project_stem is None:
+            return name == inbox_name.casefold()
+        return name.startswith(project_stem.casefold()) and name.endswith(".3mf")
+
+    rows = [
+        row
+        for row in listed
+        if row.id != origin_id and row.file_size == len(payload) and named(row.filename)
+    ]
+    if not rows:
+        return None
+    recorded = await uploads.recorded([row.id for row in rows])
+    found = await _same_bytes(client, [row for row in rows if row.id not in recorded], payload)
+    if found is not None:
+        logger.info(
+            "an earlier attempt's upload was never recorded; taking it",
+            extra={"library_file_id": found.id, "folder_id": found.folder_id},
+        )
+    return found
+
+
+async def _same_bytes(
+    client: BambuddyClient, rows: Sequence[LibraryFile | LibraryListRow], payload: bytes
+) -> LibraryFile | None:
+    """The newest of ``rows`` whose ``file_hash`` is the sha256 of ``payload``, or
+    ``None``. A row whose read fails is passed over."""
+    digest = hashlib.sha256(payload).hexdigest()
+    # Newest first: a retry's own upload is the latest of its name.
+    for row in sorted(rows, key=lambda row: row.id, reverse=True):
+        try:
+            found = await client.library_file(row.id)
+        except ApiError:
+            continue
+        if found.file_hash == digest:
+            return found
+    return None
 
 
 async def _delete_copy(
     client: BambuddyClient,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    key: str,
     library_file_id: int,
     *,
     strict: bool,
-) -> None:
-    """Delete one copy and forget it once the delete has come back (committed or 404).
+) -> bool:
+    """Delete one copy and forget it once the delete has come back (committed or 404);
+    whether it is gone.
 
     ``strict`` raises a failed delete; otherwise it is logged and the copy stays
     recorded, to be retried. Forgetting it first is never right: a delete that failed
@@ -342,17 +681,18 @@ async def _delete_copy(
             if strict:
                 raise
             logger.warning(
-                "could not delete a superseded inbox copy; it stays recorded for the next try",
+                "could not delete a superseded copy; it stays recorded for the next try",
                 extra={"library_file_id": library_file_id, "status": error.status},
             )
-            return
+            return False
         logger.info("the library copy was already gone", extra={"library_file_id": library_file_id})
-    await uploads.forget(meta.id, library_file_id)
+    await uploads.forget(key, library_file_id)
+    return True
 
 
 async def ensure_copy(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -383,9 +723,8 @@ async def ensure_copy(
     """
     found = await _ensure_copy(
         client,
-        store,
         uploads,
-        meta,
+        Printable.of_output(store, meta),
         settings,
         target=target,
         folder_id=folder_id,
@@ -405,9 +744,8 @@ class _Ensured(NamedTuple):
 
 async def _ensure_copy(
     client: BambuddyClient,
-    store: OutputStore,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    printable: Printable,
     settings: StoredSettings,
     *,
     target: Target | None,
@@ -417,16 +755,18 @@ async def _ensure_copy(
 ) -> _Ensured:
     target = target if target is not None else await target_for(client, settings)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-    key = _copy_lock_key(meta.id, folder, settings)
+    key = _copy_lock_key(printable.key, folder, settings)
     async with _copy_lock(key), uploads.copy_lock(f"{key[0] or ''}:{key[1]}"):
-        for copy in await _reusable(uploads, meta, settings, target, folder):
-            found = await _still_there(client, uploads, meta, copy, tolerate_errors=tolerate_errors)
+        for copy in await _reusable(uploads, printable, settings, target, folder):
+            found = await _still_there(
+                client, uploads, printable.key, copy, tolerate_errors=tolerate_errors
+            )
             if found is not None:
                 return _Ensured(copy.id, found.filename, created=False)
-        library_file_id, filename = await upload_output(
-            client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
+        library_file_id, filename, created = await upload_copy(
+            client, uploads, printable, settings, target=target, folder_id=folder_id, stem=stem
         )
-    return _Ensured(library_file_id, filename, created=True)
+    return _Ensured(library_file_id, filename, created=created)
 
 
 #: One per folder while :func:`ensure_copy` holds it; weak, so an idle folder's lock is
@@ -437,13 +777,13 @@ _COPY_LOCKS: weakref.WeakValueDictionary[tuple[str | None, int | None], asyncio.
 
 
 def _copy_lock_key(
-    output_id: str, folder: int | None, settings: StoredSettings
+    key: str, folder: int | None, settings: StoredSettings
 ) -> tuple[str | None, int | None]:
     """A project folder's lock is shared by every output: :func:`project_filename` lists
     the folder and the upload takes a name from that listing, so two outputs must not
     interleave there. The inbox keeps :func:`download_filename`, which is not made
-    unique, so there only one output's copies are serialized."""
-    return (output_id if is_inbox(folder, settings) else None, folder)
+    unique, so there only one output's (or library file's) copies are serialized."""
+    return (key if is_inbox(folder, settings) else None, folder)
 
 
 def _copy_lock(key: tuple[str | None, int | None]) -> asyncio.Lock:
@@ -456,7 +796,7 @@ def _copy_lock(key: tuple[str | None, int | None]) -> asyncio.Lock:
 
 async def _reusable(
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    printable: Printable,
     settings: StoredSettings,
     target: Target,
     folder: int | None,
@@ -469,7 +809,7 @@ async def _reusable(
     reuses it rather than uploading a duplicate.
     """
     keys = [target.key]
-    own = [normalise_colour(colour) for colour in meta.colors]
+    own = [normalise_colour(colour) for colour in printable.colours]
     own_colours = (
         target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
@@ -489,7 +829,7 @@ async def _reusable(
 
     ranked = [
         (order, copy)
-        for copy in await uploads.for_output(meta.id)
+        for copy in await uploads.for_output(printable.key)
         if copy.folder_id == folder and (order := rank(copy)) is not None
     ]
     return [copy for _, copy in sorted(ranked, key=lambda pair: pair[0])]
@@ -498,7 +838,7 @@ async def _reusable(
 async def _still_there(
     client: BambuddyClient,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    key: str,
     copy: LibraryCopy,
     *,
     tolerate_errors: bool = False,
@@ -527,14 +867,14 @@ async def _still_there(
             "a recorded library copy was deleted in Bambuddy; uploading it again",
             extra={"library_file_id": copy.id},
         )
-        await uploads.forget(meta.id, copy.id)
+        await uploads.forget(key, copy.id)
         return None
     return CopyFound(filename=found.filename)
 
 
 @dataclass(frozen=True)
 class ReadableCopy:
-    """A library file holding the output's 3MF, for reading its slots (#457)."""
+    """A library file holding the 3MF, for reading its slots (#457)."""
 
     id: int
     #: Recolored for a run's spools (#476), so its filament colors are the spools', not
@@ -544,12 +884,12 @@ class ReadableCopy:
 
 async def copy_to_read(
     client: BambuddyClient,
-    store: OutputStore,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    printable: Printable,
     settings: StoredSettings,
 ) -> ReadableCopy:
-    """Any recorded copy Bambuddy still has, else a new upload (#457).
+    """Any recorded copy Bambuddy still has, else the library file it came from, else a
+    new upload (#457).
 
     The filament step only reads the plate's slots out of the file, and they don't
     depend on the plate, nozzle or folder a copy was laid out for. So it reuses a run's
@@ -557,21 +897,38 @@ async def copy_to_read(
     supersede and the next open would upload again. Inbox copies come first; a copy in
     a project's folder is only read, never moved.
     """
+    found = await recorded_copy_to_read(client, uploads, printable, settings)
+    if found is not None:
+        return found
+    library_file_id = await ensure_uploaded(client, uploads, printable, settings)
+    return ReadableCopy(library_file_id, recolored=False)
+
+
+async def recorded_copy_to_read(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    printable: Printable,
+    settings: StoredSettings,
+) -> ReadableCopy | None:
+    """:func:`copy_to_read` without the upload: a file Bambuddy already has, or ``None``
+    (#1050, for the print check, which uploads nothing)."""
     recorded = sorted(
-        await uploads.for_output(meta.id), key=lambda copy: not is_inbox(copy.folder_id, settings)
+        await uploads.for_output(printable.key),
+        key=lambda copy: not is_inbox(copy.folder_id, settings),
     )
     for copy in recorded:
-        if await _still_there(client, uploads, meta, copy, tolerate_errors=True) is not None:
+        found = await _still_there(client, uploads, printable.key, copy, tolerate_errors=True)
+        if found is not None:
             return ReadableCopy(copy.id, recolored=_RECOLORED in copy.target_key)
-    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
-    return ReadableCopy(library_file_id, recolored=False)
+    if printable.origin_id is not None:
+        return ReadableCopy(printable.origin_id, recolored=False)
+    return None
 
 
 async def ensure_uploaded(
     client: BambuddyClient,
-    store: OutputStore,
     uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    printable: Printable,
     settings: StoredSettings,
     *,
     target: Target | None = None,
@@ -584,22 +941,22 @@ async def ensure_uploaded(
     ``None`` means the inbox, the folder from Settings.
 
     An output is immutable once generated — changing a parameter produces a new one —
-    so a recorded copy still describes this exact 3MF. What is *not* immutable is where
-    it sits and what it was laid out for, so a copy is reused only where both still
-    hold: the same folder, and the same :attr:`Target.key` (the plate, #105, and the
-    nozzle, #126). A run with the same choices reuses the copy; the print dialog's
+    so a recorded copy still describes this exact 3MF. A library file's copies are
+    recorded the same way (:attr:`Printable.key`). What is *not* immutable is where it
+    sits and what it was laid out for, so a copy is reused only where both still hold:
+    the same folder, and the same :attr:`Target.key` (the plate, #105, and the nozzle,
+    #126). A run with the same choices reuses the copy; the print dialog's
     slot read takes any copy at all (:func:`copy_to_read`, #457).
 
     Anything else uploads a **new copy** there (#316). Never a move: a file sent to
     project A is A's record of what it printed, and A's slices and archives stay in A,
     so moving the file to project B would leave A pointing at nothing. And never a
-    delete outside the inbox; see :func:`upload_output`.
+    delete outside the inbox of a copy anything printed from; see :func:`upload_copy`.
     """
     ensured = await _ensure_copy(
         client,
-        store,
         uploads,
-        meta,
+        printable,
         settings,
         target=target,
         folder_id=folder_id,
@@ -625,7 +982,7 @@ async def delete_inbox_copies(
     """
     for copy in await uploads.for_output(meta.id):
         if is_inbox(copy.folder_id, settings):
-            await _delete_copy(client, uploads, meta, copy.id, strict=True)
+            await _delete_copy(client, uploads, meta.id, copy.id, strict=True)
 
 
 async def attach_edit_link(
@@ -640,7 +997,7 @@ async def attach_edit_link(
     ApiError. The note is cosmetic — the file is already uploaded, and on the print
     run already queued — so letting a timeout or a rejected note abort the send would
     fail the request for work that had in fact succeeded. Same reasoning as the
-    tolerated 404 in upload_output.
+    tolerated 404 in upload_copy.
 
     Returns the link only when Bambuddy took it, so the result never claims a link
     that is not actually on the file.
@@ -672,24 +1029,28 @@ def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
 
 
 def resolve_print_options(
-    settings: StoredSettings, slug: str | None, printer_id: int | None, request_scope: PrintOptions
+    settings: StoredSettings,
+    scope: str | None,
+    printer_id: int | None,
+    request_scope: PrintOptions,
 ) -> PrintOptions:
-    """global → per-printer → per-model → per-request, least specific first.
+    """global → per-printer → per-subject → per-request, least specific first.
 
     The print run's merge (#124). The send bar no longer queues (#312), so it resolves
-    none. A library file (#313) has no model, so its per-model layer is empty.
+    none. ``scope`` is the print's :func:`~scadbuddy.bambuddy.options.options_scope`: an
+    output's model, or a library file's own (#1754).
     """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(slug) if slug is not None else None,
+        settings.model_print_options.get(scope) if scope is not None else None,
         request_scope,
     )
 
 
 async def send_output(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -698,12 +1059,13 @@ async def send_output(
 
     A copy already in the inbox for the same target is reused rather than uploaded again.
     """
-    library_file_id, filename, _ = await ensure_copy(
+    library_file_id, filename, created = await ensure_copy(
         client, store, uploads, meta, settings, target=None, folder_id=None
     )
     return SendResult(
         library_file_id=library_file_id,
         filename=filename,
+        created=created,
         bambuddy_url=client.config.web_url(LIBRARY_PATH),
         edit_url=await attach_edit_link(client, library_file_id, meta, settings),
     )

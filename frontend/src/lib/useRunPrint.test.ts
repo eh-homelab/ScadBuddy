@@ -1,8 +1,10 @@
+import { SpanStatusCode, trace } from '@opentelemetry/api'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { api, ApiError } from '../api/client'
 import { choicesView, queuedResult } from '../mocks/choices'
 import type { SlotChoice } from '../api/types'
+import { installTestTracing } from '../test/tracing'
 import { DEFAULT_NOZZLES } from './printChoices'
 import type { PrintSelection } from './usePrintChoices'
 import { useRunPrint } from './useRunPrint'
@@ -18,6 +20,7 @@ const selection: PrintSelection = {
   bedType: 'Textured PEI Plate',
   overrides: {},
   plate: 'all',
+  sides: {},
 }
 
 /**
@@ -35,6 +38,7 @@ function input(overrides: Partial<PrintSelection> = {}) {
     copies: null,
     projectId: null,
     options: {},
+    printSequence: null,
     rackPosition: null,
     rackAlgorithm: 'least_used' as const,
     onRan: vi.fn(),
@@ -109,5 +113,99 @@ describe('useRunPrint', () => {
     await act(() => result.current.run())
     expect(result.current.runError).toBe('Bambuddy is down.')
     expect(result.current.refused).toBe(false)
+  })
+})
+
+describe('useRunPrint, traced', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('records the run as a print span naming the output, printer and plate, with the run request inside it', async () => {
+    const tracing = installTestTracing()
+    try {
+      let active: string | undefined
+      vi.spyOn(api, 'runPrint').mockImplementation(async () => {
+        active = trace.getActiveSpan()?.spanContext().spanId
+        return queuedResult
+      })
+      vi.spyOn(api, 'putModelChoices').mockResolvedValue(undefined as never)
+      vi.spyOn(api, 'putPrinterBedType').mockResolvedValue(undefined as never)
+      const { result } = renderHook(() => useRunPrint(input()))
+      await act(() => result.current.run())
+
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.name).toBe('print')
+      expect(span?.attributes).toEqual({
+        'scadbuddy.print_source': 'output',
+        'scadbuddy.output_id': OUTPUT,
+        'scadbuddy.printer_id': 1,
+        'scadbuddy.plate_id': 1,
+        'scadbuddy.all_plates': true,
+      })
+      expect(active).toBe(span?.spanContext().spanId)
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
+  it("says a library file was printed, but not its id, which is Bambuddy's (spec §6, #1231)", async () => {
+    const tracing = installTestTracing()
+    try {
+      vi.spyOn(api, 'runLibraryPrint').mockResolvedValue(queuedResult)
+      vi.spyOn(api, 'putPrinterBedType').mockResolvedValue(undefined as never)
+      const props = { ...input(), source: { kind: 'library' as const, file: { id: 42, filename: 'cube.3mf' } } }
+      const { result } = renderHook(() => useRunPrint(props))
+      await act(() => result.current.run())
+
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.name).toBe('print')
+      expect(span?.attributes).toEqual({
+        'scadbuddy.print_source': 'library',
+        'scadbuddy.printer_id': 1,
+        'scadbuddy.plate_id': 1,
+        'scadbuddy.all_plates': true,
+      })
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
+  it('marks a run left by closing the dialog as abandoned, not an error', async () => {
+    const tracing = installTestTracing()
+    try {
+      vi.spyOn(api, 'runPrint').mockImplementation(
+        (_output, _body, signal) =>
+          new Promise((_, reject) =>
+            signal?.addEventListener('abort', () => reject(new DOMException('closed', 'AbortError'))),
+          ),
+      )
+      vi.spyOn(api, 'putModelChoices').mockResolvedValue(undefined as never)
+      vi.spyOn(api, 'putPrinterBedType').mockResolvedValue(undefined as never)
+      const { result, unmount } = renderHook(() => useRunPrint(input()))
+      void act(() => void result.current.run())
+      await waitFor(() => expect(api.runPrint).toHaveBeenCalled())
+      unmount()
+      await waitFor(() => expect(tracing.exporter.getFinishedSpans()).toHaveLength(1))
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.status.code).not.toBe(SpanStatusCode.ERROR)
+      expect(span?.attributes['scadbuddy.outcome']).toBe('abandoned')
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
+  it('marks a refused run as an error with its problem type', async () => {
+    const tracing = installTestTracing()
+    try {
+      vi.spyOn(api, 'runPrint').mockRejectedValue(
+        new ApiError({ type: 'https://scadbuddy.dev/problems/unresolvable', title: 'No', status: 422, detail: 'secret' }),
+      )
+      const { result } = renderHook(() => useRunPrint(input()))
+      await act(() => result.current.run())
+      const [span] = tracing.exporter.getFinishedSpans()
+      expect(span?.status.code).toBe(SpanStatusCode.ERROR)
+      expect(span?.attributes['scadbuddy.failure_class']).toBe('https://scadbuddy.dev/problems/unresolvable')
+    } finally {
+      tracing.uninstall()
+    }
   })
 })

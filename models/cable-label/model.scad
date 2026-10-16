@@ -39,7 +39,7 @@ clip_len = 10; // [6:1:20]
 // Label text
 text = "HDMI"; // 16
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans Mono:style=Bold"; // font
 
 // Letter height in mm (text too big for the label face shrinks to fit)

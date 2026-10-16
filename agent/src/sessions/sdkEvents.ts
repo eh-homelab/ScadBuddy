@@ -2,13 +2,14 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { TierResolver } from '../harness/permissions.js'
 import { isPreamble, unwrapUntrusted } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
+import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from './blobs.js'
 import { event, type ServerEvent } from './protocol.js'
 
 // Maps the Agent SDK's message stream to panel-protocol events (#300), per the
 // table in frontend/src/agent/chat/protocol.ts (#340). The query runs with
 // `includePartialMessages: true`, so for each API response the SDK yields
 // `stream_event` messages wrapping the raw streaming events AND the complete
-// `assistant` message. Order measured against the pinned SDK (0.3.283) with
+// `assistant` message. Order measured against the SDK (0.3.283 and 0.3.287) with
 // test/support/fakeAnthropic.ts, one text reply:
 //
 //   system/init, system/status, stream_event/message_start,
@@ -25,16 +26,38 @@ import { event, type ServerEvent } from './protocol.js'
 //   stream_event content_block_stop of a text block → assistant.text.done
 //   assistant tool_use block                      → tool.call (risk from the tier resolver;
 //                                                   unknown tools are outward, spec §8.1)
-//   user tool_result block                        → tool.result
+//   user tool_result block                        → tool.result (its images as `images`, #782)
 //
 // `system/init` is not mapped: every resumed query emits one, while
 // `session.started` is emitted once, when the session is created (manager.ts).
 // `result` is handled by the manager, which owns the session's running totals.
-// Messages of subagents (`parent_tool_use_id` set) are skipped: with
-// `tools: []` there is no Task tool to spawn one.
+// A subagent's messages (`parent_tool_use_id` set: the session's `Agent` call
+// that spawned it, which every session has through ScadBuddy's plugin, #896)
+// map their tool calls and results only (#1108), so each call is in the feed
+// and has its `tool_call` audit row (audit/turn.ts). Its `tool.call` carries
+// that id as `parent`. A subagent's text is not shown: the panel shows what the
+// session's own agent says, and the subagent's answer reaches it as the
+// `Agent` call's result. A call the approval gate shows first (ShownCalls) has
+// no `parent`, since the gate is not told which subagent made it.
 
 /** The longest tool.result summary; the full result stays in the transcript. */
 export const SUMMARY_MAX = 500
+/** The longest tool.call title (#782). */
+export const TITLE_MAX = 120
+
+/**
+ * A tool's title for a call (#782, tools/registry.ts `ToolSpec.title`): what
+ * the panel shows instead of its name; undefined for a tool outside the registry.
+ */
+export type TitleResolver = (toolName: string, input: Record<string, unknown>) => string | undefined
+
+// What Claude Code adds after each MCP image it hands the model (measured on SDK
+// 0.3.289, design 2026-10-08 §2): the path of its own copy, in its config
+// directory, which no browser can load and which a resumed turn's temporary
+// directory does not outlive; and, for an image sent as an embedded resource,
+// the line naming the resource before it. The panel shows the image instead.
+const IMAGE_SOURCE_LINE = /^\[Image: source: [^\n\]]*\]\s*$/
+const RESOURCE_LINE = /^\[Resource from [^\n]* at [^\n]*\]\s*$/
 /** The longest tool.call input, as JSON, that is logged whole; longer ones are cut to a preview. */
 export const INPUT_MAX = 4096
 
@@ -93,20 +116,96 @@ function blocks(content: unknown): Block[] {
   return Array.isArray(content) ? (content as Block[]).filter((b) => typeof b?.type === 'string') : []
 }
 
+const isText = (b: Block): b is Block & { text: string } => b.type === 'text' && typeof b.text === 'string'
+
 /**
- * The panel's one-line view of a result. ScadBuddy's untrusted-data envelope
+ * The panel's view of a result: a one-line summary, and the images it carried
+ * (#782), which the summary leaves out. ScadBuddy's untrusted-data envelope
  * (safety/untrusted.ts, #258) is for the model; the panel shows what is in it.
+ * An image the panel may not show (another type, bytes that are not what they
+ * claim, too large, past RESULT_IMAGES_MAX) stays `[image]` in the summary.
  */
-function summarise(content: unknown): string {
+function summarise(content: unknown): { summary: string; images: SessionImage[] } {
+  const images: SessionImage[] = []
   let text: string
   if (typeof content === 'string') text = unwrapUntrusted(content)
-  else
-    text = blocks(content)
-      // A preamble only announces the image after it, which shows as [image].
-      .filter((b) => !(b.type === 'text' && typeof b.text === 'string' && isPreamble(b.text)))
-      .map((b) => (b.type === 'text' && typeof b.text === 'string' ? unwrapUntrusted(b.text) : `[${b.type}]`))
+  else {
+    const all = blocks(content)
+    const shown = all.map((b) => {
+      if (b.type !== 'image' || images.length >= RESULT_IMAGES_MAX) return false
+      const image = imageOfBlock(b)
+      if (image) images.push(image)
+      return image !== undefined
+    })
+    text = all
+      .filter((b, i) => {
+        if (shown[i]) return false
+        if (!isText(b)) return true
+        // A preamble only announces the image after it.
+        if (isPreamble(b.text)) return false
+        // Claude Code's lines around an image the panel shows: each image's own, so a
+        // refused image keeps its source line beside its `[image]` (#2149).
+        if (IMAGE_SOURCE_LINE.test(b.text) && shown[i - 1] === true) return false
+        if (RESOURCE_LINE.test(b.text) && shown[i + 1] === true) return false
+        return true
+      })
+      .map((b) => (isText(b) ? unwrapUntrusted(b.text) : `[${b.type}]`))
       .join('\n')
-  return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text
+  }
+  return { summary: text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text, images }
+}
+
+/** A title as the event carries it: trimmed, one line, at most TITLE_MAX; undefined when empty or when it threw. */
+function titleFor(titleOf: TitleResolver | undefined, name: string, input: Record<string, unknown>): string | undefined {
+  let title: string | undefined
+  try {
+    title = titleOf?.(name, input)
+  } catch {
+    return undefined
+  }
+  if (typeof title !== 'string') return undefined
+  const line = title.replace(/\s+/g, ' ').trim()
+  if (line === '') return undefined
+  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line
+}
+
+/**
+ * Where each of a turn's `tool.call` events is in being logged (#881). The turn
+ * logs the SDK's stream one append at a time, while the SDK asks canUseTool as
+ * soon as Claude Code does, so a call can reach the approval gate while its
+ * `tool.call` still waits behind the turn's earlier appends, or before the turn
+ * has read it at all. The gate calls `ensure` before it logs `approval.required`:
+ * it waits for the turn's own append of the call, or logs the call itself when
+ * the turn has not reached it, so the panel never sees an approval for a call it
+ * has not been shown. Neither waits on anything that may never come.
+ */
+export class ShownCalls {
+  private readonly logged = new Map<string, Promise<void>>()
+
+  /** The calls among `events` are being logged by `append`. */
+  logging(events: readonly ServerEvent[], append: Promise<unknown>): void {
+    const done = append.then(
+      () => undefined,
+      () => undefined,
+    )
+    for (const e of events) if (e.type === 'tool.call') this.logged.set(e.id, done)
+  }
+
+  /**
+   * Resolves once the call's `tool.call` has been logged (or its append failed):
+   * the turn's own append when it has one, else `log`'s.
+   */
+  ensure(id: string, log: () => Promise<unknown>): Promise<void> {
+    let done = this.logged.get(id)
+    if (done === undefined) {
+      done = log().then(
+        () => undefined,
+        () => undefined,
+      )
+      this.logged.set(id, done)
+    }
+    return done
+  }
 }
 
 export class SdkEventMapper {
@@ -118,10 +217,46 @@ export class SdkEventMapper {
   private readonly openText = new Map<number, string>()
   private readonly streamedMessages = new Set<string>()
   private readonly calls = new Set<string>()
+  private readonly titleOf: TitleResolver | undefined
+  /** Images of results mapped since the last `takeImages`. */
+  private images: SessionImage[] = []
 
-  constructor(sessionId: string, tierOf: TierResolver) {
+  constructor(sessionId: string, tierOf: TierResolver, titleOf?: TitleResolver) {
     this.sessionId = sessionId
     this.tierOf = tierOf
+    this.titleOf = titleOf
+  }
+
+  /**
+   * The bytes of the images the `tool.result` events mapped since the last call
+   * name (#782). The manager stores them before it logs those events, so a
+   * watcher never sees a name it cannot load.
+   */
+  takeImages(): SessionImage[] {
+    const taken = this.images
+    this.images = []
+    return taken
+  }
+
+  /**
+   * The `tool.call` for a call this mapper has not produced yet, claimed so that it
+   * is produced once: by the stream's `tool_use`, or by the approval gate when the
+   * gate gets there first (ShownCalls). Undefined when it was produced already.
+   */
+  call(id: string, name: string, input: Record<string, unknown>, parent?: string): ServerEvent | undefined {
+    if (this.calls.has(id)) return undefined
+    this.calls.add(id)
+    const title = titleFor(this.titleOf, name, input)
+    return event({
+      type: 'tool.call',
+      sessionId: this.sessionId,
+      id,
+      name,
+      input,
+      risk: this.tierOf(name, input) ?? 'outward',
+      ...(parent !== undefined ? { parent } : {}),
+      ...(title !== undefined ? { title } : {}),
+    })
   }
 
   map(message: SDKMessage): ServerEvent[] {
@@ -157,25 +292,23 @@ export class SdkEventMapper {
         }
       }
       case 'assistant': {
-        if (message.parent_tool_use_id !== null) return []
+        const parent = message.parent_tool_use_id ?? undefined
         const out: ServerEvent[] = []
         const apiId = message.message.id
         const streamed = this.streamedMessages.has(apiId)
         blocks(message.message.content).forEach((block, index) => {
-          if (block.type === 'text' && !streamed && typeof block.text === 'string' && block.text !== '') {
+          if (block.type === 'text' && parent === undefined && !streamed && typeof block.text === 'string' && block.text !== '') {
             const messageId = `${apiId}:${index}`
             out.push(event({ type: 'assistant.text.delta', sessionId, messageId, delta: block.text }))
             out.push(event({ type: 'assistant.text.done', sessionId, messageId }))
-          } else if (block.type === 'tool_use' && typeof block.id === 'string' && !this.calls.has(block.id)) {
-            this.calls.add(block.id)
+          } else if (block.type === 'tool_use' && typeof block.id === 'string') {
             const name = typeof block.name === 'string' ? block.name : 'unknown'
             const input =
               typeof block.input === 'object' && block.input !== null && !Array.isArray(block.input)
                 ? (block.input as Record<string, unknown>)
                 : {}
-            out.push(
-              event({ type: 'tool.call', sessionId, id: block.id, name, input, risk: this.tierOf(name, input) ?? 'outward' }),
-            )
+            const call = this.call(block.id, name, input, parent)
+            if (call) out.push(call)
           }
         })
         return out
@@ -183,18 +316,23 @@ export class SdkEventMapper {
       case 'user': {
         // SDKUserMessageReplay (`isReplay: true`, sdk.d.ts) echoes history, which
         // was already emitted when it happened.
-        if (message.parent_tool_use_id !== null || ('isReplay' in message && message.isReplay)) return []
+        if ('isReplay' in message && message.isReplay) return []
         return blocks(message.message.content)
           .filter((b) => b.type === 'tool_result' && typeof b.tool_use_id === 'string')
-          .map((b) =>
-            event({
+          .map((b) => {
+            const { summary, images } = summarise(b.content)
+            this.images.push(...images)
+            // One ref per name: the same image twice is one blob.
+            const refs = [...new Map(images.map((i) => [i.name, { name: i.name, mediaType: i.mediaType }])).values()]
+            return event({
               type: 'tool.result',
               sessionId,
               id: b.tool_use_id as string,
               ok: b.is_error !== true,
-              summary: summarise(b.content),
-            }),
-          )
+              summary,
+              ...(refs.length ? { images: refs } : {}),
+            })
+          })
       }
       default:
         return []

@@ -11,10 +11,6 @@ itself per request:
 - ``X-ScadBuddy-Agent-Author-Session``: the assistant session the call ran in, when it
   ran in one (the harness; an ``/mcp`` call has none).
 
-A request from the agent's headless browser carries the agent-actor marker instead
-(``api/agent_actor.py``, #349), whose value is the session id: its commits are the
-agent's too.
-
 :class:`AgentAuthorship` reads these once per request into a context variable, and
 ``library/history.py`` reads that when it commits: such a commit is authored as
 :data:`AGENT_AUTHOR_NAME` (committed by ScadBuddy as always) with the principal and
@@ -26,6 +22,16 @@ trusts its callers (§4.3), and a forged header can only mislabel a revision. Th
 bounded and must be printable, so a trailer cannot smuggle a second line into the
 commit; a malformed one is a 400 rather than quietly ignored.
 
+Flows read them too (spec 2026-10-11-flow-grants-and-git-design.md §4.2): the header
+names a run's starter (`workflow_runs.started_by`), the starter session that may deny,
+narrow or pass up the run's calls outside its grant (`POST /workflow-runs/{id}/
+escalations/{call}`, matched against `started_by`), and the starter that may revoke the
+run's grant. Still a label, not a credential: a forged one can at most deny a call,
+narrow it into the grant the person approved, pass it up, or revoke the grant, each of
+which only removes authority. Nothing that approves, creates or widens anything is
+reachable with the header; those routes need its absence (`api/flows.py`
+`_browser_only`).
+
 A context variable, not a parameter threaded through every catalogue write: the
 commits happen several calls below the routes, in threads (``asyncio.to_thread`` and
 Starlette's threadpool both run the call in a copy of the request's context,
@@ -36,6 +42,8 @@ of them should carry the author without each route remembering to pass it.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -47,8 +55,7 @@ from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
 AUTHOR_HEADER = "x-scadbuddy-agent-author"
 AUTHOR_SESSION_HEADER = "x-scadbuddy-agent-author-session"
-#: The headless browser's marker (``api/agent_actor.py`` ``AGENT_ACTOR_HEADER``).
-ACTOR_HEADER = "x-scadbuddy-agent-session"
+TOOL_HEADER = "x-scadbuddy-agent-tool"
 
 AGENT_AUTHOR_NAME = "ScadBuddy agent"
 AGENT_AUTHOR_EMAIL = "agent@scadbuddy.localhost"
@@ -68,6 +75,8 @@ _SESSION = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 class AgentAuthor:
     principal: str | None
     session: str | None
+    #: The agent tool that made the call (``X-ScadBuddy-Agent-Tool``), for activity.
+    tool: str | None = None
 
 
 _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", default=None)
@@ -78,22 +87,38 @@ def current_author() -> AgentAuthor | None:
     return _author.get()
 
 
+@contextmanager
+def authored_as(author: AgentAuthor | None) -> Iterator[None]:
+    """Commits made inside are ``author``'s: an operation's run, in a worker with no
+    request of its own, is the request's that started it (#1054)."""
+    token = _author.set(author)
+    try:
+        yield
+    finally:
+        _author.reset(token)
+
+
 class InvalidAuthorError(ValueError):
     pass
 
 
 def author_from(headers: Headers) -> AgentAuthor | None:
     principal = headers.get(AUTHOR_HEADER)
-    session = headers.get(AUTHOR_SESSION_HEADER) or headers.get(ACTOR_HEADER)
+    session = headers.get(AUTHOR_SESSION_HEADER)
+    tool = headers.get(TOOL_HEADER)
     if principal is None and session is None:
-        return None
+        return None  # a tool alone labels nothing
     if principal is not None and not _PRINCIPAL.match(principal):
         raise InvalidAuthorError(
             f"{AUTHOR_HEADER} must be 1 to {MAX_PRINCIPAL} printable characters, no spaces"
         )
+    if tool is not None and not _PRINCIPAL.match(tool):
+        raise InvalidAuthorError(
+            f"{TOOL_HEADER} must be 1 to {MAX_PRINCIPAL} printable characters, no spaces"
+        )
     if session is not None and not _SESSION.match(session):
         raise InvalidAuthorError("the agent session id must be 1 to 64 of [A-Za-z0-9_-]")
-    return AgentAuthor(principal=principal, session=session)
+    return AgentAuthor(principal=principal, session=session, tool=tool)
 
 
 class AgentAuthorship:

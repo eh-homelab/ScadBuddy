@@ -5,16 +5,19 @@ import type { FilamentOptions, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
+import { Dialog } from './ui/Dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
 function Harness({
   options,
   copies = 1,
   onChange,
+  offeredTrays,
 }: {
   options: FilamentOptions
   copies?: number
   onChange?: (plan: SlotChoice[]) => void
+  offeredTrays?: ReadonlySet<number>
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
   return (
@@ -22,6 +25,7 @@ function Harness({
       options={options}
       plan={plan}
       copies={copies}
+      offeredTrays={offeredTrays}
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -30,15 +34,20 @@ function Harness({
   )
 }
 
-function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1) {
+function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1, offeredTrays?: ReadonlySet<number>) {
   const onChange = vi.fn()
   return {
     onChange,
-    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />),
+    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} offeredTrays={offeredTrays} />),
   }
 }
 
 const slot = (id: number) => screen.getByTestId(`filament-slot-${id}`)
+
+/** Opens a slot's list: a slot with a spool chosen shows only that spool until "Change". */
+async function expand(user: { click: (element: Element) => Promise<void> }, id: number) {
+  await user.click(screen.getByTestId(`change-slot-${id}`))
+}
 
 /** The fixture is printer 1, which has the Filament Track Switch fitted. */
 const switched: FilamentOptions = fixtures.filamentOptions
@@ -48,8 +57,9 @@ const wired: FilamentOptions = { ...fixtures.filamentOptions, track_switch: fals
 describe('FilamentPicker', () => {
   // #469 — the fixture printer has the 0.2 on the right (extruder 0) and the 0.4 on the
   // left (1); spools 9 and 21 are on the right, the HT's spool 22 on the left.
-  it('badges each loaded spool with the side it feeds, and the chosen one in the heading', () => {
-    open(wired)
+  it('badges each loaded spool with the side it feeds, and the chosen one in the heading', async () => {
+    const { user } = open(wired)
+    await expand(user, 1)
 
     expect(within(slot(1)).getByTestId('side-9')).toHaveTextContent('R')
     expect(within(slot(1)).getByTestId('side-22')).toHaveTextContent('L')
@@ -57,8 +67,9 @@ describe('FilamentPicker', () => {
     expect(within(slot(1)).getByTestId('slot-side-1')).toHaveTextContent('R')
   })
 
-  it('rules out no spool for the nozzle mounted on its side (#768)', () => {
-    open(wired)
+  it('rules out no spool for the nozzle mounted on its side (#768)', async () => {
+    const { user } = open(wired)
+    await expand(user, 2)
 
     for (const id of [9, 22, 27]) expect(within(slot(2)).getByTestId(`spool-${id}`)).toBeEnabled()
     expect(screen.queryByText(/nozzle is fitted/)).toBeNull()
@@ -68,15 +79,35 @@ describe('FilamentPicker', () => {
     expect(screen.queryByText(/mounted\./)).toBeNull()
   })
 
-  it('with the track switch, a side is only where the spool rests', () => {
-    open(switched)
+  // #2166 — with the switch any spool reaches either nozzle: the plan says where each
+  // prints, so no side is shown at all.
+  it('with the track switch, shows no side', async () => {
+    const { user } = open(switched)
+    await expand(user, 2)
 
-    expect(within(slot(2)).getByTestId('side-9')).toHaveTextContent('rests on R')
-    expect(within(slot(2)).getByTestId('side-9')).toHaveAttribute(
-      'title',
-      'Rests on the right inlet; the Filament Track Switch can feed it to either nozzle.',
-    )
+    expect(within(slot(2)).queryByTestId('side-9')).toBeNull()
+    expect(screen.queryByTestId('slot-side-1')).toBeNull()
     expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
+  })
+
+  // #2164 — the tray itself is offered only once the question about it was answered no.
+  it('holds a tray-only row back until it is offered', async () => {
+    const tray = {
+      spool_id: -52,
+      material: 'PLA',
+      color_name: "what's in AMS-D slot 4",
+      colour: '#27272C',
+      tray_only: true,
+    }
+    const options = { ...fixtures.filamentOptions, spools: [...(fixtures.filamentOptions.spools ?? []), tray] }
+    const first = open(options)
+    await expand(first.user, 2)
+    expect(screen.queryByTestId('spool--52')).toBeNull()
+    first.unmount()
+
+    const { user } = open(options, 1, new Set([-52]))
+    await expand(user, 2)
+    expect(within(slot(2)).getByTestId('spool--52')).toBeInTheDocument()
   })
 
   it('heads each slot with its colour, number, material and the grams it needs', () => {
@@ -110,8 +141,9 @@ describe('FilamentPicker', () => {
     expect(heading(2)).not.toHaveTextContent('0 g')
   })
 
-  it('shows every spool with its label, remaining grams and where it is loaded', () => {
-    open()
+  it('shows every spool with its label, remaining grams and where it is loaded', async () => {
+    const { user } = open()
+    await expand(user, 1)
     const rows = slot(1)
 
     const misty = within(rows).getByTestId('spool-9').closest('label') as HTMLElement
@@ -119,15 +151,16 @@ describe('FilamentPicker', () => {
     expect(misty).toHaveTextContent('1000 g')
     // Where it is, as a label. Which tray the print actually draws from is Bambuddy's
     // to decide at dispatch, so no tray number is computed here.
-    expect(misty).toHaveTextContent('AMS 0 · slot 2')
+    expect(misty).toHaveTextContent('AMS-A · slot 2')
 
     // Loaded, but in the other machine — the difference between "ready" and "fetch it".
     const away = within(rows).getByTestId('spool-30').closest('label') as HTMLElement
     expect(away).toHaveTextContent('on 3DP-77A-114')
   })
 
-  it('shows an em dash, never 0 g, for a spool Bambuddy cannot weigh', () => {
-    open()
+  it('shows an em dash, never 0 g, for a spool Bambuddy cannot weigh', async () => {
+    const { user } = open()
+    await expand(user, 1)
     // An untagged spool reports `remain: -1`, which is unknown, not empty.
     const untagged = within(slot(1)).getByTestId('spool-27').closest('label') as HTMLElement
     expect(untagged).toHaveTextContent('\u2014')
@@ -140,6 +173,7 @@ describe('FilamentPicker', () => {
     expect(within(slot(1)).getByTestId('spool-21')).toBeChecked()
     expect(within(slot(2)).getByTestId('spool-27')).toBeChecked()
 
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-22'))
 
     expect(onChange).toHaveBeenCalledWith([
@@ -147,7 +181,67 @@ describe('FilamentPicker', () => {
       { slot_id: 2, spool_id: 22 },
     ])
     expect(within(slot(2)).getByTestId('spool-22')).toBeChecked()
-    expect(within(slot(2)).getByTestId('spool-27')).not.toBeChecked()
+    // Picking collapses the list to the spool picked.
+    expect(within(slot(2)).queryByTestId('spool-27')).not.toBeInTheDocument()
+  })
+
+  it('shows only the chosen spool until Change opens the list, and closes it on a pick', async () => {
+    const { user } = open()
+
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+    expect(within(slot(1)).getByTestId('spool-21')).toBeChecked()
+    // Nothing is open, so there is nothing for the filters to narrow.
+    expect(screen.queryByTestId('filter-material')).not.toBeInTheDocument()
+
+    await expand(user, 1)
+    expect(within(slot(1)).getAllByRole('radio').length).toBeGreaterThan(1)
+    expect(screen.getByTestId('change-slot-1')).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByTestId('filter-material')).toBeInTheDocument()
+
+    // "Done" keeps the spool and closes the list.
+    await user.click(screen.getByTestId('change-slot-1'))
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+
+    await expand(user, 1)
+    await user.click(within(slot(1)).getByTestId('spool-9'))
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+    expect(within(slot(1)).getByTestId('spool-9')).toBeChecked()
+  })
+
+  it('closes only the open list on Escape, not the print dialog around it (#3636)', async () => {
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <Dialog open title="Print" onClose={onClose}>
+        <Harness options={fixtures.filamentOptions} />
+      </Dialog>,
+    )
+    await expand(user, 1)
+    within(slot(1)).getByTestId('spool-9').focus()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+    expect(screen.getByTestId('change-slot-1')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('change-slot-1')).toHaveFocus()
+
+    // With nothing open, Escape is the dialog's again.
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a slot with nothing chosen open', () => {
+    open({ ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 21 }] })
+
+    expect(within(slot(2)).getAllByRole('radio').length).toBeGreaterThan(1)
+    expect(screen.queryByTestId('change-slot-2')).not.toBeInTheDocument()
+    expect(screen.getByTestId('filter-material')).toBeInTheDocument()
+  })
+
+  it("labels the file's own colour as the original, beside what it prints in", () => {
+    open()
+
+    expect(screen.getByTestId('slot-original-1')).toHaveTextContent('original')
+    expect(screen.getByTestId('slot-prints-in-1')).toHaveTextContent('prints in')
   })
 
   it('says which colour each slot will print in, following the spool picked', async () => {
@@ -157,6 +251,7 @@ describe('FilamentPicker', () => {
 
     expect(screen.getByTestId('slot-prints-in-2')).toHaveTextContent(`prints in ${named(27)}`)
 
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-22'))
 
     expect(screen.getByTestId('slot-prints-in-2')).toHaveTextContent(`prints in ${named(22)}`)
@@ -164,6 +259,7 @@ describe('FilamentPicker', () => {
 
   it('marks a spool already used by another slot without hiding it', async () => {
     const { user } = open()
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-21'))
 
     // Printing two slots from one spool is legitimate; it just should not be a surprise.
@@ -174,6 +270,7 @@ describe('FilamentPicker', () => {
 
   it('restores the suggested filaments', async () => {
     const { user } = open()
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-22'))
     expect(within(slot(2)).getByTestId('spool-22')).toBeChecked()
 
@@ -184,6 +281,8 @@ describe('FilamentPicker', () => {
 
   it('filters the list every slot offers, not just one', async () => {
     const { user } = open()
+    await expand(user, 1)
+    await expand(user, 2)
     expect(within(slot(1)).queryByTestId('spool-9')).toBeInTheDocument()
 
     await user.selectOptions(screen.getByTestId('filter-material'), 'PLA')
@@ -196,6 +295,7 @@ describe('FilamentPicker', () => {
 
   it('searches the colour name and the brand', async () => {
     const { user } = open()
+    await expand(user, 1)
     await user.type(screen.getByTestId('filter-search'), 'cookiecad')
 
     expect(within(slot(1)).queryByTestId('spool-24')).toBeInTheDocument()
@@ -204,6 +304,7 @@ describe('FilamentPicker', () => {
 
   it('hides the shelf when only what is loaded will do', async () => {
     const { user } = open()
+    await expand(user, 1)
     await user.click(screen.getByTestId('filter-loaded-only'))
 
     expect(within(slot(1)).queryByTestId('spool-9')).toBeInTheDocument()
@@ -212,6 +313,7 @@ describe('FilamentPicker', () => {
 
   it('hides a spool with less than this print needs', async () => {
     const { user } = open()
+    await expand(user, 1)
     // Spool 26 has 2 g against slot 1's 4.8 g.
     expect(within(slot(1)).queryByTestId('spool-26')).toBeInTheDocument()
 
@@ -228,6 +330,7 @@ describe('FilamentPicker', () => {
       slots: (fixtures.filamentOptions.slots ?? []).map((need) => ({ ...need, used_grams: null })),
     }
     const { user } = open(unsliced)
+    await expand(user, 1)
     await user.click(screen.getByTestId('filter-enough'))
 
     // There is no figure to compare against, so silently emptying the list would look
@@ -238,6 +341,7 @@ describe('FilamentPicker', () => {
 
   it('keeps the chosen spool on the list even when the filters exclude it', async () => {
     const { user } = open()
+    await expand(user, 2)
     // Slot 2 starts on the Elegoo pink, which is PLA; filter to PETG and it must stay,
     // or the radio group would show nothing selected and read as an empty slot.
     await user.selectOptions(screen.getByTestId('filter-material'), 'PETG')
@@ -257,7 +361,7 @@ describe('FilamentPicker', () => {
   it('reads an instruction as muted and an unfilled slot as a fault', () => {
     open({ ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 27 }] })
 
-    // "Load this spool into AMS 0 slot 2" is an instruction, not a fault; colouring it
+    // "Load this spool into AMS-A slot 2" is an instruction, not a fault; colouring it
     // like one trains the user to ignore the colour.
     expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-muted')
     expect(screen.getByTestId('filament-warnings-2').firstChild).toHaveClass('text-warn')
@@ -269,16 +373,19 @@ describe('FilamentPicker', () => {
 
     // Spool 22 is loaded in this printer, so the "load it in" instruction must go —
     // and it must go because it was recomputed, not because warnings were dropped.
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-22'))
     expect(screen.queryByTestId('filament-warnings-2')).not.toBeInTheDocument()
 
     // Back to the shelf spool and it comes back, which a dropped list could not do.
+    await expand(user, 2)
     await user.click(within(slot(2)).getByTestId('spool-27'))
     expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent('Load Elegoo')
   })
 
-  it('gives every slot a labelled radio group and every filter a label', () => {
-    open()
+  it('gives every slot a labelled radio group and every filter a label', async () => {
+    const { user } = open()
+    await expand(user, 1)
 
     expect(screen.getByRole('group', { name: /Slot 1/ })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: /Slot 2/ })).toBeInTheDocument()
@@ -290,5 +397,14 @@ describe('FilamentPicker', () => {
       screen.getByTestId('filter-loaded-only'),
     )
     expect(screen.getByLabelText('Enough for this print')).toBe(screen.getByTestId('filter-enough'))
+  })
+})
+
+describe('FilamentPicker · grams from the last slice (#2365)', () => {
+  it('marks grams as the last slice’s while a newer one is on its way', () => {
+    renderPage(
+      <FilamentPicker options={fixtures.filamentOptions} plan={[]} copies={1} onChange={vi.fn()} gramsStale />,
+    )
+    expect(within(slot(1)).getByText('4.8 g for 1 copy, from the last slice')).toBeInTheDocument()
   })
 })

@@ -10,16 +10,20 @@ one key inside the row's upsert.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg_pool import PoolTimeout
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
     STORE_READINESS_LOCK,
     ModelPrintChoices,
@@ -53,6 +57,17 @@ def store(settings: Settings) -> Iterator[SettingsStore]:
         yield opened
     finally:
         opened.close()
+
+
+def test_every_pooled_connection_bounds_a_silent_peer(store: SettingsStore) -> None:
+    """#1226: ``statement_timeout`` is the server's, so it cannot catch a half-open
+    connection; the client's own TCP keepalive and user timeout must."""
+    with store.pool.connection() as first, store.pool.connection() as second:
+        params = [conn.info.get_parameters() for conn in (first, second)]
+    for got in params:
+        assert {name: got.get(name) for name in TCP_KEEPALIVE} == {
+            name: str(value) for name, value in TCP_KEEPALIVE.items()
+        }
 
 
 def _fresh_load(settings: Settings) -> StoredSettings:
@@ -456,6 +471,30 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
     assert store.load().store_backend == "local"
 
 
+def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#1253: the inbox is not env-seeded, so with no row its value is StoredSettings'
+    default, not an attribute of the deployment's ``Settings`` (which has none)."""
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="bambuddy",
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        with pytest.raises(StoreNotReadyError, match="library folder"):
+            store.save(SettingsPatch(bambuddy_url="https://b.test"))
+        store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+        # A stored inbox counts: it is not refused as an unknown env setting.
+        store.save(SettingsPatch(bambuddy_url="https://c.test"))
+        assert store.load().bambuddy_url == "https://c.test"
+    finally:
+        store.close()
+
+
 def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     store: SettingsStore, settings: Settings
 ) -> None:
@@ -470,11 +509,201 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
         "least_used",
     )
 
-    store.set_printer_rack_algorithm(2, None)
+    assert store.set_printer_rack_algorithm(2, None) == "least_used"
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
     store.forget_remembered()
     assert _fresh_load(settings).printer_rack_algorithms == {}
+
+
+def test_an_older_rack_algorithm_save_arriving_after_a_newer_one_is_refused(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1216: saves are ordered by the dialog's version, not by when they arrive. One the
+    dialog gave up on that turns up after the next one is refused, and the newer choice
+    stays; a resend of the same version stores the same choice again (a 503 is safe to
+    retry); and a forget is ordered too, so an older save cannot bring a choice back."""
+    store.set_printer_rack_algorithm(1, "bambuddy", version=2)
+    with pytest.raises(settings_store.RackAlgorithmSupersededError):
+        store.set_printer_rack_algorithm(1, "oldest_first", version=1)
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+    assert store.set_printer_rack_algorithm(1, "bambuddy", version=2) == "bambuddy"
+    # Another printer has its own order.
+    store.set_printer_rack_algorithm(2, "oldest_first", version=1)
+
+    store.set_printer_rack_algorithm(1, None, version=3)
+    with pytest.raises(settings_store.RackAlgorithmSupersededError):
+        store.set_printer_rack_algorithm(1, "oldest_first", version=2)
+    assert _fresh_load(settings).printer_rack_algorithms == {"2": "oldest_first"}
+
+
+def test_a_bounded_settings_read_gives_up_on_a_held_table(settings: Settings) -> None:
+    """#1111: a read given a timeout fails within it rather than waiting on Postgres;
+    the bound is this read's own, so the next read on the same connection is not
+    bounded by it."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    try:
+        before = _connection_and_bound(store)
+        with psycopg.connect(settings.database_url) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=0.2)
+        after = _connection_and_bound(store)
+    finally:
+        store.close()
+    assert after == before
+
+
+def _connection_and_bound(store: SettingsStore) -> tuple[int, str]:
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT pg_backend_pid() AS pid, current_setting('statement_timeout') AS bound"
+        ).fetchone()
+    assert row is not None
+    return row["pid"], row["bound"]
+
+
+def test_a_settings_read_timeout_bounds_the_whole_read(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """#1111: the timeout is the read's whole budget, not each statement's: a read that
+    waits most of it on one table gets only the rest for the next."""
+    budget = 2.0
+    settings_holder = psycopg.connect(settings.database_url)
+    release = threading.Timer(0.6 * budget, settings_holder.commit)
+    try:
+        settings_holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+        with psycopg.connect(settings.database_url) as beds, beds.transaction():
+            beds.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+            release.start()
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                store.load(timeout=budget)
+            elapsed = time.monotonic() - started
+    finally:
+        release.cancel()
+        # Only a started Timer can be joined; one that never started would mask the
+        # real failure with a RuntimeError (#1269).
+        if release.ident is not None:
+            release.join()
+        settings_holder.close()
+    # The read waits 0.6 budgets on one table and the rest on the other: about one
+    # budget in all. A per-statement bound would take about 1.6; a bound in the wrong
+    # unit would give up at once.
+    assert 0.9 * budget < elapsed < 1.45 * budget
+
+
+def test_a_bounded_settings_read_gives_up_waiting_for_a_connection(settings: Settings) -> None:
+    """#1261: the pool wait is inside the read's one deadline too: with the pool's only
+    connection held the whole time, the read gives up instead of waiting it out."""
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    failed: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            store.load(timeout=0.2)
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store.pool.connection():
+            finished = _finishes_while_held(read)
+    finally:
+        store.close()
+    assert finished
+    assert [type(exc) for exc in failed] == [PoolTimeout]
+
+
+def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
+    store: SettingsStore,
+) -> None:
+    """#1111: the bound leaves an ordinary read alone."""
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
+    assert store.load(timeout=5) == store.load()
+
+
+def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the print dialog gives up on a save after 25 s and sends the next choice.
+    A save that is still waiting in Postgres must give up first, or it could commit
+    after the one that replaced it and leave the printer on the older choice."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM settings WHERE name = 'printer_rack_algorithms' FOR UPDATE")
+        finished = _finishes_while_held(save)
+    assert finished
+    assert [type(exc) for exc in failed] == [psycopg.errors.QueryCanceled]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+
+def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129: the pool wait is bounded too, not only the write."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
+    store.open()
+    store.set_printer_rack_algorithm(1, "oldest_first")
+    failed: list[BaseException] = []
+
+    def save() -> None:
+        try:
+            store.set_printer_rack_algorithm(1, "bambuddy")
+        except Exception as exc:
+            failed.append(exc)
+
+    try:
+        with store.pool.connection():
+            finished = _finishes_while_held(save)
+    finally:
+        store.close()
+    assert finished
+    assert [type(exc) for exc in failed] == [PoolTimeout]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
+
+
+def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1129 review: a save that committed must not then stall on an unbounded read of
+    every setting, or the dialog gives up on a value that is stored."""
+    monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
+    answered: list[str] = []
+    with psycopg.connect(settings.database_url) as holder, holder.transaction():
+        holder.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
+        finished = _finishes_while_held(
+            lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
+        )
+    assert finished
+    assert answered == ["bambuddy"]
+    assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
+
+
+def _finishes_while_held(call: Callable[[], object]) -> bool:
+    """Run ``call`` in a thread and give it 5 s; whether it finished.
+
+    The caller holds what ``call`` waits on (a row lock, the pool's one connection)
+    for those whole 5 s, so finishing at all means a bound gave up: without one the
+    save waits until the holder lets go. That is the property, not a wall-clock margin
+    (#1714). The caller asserts only after letting go, so a failure cannot leave the
+    holder's lock pinning the teardown (#1283)."""
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    return not worker.is_alive()
 
 
 def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
@@ -518,3 +747,13 @@ def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_ref
     assert len(errors) == 1 and isinstance(errors[0], StoreNotReadyError)
     loaded = _fresh_load(settings)
     assert (loaded.store_backend, loaded.bambuddy_url) == ("local", None)
+
+
+@pytest.mark.parametrize(
+    "name", ["store_max_total_bytes", "store_max_count", "worker_cache_max_bytes"]
+)
+def test_a_negative_store_cap_is_refused_naming_its_field(name: str) -> None:
+    """#2348: every other runtime number was already bounded; 0 is no limit for these."""
+    with pytest.raises(ValueError, match=f"SCADBUDDY_{name.upper()} must be at least 0"):
+        SettingsPatch.model_validate({name: -1})
+    assert getattr(SettingsPatch.model_validate({name: 0}), name) == 0

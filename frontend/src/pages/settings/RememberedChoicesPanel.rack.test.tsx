@@ -19,6 +19,6 @@ describe('RememberedChoicesPanel · rack algorithm (#836)', () => {
     renderPage(<RememberedChoicesPanel targets={{ printers: [{ id: 1, name: 'H2C' }] } as BambuddyTargets} />)
     expect(await screen.findByText('Oldest first')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Forget rack nozzle for H2C' }))
-    await waitFor(() => expect(forgot).toEqual([{ algorithm: null }]))
+    await waitFor(() => expect(forgot).toEqual([{ algorithm: null, version: expect.any(Number) }]))
   })
 })

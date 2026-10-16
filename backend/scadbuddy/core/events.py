@@ -84,7 +84,9 @@ class BaseEvent(BaseModel):
     at: datetime = Field(default_factory=_now, description="When it was published")
 
 
-JobKind = Literal["job.pending", "job.running", "job.done", "job.failed", "job.superseded"]
+JobKind = Literal[
+    "job.pending", "job.running", "job.done", "job.failed", "job.superseded", "job.cancelled"
+]
 
 
 class JobEvent(BaseEvent):
@@ -92,9 +94,10 @@ class JobEvent(BaseEvent):
 
     ``job.pending`` is published for a new job and again for one requeued after its
     worker was lost; a submit coalesced onto a waiting job publishes nothing, as that
-    job did not change. ``job.superseded`` ends a job a newer render replaced before
-    it started (its stored state is ``failed``), so nobody following it waits on.
-    Expired jobs are ``job.failed``."""
+    job did not change. ``job.superseded`` ends a job a newer render replaced (its
+    stored state is ``cancelled``), so nobody following it waits on; ``job.cancelled``
+    ends one whose last request was let go with no replacement (#607). Expired jobs
+    are ``job.failed``."""
 
     kind: JobKind
     job_id: str
@@ -142,14 +145,18 @@ class UpstreamAvailable(BaseEvent):
 
 
 class OutputEvent(BaseEvent):
-    kind: Literal["output.created", "output.deleted"]
+    """An output was saved or deleted, or (``output.updated``) its re-render was
+    attached or marked failed (#1970): re-read ``GET /outputs/{id}``."""
+
+    kind: Literal["output.created", "output.deleted", "output.updated"]
     output_id: str
     slug: str
 
 
 class PrintEvent(BaseEvent):
-    """An output's print moved on (``print.progress``), or reached a state nothing
-    changes without another print (``print.settled``)."""
+    """A print moved on (``print.progress``), or reached a state nothing changes without
+    another print (``print.settled``). A library file's print (#1751) is announced as
+    its run is: ``output_id`` is ``library:<file id>``, on ``print:library:<file id>``."""
 
     kind: Literal["print.progress", "print.settled"]
     output_id: str
@@ -166,6 +173,44 @@ class PrintRunEvent(BaseEvent):
     output_id: str
     slug: str
     run_id: str
+
+
+class OperationEvent(BaseEvent):
+    """An operation (#1053, spec 2026-10-01 §4.2) was accepted or ended: re-read
+    ``GET /operations/{operation_id}``."""
+
+    kind: Literal["operation.changed"] = "operation.changed"
+    operation_id: str
+    op_kind: str
+    subject: str
+
+
+class FlowRunEvent(BaseEvent):
+    """A flow run (#1057, spec 2026-10-01 §7.3) started, moved or ended: re-read
+    ``GET /workflow-runs/{run_id}``. Published on ``workflow-runs`` and
+    ``workflow-run:<run id>``."""
+
+    kind: Literal["flow_run.changed"] = "flow_run.changed"
+    run_id: str
+    definition_id: str
+    status: str
+
+
+class ActivityEvent(BaseEvent):
+    """An activity row changed (spec 2026-10-09): re-read ``GET /activity/{id}``."""
+
+    kind: Literal["activity.changed"] = "activity.changed"
+    activity_id: str
+    principal: str | None = None
+
+
+class AgentOperationEvent(BaseEvent):
+    """The agent recorded or ended an ``ai_operations`` row; the agent publishes it
+    itself (``agent/src/operations/store.ts``). The activity component ingests it; it
+    goes to no WebSocket topic."""
+
+    kind: Literal["ai_operation.changed"] = "ai_operation.changed"
+    operation_id: str
 
 
 class LibraryChanged(BaseEvent):
@@ -190,6 +235,13 @@ class FontInstalled(BaseEvent):
     family: str
 
 
+class PresetsChanged(BaseEvent):
+    """A saved preset of the template was created, changed or deleted (#357)."""
+
+    kind: Literal["presets.changed"] = "presets.changed"
+    slug: str
+
+
 SettingsSection = Literal[
     "connection",
     "print_options",
@@ -197,6 +249,7 @@ SettingsSection = Literal[
     "printer_bed_type",
     "printer_rack_algorithm",
     "last_project",
+    "model_project",
     "remembered",
 ]
 
@@ -274,9 +327,14 @@ Event = Annotated[
     | OutputEvent
     | PrintEvent
     | PrintRunEvent
+    | OperationEvent
+    | FlowRunEvent
+    | ActivityEvent
+    | AgentOperationEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled
+    | PresetsChanged
     | SettingsChanged
     | AnalyzerDecisionEvent
     | SessionBusEvent

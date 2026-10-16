@@ -39,8 +39,8 @@ export type Checkout = { commit: string; dir: string }
 
 /** The network half of fetching, so tests can point it at a local repository. */
 export interface RepoFetcher {
-  /** Fetches `ref` of `url` into the empty directory `into`; resolves to the commit. */
-  checkout(url: string, ref: string, into: string): Promise<Checkout>
+  /** Fetches `ref` of `url` into the empty directory `into`; resolves to the commit. `signal` kills git. */
+  checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout>
   /** Paths under `subpath` that are symlinks or submodules in the checked-out commit. */
   specialPaths(checkout: Checkout, subpath: string): Promise<string[]>
 }
@@ -94,7 +94,7 @@ export class GitFetcher implements RepoFetcher {
     return env
   }
 
-  private async git_(dir: string, args: string[]): Promise<string> {
+  private async git_(dir: string, args: string[], signal?: AbortSignal): Promise<string> {
     const config = [
       '-c', 'http.followRedirects=false',
       '-c', 'core.hooksPath=/dev/null',
@@ -110,9 +110,11 @@ export class GitFetcher implements RepoFetcher {
         timeout: this.timeoutMs,
         maxBuffer: 16 * 1024 * 1024,
         encoding: 'utf8',
+        ...(signal ? { signal } : {}),
       })
       return stdout
     } catch (err) {
+      if ((err as Error).name === 'AbortError') throw err
       const e = err as { stderr?: string; killed?: boolean; code?: unknown; message: string }
       if (e.code === 'ENOENT') throw new FetchError('git is not installed in the agent image')
       if (e.killed) throw new FetchError(`git ${args[0]} timed out after ${this.timeoutMs} ms`)
@@ -121,16 +123,16 @@ export class GitFetcher implements RepoFetcher {
     }
   }
 
-  async checkout(url: string, ref: string, into: string): Promise<Checkout> {
+  async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
     await mkdir(into, { recursive: true })
-    await this.git_(into, ['init', '-q'])
-    await this.git_(into, ['fetch', '-q', '--depth', '1', '--no-tags', '--no-recurse-submodules', url, ref])
-    const commit = (await this.git_(into, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])).trim()
+    await this.git_(into, ['init', '-q'], signal)
+    await this.git_(into, ['fetch', '-q', '--depth', '1', '--no-tags', '--no-recurse-submodules', url, ref], signal)
+    const commit = (await this.git_(into, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'], signal)).trim()
     if (!COMMIT_RE.test(commit)) throw new FetchError(`git returned "${commit.slice(0, 80)}" as the commit`)
     if (COMMIT_RE.test(ref) && ref !== commit) {
       throw new FetchError(`asked for commit ${ref}, the remote returned ${commit}`)
     }
-    await this.git_(into, ['checkout', '-q', '--detach', commit])
+    await this.git_(into, ['checkout', '-q', '--detach', commit], signal)
     return { commit, dir: into }
   }
 

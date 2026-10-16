@@ -5,32 +5,25 @@ import { bundledCliVersion, sdkDeclaredCliVersion } from './harness/cliVersion.j
 
 // Build-time assertion, run by the Dockerfile's `agent` stage:
 //
-//   node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
+//   node dist/check-cli-version.js
 //
-// Fails when either the SDK's declared Claude Code version or the bundled
-// binary's own `--version` differs from the pin. Both are checked because an
-// SDK bump moves the declaration and a broken optional-dependency install
-// could leave a different (or no) binary behind.
-
-const expected = process.argv[2]
-if (!expected) {
-  console.error('usage: check-cli-version <expected Claude Code version>')
-  process.exit(2)
-}
+// Fails when there is no bundled binary for this platform, or its own
+// `--version` differs from the `claudeCodeVersion` the installed SDK declares:
+// an optional-dependency install that left a different (or no) binary behind.
+// The version itself is pinned by agent/package.json (the SDK, exactly) and the
+// lockfile (each platform's binary, by integrity hash), so it is not repeated
+// here as an argument (#1540).
 
 const configDir = await mkdtemp(path.join(tmpdir(), 'claude-version-'))
 try {
   const declared = await sdkDeclaredCliVersion()
   const actual = await bundledCliVersion(configDir)
-  if (declared !== expected || actual !== expected) {
-    console.error(
-      `ERROR: the Agent SDK declares Claude Code '${declared}' and its binary reports '${actual}'; ` +
-        `this build pins '${expected}'.`,
-    )
-    console.error('       Re-verify the harness facts in the AI design spec, then bump the pin.')
+  if (declared !== actual) {
+    console.error(`ERROR: the Agent SDK declares Claude Code '${declared}' but its binary reports '${actual}'.`)
+    console.error('       Reinstall agent/node_modules from the lockfile for this platform.')
     process.exitCode = 1
   } else {
-    console.log(`Claude Code ${actual} (bundled by the Agent SDK) matches the pin.`)
+    console.log(`Claude Code ${actual} (bundled by the Agent SDK) is the version the SDK declares.`)
   }
 } finally {
   await rm(configDir, { recursive: true, force: true })

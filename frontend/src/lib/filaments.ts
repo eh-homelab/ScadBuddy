@@ -1,6 +1,7 @@
 import type {
   FilamentOptions,
   FilamentWarning,
+  SlicePreview,
   SlotChoice,
   SlotNeed,
   SpoolOption,
@@ -33,11 +34,36 @@ export function spoolLabel(spool: SpoolOption): string {
 }
 
 /**
+ * An AMS unit's name as Bambuddy shows it: by letter, so `ams_id` 3 is "AMS-D", the
+ * fourth AMS, and 128 is "HT-A". 255 is the external spool and 6 the AMS Lite.
+ */
+export function amsUnitLabel(amsId: number): string {
+  if (amsId === 255) return 'External'
+  if (amsId === 6) return 'AMS Lite'
+  const letter = String.fromCharCode(65 + (amsId >= 128 ? amsId - 128 : amsId))
+  return amsId >= 128 ? `HT-${letter}` : `AMS-${letter}`
+}
+
+/**
+ * An AMS tray as Bambuddy names it, "AMS-A · slot 4", with the printer first when
+ * asked ("3DP-31B-598 · AMS-A · slot 4"): on a farm two printers each have an AMS-A
+ * slot 1. The one wording for a loaded spool, in the print dialog and Settings alike.
+ */
+export function trayPlace(
+  loaded: { printer_id: number; printer_name?: string | null; ams_id: number; tray_id: number },
+  { printer = false }: { printer?: boolean } = {},
+): string {
+  const place = `${amsUnitLabel(loaded.ams_id)} · slot ${loaded.tray_id + 1}`
+  return printer ? `${loaded.printer_name ?? `Printer ${loaded.printer_id}`} · ${place}` : place
+}
+
+/**
  * Where a spool physically is, or `null` when it is on the shelf.
  *
- `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
- * 1, so the human number wins. This is a label and nothing more: which tray the print
- * actually draws from is Bambuddy's to decide at dispatch.
+ * `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
+ * 1, so the human number wins, and the unit is named as Bambuddy names it. This is a
+ * label and nothing more: which tray the print actually draws from is Bambuddy's to
+ * decide at dispatch.
  *
  * `printerId` is the printer the print is scoped to. A spool loaded somewhere else is
  * still a legitimate choice, and naming the other printer is the difference between
@@ -47,7 +73,7 @@ export function spoolLabel(spool: SpoolOption): string {
 export function loadedLabel(spool: SpoolOption, printerId?: number | null): string | null {
   const loaded = spool.loaded
   if (!loaded) return null
-  let where = `AMS ${loaded.ams_id} · slot ${loaded.tray_id + 1}`
+  let where = trayPlace(loaded)
   if (printerId !== null && printerId !== undefined && loaded.printer_id !== printerId) {
     where += ` · on ${loaded.printer_name ?? 'another printer'}`
   }
@@ -66,6 +92,28 @@ export function slotNeed(slot: SlotNeed, copies: number): number | null {
   const used = slot.used_grams
   if (used === null || used === undefined || used <= 0) return null
   return used * copies
+}
+
+/**
+ * #2365 — the slots with the background slice's grams where it has them. A ScadBuddy
+ * upload carries none until it is sliced, so without this every slot read "grams
+ * unknown" beside the slice's own grams, and nothing could judge a spool short. `null`
+ * (no slice for the plate the slots describe) leaves the options as they are.
+ */
+export function withSlicedGrams(
+  options: FilamentOptions,
+  slice: Pick<SlicePreview, 'slots'> | null,
+): FilamentOptions {
+  const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry.grams]))
+  if (sliced.size === 0) return options
+  return {
+    ...options,
+    slots: (options.slots ?? []).map((slot) => {
+      const grams = sliced.get(slot.slot_id)
+      // A slot the slice gives no grams keeps the 3MF's own figure: the intended fallback.
+      return grams != null && grams > 0 ? { ...slot, used_grams: grams } : slot
+    }),
+  }
 }
 
 export interface SpoolFilters {
@@ -175,6 +223,16 @@ export function checkPlan(
   const byId = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
   const printerId = options.printer_id
   const found: FilamentWarning[] = []
+  // What every slot on one spool needs together, as the server's check (#2851): a spool
+  // two slots share has to cover both, though each fits on its own.
+  const sharing = new Map<number, { slot_id: number; needed: number }[]>()
+  for (const slot of options.slots ?? []) {
+    const choice = plan.find((entry) => entry.slot_id === slot.slot_id)
+    const needed = slotNeed(slot, copies)
+    if (choice && needed !== null) {
+      sharing.set(choice.spool_id, [...(sharing.get(choice.spool_id) ?? []), { slot_id: slot.slot_id, needed }])
+    }
+  }
 
   for (const slot of options.slots ?? []) {
     const choice = plan.find((entry) => entry.slot_id === slot.slot_id)
@@ -221,6 +279,20 @@ export function checkPlan(
           needed,
         )} g.`,
       })
+    } else if (needed !== null && left !== null && left !== undefined) {
+      const on = sharing.get(spool.spool_id) ?? []
+      const together = on.reduce((sum, other) => sum + other.needed, 0)
+      if (on.length > 1 && left < together) {
+        const ids = on.map((other) => other.slot_id).sort((a, b) => a - b)
+        const names = `${ids.slice(0, -1).join(', ')} and ${ids.at(-1)}`
+        found.push({
+          kind: 'low-filament',
+          slot_id: slot.slot_id,
+          message: `${label} has about ${Math.round(left)} g left and slots ${names} need ${Math.round(
+            together,
+          )} g of it between them.`,
+        })
+      }
     }
   }
 
@@ -229,16 +301,51 @@ export function checkPlan(
 
 /**
  * The picker's opening selection (#78): the spools this model last printed with, slot by
- * slot, and the server's auto-match wherever nothing is remembered or the remembered
- * spool is no longer in the inventory.
+ * slot, and the server's auto-match wherever nothing is remembered, the remembered spool
+ * is no longer in the inventory, or its colour no longer fits the slot's (#933). Which
+ * spools still fit is the server's call (`colour_matches`, the auto-match's own cut-off),
+ * as the download's seed is (`seed_plan` in `bambuddy/filaments.py`).
  */
 export function seedPlan(options: FilamentOptions, remembered: SlotChoice[]): SlotChoice[] {
+  return (options.slots ?? []).flatMap((slot) => {
+    const fits = new Set(slot.colour_matches ?? [])
+    const kept = remembered.find(
+      (choice) => choice.slot_id === slot.slot_id && fits.has(choice.spool_id),
+    )
+    const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
+    return choice ? [{ ...choice }] : []
+  })
+}
+
+/**
+ * The selection after a re-arrange: the plan the user chose and arranged for, kept slot
+ * by slot whatever its colours (a spool picked in this dialog is a choice, not a
+ * remembered one that may have gone stale, #933), less any slot the new file lacks or
+ * spool no longer in the inventory; the auto-match fills the rest.
+ */
+export function carriedPlan(options: FilamentOptions, carried: SlotChoice[]): SlotChoice[] {
   const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
   return (options.slots ?? []).flatMap((slot) => {
-    const kept = remembered.find(
+    const kept = carried.find(
       (choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id),
     )
     const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
     return choice ? [{ ...choice }] : []
   })
+}
+
+/**
+ * #2702 review — the background slice's plate's own slots, or `null` when the dialog
+ * does not hold them. The slice is always of one plate, while the dialog's slots are the
+ * chosen plate's, or every plate's under "All plates". So they are the sliced plate's
+ * only when that plate is the one chosen, or the file has one. `sliced` is the plate
+ * the shown slice was made for (`usePreviewSlice`'s `plateId`), not the one on screen:
+ * a stale slice stays shown while the next is sliced, and can be another plate's.
+ */
+export function slicedPlateSlots(
+  slots: readonly SlotNeed[],
+  { plates, chosen, sliced }: { plates: number; chosen: number | 'all'; sliced: number | null },
+): readonly SlotNeed[] | null {
+  if (plates <= 1) return slots
+  return chosen === sliced ? slots : null
 }

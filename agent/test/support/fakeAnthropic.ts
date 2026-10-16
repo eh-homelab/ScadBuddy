@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net'
 // `/v1/messages?beta=true`), optionally `/v1/messages/count_tokens`, and may be
 // asked for `GET /v1/models` at start-up (model discovery).
 //
-// Replies are scripted: `reply(request)` picks what the "model" says for each
+// Replies are scripted: `reply(request)` picks (or resolves to) what the "model" says for each
 // /v1/messages call, as text or as one tool_use block. Streaming requests get
 // the Messages streaming SSE event sequence (message_start, content_block_*,
 // message_delta, message_stop); others get a JSON message.
@@ -21,8 +21,42 @@ export type Reply =
   | { error: { status: number; type: string; message: string; headers?: Record<string, string> } }
   /** Never answer (until the server closes): a model that is still thinking. */
   | { hang: true }
+  /**
+   * Start a streamed text reply, send `text`, then never finish it: a model cut
+   * off mid-reply (#991). `usage` is message_start's usage (10 input tokens by
+   * default); no message_delta, so the output's usage is never reported.
+   */
+  | { stall: string; usage?: { input_tokens: number; output_tokens?: number } }
+  /**
+   * Start a streamed text reply like `stall`, then end the stream with an SSE
+   * `error` event (e.g. `overloaded_error`) instead of message_stop: a request
+   * the endpoint cut off itself (#1661).
+   */
+  | { stall: string; usage?: { input_tokens: number; output_tokens?: number }; streamError: { type: string; message: string } }
 
-type ContentReply = Exclude<Reply, { error: unknown } | { hang: true }>
+/** Every finished reply's usage: message_start's input, message_delta's output. */
+export const REPLY_TOKENS = { input: 10, output: 5 }
+
+// What the manager prices this fake's usage at: claude-sonnet-4-5's $3 input /
+// $15 output per MTok. Tests compare against these, so the expected costs move
+// with the fake's token counts instead of drifting from them.
+const INPUT_USD_PER_MTOK = 3
+const OUTPUT_USD_PER_MTOK = 15
+
+/** The cost of one finished reply. */
+export const REPLY_COST_USD = (REPLY_TOKENS.input * INPUT_USD_PER_MTOK + REPLY_TOKENS.output * OUTPUT_USD_PER_MTOK) / 1_000_000
+
+/** A reply cut off mid-stream (#991): 100k input tokens, then a few words. */
+export const STALL = { stall: 'Once upon a time', usage: { input_tokens: 100_000 } } satisfies Reply
+
+/**
+ * The cost of the request `STALL` cuts off. Claude Code prices it at nothing;
+ * the manager prices it from the stream, estimating "Once upon a time" at 4
+ * output tokens.
+ */
+export const STALL_COST_USD = (STALL.usage.input_tokens * INPUT_USD_PER_MTOK + 4 * OUTPUT_USD_PER_MTOK) / 1_000_000
+
+type ContentReply = Exclude<Reply, { error: unknown } | { hang: true } | { stall: string }>
 
 export type RecordedRequest = {
   method: string
@@ -38,6 +72,17 @@ export type MessagesBody = {
   messages?: { role: string; content: unknown }[]
   system?: unknown
   max_tokens?: number
+}
+
+/**
+ * Whether a request carried the `thinking-display-updates` beta. Claude Code
+ * 2.1.287 sends a request a gateway refused with a 400 once more without it
+ * (src/harness/credentialErrors.ts), which is how that re-send is told apart.
+ */
+export function displayUpdates(request: RecordedRequest): boolean {
+  return String(request.headers['anthropic-beta'] ?? '')
+    .split(',')
+    .includes('thinking-display-updates-2026-08-18')
 }
 
 export type FakeAnthropic = {
@@ -63,9 +108,29 @@ function contentOf(reply: ContentReply): { block: Record<string, unknown>; stopR
   }
 }
 
+function stalledStart(model: string, reply: Extract<Reply, { stall: string }>): string {
+  return [
+    sse('message_start', {
+      type: 'message_start',
+      message: {
+        id: nextId('msg'),
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, input_tokens: 10, ...reply.usage },
+      },
+    }),
+    sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    sse('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: reply.stall } }),
+  ].join('')
+}
+
 function streamEvents(model: string, reply: ContentReply): string {
   const { block, stopReason } = contentOf(reply)
-  const usage = { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+  const usage = { input_tokens: REPLY_TOKENS.input, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
   const start =
     block.type === 'text' ? { type: 'text', text: '' } : { type: 'tool_use', id: block.id, name: block.name, input: {} }
   const delta =
@@ -92,18 +157,18 @@ function streamEvents(model: string, reply: ContentReply): string {
     sse('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: 5 },
+      usage: { output_tokens: REPLY_TOKENS.output },
     }),
     sse('message_stop', { type: 'message_stop' }),
   ].join('')
 }
 
-export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply): Promise<FakeAnthropic> {
+export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply | Promise<Reply>, listenOn = 0): Promise<FakeAnthropic> {
   const requests: RecordedRequest[] = []
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
-    req.on('end', () => {
+    req.on('end', async () => {
       const path = (req.url ?? '/').split('?')[0] ?? '/'
       const raw = Buffer.concat(chunks).toString('utf8')
       let body: MessagesBody | undefined
@@ -127,8 +192,14 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       }
       if (req.method === 'POST' && path === '/v1/messages') {
         const model = body?.model ?? 'claude-fake'
-        const answer = reply(recorded)
+        const answer = await reply(recorded)
         if ('hang' in answer) return
+        if ('stall' in answer) {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+          res.write(stalledStart(model, answer))
+          if ('streamError' in answer) res.end(sse('error', { type: 'error', error: answer.streamError }))
+          return
+        }
         if ('error' in answer) {
           res.writeHead(answer.error.status, { ...answer.error.headers, 'content-type': 'application/json' })
           res.end(JSON.stringify({ type: 'error', error: { type: answer.error.type, message: answer.error.message } }))
@@ -159,7 +230,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: path } }))
     })
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>((resolve) => server.listen(listenOn, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${port}`,

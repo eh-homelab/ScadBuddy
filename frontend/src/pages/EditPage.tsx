@@ -1,5 +1,6 @@
 import { Link, Navigate, useLocation, useParams } from 'react-router'
 import { api } from '../api/client'
+import { arrangedSources } from '../lib/arrange'
 import { modelPath, type EditNavigationState } from '../lib/deeplink'
 import { Spinner } from '../components/ui/Spinner'
 import { useAsync } from '../lib/useAsync'
@@ -44,6 +45,30 @@ export function EditPage() {
         </p>
         <Link to="/" className="mt-4 inline-block text-[13px] text-accent underline">
           Back to models
+        </Link>
+      </div>
+    )
+  }
+
+  // spec 2026-09-27 §7: an arranged output lays out objects from several outputs, so
+  // there is no one set of template inputs to reopen.
+  const arrangedFrom = (target.data.arranged_from ?? []).length
+  if (arrangedFrom > 0) {
+    const sources = arrangedSources(target.data.arranged_from ?? [])
+    return (
+      <div className="mx-auto max-w-lg px-4 py-16 text-center">
+        <h1 className="text-[15px] font-medium">
+          {`${target.data.name ?? 'This output'} was arranged`}
+        </h1>
+        <p className="mt-2 text-[13px] text-muted">
+          It lays out objects from {sources}, so it has no one set of parameters to open in the
+          customizer.
+        </p>
+        <Link
+          to={modelPath(target.data.slug, 'history')}
+          className="mt-4 inline-block text-[13px] text-accent underline"
+        >
+          Open its history
         </Link>
       </div>
     )

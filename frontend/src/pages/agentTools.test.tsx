@@ -1,4 +1,5 @@
 import { screen, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
@@ -55,8 +56,10 @@ describe('catalogue tools', () => {
     await screen.findByRole('heading', { name: 'Gridfinity Bin' })
 
     const found = await bridge.call('search', { query: 'grid' })
+    // dollhouse-kit's fixture (#1737) mentions a grid too, so the search finds both.
     expect(found.ok && (found.result as { slug: string }[]).map((model) => model.slug)).toEqual([
       'gridfinity-bin',
+      'builtin:dollhouse-kit',
     ])
 
     const missing = await bridge.call('open_model', { slug: 'nope' })
@@ -85,7 +88,50 @@ describe('catalogue filters through navigate (#276)', () => {
     expect(
       screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
     ).toEqual(['Keychain Template', 'Name Keychain'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 7')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 8')
+  })
+
+  it('answers with the route the page settles on, even when asked between its two commits (#761)', async () => {
+    // The page writes `view=cards` into the URL in an effect after it first renders the
+    // new route: two commits. `navigate`'s poll used to answer with whatever route was
+    // committed when it woke. Here its first wake is held until the moment the new route
+    // has committed and the page's effect has not yet run, which load made only likely.
+    const realSetTimeout = globalThis.setTimeout
+    let armed = false
+    let held: (() => void) | undefined
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (armed && ms === 50) {
+        armed = false
+        held = fn
+        return 0
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }) as typeof setTimeout)
+    function WakeAtCommit() {
+      const { pathname, search } = useLocation()
+      useLayoutEffect(() => {
+        if (held && search.includes('tag=keychain')) {
+          const wake = held
+          held = undefined
+          queueMicrotask(wake)
+        }
+      }, [pathname, search])
+      return null
+    }
+    renderPage(
+      <>
+        <CatalogueShell />
+        <WakeAtCommit />
+      </>,
+    )
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    armed = true
+    expect(await bridge.call('navigate', { route: '/?tag=keychain&sort=name' })).toEqual({
+      ok: true,
+      result: { route: '/?tag=keychain&sort=name&view=cards' },
+    })
+    expect(held).toBeUndefined() // the held wake did run at the commit
   })
 })
 
@@ -169,7 +215,7 @@ describe('settings tools', () => {
       ok: true,
       result: { saved: false },
     })
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     expect(put).not.toHaveBeenCalled()
 
     const bad = await bridge.call('set_field', { field: 'display_unit', value: 'cubits' })

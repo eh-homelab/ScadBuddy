@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import json
 import logging
 import os
+import platform
+import re
 import signal
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,9 +21,16 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library import lsp
+from scadbuddy.editor import nonet
+from scadbuddy.editor.component import (
+    LANGUAGE_SERVER_CLIENTS,
+    LSP_SESSIONS_PER_CLIENT,
+    LanguageServerClients,
+)
+from scadbuddy.library import lsp, lsp_diagnostics
 from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
 from tests.conftest import MODEL_SLUG
@@ -88,6 +99,19 @@ while True:
         stdout.flush()
         os.close(1)
         time.sleep(60)
+    if method == "network":
+        # What the server would get for a socket of each family.
+        import socket
+        opened = {}
+        for name, family in (("unix", socket.AF_UNIX), ("inet", socket.AF_INET),
+                             ("inet6", socket.AF_INET6)):
+            try:
+                socket.socket(family, socket.SOCK_STREAM).close()
+                opened[name] = True
+            except OSError:
+                opened[name] = False
+        send({"jsonrpc": "2.0", "id": message["id"], "result": opened})
+        continue
     if "id" not in message:
         continue
     cwd = pathlib.Path.cwd()
@@ -288,6 +312,20 @@ def test_messages_before_initialize_are_rewritten(client: TestClient, model: str
     assert late["location"]["uri"] == CLIENT_ROOT + "helper.scad"
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux" or platform.machine() not in nonet.ARCHES,
+    reason="no seccomp filter for this platform",
+)
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+def test_the_server_has_no_network(client: TestClient, model: str, which: int) -> None:
+    """A browser socket starts this process: it may open no network socket (#95)."""
+    with client.websocket_connect(_lsp_routes(model)[which]) as session:
+        _initialize(session)
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "network", "params": {}})
+        opened = session.receive_json()["result"]
+    assert opened == {"unix": True, "inet": False, "inet6": False}
+
+
 def test_closing_the_editor_stops_the_server(
     client: TestClient, model: str, pid_file: Path
 ) -> None:
@@ -331,7 +369,49 @@ def test_a_server_that_crashes_is_logged(
         with pytest.raises(WebSocketDisconnect):
             session.receive_json()
 
-    assert "openscad-lsp exited with status 3" in caplog.text
+    # 3 is the status the fake server exits with, never asyncio's 255 for a pid
+    # something else reaped first (#1613, `test_kill_leaves_an_exited_servers_status_to_asyncio`).
+    assert re.search(r"openscad-lsp exited with status 3\b", caplog.text)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="reads /proc/<pid>/stat")
+async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
+    """#1613: a server that exited before asyncio's child watcher read it is killed
+    without being reaped, so asyncio still reads its own status. `process.kill()` reaped
+    it in `Popen.send_signal`'s poll, and asyncio then reported 255."""
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", "raise SystemExit(3)")
+    killed = False
+    try:
+        # Not yielding to the loop: the child is a zombie its watcher has not read yet.
+        stat = Path(f"/proc/{process.pid}/stat")
+        deadline = time.monotonic() + 10
+        while stat.read_text().rsplit(")", 1)[1].split()[0] != "Z":
+            assert time.monotonic() < deadline, "the child never exited"
+            time.sleep(0.01)
+        assert process.returncode is None
+        lsp.kill(process)
+        killed = True
+        assert await process.wait() == 3
+    finally:
+        if not killed:  # a failed poll: reap the child here, not in the next test
+            lsp.kill(process)
+            await process.wait()
+
+
+@pytest.mark.parametrize("module", [lsp, lsp_diagnostics], ids=lambda m: m.__name__)
+def test_the_language_server_is_only_killed_through_lsp_kill(module: Any) -> None:
+    """#1613 review: ``process.kill()`` / ``terminate()`` / ``send_signal()`` poll, and
+    reap a server asyncio has not read yet; only ``lsp.kill`` (``os.kill``) may signal it."""
+    tree = ast.parse(Path(module.__file__).read_text())
+    calls = [
+        f"{node.lineno}: .{node.func.attr}()"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"kill", "terminate", "send_signal"}
+        and not (isinstance(node.func.value, ast.Name) and node.func.value.id in {"os", "lsp"})
+    ]
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -411,6 +491,111 @@ def test_sessions_past_the_cap_are_refused(settings: Settings, model: str) -> No
         with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect(route):
             pass
         assert refused.value.code == 1013
+
+
+PROXY = "10.0.0.1"
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+def test_one_client_cannot_take_every_session(settings: Settings, model: str, which: int) -> None:
+    """Past its own share a client is refused while another still gets one, and a
+    closed session gives its share back."""
+    app: FastAPI = create_app(
+        settings.model_copy(update={"lsp_sessions": 4, "trusted_proxies": PROXY})
+    )
+    route = _lsp_routes(model)[which]
+    alice = {"x-forwarded-for": "192.0.2.10"}
+    bob = {"x-forwarded-for": "192.0.2.20"}
+    with TestClient(app, client=(PROXY, 40000)) as client, contextlib.ExitStack() as open_:
+        held = [
+            open_.enter_context(client.websocket_connect(route, headers=alice))
+            for _ in range(LSP_SESSIONS_PER_CLIENT)
+        ]
+        for session in held:
+            _initialize(session)
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers=alice),
+        ):
+            pass
+        assert refused.value.code == 1013
+        with client.websocket_connect(route, headers=bob) as other:
+            _initialize(other)
+        held[0].close()
+        assert _wait_until(lambda: _clients(app).sessions("192.0.2.10") < LSP_SESSIONS_PER_CLIENT)
+        with client.websocket_connect(route, headers=alice) as again:
+            _initialize(again)
+
+
+def test_an_untrusted_peer_cannot_name_another_client(settings: Settings, model: str) -> None:
+    """``X-Forwarded-For`` from a peer outside ``SCADBUDDY_TRUSTED_PROXIES`` is not
+    believed, so a fresh value per socket is no way past the per-client limit."""
+    app: FastAPI = create_app(
+        settings.model_copy(update={"lsp_sessions": 4, "trusted_proxies": PROXY})
+    )
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app, client=("192.0.2.30", 40000)) as client, contextlib.ExitStack() as open_:
+        for n in range(LSP_SESSIONS_PER_CLIENT):
+            _initialize(
+                open_.enter_context(
+                    client.websocket_connect(route, headers={"x-forwarded-for": f"198.51.100.{n}"})
+                )
+            )
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers={"x-forwarded-for": "198.51.100.99"}),
+        ):
+            pass
+        assert refused.value.code == 1013
+
+
+def test_without_trusted_proxies_there_is_no_per_client_cap(
+    settings: Settings, model: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Behind a gateway with ``SCADBUDDY_TRUSTED_PROXIES`` empty every socket comes from
+    the gateway, so a per-client cap would be one cap for everyone: only the global one
+    applies, and start says so."""
+    # On the logger itself: the app's start replaces the root's handlers, caplog's too.
+    said = logging.getLogger("scadbuddy.editor.component")
+    caplog.set_level(logging.INFO, logger=said.name)
+    said.addHandler(caplog.handler)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 4}))
+    route = f"/api/v1/models/{model}/lsp"
+    with (
+        TestClient(app, client=(PROXY, 40000)) as client,
+        contextlib.ExitStack() as open_,
+    ):
+        open_.callback(said.removeHandler, caplog.handler)
+        for n in range(4):
+            _initialize(
+                open_.enter_context(
+                    client.websocket_connect(route, headers={"x-forwarded-for": f"192.0.2.{n}"})
+                )
+            )
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route),
+        ):
+            pass
+        assert refused.value.code == 1013
+    assert "per-client language-server cap" in caplog.text
+
+
+def test_a_refused_socket_takes_no_share(settings: Settings, model: str) -> None:
+    """A socket refused at the global cap leaves its client's count where it was."""
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client, client.websocket_connect(route) as first:
+        _initialize(first)
+        for _ in range(3):
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(route):
+                pass
+        assert _clients(app).sessions("testclient") == 1
+
+
+def _clients(app: FastAPI) -> LanguageServerClients:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    return state.components.get(LANGUAGE_SERVER_CLIENTS)
 
 
 def test_a_wedged_server_is_killed_and_its_slot_freed(
@@ -687,3 +872,45 @@ def test_the_real_server_completes_and_documents_through_the_bridge(
     assert any(label.startswith("plate(") for label in labels)
     assert "A plate the width of the tag." in responses[3]["contents"]["value"]
     assert responses[4][0]["uri"] == CLIENT_ROOT + "helper.scad"
+
+
+def _lsp_routes(model: str) -> list[str]:
+    return [f"/api/v1/models/{model}/lsp", "/api/v1/lsp"]
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://scad.example.com", "null"])
+def test_a_foreign_origin_is_refused(
+    settings: Settings, model: str, pid_file: Path, which: int, origin: str
+) -> None:
+    """Browsers do not apply the same-origin policy to sockets, so a page on another
+    origin could otherwise start a language server in a model's directory and hold the
+    permits every real editor needs (#1317); the realtime socket's rule (#266)."""
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = _lsp_routes(model)[which]
+    with TestClient(app) as client:
+        client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(route, headers={"origin": origin}),
+        ):
+            pass
+        assert refused.value.code == 1008
+        assert not pid_file.exists()
+        # The refusal took no permit: the one there is still serves the UI.
+        with client.websocket_connect(route, headers={"origin": "https://scad.example.com"}) as ok:
+            assert "result" in _initialize(ok)
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["model", "scratch"])
+@pytest.mark.parametrize(
+    "origin", ["https://scad.example.com:443", "http://localhost:5173", "https://scad.lan"]
+)
+def test_the_ui_origins_are_accepted(
+    app: FastAPI, client: TestClient, model: str, which: int, origin: str
+) -> None:
+    state = getattr(app.state, STATE_ATTR)
+    state.settings = state.settings.model_copy(update={"allowed_origins": "https://scad.lan"})
+    client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+    with client.websocket_connect(_lsp_routes(model)[which], headers={"origin": origin}) as ok:
+        assert "result" in _initialize(ok)

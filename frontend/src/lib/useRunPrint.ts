@@ -1,3 +1,4 @@
+import type { Attributes } from '@opentelemetry/api'
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
@@ -5,11 +6,15 @@ import type {
   PrintOptions,
   PrintRunRequest,
   PrintRunResult,
+  PrintSequence,
+  PrimeTowerChoice,
+  SupportsChoice,
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
-import { printChoicesOf } from './printChoices'
+import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
+import { traceAction } from './traceAction'
 import type { PrintSelection } from './usePrintChoices'
 
 interface RunInput {
@@ -23,16 +28,45 @@ interface RunInput {
   planChanged: boolean
   /** `null` leaves the quantity to the remembered options (#124). */
   copies: number | null
-  /** #79 — the Bambuddy project this print is filed under. */
-  projectId: number | null
+  /**
+   * #79 — the Bambuddy project this print is filed under; `null` is "No project".
+   * `undefined` while the project list is unknown leaves the field out, so the server
+   * applies the remembered `last_project_id` rather than an explicit "No project" (#1045).
+   */
+  projectId: number | null | undefined
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   options: PrintOptions
+  /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
+  printSequence: PrintSequence | null
+  /** #1899 — this print's supports; `null` (or absent) leaves them to the template and the process. */
+  supports?: SupportsChoice | null
+  /** #3628 — this print's prime tower; `null` (or absent) leaves it to the template and the process. */
+  primeTower?: PrimeTowerChoice | null
+  /** #717 — the filament profiles left on, by id. */
+  filamentProfiles?: string[]
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
   rackAlgorithm: RackAlgorithm | null
   onRan: (result: PrintRunResult) => void
 }
+
+/**
+ * Spec 2026-10-01 §6: what is printed, on which printer, and which plate. Every print
+ * says which kind of source it was (#1231), ScadBuddy's own word; a library file's id is
+ * Bambuddy's, which §6 never records, so only an output names its source.
+ */
+function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes {
+  return {
+    'scadbuddy.print_source': source.kind,
+    ...(source.kind === 'output' ? { 'scadbuddy.output_id': source.output.id } : {}),
+    ...(typeof body.printer_id === 'number' ? { 'scadbuddy.printer_id': body.printer_id } : {}),
+    'scadbuddy.plate_id': body.plate_id,
+    'scadbuddy.all_plates': body.all_plates,
+  }
+}
+
+const NONE: string[] = []
 
 /**
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
@@ -51,11 +85,19 @@ export function useRunPrint({
   copies,
   projectId,
   options,
+  printSequence,
+  supports = null,
+  primeTower = null,
+  filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
   onRan,
 }: RunInput) {
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
+  // By value: the caller builds a new array each render.
+  const profilesKey = filamentProfiles.join(',')
+  const supportsKey = JSON.stringify(supports)
+  const towerKey = JSON.stringify(primeTower)
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -80,7 +122,22 @@ export function useRunPrint({
   useEffect(() => {
     setRunError(null)
     setRefused(false)
-  }, [nozzles, tier, processName, bedType, plan, overrides, printerId, plate, rackPosition, rackAlgorithm])
+  }, [
+    nozzles,
+    tier,
+    processName,
+    bedType,
+    plan,
+    overrides,
+    printerId,
+    plate,
+    printSequence,
+    supportsKey,
+    towerKey,
+    profilesKey,
+    rackPosition,
+    rackAlgorithm,
+  ])
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
@@ -131,15 +188,19 @@ export function useRunPrint({
         ...(copies === null ? {} : { copies }),
         plate_id: plate === 'all' ? 1 : plate,
         all_plates: plate === 'all',
-        project_id: projectId,
+        ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
+        ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),
       }
-      const ran = await sourceApi(source).run(body, controller.signal)
+      // The run's POST, retries included, is the action's child; the polls are not (traceAction).
+      const ran = await traceAction('print', printAttributes(source, body), (within) =>
+        sourceApi(source).run(body, controller.signal, within),
+      )
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)

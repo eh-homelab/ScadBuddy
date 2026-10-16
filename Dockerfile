@@ -25,14 +25,14 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-09-28@sha256:992508950d86ed5ea6a6ed19934e7d65aa6b1959df69823666f575e9c1579b49 AS base
+FROM openscad/openscad:dev.2026-10-12@sha256:4098a7c2c37d5a9110121635a568e6596b8619362ced5c84cc67f47d395e7fd0 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -156,7 +156,11 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY frontend/ ./
-RUN pnpm build
+# The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
+# runtime stage gets. Declared here, after the copy, so a new version reruns only this
+# build step. build-image.yml passes it; ci.yml's builds keep the default.
+ARG SCADBUDDY_VERSION=dev
+RUN VITE_SCADBUDDY_VERSION="${SCADBUDDY_VERSION}" pnpm build
 
 # ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
 # A SEPARATE image, reached with `--target agent` and deployed as a second
@@ -177,8 +181,10 @@ RUN corepack enable
 # agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
 # install script that is declined there); without it the frozen install fails
 # with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
-# stage does.
+# stage does. agent/patches holds the dependency patches pnpm-workspace.yaml names
+# (patchedDependencies, #3294); the frozen install fails without them.
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile
 
 COPY --from=api-spec /src/openapi.json /src/openapi.json
@@ -208,6 +214,7 @@ FROM node:24-bookworm-slim AS agent-deps
 WORKDIR /src/agent
 RUN corepack enable
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:24-bookworm-slim AS agent
@@ -234,50 +241,111 @@ RUN groupadd --gid 10001 scadbuddy \
 WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
 
-# The headless browser (#349, AI spec D11 and §5.3): the Chromium build the
-# pinned @playwright/mcp's own `playwright-core` expects, installed at build
-# time with its system libraries, so nothing is downloaded at runtime (the
-# upstream plugin's `npx @playwright/mcp@latest` is what spec D11 rejects).
-# `install-browser` is @playwright/mcp's cli.js passing through to
-# `playwright install`. `--only-shell` installs chromium-headless-shell alone,
-# which is what a headless launch without a `channel` uses
-# (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
-# 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
-# Bump with @playwright/mcp in agent/package.json.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
-# The vendored plugin manifest (agent/plugins/playwright/README.md); each
-# session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
+# ScadBuddy's own plugin (agent/plugins/scadbuddy, harness/ownPlugin.ts).
 COPY --from=agent-build /src/agent/plugins ./plugins
 
-# The Claude Code binary the Agent SDK bundles is pinned the way
-# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
-# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
-# the harness underneath every query. This fails the build when either the
-# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
-# from the pin. Bump it together with the SDK version in agent/package.json.
-# It runs against the node_modules that ship, for the platform being built.
-ARG CLAUDE_CODE_VERSION=2.1.283
-RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
-ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
-    NODE_ENV=production \
+# The Agent SDK "runs the Claude Code binary"
+# (https://code.claude.com/docs/en/agent-sdk/overview), a per-platform optional
+# dependency. agent/package.json pins the SDK exactly and the lockfile pins each
+# platform's binary by integrity hash, so the version is not repeated here
+# (#1540; it was a CLAUDE_CODE_VERSION ARG, edited by hand on every SDK bump).
+# This fails the build when no binary installed for the platform being built,
+# or its own `--version` differs from the `claudeCodeVersion` the SDK declares.
+# It runs against the node_modules that ship.
+RUN node dist/check-cli-version.js
+ENV NODE_ENV=production \
     HOME=/var/lib/scadbuddy-agent \
     CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
+
+# Build provenance for the trace resource (service.version, scadbuddy.revision;
+# agent/src/telemetry/setup.ts), passed by build-image.yml like the runtime
+# image's.
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 
 USER 10001:10001
 EXPOSE 8081
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/main.js"]
+# --import loads OpenTelemetry before the app (agent/src/telemetry.ts, #988):
+# the ESM loader hook must be registered before node:http is imported.
+CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 
 # No curl in this image; node's fetch is the probe. Exec form, like the
 # backend's, so the exit status is the signal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+# ── agent-durable: durable agent sessions on Temporal (spec 2026-10-01 §6.3a) ──
+# A sidecar in the ScadBuddy pod beside `agent`, trusted like it (#1030). Python
+# because the Claude Agent SDK's Temporal plugin is Python (ai-integrations#33,
+# git-pinned in agent-durable/uv.lock). Plain psycopg against apt's libpq5, as
+# the backend image does, so libpq fixes arrive with the OS.
+FROM python:3.14-slim-bookworm AS agent-durable
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini libpq5 git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
+
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /srv/agent --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o 10001 -g 10001 /srv/agent
+
+WORKDIR /app/agent-durable
+ENV UV_PROJECT_ENVIRONMENT=/app/agent-durable/.venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+COPY agent-durable/pyproject.toml agent-durable/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY agent-durable/src ./src
+RUN uv sync --frozen --no-dev
+
+# ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
+# A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
+# --plugin-dir with `skills/` at its top as one plugin named after the directory
+# (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
+# plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
+COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
+# Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
+# agent's loopback MCP server inline, which a plugin's own subagents cannot carry
+# (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
+COPY plugins/scadbuddy/agents /app/subagents
+# The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
+# becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
+# same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
+COPY --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
+
+# Fails the build when the bundled Claude Code is missing for this platform or
+# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
+# or when the tool manifest does not parse or is empty (rather than at the worker's start).
+RUN .venv/bin/python -m scadbuddy_durable.check_cli_version \
+    && .venv/bin/python -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV PATH=/app/agent-durable/.venv/bin:$PATH \
+    HOME=/srv/agent \
+    CLAUDE_CONFIG_DIR=/srv/agent/claude \
+    SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
+    SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
+    SCADBUDDY_DURABLE_AGENTS_DIR=/app/subagents \
+    SCADBUDDY_DURABLE_CWD=/srv/agent \
+    SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+USER 10001:10001
+EXPOSE 8082
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python", "-m", "scadbuddy_durable"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/healthz', timeout=4).status == 200 else 1)"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
@@ -366,7 +434,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.09.28
+ARG OPENSCAD_VERSION=2026.10.12
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
@@ -485,7 +553,8 @@ RUN uv sync --frozen \
 
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
-# above (the release's checksums.txt).
+# above (the release's checksums.txt). ci.yml's `agent` job installs the same version
+# and amd64 digest for the agent's Temporal tests (#1055); bump them together.
 ARG TARGETARCH
 ARG TEMPORAL_CLI_VERSION=1.9.1
 ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
@@ -548,7 +617,11 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # A new build must become current before the old pod drains, so roll it out with
 # RollingUpdate and maxSurge >= 1: under Recreate the old build stays current while it
 # drains, and runs submitted then are pinned to a build no pod serves afterwards.
-CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
+# --no-proxy-headers: uvicorn would otherwise believe X-Forwarded-For/-Proto from
+# 127.0.0.1 (its default FORWARDED_ALLOW_IPS) and rewrite the request's client before the
+# app sees it, so an in-pod caller (kubectl port-forward, a sidecar) could name any
+# client. SCADBUDDY_TRUSTED_PROXIES (`core/proxies.py`) is the only trust decision.
+CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608", "--no-proxy-headers"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.

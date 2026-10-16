@@ -21,15 +21,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+import re
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, Self
+from typing import IO, Any, Literal, Self
 
 import httpx
 from fastapi import status
+from opentelemetry.trace import Span, SpanKind
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
@@ -37,17 +39,23 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchivePhotoUpload,
     ArchiveRunList,
+    ArchiveStats,
     AvailableFilament,
     ExternalLink,
     FilamentRequirements,
+    FileUpdate,
     Folder,
     FolderCreate,
+    FolderUpdate,
     InventoryRemain,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
     LocalPresetCatalogue,
+    MoveResult,
     PresetCatalogue,
+    PresetRef,
+    PresetValues,
     Printer,
     PrinterMedia,
     PrinterStatus,
@@ -63,20 +71,149 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     TimelapseInfo,
     TimelapseThumbnails,
+    TrashedLibraryFile,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
+from scadbuddy.core.tracing import detached_span, span
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
+
+
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
+#: The largest camera frame read into memory: a JPEG of a printer's camera is well
+#: under a megabyte, so past this Bambuddy is answering something else (#1006).
+MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
+#: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
+TRASH_PAGE = 500
+#: The Bambuddy permission that shows a caller every user's trash (``Permission``,
+#: ``backend/app/core/permissions.py`` line 62 at v1.2.5.5).
+LIBRARY_DELETE_ALL = "library:delete_all"
+#: A live camera stream never ends, so it has no total timeout; a camera that sends no
+#: frame for ``read`` seconds has stalled, and the stream ends.
+CAMERA_STREAM_TIMEOUT = httpx.Timeout(10.0, read=30.0)
+#: What Bambuddy's ``/camera/stream`` answers with.
+MJPEG_TYPE = "multipart/x-mixed-replace; boundary=frame"
+#: A multipart MJPEG type with a plain boundary token: the only type a stream is
+#: served as, since ScadBuddy's origin would otherwise serve whatever Bambuddy (or an
+#: external camera behind it) labels the bytes, ``text/html`` included.
+_MJPEG = re.compile(
+    r"multipart/x-mixed-replace;\s*boundary=\"?([A-Za-z0-9'()+_,.\-]{1,70})\"?", re.I
+)
+
+
+def mjpeg_type(upstream: str | None) -> str:
+    """The content type to serve a camera stream as: ``multipart/x-mixed-replace`` with
+    the upstream's boundary, since the parts are split on it; :data:`MJPEG_TYPE` when the
+    upstream names no usable boundary. Never the upstream's type itself."""
+    match = _MJPEG.fullmatch((upstream or "").strip())
+    return f"multipart/x-mixed-replace; boundary={match.group(1)}" if match else MJPEG_TYPE
+
+
+#: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
+#: 2026-10-01 §4). A closed set, so a span name never carries an id or free text.
+Operation = Literal[
+    "media.attachment",
+    "archives.list",
+    "archives.photo.delete",
+    "archives.photo.upload",
+    "archives.printer_media",
+    "archives.read",
+    "archives.runs",
+    "archives.stats",
+    "archives.timelapse.info",
+    "archives.timelapse.select",
+    "archives.timelapse.thumbnails",
+    "auth.me",
+    "auth.status",
+    "external_links.create",
+    "external_links.list",
+    "external_links.update",
+    "library.annotate",
+    "library.bulk_delete",
+    "library.delete",
+    "library.download",
+    "library.filament_requirements",
+    "library.files.list",
+    "library.files.read",
+    "library.files.update",
+    "library.folders.by_project",
+    "library.folders.create",
+    "library.folders.delete",
+    "library.folders.list",
+    "library.folders.read",
+    "library.folders.update",
+    "library.listing",
+    "library.move",
+    "library.plate_thumbnail",
+    "library.plates",
+    "library.rename",
+    "library.thumbnail",
+    "library.trash.list",
+    "library.trash.restore",
+    "library.upload",
+    "media.download",
+    "media.photo",
+    "media.plate_thumbnail",
+    "media.source",
+    "media.thumbnail",
+    "media.timelapse",
+    "printers.available_filaments",
+    "printers.camera.snapshot",
+    "printers.camera.stream",
+    "printers.camera.token",
+    "printers.inventory_remain",
+    "printers.list",
+    "printers.read",
+    "printers.status",
+    "projects.add_archives",
+    "projects.add_queue",
+    "projects.create",
+    "projects.list",
+    "projects.read",
+    "queue.add",
+    "queue.list",
+    "queue.read",
+    "settings.read",
+    "slice.job.status",
+    "slice.start",
+    "slicer.local_presets",
+    "slicer.preset_values",
+    "slicer.presets",
+    "spools.assign",
+    "spools.assignments",
+    "spools.filament_presets",
+    "spools.list",
+    "version",
+]
+
+
+def _call_span(
+    operation: Operation, method: str, scope: Scope, *, detached: bool = False
+) -> AbstractContextManager[Span]:
+    """Our side of a Bambuddy call (spec 2026-10-01 §4): no headers are injected; the
+    span is named by the operation and holds the method, the status code and the scope,
+    never a path or a body. ``detached`` is for a call held open across a ``yield`` (a
+    stream), which may be closed from another task: that span is never made current."""
+    name = f"bambuddy.{operation}"
+    attributes = {"http.request.method": method, "scadbuddy.bambuddy.scope": str(scope)}
+    if detached:
+        return detached_span(name, kind=SpanKind.CLIENT, attributes=attributes)
+    return span(name, kind=SpanKind.CLIENT, attributes=attributes)
+
+
+class BambuddyAnswerError(ApiError):
+    """What Bambuddy's answer did wrong, found while reading it inside
+    :meth:`BambuddyClient.stream`'s ``async with`` (a frame over its cap): it fails the
+    call's span, as a refusal does. Any other error the reader raises leaves it alone."""
 
 
 @dataclass(frozen=True)
@@ -141,28 +278,31 @@ class BambuddyClient:
         path: str,
         *,
         scope: Scope,
+        operation: Operation,
         what: str,
         params: Mapping[str, Any] | None = None,
         json: Any | None = None,
         files: Any | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
-        try:
-            response = await self._http.request(
-                method,
-                self.config.url(path),
-                headers=self._headers,
-                params=dict(params) if params else None,
-                json=json,
-                files=files,
-                timeout=timeout or self.config.timeout,
-            )
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": method, "path": path})
-            raise map_transport(error, what=what) from error
-        if response.is_success:
-            return response
-        raise map_response(response, scope=scope, what=what)
+        with _call_span(operation, method, scope) as current:
+            try:
+                response = await self._http.request(
+                    method,
+                    self.config.url(path),
+                    headers=self._headers,
+                    params=dict(params) if params else None,
+                    json=json,
+                    files=files,
+                    timeout=timeout or self.config.timeout,
+                )
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": method, "path": path})
+                raise map_transport(error, what=what) from error
+            current.set_attribute("http.response.status_code", response.status_code)
+            if response.is_success:
+                return response
+            raise map_response(response, scope=scope, what=what)
 
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
@@ -180,7 +320,9 @@ class BambuddyClient:
     async def printers(self) -> list[Printer]:
         what = "list the printers"
         # The trailing slash is required: /api/v1/printers is a 404 on 1.2.5.5.
-        response = await self._send("GET", "/printers/", scope=Scope.READ_STATUS, what=what)
+        response = await self._send(
+            "GET", "/printers/", scope=Scope.READ_STATUS, operation="printers.list", what=what
+        )
         return [Printer.model_validate(row) for row in self._rows(response, what=what)]
 
     async def printer(self, printer_id: int) -> Printer:
@@ -189,6 +331,7 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}",
             scope=Scope.READ_STATUS,
+            operation="printers.read",
             what=f"read printer {printer_id}",
         )
         return Printer.model_validate(response.json())
@@ -199,9 +342,32 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}/status",
             scope=Scope.READ_STATUS,
+            operation="printers.status",
             what=f"read the status of printer {printer_id}",
         )
         return PrinterStatus.model_validate(response.json())
+
+    async def _camera_token(self, *, what: str) -> str:
+        """A camera stream token, minted under ``camera:view``. An answer without one is
+        a 502, as any unexpected body is (#2752 review)."""
+        minted = await self._send(
+            "POST",
+            "/printers/camera/stream-token",
+            scope=Scope.READ_STATUS,
+            operation="printers.camera.token",
+            what=what,
+        )
+        try:
+            body = minted.json()
+        except ValueError:
+            body = None
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no camera token when asked to {what}",
+            )
+        return token
 
     async def camera_snapshot(self, printer_id: int) -> bytes:
         """One JPEG frame from the printer's camera (#796).
@@ -212,17 +378,63 @@ class BambuddyClient:
         take Bambuddy up to 15 s; a camera that gives no frame is its 503.
         """
         what = f"capture the camera of printer {printer_id}"
-        minted = await self._send(
-            "POST", "/printers/camera/stream-token", scope=Scope.READ_STATUS, what=what
-        )
-        response = await self._send(
-            "GET",
+        token = await self._camera_token(what=what)
+        frame = bytearray()
+        async with self.stream(
             f"/printers/{printer_id}/camera/snapshot",
-            scope=Scope.READ_STATUS,
+            operation="printers.camera.snapshot",
             what=what,
-            params={"token": minted.json()["token"]},
-        )
-        return response.content
+            params={"token": token},
+            # Nothing sends a Range here, so a 416 is no seek: map it, never a "frame".
+            pass_416=False,
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                frame += chunk
+                if len(frame) > MAX_CAMERA_FRAME_BYTES:
+                    raise BambuddyAnswerError(
+                        status.HTTP_502_BAD_GATEWAY,
+                        f"Bambuddy's frame was over {MAX_CAMERA_FRAME_BYTES} bytes when asked"
+                        f" to {what}",
+                    )
+        return bytes(frame)
+
+    @asynccontextmanager
+    async def camera_stream(
+        self, printer_id: int, *, fps: int
+    ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+        """The printer's live camera as Bambuddy's MJPEG stream (#981): its content type
+        (``multipart/x-mixed-replace; boundary=frame``) and its bytes, open until the
+        context exits. A refusal (no printer, no camera) raises before anything is
+        yielded, so a caller can still answer it as an error.
+
+        Leaving the context closes the connection, and that is the whole release:
+        Bambuddy fans one camera out to every viewer and stops it 5 s after the last
+        one disconnects (``camera.py``'s broadcaster). ``/camera/stop`` is never
+        called: once no subscriber is counted it force-stops every stream of the
+        printer, an external camera's other viewers included. The token is minted
+        here, as the snapshot's is, and never leaves the server."""
+        what = f"stream the camera of printer {printer_id}"
+        token = await self._camera_token(what=what)
+        path = f"/printers/{printer_id}/camera/stream"
+        with _call_span(
+            "printers.camera.stream", "GET", Scope.READ_STATUS, detached=True
+        ) as current:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    self.config.url(path),
+                    headers=self._headers,
+                    params={"token": token, "fps": fps},
+                    timeout=CAMERA_STREAM_TIMEOUT,
+                ) as response:
+                    current.set_attribute("http.response.status_code", response.status_code)
+                    if not response.is_success:
+                        await response.aread()
+                        raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                    yield mjpeg_type(response.headers.get("content-type")), response.aiter_bytes()
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
 
     async def available_filaments(
         self, model: str, *, location: str | None = None
@@ -239,6 +451,7 @@ class BambuddyClient:
             "GET",
             "/printers/available-filaments",
             scope=Scope.READ_STATUS,
+            operation="printers.available_filaments",
             what=what,
             params=params,
         )
@@ -247,15 +460,38 @@ class BambuddyClient:
     async def folders(self) -> list[Folder]:
         what = "list the library folders"
         response = await self._send(
-            "GET", "/library/folders", scope=Scope.MANAGE_LIBRARY, what=what
+            "GET",
+            "/library/folders",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.list",
+            what=what,
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
 
     async def presets(self) -> PresetCatalogue:
         response = await self._send(
-            "GET", "/slicer/presets", scope=Scope.MANAGE_LIBRARY, what="list the slicer presets"
+            "GET",
+            "/slicer/presets",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.presets",
+            what="list the slicer presets",
         )
-        return PresetCatalogue.model_validate(response.json())
+        # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
+        return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues:
+        """``GET /slicer/preset-values`` — a process preset's effective values, flattened
+        by Bambuddy's slicer sidecar, so a change can be shown against the value it
+        replaces and written in the shape the preset stores it (#717)."""
+        response = await self._send(
+            "GET",
+            "/slicer/preset-values",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.preset_values",
+            what=f"read the values of process preset {ref.id}",
+            params={"source": ref.source, "id": ref.id, "slot": "process"},
+        )
+        return PresetValues.model_validate(response.json())
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.
@@ -264,7 +500,11 @@ class BambuddyClient:
         classified them, so the two calls are not interchangeable.
         """
         response = await self._send(
-            "GET", "/local-presets/", scope=Scope.MANAGE_LIBRARY, what="list the local presets"
+            "GET",
+            "/local-presets/",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_presets",
+            what="list the local presets",
         )
         return LocalPresetCatalogue.model_validate(response.json())
 
@@ -281,6 +521,7 @@ class BambuddyClient:
             "GET",
             "/inventory/spools",
             scope=Scope.READ_STATUS,
+            operation="spools.list",
             what=what,
             params={"include_archived": include_archived},
         )
@@ -297,6 +538,7 @@ class BambuddyClient:
             "GET",
             f"/inventory/spools/{spool_id}/filament-presets",
             scope=Scope.READ_STATUS,
+            operation="spools.filament_presets",
             what=what,
         )
         return [SpoolFilamentPreset.model_validate(row) for row in self._rows(response, what=what)]
@@ -312,10 +554,33 @@ class BambuddyClient:
             "GET",
             "/inventory/assignments",
             scope=Scope.READ_STATUS,
+            operation="spools.assignments",
             what=what,
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def assign_spool(
+        self, *, spool_id: int, printer_id: int, ams_id: int, tray_id: int
+    ) -> SpoolAssignment:
+        """``POST /api/v1/inventory/assignments``: record that ``spool_id`` is in the
+        tray (#2164). Only on a person's confirmation in the print dialog. Bambuddy also
+        configures the tray over MQTT from the spool, as its own Assign does."""
+        what = f"assign spool {spool_id} to printer {printer_id}'s tray"
+        response = await self._send(
+            "POST",
+            "/inventory/assignments",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.assign",
+            what=what,
+            json={
+                "spool_id": spool_id,
+                "printer_id": printer_id,
+                "ams_id": ams_id,
+                "tray_id": tray_id,
+            },
+        )
+        return SpoolAssignment.model_validate(response.json())
 
     async def inventory_remain(self, printer_id: int) -> InventoryRemain:
         """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""
@@ -323,6 +588,7 @@ class BambuddyClient:
             "GET",
             f"/printers/{printer_id}/inventory-remain",
             scope=Scope.READ_STATUS,
+            operation="printers.inventory_remain",
             what=f"read the loaded filament of printer {printer_id}",
         )
         return InventoryRemain.model_validate(response.json())
@@ -340,6 +606,7 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}/filament-requirements",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.filament_requirements",
             what=f"read the filament requirements of library file {file_id}",
             params={"plate_id": plate_id} if plate_id is not None else None,
         )
@@ -359,25 +626,119 @@ class BambuddyClient:
         not documented, so callers sort; ``limit`` keeps the read small. There is no
         filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
+        response = await self._list_archives(
+            what,
+            printer_id=printer_id,
+            project_id=None,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def archive_outcomes(
+        self,
+        *,
+        printer_id: int | None = None,
+        project_id: int | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        skip_invalid: bool = False,
+    ) -> list[ArchiveDetail]:
+        """:meth:`archives` with each row's outcome (#1912): the list route answers
+        the whole ``ArchiveResponse``, the same schema as :meth:`archive`.
+
+        With ``skip_invalid``, a row that does not parse is logged and left out rather
+        than failing the read, for a caller that reads the rest singly anyway."""
+        what = "list the archives"
+        response = await self._list_archives(
+            what,
+            printer_id=printer_id,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        rows = self._rows(response, what=what)
+        if not skip_invalid:
+            return [ArchiveDetail.model_validate(row) for row in rows]
+        parsed: list[ArchiveDetail] = []
+        unparsed = 0
+        for row in rows:
+            try:
+                parsed.append(ArchiveDetail.model_validate(row))
+            except ValueError:
+                unparsed += 1
+        if unparsed:
+            # One line per read, not per row (#3477 review): each such archive falls
+            # back to its own single read.
+            logger.info(
+                "archive rows did not parse; left out of the list read",
+                extra={"rows": unparsed},
+            )
+        return parsed
+
+    async def _list_archives(
+        self,
+        what: str,
+        *,
+        printer_id: int | None,
+        project_id: int | None,
+        limit: int,
+        offset: int,
+        date_from: date | None,
+        date_to: date | None,
+    ) -> httpx.Response:
         params: dict[str, Any] = {"limit": limit}
         if printer_id is not None:
             params["printer_id"] = printer_id
+        if project_id is not None:
+            params["project_id"] = project_id
         if offset:
             params["offset"] = offset
         if date_from is not None:
             params["date_from"] = date_from.isoformat()
         if date_to is not None:
             params["date_to"] = date_to.isoformat()
-        response = await self._send(
-            "GET", "/archives/", scope=Scope.READ_STATUS, what=what, params=params
+        return await self._send(
+            "GET",
+            "/archives/",
+            scope=Scope.READ_STATUS,
+            operation="archives.list",
+            what=what,
+            params=params,
         )
-        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def archive_stats(
+        self, *, date_from: date | None = None, date_to: date | None = None
+    ) -> ArchiveStats:
+        """``GET /api/v1/archives/stats``: totals over every archive, or over those
+        created within the window (both ends inclusive)."""
+        params: dict[str, Any] = {}
+        if date_from is not None:
+            params["date_from"] = date_from.isoformat()
+        if date_to is not None:
+            params["date_to"] = date_to.isoformat()
+        response = await self._send(
+            "GET",
+            "/archives/stats",
+            scope=Scope.READ_STATUS,
+            operation="archives.stats",
+            what="read the print statistics",
+            params=params,
+        )
+        return ArchiveStats.model_validate(response.json())
 
     async def archive(self, archive_id: int) -> ArchiveDetail:
         response = await self._send(
             "GET",
             f"/archives/{archive_id}",
             scope=Scope.READ_STATUS,
+            operation="archives.read",
             what=f"read archive {archive_id}",
         )
         return ArchiveDetail.model_validate(response.json())
@@ -388,6 +749,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/runs",
             scope=Scope.READ_STATUS,
+            operation="archives.runs",
             what=f"list the runs of archive {archive_id}",
         )
         return ArchiveRunList.model_validate(response.json())
@@ -397,6 +759,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/timelapse/info",
             scope=Scope.READ_STATUS,
+            operation="archives.timelapse.info",
             what=f"read the timelapse of archive {archive_id}",
         )
         return TimelapseInfo.model_validate(response.json())
@@ -406,6 +769,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/timelapse/thumbnails",
             scope=Scope.READ_STATUS,
+            operation="archives.timelapse.thumbnails",
             what=f"read the timelapse frames of archive {archive_id}",
         )
         return TimelapseThumbnails.model_validate(response.json())
@@ -418,6 +782,7 @@ class BambuddyClient:
             "GET",
             f"/archives/{archive_id}/printer-media",
             scope=Scope.READ_STATUS,
+            operation="archives.printer_media",
             what=f"list the printer media of archive {archive_id}",
         )
         return PrinterMedia.model_validate(response.json())
@@ -429,20 +794,23 @@ class BambuddyClient:
             "POST",
             f"/archives/{archive_id}/timelapse/select",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.timelapse.select",
             what=f"attach a timelapse to archive {archive_id}",
             params={"filename": filename},
             timeout=self.config.upload_timeout,
         )
 
     async def upload_archive_photo(
-        self, archive_id: int, filename: str, content: bytes
+        self, archive_id: int, filename: str, content: bytes | IO[bytes]
     ) -> ArchivePhotoUpload:
         """Bambuddy takes only ``.jpg``, ``.jpeg``, ``.png`` and ``.webp`` here, and
-        renames the file; the answer's ``filename`` is the name to keep."""
+        renames the file; the answer's ``filename`` is the name to keep. A file object
+        is streamed from where it is, never read whole (#309)."""
         response = await self._send(
             "POST",
             f"/archives/{archive_id}/photos",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.photo.upload",
             what=f"add a photo to archive {archive_id}",
             files={"file": (filename, content)},
             timeout=self.config.upload_timeout,
@@ -454,6 +822,7 @@ class BambuddyClient:
             "DELETE",
             f"/archives/{archive_id}/photos/{filename}",
             scope=Scope.MANAGE_ARCHIVES,
+            operation="archives.photo.delete",
             what=f"delete a photo of archive {archive_id}",
         )
 
@@ -462,37 +831,62 @@ class BambuddyClient:
         self,
         path: str,
         *,
+        operation: Operation,
         what: str,
         range_header: str | None = None,
         if_range: str | None = None,
+        params: Mapping[str, str] | None = None,
+        pass_416: bool = True,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
         ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
         a seek with a ``206`` and only those bytes. The response is open for the
-        duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
+        duration of the ``async with``. Read it with ``aiter_raw`` to pass the bytes on
+        as Bambuddy sent them (the media proxy keeps its ``Content-Encoding``), or with
+        ``aiter_bytes`` where the caller counts or uses the decoded bytes, as the camera
+        frame's cap does. A failure is mapped
         as every other call's is, once its (small) body has been read, except a ``416``:
         that is the answer to a seek past the end, and its ``Content-Range`` carries the
-        length the media element needs, so it is passed through.
+        length the media element needs, so it is passed through. ``pass_416=False`` maps
+        it as any refusal, for a caller that sends no ``Range`` (#3397).
         """
         headers = dict(self._headers)
         if range_header is not None:
             headers["Range"] = range_header
         if if_range is not None:
             headers["If-Range"] = if_range
-        request = self._http.build_request("GET", self.config.url(path), headers=headers)
-        try:
-            response = await self._http.send(request, stream=True)
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
-            raise map_transport(error, what=what) from error
-        try:
-            if not response.is_success and response.status_code != 416:
-                await response.aread()
-                raise map_response(response, scope=Scope.READ_STATUS, what=what)
-            yield response
-        finally:
-            await response.aclose()
+        request = self._http.build_request(
+            "GET", self.config.url(path), headers=headers, params=params
+        )
+        # The span fails only on what Bambuddy did: an error the consumer raises inside
+        # the ``async with`` (a browser that went away) leaves it, and is raised after.
+        # A transport error there is the body's read failing, which is Bambuddy's.
+        consumer_error: Exception | None = None
+        with _call_span(operation, "GET", Scope.READ_STATUS, detached=True) as current:
+            try:
+                response = await self._http.send(request, stream=True)
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
+            current.set_attribute("http.response.status_code", response.status_code)
+            try:
+                if not response.is_success and (response.status_code != 416 or not pass_416):
+                    await response.aread()
+                    raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                try:
+                    yield response
+                except httpx.HTTPError as error:
+                    logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                    raise map_transport(error, what=what) from error
+                except BambuddyAnswerError:
+                    raise
+                except Exception as error:
+                    consumer_error = error
+            finally:
+                await response.aclose()
+        if consumer_error is not None:
+            raise consumer_error
 
     # --- library -------------------------------------------------------------
 
@@ -502,9 +896,22 @@ class BambuddyClient:
             "GET",
             f"/library/folders/by-project/{project_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.by_project",
             what=what,
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def folder(self, folder_id: int) -> Folder:
+        """``GET /api/v1/library/folders/{id}`` — one folder, 404 "Folder not found" when
+        Bambuddy cannot see it (#2263)."""
+        response = await self._send(
+            "GET",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.read",
+            what=f"read library folder {folder_id}",
+        )
+        return Folder.model_validate(response.json())
 
     async def create_folder(self, folder: FolderCreate) -> Folder:
         """``POST /api/v1/library/folders/`` — the trailing slash is the write route."""
@@ -512,6 +919,7 @@ class BambuddyClient:
             "POST",
             "/library/folders/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.create",
             what=f"create the {folder.name!r} library folder",
             json=folder.model_dump(mode="json", exclude_none=True),
         )
@@ -520,15 +928,20 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes,
+        content: bytes | IO[bytes],
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,
     ) -> LibraryFile:
+        """``content`` as bytes, or a seekable file, which is sent from its start a chunk
+        at a time rather than read whole (#503); a retry sends it from its start again."""
+        if not isinstance(content, bytes):
+            content.seek(0)
         response = await self._send(
             "POST",
             "/library/files",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.upload",
             what=f"upload {filename}",
             params={"folder_id": folder_id} if folder_id is not None else None,
             files={"file": (filename, content, media_type)},
@@ -543,6 +956,7 @@ class BambuddyClient:
             "GET",
             "/library/files",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.list",
             what=what,
             params={"folder_id": folder_id},
         )
@@ -554,25 +968,37 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.read",
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
 
-    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
+    async def library_listing(
+        self, *, folder_id: int | None, every_folder: bool = False
+    ) -> list[LibraryListRow]:
         """``GET /library/files/`` — one folder's files, or the root's without one
         (``include_root`` defaults to true). One read, however many files: Bambuddy
-        does not paginate it."""
+        does not paginate it. ``every_folder`` (without ``folder_id``) is every file in
+        the library, ``include_root=false`` (#3630)."""
         what = (
-            "list the library files"
+            "list every library file"
+            if every_folder
+            else "list the library files"
             if folder_id is None
             else f"list the files of library folder {folder_id}"
         )
+        params: dict[str, Any] | None = None
+        if folder_id is not None:
+            params = {"folder_id": folder_id}
+        elif every_folder:
+            params = {"include_root": "false"}
         response = await self._send(
             "GET",
             "/library/files/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.listing",
             what=what,
-            params={"folder_id": folder_id} if folder_id is not None else None,
+            params=params,
         )
         return [LibraryListRow.model_validate(row) for row in self._rows(response, what=what)]
 
@@ -583,6 +1009,7 @@ class BambuddyClient:
             "GET",
             f"/library/files/{file_id}/plates",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.plates",
             what=f"read the plates of library file {file_id}",
         )
         return LibraryPlates.model_validate(response.json())
@@ -594,21 +1021,23 @@ class BambuddyClient:
         it in ``contextlib.aclosing``."""
         what = f"download library file {file_id}"
         path = f"/library/files/{file_id}/download"
-        try:
-            async with self._http.stream(
-                "GET",
-                self.config.url(path),
-                headers=self._headers,
-                timeout=self.config.upload_timeout,
-            ) as response:
-                if not response.is_success:
-                    await response.aread()
-                    raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
-                async for chunk in response.aiter_bytes():
-                    yield chunk
-        except httpx.HTTPError as error:
-            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
-            raise map_transport(error, what=what) from error
+        with _call_span("library.download", "GET", Scope.MANAGE_LIBRARY, detached=True) as current:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    self.config.url(path),
+                    headers=self._headers,
+                    timeout=self.config.upload_timeout,
+                ) as response:
+                    current.set_attribute("http.response.status_code", response.status_code)
+                    if not response.is_success:
+                        await response.aread()
+                        raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
@@ -630,17 +1059,187 @@ class BambuddyClient:
             "PUT",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.annotate",
             what=f"annotate library file {file_id}",
             json={"notes": notes},
         )
         return LibraryFile.model_validate(response.json())
 
-    async def delete_library_file(self, file_id: int) -> None:
+    async def update_library_file(self, file_id: int, update: FileUpdate) -> LibraryFile:
+        """``PUT /library/files/{id}``: rename and/or move. Partial, as
+        :meth:`annotate_library_file` explains."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.update",
+            what=f"update library file {file_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def update_folder(self, folder_id: int, update: FolderUpdate) -> Folder:
+        """``PUT /library/folders/{id}``: rename and/or move; partial, ``parent_id=0``
+        is the top level."""
+        response = await self._send(
+            "PUT",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.update",
+            what=f"update library folder {folder_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return Folder.model_validate(response.json())
+
+    async def delete_folder(self, folder_id: int) -> None:
+        """``DELETE /library/folders/{id}``. The caller empties it first (the folder
+        delete kind), so what this drops is the folder's own record."""
         await self._send(
+            "DELETE",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.delete",
+            what=f"delete library folder {folder_id}",
+        )
+
+    async def rename_library_file(self, file_id: int, filename: str) -> LibraryFile:
+        """``PUT /library/files/{id}`` with ``filename`` alone (#2670): the same partial
+        update as :meth:`annotate_library_file`, under the same id. Bambuddy refuses a
+        name a printer's SD card would (``validate_print_filename``) with a 400."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.rename",
+            what=f"rename library file {file_id} to {filename!r}",
+            json={"filename": filename},
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def move_library_files(self, file_ids: list[int], folder_id: int | None) -> MoveResult:
+        """``POST /library/files/move`` (``FileMoveRequest``, #2670): each file into
+        ``folder_id``, the root when ``None``, under its own id. Bambuddy skips a file its
+        key's user did not add, or one it cannot relocate, each with a reason, and passes
+        over an id it does not have without a word; it 404s a folder it does not have and
+        403s a read-only external one."""
+        target = "the library root" if folder_id is None else f"library folder {folder_id}"
+        response = await self._send(
+            "POST",
+            "/library/files/move",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.move",
+            what=f"move {len(file_ids)} library files to {target}",
+            json={"file_ids": file_ids, "folder_id": folder_id},
+        )
+        return MoveResult.model_validate(response.json())
+
+    async def delete_library_file(self, file_id: int) -> bool:
+        """``DELETE /library/files/{id}``: moves the file to Bambuddy's trash, and says
+        so as ``trashed``. An external file skips the trash (``trashed: false``): its
+        record is dropped for good (Bambuddy's ``openapi.json``, read 2026-10-10, #2167)."""
+        response = await self._send(
             "DELETE",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="library.delete",
             what=f"delete library file {file_id}",
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            return True
+        return not (isinstance(body, dict) and body.get("trashed") is False)
+
+    async def bulk_delete_library_files(self, file_ids: list[int]) -> int:
+        """``POST /library/bulk-delete`` (``BulkDeleteRequest``): each file to the trash,
+        as :meth:`delete_library_file` does. Bambuddy skips a file the key's user does
+        not own (without ``*_all``) and answers only how many it deleted
+        (``BulkDeleteResponse.deleted_files``), so the caller reads which it skipped."""
+        what = f"delete {len(file_ids)} library files"
+        response = await self._send(
+            "POST",
+            "/library/bulk-delete",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.bulk_delete",
+            what=what,
+            json={"file_ids": file_ids, "folder_ids": []},
+        )
+        body = response.json()
+        deleted = body.get("deleted_files") if isinstance(body, dict) else None
+        if not isinstance(deleted, int):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say how many files it deleted when asked to {what}",
+            )
+        return deleted
+
+    async def trashed_library_files(self) -> list[TrashedLibraryFile]:
+        """``GET /library/trash``: every file in Bambuddy's trash that its API key's user
+        may see, page by page (``limit`` at most 500). Bambuddy v1.2.5.5
+        ``backend/app/api/routes/library_trash.py`` ``list_trash`` (lines 88-150):
+        ``{items, total, retention_days}``, each item with its ``folder_id``; a caller
+        without ``library:delete_all`` sees only its user's files
+        (:meth:`sees_every_users_trash` says which)."""
+        found: list[TrashedLibraryFile] = []
+        while True:
+            response = await self._send(
+                "GET",
+                "/library/trash",
+                scope=Scope.MANAGE_LIBRARY,
+                operation="library.trash.list",
+                what="list Bambuddy's library trash",
+                params={"limit": TRASH_PAGE, "offset": len(found)},
+            )
+            body = response.json()
+            items = [TrashedLibraryFile.model_validate(row) for row in body["items"]]
+            found.extend(items)
+            if not items or len(found) >= body["total"]:
+                return found
+
+    async def sees_every_users_trash(self) -> bool:
+        """Whether :meth:`trashed_library_files` lists every user's trashed files rather
+        than only the key's user's. Bambuddy v1.2.5.5 narrows ``list_trash`` to the
+        caller's own files unless ``require_ownership_permission`` grants
+        ``library:delete_all`` (``backend/app/core/auth.py`` lines 2106-2220), which it
+        grants to every caller while auth is off. So: ``GET /auth/status``
+        (``routes/auth.py`` line 395, public) for ``auth_enabled``, then ``GET /auth/me``
+        (line 662), whose ``permissions`` for an API key are those the key can exercise
+        (``apikey_effective_permissions``, ``core/auth.py`` line 340). Any other shape
+        is a 502, never read as seeing everything."""
+        what = "read whether Bambuddy's API key sees every user's trash"
+        response = await self._send(
+            "GET", "/auth/status", scope=Scope.MANAGE_LIBRARY, operation="auth.status", what=what
+        )
+        body = response.json()
+        enabled = body.get("auth_enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say whether auth is on, asked to {what}",
+            )
+        if not enabled:
+            return True
+        response = await self._send(
+            "GET", "/auth/me", scope=Scope.MANAGE_LIBRARY, operation="auth.me", what=what
+        )
+        body = response.json()
+        permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not list the API key's permissions, asked to {what}",
+            )
+        return LIBRARY_DELETE_ALL in permissions
+
+    async def restore_library_file(self, file_id: int) -> None:
+        """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file
+        not in the trash (an external one, or one already purged) is the 404."""
+        await self._send(
+            "POST",
+            f"/library/trash/{file_id}/restore",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.trash.restore",
+            what=f"restore library file {file_id} from Bambuddy's trash",
         )
 
     # --- slice ---------------------------------------------------------------
@@ -650,6 +1249,7 @@ class BambuddyClient:
             "POST",
             f"/library/files/{file_id}/slice",
             scope=Scope.MANAGE_LIBRARY,
+            operation="slice.start",
             what=f"slice library file {file_id}",
             json=request.model_dump(mode="json", exclude_none=True),
         )
@@ -660,6 +1260,7 @@ class BambuddyClient:
             "GET",
             f"/slice-jobs/{job_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="slice.job.status",
             what=f"read slice job {job_id}",
         )
         return SliceJob.model_validate(response.json())
@@ -683,11 +1284,34 @@ class BambuddyClient:
 
     # --- queue ---------------------------------------------------------------
 
+    async def queue(
+        self, *, printer_id: int | None = None, status: str | None = None
+    ) -> list[QueueItem]:
+        """``GET /api/v1/queue/``: every item, finished ones too, unless ``status``
+        narrows it. Reading the queue needs only ``can_read_status`` (``QUEUE_READ``
+        in Bambuddy's ``auth.py``); ``can_queue`` is for changing it."""
+        what = "list the print queue"
+        params: dict[str, Any] = {}
+        if printer_id is not None:
+            params["printer_id"] = printer_id
+        if status is not None:
+            params["status"] = status
+        response = await self._send(
+            "GET",
+            "/queue/",
+            scope=Scope.READ_STATUS,
+            operation="queue.list",
+            what=what,
+            params=params,
+        )
+        return [QueueItem.model_validate(row) for row in self._rows(response, what=what)]
+
     async def queue_item(self, item_id: int) -> QueueItem:
         response = await self._send(
             "GET",
             f"/queue/{item_id}",
             scope=Scope.MANAGE_QUEUE,
+            operation="queue.read",
             what=f"read queue item {item_id}",
         )
         return QueueItem.model_validate(response.json())
@@ -702,6 +1326,7 @@ class BambuddyClient:
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
+            operation="queue.add",
             what=(
                 f"queue archive {item.archive_id}"
                 if item.library_file_id is None
@@ -716,7 +1341,11 @@ class BambuddyClient:
     async def version(self) -> str:
         """``GET /api/v1/updates/version``, which Bambuddy serves without a key."""
         response = await self._send(
-            "GET", "/updates/version", scope=Scope.READ_STATUS, what="read Bambuddy's version"
+            "GET",
+            "/updates/version",
+            scope=Scope.READ_STATUS,
+            operation="version",
+            what="read Bambuddy's version",
         )
         return str(response.json().get("version") or "unknown")
 
@@ -724,7 +1353,9 @@ class BambuddyClient:
         """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which
         needs ``SETTINGS_READ``: Read Status for a key)."""
         what = "read Bambuddy's settings"
-        response = await self._send("GET", "/settings/", scope=Scope.READ_STATUS, what=what)
+        response = await self._send(
+            "GET", "/settings/", scope=Scope.READ_STATUS, operation="settings.read", what=what
+        )
         value = response.json().get("capture_finish_photo")
         if not isinstance(value, bool):
             raise ApiError(
@@ -742,6 +1373,7 @@ class BambuddyClient:
             "GET",
             "/projects/",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.list",
             what=what,
             params={"status": status_filter} if status_filter is not None else None,
         )
@@ -754,6 +1386,7 @@ class BambuddyClient:
             "GET",
             f"/projects/{project_id}",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.read",
             what=f"read project {project_id}",
         )
         return Project.model_validate(response.json())
@@ -763,6 +1396,7 @@ class BambuddyClient:
             "POST",
             "/projects/",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.create",
             what=f"create the {project.name!r} project",
             json=project.model_dump(mode="json", exclude_none=True),
         )
@@ -774,6 +1408,7 @@ class BambuddyClient:
             "POST",
             f"/projects/{project_id}/add-archives",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.add_archives",
             what=f"add archives to project {project_id}",
             json={"archive_ids": archive_ids},
         )
@@ -783,6 +1418,7 @@ class BambuddyClient:
             "POST",
             f"/projects/{project_id}/add-queue",
             scope=Scope.MANAGE_PROJECTS,
+            operation="projects.add_queue",
             what=f"add queue items to project {project_id}",
             json={"queue_item_ids": queue_item_ids},
         )
@@ -792,7 +1428,11 @@ class BambuddyClient:
     async def external_links(self) -> list[ExternalLink]:
         what = "list the external links"
         response = await self._send(
-            "GET", "/external-links/", scope=Scope.MANAGE_LIBRARY, what=what
+            "GET",
+            "/external-links/",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.list",
+            what=what,
         )
         return [ExternalLink.model_validate(row) for row in self._rows(response, what=what)]
 
@@ -803,6 +1443,7 @@ class BambuddyClient:
             "POST",
             "/external-links/",
             scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.create",
             what=f"create the {name!r} external link",
             json={"name": name, "url": url, "icon": icon, "open_in_new_tab": open_in_new_tab},
         )
@@ -827,6 +1468,7 @@ class BambuddyClient:
             "PATCH",
             f"/external-links/{link_id}",
             scope=Scope.MANAGE_LIBRARY,
+            operation="external_links.update",
             what=f"update external link {link_id}",
             json={key: value for key, value in patch.items() if value is not None},
         )
@@ -838,3 +1480,32 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
     """A client built from the stored settings, or a 409 saying what is missing."""
     async with BambuddyClient(BambuddyConfig.from_settings(settings)) as client:
         yield client
+
+
+#: Reads a process preset's values (#717); :func:`read_once` makes one that reads each
+#: preset at most once.
+ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
+
+
+def read_once(client: BambuddyClient) -> ReadPresetValues:
+    """``client.preset_values``, read at most once per preset by whoever shares it
+    (#2804 review): a print's filament profiles and its supports change the same process
+    preset. A failed read fails the same way for every one of them.
+
+    It assumes its callers take turns, as ``check_print`` and ``plan_run`` do: two reads
+    of the same preset gathered concurrently would both miss and both read."""
+    read: dict[tuple[str, str], PresetValues | ApiError] = {}
+
+    async def values(process: PresetRef) -> PresetValues:
+        key = (process.source, process.id)
+        if key not in read:
+            try:
+                read[key] = await client.preset_values(process)
+            except ApiError as error:
+                read[key] = error
+        answer = read[key]
+        if isinstance(answer, ApiError):
+            raise answer
+        return answer
+
+    return values

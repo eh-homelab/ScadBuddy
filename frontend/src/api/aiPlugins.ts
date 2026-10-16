@@ -9,22 +9,59 @@
  * Errors come back as `{ detail }`, and a refused package install as
  * `{ detail, problems: string[] }` (422); `readProblem` keeps both on `ApiError.problem`.
  */
-import { ApiError } from './client'
+import { ApiError, command } from './client'
 
 export type RiskTier = 'read' | 'write' | 'outward'
 
 export interface RemotePlugin {
   name: string
   kind: 'remote_mcp'
+  built_in?: false
   url: string
   enabled: boolean
   tool_prefix: string
   auth: { header: string; last4: string } | null
   usable: boolean
+  /** Why it is never handed to the harness (a name Claude Code now reserves, #2127), or null. */
+  problem: string | null
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
   created_at: string
   updated_at: string
+}
+
+/** One tool of a built-in set, with the tier ScadBuddy's code gives it: the least it can be set to. */
+export interface BuiltInTool {
+  name: string
+  harness_name: string
+  risk: RiskTier
+}
+
+/**
+ * ScadBuddy's own tool sets (#1953, agent/src/plugins/builtInTools.ts `BuiltInPluginView`), listed
+ * first in `/plugins`: a tier per tool that can only be raised, and disabled tools. They are never
+ * added, removed or tested (409 with `built_in: true`); `enabled` changes only where the set has a
+ * switch (`switchable`).
+ */
+export interface BuiltInToolSet {
+  name: string
+  kind: 'built_in'
+  built_in: true
+  enabled: boolean
+  switchable: boolean
+  tool_prefix: string
+  tools: BuiltInTool[]
+  /** Raised tiers only. */
+  tool_tiers: Record<string, RiskTier>
+  disabled_tools: string[]
+}
+
+export type ListedPlugin = BuiltInToolSet | RemotePlugin
+
+export interface BuiltInToolSetPatch {
+  enabled?: boolean
+  tool_tiers?: Record<string, RiskTier>
+  disabled_tools?: string[]
 }
 
 export interface RemotePluginCreate {
@@ -74,6 +111,13 @@ export interface PackageReview {
   hooks: { event: string; type: string; url?: string }[]
   mcp_servers: { name: string; type: string; url: string }[]
   files: string[]
+  /**
+   * What the vetting refuses (a command hook, a hooks module, a local MCP server, ...).
+   * Such a pin loads only when approved with `allow_refused`, as it is.
+   */
+  refused?: string[]
+  /** The Claude Code built-ins its skills and subagents name, offered while the pin is allowed. */
+  builtin_tools?: string[]
 }
 
 export interface FileDiff {
@@ -94,6 +138,8 @@ export interface PluginPackage {
   review: PackageReview
   approved: boolean
   approved_at: string | null
+  /** Approved with what `review.refused` lists allowed: its code runs with the Claude credential. */
+  allow_refused: boolean
   enabled: boolean
   pending: {
     ref: string
@@ -121,6 +167,55 @@ export function repinMoves(pkg: PluginPackage): boolean {
   if (!pkg.pending) return false
   const { url, path } = packageFetch(pkg)
   return pkg.pending.plugin_url !== url || pkg.pending.plugin_path !== path
+}
+
+/**
+ * A plugin that ships with the agent (agent `plugins/packages/builtins.ts`): ScadBuddy's
+ * own. Listed first; it can be enabled or disabled, never
+ * removed, approved or re-pinned.
+ */
+export interface BuiltInPluginPackage {
+  name: string
+  built_in: true
+  source: { kind: 'built_in'; path: string }
+  review: PackageReview
+  approved: true
+  enabled: boolean
+}
+
+export type ListedPackage = PluginPackage | BuiltInPluginPackage
+
+export function isBuiltIn(pkg: ListedPackage): pkg is BuiltInPluginPackage {
+  return 'built_in' in pkg && pkg.built_in === true
+}
+
+/** An install that named a built-in plugin: answered 409 with `built_in: true`, not refused. */
+export function isBuiltInAnswer(error: unknown): boolean {
+  return error instanceof ApiError && (error.problem as { built_in?: unknown }).built_in === true
+}
+
+/** A file of a package, for review (#1029; agent `plugins/packages/files.ts`). */
+export interface PackageFile {
+  path: string
+  size: number
+}
+
+/** One file's content: `null` when it is binary, cut at a preview unless asked for all. */
+export interface PackageFileContent {
+  path: string
+  size: number
+  binary: boolean
+  media_type: string
+  truncated: boolean
+  /** Too large to send whole (#2151): only the preview, so no "Show all". */
+  too_large: boolean
+  content: string | null
+}
+
+/** Which pin's files: the package's own, or its pending re-pin's. */
+export interface PackageFilesOf {
+  name: string
+  pending: boolean
 }
 
 export type PackageInstall =
@@ -167,23 +262,38 @@ const seg = encodeURIComponent
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
 export const aiPlugins = {
-  listRemote: () => request<RemotePlugin[]>('/plugins'),
+  listPlugins: () => request<ListedPlugin[]>('/plugins'),
+  updateBuiltIn: (name: string, body: BuiltInToolSetPatch) =>
+    request<BuiltInToolSet>(`/plugins/${seg(name)}`, json('PATCH', body)),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
   updateRemote: (name: string, body: RemotePluginPatch) =>
     request<RemotePlugin>(`/plugins/${seg(name)}`, json('PATCH', body)),
   deleteRemote: (name: string) => request<void>(`/plugins/${seg(name)}`, { method: 'DELETE' }),
   testRemote: (name: string) => request<PluginTest>(`/plugins/${seg(name)}/test`, { method: 'POST' }),
 
-  listPackages: () => request<PluginPackage[]>('/plugin-packages'),
+  listPackages: () => request<ListedPackage[]>('/plugin-packages'),
+  // The two fetches are the agent's commands (#1055): an Idempotency-Key per press, a
+  // 202 followed at the agent's /api/v1/ai/operations/{id}.
   installPackage: (source: PackageInstall) =>
-    request<PluginPackage>('/plugin-packages', json('POST', { source })),
-  approvePackage: (name: string, commit_sha: string, content_hash: string) =>
-    request<PluginPackage>(`/plugin-packages/${seg(name)}/approve`, json('POST', { commit_sha, content_hash })),
-  setPackageEnabled: (name: string, enabled: boolean) =>
-    request<PluginPackage>(`/plugin-packages/${seg(name)}`, json('PATCH', { enabled })),
+    command<PluginPackage>('/ai/plugin-packages', json('POST', { source }), '/ai/operations'),
+  approvePackage: (name: string, commit_sha: string, content_hash: string, allow_refused = false) =>
+    request<PluginPackage>(
+      `/plugin-packages/${seg(name)}/approve`,
+      json('POST', allow_refused ? { commit_sha, content_hash, allow_refused } : { commit_sha, content_hash }),
+    ),
+  setPackageEnabled: <T extends ListedPackage = PluginPackage>(name: string, enabled: boolean) =>
+    request<T>(`/plugin-packages/${seg(name)}`, json('PATCH', { enabled })),
   repinPackage: (name: string, ref?: string) =>
-    request<PluginPackage>(`/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {})),
+    command<PluginPackage>(`/ai/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {}), '/ai/operations'),
   discardRepin: (name: string) =>
     request<PluginPackage>(`/plugin-packages/${seg(name)}/pending`, { method: 'DELETE' }),
   deletePackage: (name: string) => request<void>(`/plugin-packages/${seg(name)}`, { method: 'DELETE' }),
+  packageFiles: ({ name, pending }: PackageFilesOf) =>
+    request<{ files: PackageFile[] }>(`/plugin-packages/${seg(name)}/files${pending ? '?pending=true' : ''}`),
+  packageFile: ({ name, pending }: PackageFilesOf, path: string, full = false) => {
+    const query = new URLSearchParams({ path })
+    if (pending) query.set('pending', 'true')
+    if (full) query.set('full', 'true')
+    return request<PackageFileContent>(`/plugin-packages/${seg(name)}/file?${query}`)
+  },
 }

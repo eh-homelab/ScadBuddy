@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from tests.support.operations import press
 
 UI = {"module": "ui/index.js", "slot": "panel", "api": 1}
 
@@ -101,7 +102,12 @@ def test_a_malformed_ui_costs_only_the_ui(client: TestClient, model: str, paths:
 
 def test_a_patch_keeps_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
-    assert client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"}).status_code == 200
+    assert (
+        client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        ).status_code
+        == 200
+    )
     assert json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["ui"] == UI
     assert "ui_error" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
 
@@ -116,6 +122,7 @@ def test_an_uploaded_unreadable_ui_is_kept_and_reported(
             "file": ("uploaded.scad", b"cube(1);\n", "application/octet-stream"),
             "meta": ("model.json", json.dumps({"ui": declared}).encode(), "application/json"),
         },
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     slug = response.json()["slug"]
@@ -239,3 +246,98 @@ def test_a_revisions_schema_carries_that_revisions_ui(
     assert client.get(f"/api/v1/models/{model}/versions/{head}/schema").json()["ui"] == UI
     bad = client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()
     assert bad["ui"] is None and bad["ui_error"].startswith("model.json's ui is not valid")
+
+
+@pytest.mark.requires_git
+def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: DataPaths) -> None:
+    """#846: a commit that leaves ``ui/`` alone keeps the interface's revision, so the
+    page keeps the mounted interface."""
+    _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
+    ui = _commit(paths, "ui")
+    assert (
+        client.patch(
+            f"/api/v1/models/{model}", json={"name": "Renamed"}, headers=press()
+        ).status_code
+        == 200
+    )
+    record = client.get(f"/api/v1/models/{model}").json()
+    assert record["version"] != ui
+    assert record["ui_version"] == ui
+    # The ui commit's files come from the live directory, never a fresh export.
+    served = client.get(f"/api/v1/models/{model}/versions/{ui}/ui/index.js")
+    assert served.status_code == 200
+    assert served.headers["cache-control"] == "no-cache"
+    assert not paths.model_revision_dir(model, ui).exists()
+    _with_ui(paths, model, {"index.js": b"export function mount() { /* two */ }\n"})
+    two = _commit(paths, "ui two")
+    assert client.get(f"/api/v1/models/{model}").json()["ui_version"] == two
+    # The earlier interface is now an export: immutable under its commit's URL (#1469).
+    older = client.get(f"/api/v1/models/{model}/versions/{ui}/ui/index.js")
+    assert older.status_code == 200
+    assert older.text == "export function mount() {}\n"
+    assert older.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+@pytest.mark.requires_git
+def test_a_commit_named_ui_url_never_serves_an_uncommitted_edit(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#1481: the live directory answers for the commit only while ``ui/`` is as it
+    was committed; an edit, or a file git does not track yet, is not that commit."""
+    _with_ui(paths, model, {"index.js": b"// committed\n"})
+    ui = _commit(paths, "ui")
+    url = f"/api/v1/models/{model}/versions/{ui}/ui"
+    assert client.get(f"{url}/index.js").headers["cache-control"] == "no-cache"
+    _with_ui(paths, model, {"index.js": b"// edited\n", "new.js": b"// untracked\n"})
+    assert client.get(f"/api/v1/models/{model}/ui/index.js").text == "// edited\n"
+    pinned = client.get(f"{url}/index.js")
+    assert pinned.status_code == 200
+    assert pinned.text == "// committed\n"
+    assert client.get(f"{url}/new.js").status_code == 404
+
+
+@pytest.mark.requires_git
+def test_a_ui_file_request_walks_no_history(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1469: whether the commit's ``ui/`` is the live one is a tree comparison, not a
+    ``git log`` walk per file."""
+    from scadbuddy.library.history import ModelHistory
+
+    _with_ui(paths, model, {"index.js": b"// one\n"})
+    ui = _commit(paths, "ui")
+
+    def walked(*_: object) -> str | None:
+        raise AssertionError("a UI file request walked the history")
+
+    monkeypatch.setattr(ModelHistory, "last_commit", walked)
+    served = client.get(f"/api/v1/models/{model}/versions/{ui}/ui/index.js")
+    assert served.status_code == 200
+    assert served.text == "// one\n"
+
+
+@pytest.mark.requires_git
+def test_a_deleted_ui_has_no_ui_version(client: TestClient, model: str, paths: DataPaths) -> None:
+    """#1469: the commit that deleted ``ui/`` is no revision of the interface, even
+    while model.json still declares one."""
+    _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
+    _commit(paths, "ui")
+    (paths.model_dir(model) / "ui" / "index.js").unlink()
+    (paths.model_dir(model) / "ui").rmdir()
+    _commit(paths, "no ui")
+    record = client.get(f"/api/v1/models/{model}").json()
+    assert record["ui"] == UI
+    assert record["ui_version"] is None
+
+
+@pytest.mark.requires_git
+def test_a_model_without_ui_has_no_ui_version(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.get(f"/api/v1/models/{model}").json()["ui_version"] is None
+    # A committed ui/ directory is not an interface without the declaration (#1469).
+    target = paths.model_dir(model) / "ui" / "index.js"
+    target.parent.mkdir()
+    target.write_bytes(b"export function mount() {}\n")
+    _commit(paths, "ui files, undeclared")
+    assert client.get(f"/api/v1/models/{model}").json()["ui_version"] is None

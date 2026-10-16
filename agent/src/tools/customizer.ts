@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
+import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
+import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
-import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
+import { DEFAULT_RENDER_LIMITER, renderPrincipal } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
@@ -46,17 +49,68 @@ async function getJob(ctx: ToolContext, id: string) {
 }
 
 /**
- * Polls a render until it settles or `renderWaitMs` passes, reporting each
- * poll as progress so a streaming client sees the job move (spec §5.1: the
- * tool "submits a render and streams progress until it settles").
+ * When a render_model or arrange call's own waits end (`waitsMs`: ACCEPTING_MS +
+ * renderWaitMs), as one deadline taken just before the slot wait (in render_model,
+ * after its parameter checks; arrange takes it first thing) (#2846). The slot wait and
+ * the job's wait (`renderWaitMs` at most) both spend from it, so a slot granted late
+ * leaves the job less time rather than running the call past `TOOL_DEADLINE_MS`, where
+ * it would be answered as "may have taken effect". Only the submit's own accepting wait
+ * (ACCEPTING_MS at most, under `TOOL_DEADLINE_MS`) can still run past it.
  */
-export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  const deadline = Date.now() + ctx.renderWaitMs
+export function renderDeadline(ctx: ToolContext): number {
+  return performance.now() + ACCEPTING_MS + ctx.renderWaitMs
+}
+
+/**
+ * A slot under the per-principal render bounds (renderLimits.ts, #252) for a job
+ * the agent puts on the render queue (render_model, arrange). Past the bound this
+ * waits for a slot rather than refusing, until `deadline` (`renderDeadline`), so a
+ * long queue is answered "not rendered" with nothing submitted, before the tool's
+ * deadline would answer it as "may have taken effect".
+ * Hand the returned function to `releaseWhenSettled`.
+ */
+export function acquireRenderSlot(ctx: ToolContext, deadline: number): Promise<() => void> {
+  const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
+  return limiter.acquire(renderPrincipal(ctx.principal), {
+    signal: ctx.signal,
+    maxWaitMs: Math.max(0, deadline - performance.now()),
+    onWait: (ahead) => {
+      ctx.progress(0, undefined, `waiting for a render slot (${ahead} ahead of this one)`).catch(() => {})
+    },
+  })
+}
+
+/**
+ * Frees a render slot once the job it was taken for settles: at once when nothing
+ * was submitted or the job is known settled, else after `holdUntilSettled`.
+ */
+export function releaseWhenSettled(
+  ctx: ToolContext,
+  submitted: string | undefined,
+  job: { status: JobStatus['status'] } | undefined,
+  release: () => void,
+): void {
+  if (submitted !== undefined && (job === undefined || !settled(job.status))) {
+    void holdUntilSettled(ctx, submitted, (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).limits.holdMs).finally(release)
+  } else {
+    release()
+  }
+}
+
+/**
+ * Polls a render until it settles, for `renderWaitMs` but never past `deadline` (the
+ * call's `renderDeadline`, so a slot granted late leaves the job less), reporting each
+ * poll as progress so a streaming client sees the job move (spec §5.1: the tool
+ * "submits a render and streams progress until it settles"). It always polls once, so
+ * a job already settled is answered.
+ */
+export async function waitForJob(ctx: ToolContext, id: string, deadline: number): Promise<JobStatus> {
+  const until = Math.min(deadline, performance.now() + ctx.renderWaitMs)
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (settled(job.status) || Date.now() >= deadline) return job
+    if (settled(job.status) || performance.now() >= until) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -78,13 +132,13 @@ function settled(status: JobStatus['status']): boolean {
  * cannot be reached, or after `holdMs` (30 min) at most (#774).
  */
 async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
-  const deadline = Date.now() + holdMs
+  const deadline = performance.now() + holdMs
   try {
-    while (Date.now() < deadline) {
+    while (performance.now() < deadline) {
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))),
       })
       if (!data || settled(data.status)) return
     }
@@ -131,6 +185,7 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, params }),
     risk: 'read',
     routes: [],
+    title: ({ slug }) => `Check parameters → ${slug}`,
     handler: async ({ slug, params }, ctx) => json(validateParams(await fetchSchema(ctx, slug), params)),
   }),
 
@@ -161,6 +216,9 @@ export const customizerTools: Tool[] = [
     source:
       "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
+    title: ({ slug, version }) => `Render ${slug}${version ? ` at ${version.slice(0, 7)}` : ''}`,
+    // Its own wait for the render, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
       // With inputs, inputs.params is what renders (missing: the defaults). A `params`
       // beside them would be dropped, so it is refused rather than validated in vain.
@@ -177,30 +235,43 @@ export const customizerTools: Tool[] = [
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      // Per-principal render bounds (renderLimits.ts, #252), held until the
-      // backend job settles, past this call when it hands the job back running.
-      const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
-      const release = limiter.acquire(ctx.principal.id)
+      // Held until the backend job settles, past this call when it hands the job back running.
+      const deadline = renderDeadline(ctx)
+      const release = await acquireRenderSlot(ctx, deadline)
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
-        const accepted = await ok(
-          ctx.backend.POST('/api/v1/models/{slug}/render', {
-            params: { path: { slug } },
-            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
-            signal: ctx.signal,
-          }),
+        // Sent again while the backend is still accepting it (#1053), with one
+        // `Idempotency-Key`: the backend counts the re-sends as this one request's claim.
+        const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+        const accepted = await reattach(
+          ctx,
+          () =>
+            ctx.backend.POST('/api/v1/models/{slug}/render', {
+              params: { path: { slug } },
+              headers,
+              body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
+              signal: ctx.signal,
+            }),
           `render ${slug}`,
         )
         submitted = accepted.job_id
         await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
-        job = await waitForJob(ctx, accepted.job_id)
-      } finally {
-        if (submitted !== undefined && (job === undefined || !settled(job.status))) {
-          void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
-        } else {
-          release()
+        job = await waitForJob(ctx, accepted.job_id, deadline)
+      } catch (err) {
+        if (submitted === undefined) throw err
+        // The job exists however the wait ended (#1072): answer its id, so the model
+        // can poll it and the session records it as made (#931).
+        const reason =
+          err instanceof ToolError ? err : ctx.signal?.aborted ? new ToolError('the call was interrupted before the render settled') : undefined
+        if (!reason) throw err
+        ctx.report?.({ detail: reason.message })
+        return {
+          ...json({ job_id: submitted, status: null, error: toolErrorText(reason, 'render_model'), note: 'poll get_render_job with this job_id' }),
+          isError: true,
         }
+      } finally {
+        releaseWhenSettled(ctx, submitted, job, release)
       }
       const summary = jobSummary(job)
       if (job.status === 'failed' || job.status === 'cancelled') {
@@ -212,12 +283,12 @@ export const customizerTools: Tool[] = [
       if (!save_output) return json(summary)
       let output
       try {
-        output = await ok(
+        output = await command(ctx, `save output of ${job.id}`, (headers) =>
           ctx.backend.POST('/api/v1/models/{slug}/outputs', {
             params: { path: { slug } },
             body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
+            headers,
           }),
-          `save output of ${job.id}`,
         )
       } catch (err) {
         // The render is done; only the save failed. Still the job's summary, so the
@@ -252,6 +323,7 @@ export const customizerTools: Tool[] = [
     input: z.object({ job_id: jobId }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/preview.glb'],
+    title: () => 'Get the render’s 3D preview',
     handler: async ({ job_id }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/jobs/{job_id}/preview.glb', { params: { path: { job_id } }, parseAs: 'stream' }),
@@ -266,20 +338,24 @@ export const customizerTools: Tool[] = [
     name: 'get_render_view',
     description:
       "A render job's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as a " +
-      'shaded PNG, to check the geometry without a 3D viewer.',
-    input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE }),
+      'shaded PNG, to check the geometry without a 3D viewer. Give `azimuth`/`elevation` (degrees; Z up, ' +
+      "azimuth 0 is the front, 90 the right side) to look from any angle, an angle left out being the named view's, " +
+      'and `zoom`/`target` (model mm) to come in closer on a feature. The same camera again draws the same ' +
+      'picture, for comparing before and after an edit.',
+    input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE, ...CAMERA }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/views/{view}.png'],
-    handler: async ({ job_id, view, size }, ctx) =>
+    title: ({ view }) => `Look at the render (${view})`,
+    handler: async ({ job_id, view, size, ...camera }, ctx) =>
       binary(
         ctx.backend.GET('/api/v1/jobs/{job_id}/views/{view}.png', {
-          params: { path: { job_id, view }, query: { size } },
+          params: { path: { job_id, view }, query: { size, ...cameraQuery(camera) } },
           parseAs: 'stream',
         }),
         `draw ${view} view of ${job_id}`,
         ctx,
         {
-          path: `/api/v1/jobs/${job_id}/views/${view}.png${size ? `?size=${size}` : ''}`,
+          path: withQuery(`/api/v1/jobs/${job_id}/views/${view}.png`, { size, ...cameraQuery(camera) }),
           name: `${job_id}-${view}.png`,
           fallbackType: 'image/png',
         },
@@ -355,14 +431,15 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params, description, tags }, { backend }) =>
+    title: ({ slug, name }) => `Save preset → ${name} (${slug})`,
+    handler: async ({ slug, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets', {
+        await command(ctx, `save preset ${name}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets', {
             params: { path: { slug } },
             body: { name, params, description, tags },
+            headers,
           }),
-          `save preset ${name}`,
         ),
       ),
   }),
@@ -381,14 +458,15 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
+    title: ({ slug, name }) => `Update preset${name ? ` → ${name}` : ''} (${slug})`,
+    handler: async ({ slug, preset_id, name, params, description, tags }, ctx) =>
       json(
-        await ok(
-          backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
+        await command(ctx, `update preset ${preset_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
             body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
+            headers,
           }),
-          `update preset ${preset_id}`,
         ),
       ),
   }),
@@ -399,14 +477,14 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80) }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets/{preset_id}/duplicate'],
-    handler: async ({ slug, preset_id, name }, { backend }) =>
+    handler: async ({ slug, preset_id, name }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
+        await command(ctx, `duplicate preset ${preset_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/presets/{preset_id}/duplicate', {
             params: { path: { slug, preset_id } },
             body: { name },
+            headers,
           }),
-          `duplicate preset ${preset_id}`,
         ),
       ),
   }),
@@ -430,28 +508,36 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'upload_asset',
     description:
-      'Upload an SVG or PNG (base64) for a `// file` parameter. Returns its asset id, the value to pass ' +
-      'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.',
+      'Upload an SVG or PNG for a `// file` parameter. Returns its asset id, the value to pass ' +
+      'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.' +
+      fromWorkspace('`content_base64`'),
     input: z.object({
       slug,
-      filename: z.string().min(1).describe('e.g. "logo.svg"; the content is sniffed, not trusted by name'),
-      content_base64: z.string().min(1),
+      filename: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('e.g. "logo.svg"; the content is sniffed, not trusted by name. With workspace_path, the file\'s own name by default'),
+      content_base64: z.string().min(1).optional().describe("The file's bytes as base64"),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/assets'],
-    handler: async ({ slug, filename, content_base64 }, { backend }) => {
-      const type = filename.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
-      const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename, type)
-      return json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets', {
-            params: { path: { slug } },
-            body: { file: filename },
-            bodySerializer: () => form,
-          }),
-          `upload ${filename}`,
-        ),
+    title: ({ slug, filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'asset'} → ${slug}`,
+    handler: async ({ slug, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
+      const source = await binarySource(ctx, { upload: 'upload_asset', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
+      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
+      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+      const type = name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+      const answer = await command(ctx, `upload ${name}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/assets', {
+          params: { path: { slug } },
+          body: { file: name },
+          ...uploadInit(ctx, source, { name: 'file', filename: name, type }, headers),
+        }),
       )
+      return json(withSent(answer, 'info' in source ? source.info : undefined))
     },
   }),
 
@@ -472,11 +558,10 @@ export const customizerTools: Tool[] = [
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/assets/fetch'],
     summarize: ({ slug, url }) => `Fetch ${url} (${new URL(url).host}) into model "${slug}" as a file asset`,
-    handler: async ({ slug, url }, { backend }) =>
+    handler: async ({ slug, url }, ctx) =>
       json(
-        await ok(
-          backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url } }),
-          `fetch ${url}`,
+        await command(ctx, `fetch ${url}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url }, headers }),
         ),
       ),
   }),

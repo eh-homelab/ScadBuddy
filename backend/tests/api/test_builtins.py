@@ -19,6 +19,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -89,7 +90,9 @@ def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: Dat
     job_id = _finished_job(client, BUILTIN)
 
     created = client.post(
-        f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id, "name": "Blue"}
+        f"/api/v1/models/{BUILTIN}/outputs",
+        json={"job_id": job_id, "name": "Blue"},
+        headers=press(),
     )
     assert created.status_code == 201, created.text
     output = created.json()
@@ -108,7 +111,9 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
     client: TestClient, paths: DataPaths
 ) -> None:
     """`builtin:keychain` and `keychain` share a slug, never jobs, outputs or history (#206)."""
-    created = client.post("/api/v1/models", json={"name": "keychain", "source": "width = 5;\n"})
+    created = client.post(
+        "/api/v1/models", json={"name": "keychain", "source": "width = 5;\n"}, headers=press()
+    )
     assert created.status_code == 201, created.text
     mine = created.json()["slug"]
     assert mine == "keychain"
@@ -123,7 +128,9 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
     outputs = {}
     for model_id, job_id in jobs.items():
         response = client.post(
-            f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id, "name": "Blue"}
+            f"/api/v1/models/{model_id}/outputs",
+            json={"job_id": job_id, "name": "Blue"},
+            headers=press(),
         )
         assert response.status_code == 201, response.text
         outputs[model_id] = response.json()
@@ -210,7 +217,9 @@ def test_a_built_ins_thumbnail_cannot_be_replaced(client: TestClient) -> None:
     png = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
 
     response = client.put(
-        f"/api/v1/models/{BUILTIN}/thumbnail", files={"file": ("t.png", png, "image/png")}
+        f"/api/v1/models/{BUILTIN}/thumbnail",
+        files={"file": ("t.png", png, "image/png")},
+        headers=press(),
     )
 
     assert response.status_code == 403, response.text
@@ -259,7 +268,9 @@ def test_the_mirror_is_never_a_template_of_mine(client: TestClient) -> None:
     assert client.get("/api/v1/models/_builtin").status_code == 422
     assert client.get("/api/v1/models/builtin:_builtin").status_code == 422
 
-    created = client.post("/api/v1/models", json={"name": "_builtin", "source": SOURCE})
+    created = client.post(
+        "/api/v1/models", json={"name": "_builtin", "source": SOURCE}, headers=press()
+    )
 
     assert created.status_code == 201, created.text
     assert created.json()["slug"] == "builtin"
@@ -320,7 +331,9 @@ def test_a_built_in_without_a_thumbnail_shows_its_first_plate_image(
         assert client.get(f"/api/v1/models/{BUILTIN}").json()["has_thumbnail"] is False
         job_id = _finished_job(client, BUILTIN)
         set_plate_image(client, job_id, cover)
-        saved = client.post(f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id})
+        saved = client.post(
+            f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id}, headers=press()
+        )
         assert saved.status_code == 201, saved.text
 
         record = client.get(f"/api/v1/models/{BUILTIN}").json()

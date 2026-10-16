@@ -1,13 +1,17 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { FeedItem } from '../../agent/chat/state'
+import { api } from '../../api/client'
+import { server } from '../../mocks/server'
 import { FeedItemView } from './FeedItemView'
 
 const you = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
 function card(state: Extract<FeedItem, { kind: 'approval' }>['state']) {
-  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, by: you }
+  const reason = state === 'closed' ? 'it expired' : state === 'cancelled' ? 'interrupted by You' : undefined
+  const item: FeedItem = { kind: 'approval', id: 'a1', tool: 't1', summary: 'Send it?', state, ...(state === 'expired' || state === 'cancelled' ? {} : { by: you }), ...(reason ? { reason } : {}) }
   return render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
 }
 
@@ -16,9 +20,12 @@ describe('the approval card', () => {
     const cases: [Parameters<typeof card>[0], string | null][] = [
       ['pending', null],
       ['sent', 'Sending your answer…'],
-      ['queued', 'Not connected: your answer goes first when the assistant reconnects.'],
       ['approved', 'Approved by You.'],
       ['denied', 'Denied by You.'],
+      ['closed', 'Your decision was not taken: it expired.'],
+      // Nobody denied these (#979).
+      ['expired', 'Expired: nobody decided in time, so it was not run.'],
+      ['cancelled', 'Cancelled: interrupted by You.'],
     ]
     for (const [state, text] of cases) {
       const { unmount } = card(state)
@@ -31,6 +38,77 @@ describe('the approval card', () => {
       }
       unmount()
     }
+  })
+})
+
+describe("a headless-browser navigation's approval card (#982)", () => {
+  const nav = (tool = 'mcp__playwright__browser_navigate', input = '{"url":"https://cults3d.com/en/3d-model/spool"}') => {
+    const onDecide = vi.fn()
+    const item: FeedItem = {
+      kind: 'approval',
+      id: 'a2',
+      tool: 'toolu_9',
+      summary: `${tool} ${input}`,
+      state: 'pending',
+    }
+    const view = render(<FeedItemView item={item} sessionId="session-9" onDecide={onDecide} onAnswer={vi.fn()} />)
+    return { onDecide, ...view }
+  }
+
+  it('shows the full URL and offers once, for this chat, always, and deny, for the user only', () => {
+    nav()
+    expect(screen.getByText('https://cults3d.com/en/3d-model/spool')).toBeInTheDocument()
+    for (const name of ['Allow once', 'Allow for this chat', 'Always allow cults3d.com', 'Deny']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('data-agent-user-only')
+    }
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('"Allow for this chat" approves the origin for the session, then approves the call', async () => {
+    const { onDecide } = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Allow for this chat' }))
+    await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
+    // Saved before the approval is sent, so the card says so whatever the approval does.
+    expect(screen.getByRole('status')).toHaveTextContent('Saved: https://cults3d.com is allowed for this chat.')
+    const listed = await api.getBrowserOrigins()
+    expect(listed.approved).toContainEqual(expect.objectContaining({ session_id: 'session-9', origin: 'https://cults3d.com', scope: 'session' }))
+  })
+
+  it('"Always allow" adds the origin to the allow list, then approves; a refused write approves nothing', async () => {
+    const { onDecide, unmount } = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Always allow cults3d.com' }))
+    await vi.waitFor(() => expect(onDecide).toHaveBeenCalledWith('a2', true))
+    expect((await api.getBrowserOrigins()).allow).toContain('https://cults3d.com')
+    unmount()
+
+    server.use(http.post('/api/v1/ai/settings/browser-origins/allow', () => HttpResponse.json({ detail: 'must come from the ScadBuddy UI' }, { status: 403 })))
+    const again = nav()
+    await userEvent.click(screen.getByRole('button', { name: 'Always allow cults3d.com' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('must come from the ScadBuddy UI')
+    expect(again.onDecide).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['http on another port', 'http://printer.lan:8080/status', 'http://printer.lan:8080'],
+    ['https on another port', 'https://printer.lan:8443/status', 'https://printer.lan:8443'],
+    ['http on its default port', 'http://printer.lan/status', 'http://printer.lan'],
+  ])('names the whole origin "Always allow" saves when it is not https on its default port: %s', (_label, url, origin) => {
+    const { unmount } = nav(undefined, JSON.stringify({ url }))
+    expect(screen.getByRole('button', { name: `Always allow ${origin}` })).toBeInTheDocument()
+    unmount()
+  })
+
+  it('is the ordinary card, showing the whole summary, when the input is not exactly {url}', () => {
+    nav(undefined, '{"opts":{"url":"https://makerworld.com/"},"url":"https://evil.example/"}')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Always allow/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/evil\.example/)).toBeInTheDocument()
+  })
+
+  it("is the ordinary card for the bridge's own browser_navigate, which drives the user's tab", () => {
+    nav('mcp__scadbuddy__browser_navigate')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Allow once' })).not.toBeInTheDocument()
   })
 })
 
@@ -77,8 +155,8 @@ describe('the memory line', () => {
     for (const [item, headline] of cases) {
       const { unmount } = memory(item, true)
       const line = screen.getByTestId('agent-memory')
-      expect(line).toHaveAttribute('open')
-      expect(line.querySelector('summary')).toHaveTextContent(headline)
+      expect(line).toHaveAttribute('data-state', 'open')
+      expect(line.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent(headline)
       expect(line).toHaveTextContent('Bank scadbuddy')
       if (item.detail) expect(line).toHaveTextContent(item.detail)
       unmount()
@@ -86,20 +164,20 @@ describe('the memory line', () => {
     memory({ count: 1, input: 'make a <b>box</b>', memories: ['1. The user prints in PETG.'] }, true)
     expect(screen.getByTestId('agent-memory')).toHaveTextContent('Bank scadbuddy · 1 found')
     const query = screen.getByTestId('agent-memory-input')
-    expect(query).toHaveAttribute('open')
-    expect(query.querySelector('summary')).toHaveTextContent('Query')
+    expect(query).toHaveAttribute('data-state', 'open')
+    expect(query.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Query')
     // Plain text, never markup: memories and queries are untrusted.
     expect(query).toHaveTextContent('make a <b>box</b>')
     expect(query.querySelector('b')).toBeNull()
     const found = screen.getByTestId('agent-memory-output')
-    expect(found).toHaveAttribute('open')
+    expect(found).toHaveAttribute('data-state', 'open')
     expect(found).toHaveTextContent('1. The user prints in PETG.')
   })
 
   it("labels a retain's input as what was saved", () => {
     memory({ action: 'retain', input: 'user: a box, 40 mm' }, true)
     const saved = screen.getByTestId('agent-memory-input')
-    expect(saved.querySelector('summary')).toHaveTextContent('Saved')
+    expect(saved.querySelector('[data-slot=collapsible-trigger]')).toHaveTextContent('Saved')
     expect(saved).toHaveTextContent('user: a box, 40 mm')
     expect(screen.queryByTestId('agent-memory-output')).toBeNull()
   })
@@ -123,19 +201,23 @@ describe('the tool card', () => {
       />,
     )
 
-  it('in basic mode shows what ran and how it ended, without its arguments', () => {
+  it('in basic mode shows what ran and how it ended, without its arguments or raw result (#782)', () => {
     card(false)
     const tool = screen.getByTestId('agent-tool')
-    expect(tool).toHaveTextContent('Set 1 parameter')
+    expect(tool).toHaveTextContent('Set parameters')
+    expect(tool).toHaveTextContent('Done')
+    expect(tool).not.toHaveTextContent('Set 1 parameter')
     expect(screen.queryByTestId('agent-tool-arguments')).toBeNull()
-    expect(tool.querySelector('details')).not.toHaveAttribute('open')
+    expect(screen.getByRole('button', { name: /^Why\?/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('link', { hidden: true, name: 'Customizer docs' })).not.toBeVisible()
   })
 
   it('in advanced mode shows its arguments and sources, open', () => {
     card(true)
     const args = screen.getByTestId('agent-tool-arguments')
-    expect(args).toHaveAttribute('open')
+    expect(args).toBeVisible()
     expect(args).toHaveTextContent('"width": 40')
+    expect(screen.getByTestId('agent-tool-result')).toHaveTextContent('Set 1 parameter')
     expect(screen.getByRole('link', { name: 'Customizer docs' })).toBeVisible()
   })
 })
@@ -266,9 +348,9 @@ describe('the question card (#940)', () => {
   it('says where the answer is once it is not pending', () => {
     const cases: [Partial<Question>, string][] = [
       [{ state: 'sent' }, 'Sending your answer…'],
-      [{ state: 'queued' }, 'Not connected: your answer goes first when the assistant reconnects.'],
       [{ state: 'answered', answers: ['Blue'], by: you }, 'Answered by You: Blue'],
       [{ state: 'cancelled', reason: 'interrupted by You' }, 'Not answered: interrupted by You.'],
+      [{ state: 'closed', reason: 'it was already resolved elsewhere' }, 'Your answer was not taken: it was already resolved elsewhere.'],
     ]
     for (const [extra, text] of cases) {
       const { unmount } = ask([colour], extra)
@@ -277,5 +359,202 @@ describe('the question card (#940)', () => {
       expect(screen.getByRole('status')).toHaveTextContent(text)
       unmount()
     }
+  })
+})
+
+describe('the attention card (#815)', () => {
+  type Question = Extract<FeedItem, { kind: 'question' }>
+  const card = {
+    question: 'The ScadBuddy tab closed. Reopen it so I can select the plate?',
+    header: 'Tab disconnected',
+    multiSelect: false,
+    options: [
+      { label: "I'm here", description: '' },
+      { label: 'Carry on without me', description: '' },
+    ],
+  }
+  const expiresAt = new Date(Date.UTC(2026, 9, 4, 9, 5)).toISOString()
+
+  function raise(onTimeout: 'proceed' | 'wait' | 'stop', extra: Partial<Question> = {}) {
+    const onAnswer = vi.fn()
+    const item: Question = {
+      kind: 'question',
+      id: 'att1',
+      tool: 't1',
+      questions: [card],
+      attention: { reason: 'tab_disconnected', onTimeout, expiresAt },
+      state: 'pending',
+      ...extra,
+    }
+    const view = render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={onAnswer} />)
+    return { onAnswer, ...view }
+  }
+
+  it('says what it needs and what its timer does, and the user acknowledges it with a quick reply', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = raise('proceed')
+    expect(screen.getByTestId('agent-attention')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'The assistant needs you: Tab disconnected' })).toBeInTheDocument()
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(/carries on with work that needs no approval\. A timeout never approves anything\./)
+    await user.click(screen.getByRole('radio', { name: /I'm here/ }))
+    await user.click(screen.getByRole('button', { name: 'Send reply' }))
+    expect(onAnswer).toHaveBeenCalledWith('att1', ["I'm here"])
+  })
+
+  it('or with their own words', async () => {
+    const user = userEvent.setup()
+    const { onAnswer } = raise('stop')
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(/it stops\.$/)
+    await user.click(screen.getByRole('radio', { name: 'Other…' }))
+    await user.type(screen.getByRole('textbox', { name: 'Your answer' }), 'Back in five minutes')
+    await user.click(screen.getByRole('button', { name: 'Send reply' }))
+    expect(onAnswer).toHaveBeenCalledWith('att1', ['Back in five minutes'])
+  })
+
+  it("says how long 'wait' waits, naming the day when it is not today", () => {
+    const tomorrow = new Date(Date.now() + 86_400_000)
+    const { unmount } = raise('wait', { attention: { reason: 'blocked', onTimeout: 'wait', expiresAt: tomorrow.toISOString() } })
+    const day = tomorrow.toLocaleString([], { weekday: 'short' })
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(new RegExp(`^It waits for you until ${day}.+, then stops\\. A restart of ScadBuddy stops it sooner\\.$`))
+    unmount()
+    raise('proceed', { attention: { reason: 'blocked', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 60_000).toISOString() } })
+    expect(screen.getByTestId('agent-attention-timer')).not.toHaveTextContent(day)
+  })
+
+  it('once timed out, says nobody replied, and offers nothing to answer', () => {
+    raise('proceed', { state: 'cancelled', reason: 'nobody replied in time (on_timeout: proceed)' })
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('agent-attention-timer')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('No reply: nobody replied in time (on_timeout: proceed).')
+  })
+})
+
+describe('the done summary (#815 §4)', () => {
+  type Question = Extract<FeedItem, { kind: 'question' }>
+  const summary = '**While nobody answered (attention request 01234567 timed out)**\n- created preset `night` of sign (save_preset)'
+
+  function post(extra: Partial<Question> = {}) {
+    const onAnswer = vi.fn()
+    const item: Question = {
+      kind: 'question',
+      id: 'done1',
+      tool: 't1',
+      questions: [
+        {
+          question: 'Rendered the sign headlessly; the plate still needs your tab.',
+          header: 'Done',
+          multiSelect: false,
+          options: [
+            { label: 'Dismiss', description: '' },
+            { label: 'Got it', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'done', summary },
+      state: 'pending',
+      ...extra,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={onAnswer} />)
+    return onAnswer
+  }
+
+  it('renders a name from a tool literally: the agent puts it in a code span, so no link or emphasis', () => {
+    // As agent questions/doneSummary.ts writes a hostile model slug and tool name.
+    post({ attention: { reason: 'done', summary: '**What this turn changed**\n- created preset `x` of `evil [click](http://e)` (`a*b*c`)' } })
+    const record = screen.getByTestId('agent-done-summary')
+    expect(record.querySelector('a, em')).toBeNull()
+    expect(record).toHaveTextContent('created preset x of evil [click](http://e) (a*b*c)')
+  })
+
+  it("shows the agent's message and ScadBuddy's own record, with no timer and nothing to reply, and dismisses", async () => {
+    const user = userEvent.setup()
+    const onAnswer = post()
+    expect(screen.getByRole('heading', { name: 'The assistant is done' })).toBeInTheDocument()
+    expect(screen.getByText('Rendered the sign headlessly; the plate still needs your tab.')).toBeInTheDocument()
+    expect(screen.getByTestId('agent-done-summary')).toHaveTextContent(/While nobody answered.*created preset night of sign \(save_preset\)/)
+    expect(screen.queryByTestId('agent-attention-timer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(onAnswer).toHaveBeenCalledWith('done1', ['Dismiss'])
+  })
+
+  it('labels its button with the option it sends', async () => {
+    const user = userEvent.setup()
+    const onAnswer = post({
+      questions: [{ question: 'Done.', header: 'Done', multiSelect: false, options: [{ label: 'Got it', description: '' }] }],
+    })
+    await user.click(screen.getByRole('button', { name: 'Got it' }))
+    expect(onAnswer).toHaveBeenCalledWith('done1', ['Got it'])
+  })
+
+  it('once dismissed or replaced, says so and keeps the record', () => {
+    post({ state: 'answered', answers: ['Dismiss'], by: you })
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Dismissed by You.')
+    expect(screen.getByTestId('agent-done-summary')).toBeInTheDocument()
+  })
+})
+
+describe('the tab-disconnected card (#815)', () => {
+  it('says the tab is back once the agent resolved it as reconnected', () => {
+    const item: FeedItem = {
+      kind: 'question',
+      id: 'att2',
+      tool: 't2',
+      questions: [
+        {
+          question: 'I need your ScadBuddy tab for browser_snapshot, but it is not connected.',
+          header: 'Tab disconnected',
+          multiSelect: false,
+          options: [
+            { label: "I'm back", description: '' },
+            { label: 'Carry on without the tab', description: '' },
+          ],
+        },
+      ],
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date().toISOString() },
+      state: 'cancelled',
+      reason: 'the ScadBuddy tab is connected again',
+      reconnected: true,
+    }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('The tab is back. A change that was waiting was not made; the assistant is told to check the page first.')
+    expect(screen.queryByRole('button', { name: 'Send reply' })).not.toBeInTheDocument()
+  })
+})
+
+describe('who asked (#1109)', () => {
+  const question: FeedItem = {
+    kind: 'question',
+    id: 'q1',
+    tool: 't2',
+    questions: [
+      {
+        question: 'Paste your key?',
+        header: 'Key',
+        multiSelect: false,
+        options: [
+          { label: 'Yes', description: '' },
+          { label: 'No', description: '' },
+        ],
+      },
+    ],
+    state: 'pending',
+  }
+  const ask = (askedBy?: string) =>
+    render(<FeedItemView item={question} askedBy={askedBy} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+
+  it("names the subagent that asked, and says nothing for the session's own agent", () => {
+    const named = ask('pkg:helper')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent(
+      'Asked by the subagent pkg:helper, not the assistant itself.',
+    )
+    named.unmount()
+    const unnamed = ask('')
+    expect(screen.getByTestId('agent-question-asked-by')).toHaveTextContent('Asked by a subagent, not the assistant itself.')
+    unnamed.unmount()
+    ask()
+    expect(screen.queryByTestId('agent-question-asked-by')).not.toBeInTheDocument()
   })
 })

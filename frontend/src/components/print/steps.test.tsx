@@ -13,12 +13,14 @@ const installed = [
 // radiogroup for both sides; only flow (Standard/High Flow) is per-side. Both steps are
 // Advanced-only (#768), so neither takes a mode.
 describe('NozzleStep', () => {
-  it('marks installed sizes and warns on one that is not', () => {
+  // #2166 — only the sizes the printer has, and the one chosen.
+  it('offers only installed sizes and warns on a chosen one that is not', () => {
     render(
       <NozzleStep sizes={['0.2', '0.4', '0.6', '0.8']} installed={installed}
         value={[{ size: '0.8', flow: 'standard' }, { size: '0.8', flow: 'standard' }]} onChange={vi.fn()} />,
     )
-    expect(screen.getByRole('radio', { name: /0\.2 mm.*installed/i })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /0\.2 mm/i })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /0\.6 mm/i })).toBeNull()
     expect(screen.getByText(/No 0\.8 mm nozzle is installed/i)).toBeInTheDocument()
   })
 
@@ -34,7 +36,7 @@ describe('NozzleStep', () => {
     ])
   })
 
-  it('offers Standard/High Flow per side, with no per-side size, and says High Flow slices as Standard', () => {
+  it('offers Standard/High Flow per side, with no per-side size, and no longer says High Flow slices as Standard (#484)', () => {
     const onChange = vi.fn()
     const { rerender } = render(
       <NozzleStep sizes={['0.2', '0.4']} installed={installed}
@@ -50,9 +52,8 @@ describe('NozzleStep', () => {
       <NozzleStep sizes={['0.2', '0.4']} installed={installed}
         value={[{ size: '0.4', flow: 'high_flow' }, { size: '0.4', flow: 'standard' }]} onChange={onChange} />,
     )
-    expect(
-      screen.getByText(/Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet\./),
-    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /left.*high flow/i })).toBeChecked()
+    expect(screen.queryByText(/slices this as Standard flow/)).toBeNull()
   })
 })
 
@@ -110,5 +111,29 @@ describe('PlateStep', () => {
     render(<PlateStep bedTypes={['Textured PEI Plate', 'Cool Plate']} value="Cool Plate"
       lastBedType="Textured PEI Plate" printerName={null} onChange={vi.fn()} />)
     expect(screen.getByText(/The printer's last print used Textured PEI Plate\./)).toBeInTheDocument()
+  })
+
+  it("names each plate by Bambu Studio's label, and a remembered one outside the list as it is (#2366)", () => {
+    render(
+      <PlateStep
+        bedTypes={['Cool Plate', 'Textured PEI Plate', 'Supertack Plate']}
+        labels={{ 'Textured PEI Plate': 'Textured PEI Plate', 'Supertack Plate': 'Bambu Cool Plate SuperTack' }}
+        value="Cool Plate"
+        lastBedType={null}
+        printerName="H2C"
+        onChange={vi.fn()}
+      />,
+    )
+    const options = screen.getAllByRole('option')
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Cool Plate',
+      'Textured PEI Plate',
+      'Bambu Cool Plate SuperTack',
+    ])
+    expect(options.map((option) => (option as HTMLOptionElement).value)).toEqual([
+      'Cool Plate',
+      'Textured PEI Plate',
+      'Supertack Plate',
+    ])
   })
 })

@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { resetAiAvailability } from '../agent/chat/availability'
@@ -8,10 +9,28 @@ import { server } from '../mocks/server'
 import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+import { choose, optionsOf } from '../test/select'
 
 /** Bambuddy's "Test connection", as against a plugin endpoint's (RemotePluginsPanel). */
 const bambuddyTest = () =>
-  within(screen.getByRole('region', { name: 'Connection' })).getByRole('button', { name: 'Test connection' })
+  within(region('Connection')).getByRole('button', { name: 'Test connection' })
+
+/** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
+async function enter(user: UserEvent, field: HTMLElement, text: string) {
+  await user.click(field)
+  await user.paste(text)
+}
+
+/**
+ * A section, by its heading. A role query over all of Settings (~1000 elements) runs
+ * jsdom's getComputedStyle on each of them, ~0.5 s after every change, and these tests
+ * ran into their 5 s under load (#1485); so buttons are looked for in their section.
+ */
+function region(name: string): HTMLElement {
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
+  if (!section) throw new Error(`no section headed ${name}`)
+  return section
+}
 
 /** The form seeds itself from the server, so wait for the URL to arrive. */
 async function seeded() {
@@ -37,15 +56,6 @@ describe('SettingsPage', () => {
     expect(key).toHaveValue('')
     expect(key).toHaveAttribute('type', 'password')
     expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
-  })
-
-  it('offers the AI headless browser switch, off by default (#349)', async () => {
-    renderPage(<SettingsPage />)
-    expect(
-      await screen.findByRole('checkbox', {
-        name: 'Let AI sessions use ScadBuddy in a headless browser',
-      }),
-    ).not.toBeChecked()
   })
 
   it('says when no key is stored yet', async () => {
@@ -83,13 +93,48 @@ describe('SettingsPage', () => {
     expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
   })
 
-  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
-    renderPage(<SettingsPage />)
+  it("shows what Bambuddy itself answered a failed test (#1542)", async () => {
+    server.use(
+      http.post('/api/v1/settings/test', () =>
+        HttpResponse.json({
+          ok: false,
+          detail: 'Bambuddy is limiting requests and refused to list the printers; it asks to wait 30 s',
+          printers: [],
+          upstream: { status: 429, retry_after: '30', detail: 'Too many requests for this API key', error: null },
+        }),
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
     await seeded()
-    expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
-    // Bambuddy's ids are integers, so the <select> values are their decimal strings.
-    expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveValue('2')
-    expect(screen.getByLabelText('Printer')).toHaveValue('1')
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('limiting requests')).toBeInTheDocument()
+    const answered = screen.getByText('What Bambuddy answered').closest<HTMLElement>('[data-slot=collapsible]')!
+    expect(within(answered).getByText('429')).toBeInTheDocument()
+    expect(within(answered).getByText('30')).toBeInTheDocument()
+    expect(within(answered).getByText('Too many requests for this API key')).toBeInTheDocument()
+  })
+
+  it('shows no answer when the test passed', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
+    expect(screen.queryByText('What Bambuddy answered')).not.toBeInTheDocument()
+  })
+
+  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    // The stored ids (folder 2, printer 1) are shown by the names Bambuddy reports.
+    await waitFor(() => expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveTextContent('ScadBuddy'))
+    expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598 (H2C)')
+    expect(await optionsOf(user, screen.getByLabelText('Printer'))).toEqual([
+      'None',
+      '3DP-31B-598 (H2C)',
+      '3DP-77A-114 (H2C)',
+    ])
     // #312: printing is the Print dialog's, which derives its own presets.
     expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
   })
@@ -99,8 +144,8 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.selectOptions(screen.getByLabelText('Printer'), '')
-    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await choose(user, screen.getByLabelText('Printer'), 'None')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
     put.mockRestore()
@@ -113,13 +158,13 @@ describe('SettingsPage', () => {
 
     const url = screen.getByLabelText('Bambuddy URL')
     await user.type(url, '/')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).not.toHaveProperty('bambuddy_api_key')
     await waitFor(() => expect(screen.getByText(/Saved at/)).toBeInTheDocument())
 
-    await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('API key'), 'secret')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect(put.mock.calls[1]?.[0]).toEqual({ bambuddy_api_key: 'secret' })
     put.mockRestore()
@@ -129,8 +174,8 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('API key'), 'secret')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByLabelText('API key')).toHaveValue(''))
     expect(screen.getByText(/Saved at/)).toBeInTheDocument()
   })
@@ -141,12 +186,110 @@ describe('SettingsPage', () => {
     await seeded()
 
     const select = screen.getByLabelText('Default plate')
-    await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
-    await user.selectOptions(select, 'A1 mini')
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await choose(user, select, /A1 mini/)
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
     expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
+    put.mockRestore()
+  })
+
+  it('keeps print runs forever until a number of days is saved, and clearing keeps them again (#1052)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const days = screen.getByLabelText('Keep finished print runs for (days)')
+    expect(days).toHaveValue(null)
+    expect(days).toHaveAttribute('placeholder', 'Forever')
+
+    await user.type(days, '7')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ print_run_retention_seconds: 604800 })
+    expect((await api.getSettings()).print_run_retention_seconds).toBe(604800)
+
+    await user.clear(days)
+    // The button is disabled while the first save is in flight.
+    const save = within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ print_run_retention_seconds: null })
+    put.mockRestore()
+  })
+
+  it('keeps finished operations for the days given, and clearing keeps them again (#1053)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const days = screen.getByLabelText('Keep finished Bambuddy operations for (days)')
+    expect(days).toHaveAttribute('placeholder', 'Forever')
+    expect(screen.getByText(/at least as long as Temporal's namespace retention/)).toBeInTheDocument()
+    await user.type(days, '2')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ operation_retention_seconds: 172800 })
+
+    await user.clear(days)
+    // The button is disabled while the first save is in flight.
+    const save = within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ operation_retention_seconds: null })
+    put.mockRestore()
+  })
+
+  it('shows the server refusing a retention below Temporal\'s beside the field (review #1063 r6 2)', async () => {
+    const msg =
+      "Keep them at least as long as Temporal keeps a finished operation (3 days): a retry after the record is gone cannot tell what it did."
+    server.use(
+      http.put('/api/v1/settings', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Unprocessable Content',
+            status: 422,
+            detail: msg,
+            errors: [{ loc: ['body', 'operation_retention_seconds'], msg }],
+          },
+          { status: 422, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await user.type(screen.getByLabelText('Keep finished Bambuddy operations for (days)'), '2')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(msg)).toBeInTheDocument()
+    // Beside the field, and its help with it, which explains the refusal (#2347).
+    expect(screen.getByText(/at least as long as Temporal's namespace retention/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Keep finished Bambuddy operations for (days)')).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('refuses a print run retention under a day, which would forget a retried print (#1061)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+
+  it('refuses a retention over ten years, whose prune Postgres cannot compute', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '3651')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
     put.mockRestore()
   })
 
@@ -156,15 +299,15 @@ describe('SettingsPage', () => {
     await seeded()
 
     const select = screen.getByLabelText('Show dimensions in')
-    expect(select).toHaveValue('mm')
-    expect(screen.getByRole('option', { name: '256 × 256 mm' })).toBeInTheDocument()
+    expect(select).toHaveTextContent('Millimetres (mm)')
+    expect(screen.getByLabelText('Default plate')).toHaveTextContent('256 × 256 mm')
 
-    await user.selectOptions(select, 'in')
+    await choose(user, select, 'Inches (in)')
     // The plate list follows the picker before the save, so the choice can be judged.
-    expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Default plate')).toHaveTextContent('10.08 × 10.08 in')
     expect(getDisplayUnit()).toBe('mm')
 
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(getDisplayUnit()).toBe('in'))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ display_unit: 'in' })
     expect((await api.getSettings()).display_unit).toBe('in')
@@ -227,7 +370,7 @@ describe('SettingsPage, live (#269)', () => {
     // Seeded from the stored settings first; editing before that would be overwritten.
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
-    await user.type(field, 'https://mine.test')
+    await enter(user, field, 'https://mine.test')
 
     await api.putSettings({ public_url: OTHER })
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
@@ -243,7 +386,7 @@ describe('SettingsPage, live (#269)', () => {
     const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
-    await user.type(field, 'https://tested.test')
+    await enter(user, field, 'https://tested.test')
     await user.click(bambuddyTest())
     await findStatus('3DP-31B-598')
 
@@ -271,7 +414,7 @@ describe('SettingsPage, live (#269)', () => {
     await seeded()
     await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Plugin endpoints' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Plugins' })).not.toBeInTheDocument()
     hidden.unmount()
 
     // The default handler answers as available.
@@ -279,7 +422,26 @@ describe('SettingsPage, live (#269)', () => {
     resetAiAvailability()
     renderPage(<SettingsPage />)
     expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Plugins' })).toBeInTheDocument()
     expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
+  })
+
+  it('says a failed load failed, and loads again on Try again (#1041)', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/settings', () =>
+        fail
+          ? HttpResponse.json({ title: 'Internal Server Error', status: 500, detail: 'injected 500' }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load settings: injected 500')
+    expect(screen.queryByText('Loading settings')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await seeded()
   })
 })

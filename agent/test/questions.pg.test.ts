@@ -1,7 +1,8 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AuditLog } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
-import type { QuestionVerdict, UserQuestion } from '../src/harness/questions.js'
+import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { QuestionError, QuestionService } from '../src/questions/service.js'
 import { ChatConnection } from '../src/routes/chat.js'
@@ -56,17 +57,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await drop()
   })
 
-  /** A turn that asks QUESTIONS through its gate (when it has one), then ends. */
-  const asking = (run: HarnessRun): AsyncIterable<SDKMessage> => {
+  /** A turn that asks QUESTIONS through its gate (when it has one) with `tool`, then ends. */
+  const askingWith = (tool: string) => (run: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(run)
     return (async function* () {
       await Promise.resolve()
       if (run.questionGate) {
-        verdicts.push(await run.questionGate({ questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate({ tool, questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal }))
       }
       yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
     })()
   }
+  const asking = askingWith(ASK_USER_QUESTION)
 
   async function events(m: SessionManager, sessionId: string): Promise<ServerEvent[]> {
     return (await m.events.read(sessionId)).map((e) => e.event)
@@ -79,8 +81,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
         SELECT id FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL`
       id = row?.id
       return id
-    }).toBeDefined()
-    await expect.poll(async () => (await m.get(sessionId, browser)).status).toBe('waiting_input')
+    }, { timeout: 10_000 }).toBeDefined()
+    await expect.poll(async () => (await m.get(sessionId, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
     return id!
   }
 
@@ -118,6 +120,161 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(row).toEqual({ outcome: 'answered', answers: ['Blue', 'Approve'], answered_by_kind: 'browser' })
   })
 
+  // #3255: the answer and the session's move back to `running` are one commit. The parked
+  // turn resumes on that commit alone (it polls the row), so a status change made in a later
+  // transaction could land after the turn had finished and set `idle`: `running` was then
+  // never logged, and the panel went straight from waiting to idle. Read off the commits
+  // themselves, so the order of the turn and the answer call does not matter.
+  // Review of #3685, for questions: two answers in one session that overlap each see the
+  // other's question as pending under READ COMMITTED, so without a lock on the session row
+  // neither moves it back, and it stays `waiting_input` with nothing pending. Both answers
+  // are held inside the refresh, written and not committed, before either runs it.
+  it('two overlapping answers in one session move it back from waiting_input (review of #3685)', async () => {
+    let hold!: () => void
+    const held = new Promise<void>((r) => (hold = r))
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string) => run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId, signal: new AbortController().signal })
+        await Promise.all([ask('toolu_q1'), ask('toolu_q2')])
+        await held
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me twice' })
+    let ids: string[] = []
+    await expect
+      .poll(async () => (ids = (await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`).map((r) => r.id)).length, { timeout: 10_000 })
+      .toBe(2)
+    await expect.poll(async () => (await m.get(session.id, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
+
+    const service = m.questions as unknown as { statusRefresh: (tx: unknown, sessionId: string) => Promise<ServerEvent[]> }
+    const refresh = service.statusRefresh.bind(service)
+    let arrived = 0
+    let both!: () => void
+    const together = new Promise<void>((r) => (both = r))
+    /** What the two answering commits moved the session to: the second must move it, seeing both answers. */
+    const moved: string[] = []
+    vi.spyOn(service, 'statusRefresh').mockImplementation(async (tx, sessionId) => {
+      // Both meet here when nothing orders them; with the session locked the second answer
+      // cannot arrive until the first commits, so the first goes on alone after a wait.
+      if (++arrived === 2) both()
+      await Promise.race([together, new Promise((r) => setTimeout(r, 1_000))])
+      const out = await refresh(tx, sessionId)
+      moved.push(...out.flatMap((e) => (e.type === 'session.status' ? [e.status] : [])))
+      return out
+    })
+
+    await Promise.all(ids.map((id) => m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))))
+    expect(arrived).toBe(2)
+    expect(moved).toEqual(['running'])
+    hold()
+    await turn!.done
+  })
+
+  it('logs the move back to running in the same commit as the answer (#3255)', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const commits: ServerEvent[][] = []
+    const committed = m.events.committed.bind(m.events)
+    vi.spyOn(m.events, 'committed').mockImplementation((sessionId, logged, seqs) => {
+      commits.push([...logged])
+      committed(sessionId, logged, seqs)
+    })
+
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+
+    const withAnswer = commits.find((batch) => batch.some((e) => e.type === 'question.resolved'))
+    expect(withAnswer?.flatMap((e) => (e.type === 'session.status' ? [e.status] : []))).toEqual(['running'])
+    const statuses = (await events(m, session.id)).flatMap((e) => (e.type === 'session.status' ? [e.status] : []))
+    expect(statuses).toEqual(['idle', 'running', 'waiting_input', 'running', 'idle'])
+  })
+
+  // #1075: the answer is in the AI audit log, tied to the tool call, as a
+  // hash: an answer can be free text the user typed.
+  // Which tool asked is recorded (ask_user is a subagent's way, but not only a subagent's).
+  it.each([ASK_USER_QUESTION, ASK_USER_TOOL])("records the answer to %s in the audit log: who answered, which call and tool, a hash, never the text", async (tool) => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingWith(tool), approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Make it teal, like my car', 'Approve']), { clientIp: '192.0.2.7' })
+    await turn!.done
+
+    const rows = await db.sql`
+      SELECT action, surface, client_ip, principal_kind, principal_id, session_id, turn_id, tool_use_id, tier,
+             input_hash, input_summary, outcome, detail
+      FROM ai_audit WHERE kind = 'question'`
+    expect(rows).toEqual([
+      {
+        action: 'answered',
+        surface: 'http',
+        client_ip: '192.0.2.7',
+        principal_kind: 'browser',
+        principal_id: browser.id,
+        session_id: session.id,
+        turn_id: expect.any(String),
+        tool_use_id: 'toolu_q1',
+        tier: 'read',
+        input_hash: audit.hash(tool, { answers: ['Make it teal, like my car', 'Approve'] }),
+        input_summary: null,
+        outcome: 'ok',
+        detail: `${tool} question ${id}: 2 answers`,
+      },
+    ])
+    const [q] = await db.sql<{ turn_id: string; tool: string }[]>`SELECT turn_id, tool FROM ai_questions WHERE id = ${id}`
+    expect(q?.tool).toBe(tool)
+    expect(rows[0]?.turn_id).toBe(q?.turn_id)
+    expect(JSON.stringify(rows)).not.toContain('teal')
+  })
+
+  // #1108: a subagent's call is in the feed and has its tool_call row, so the
+  // question row's tool_use_id points at a call the audit log has.
+  it("a subagent's ask_user has a tool_call row and a tool.call tagged with the Agent call that spawned it", async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const say = (parent: string | null, content: unknown[]) =>
+      ({ type: 'assistant', message: { id: `msg_${parent ?? 'top'}`, content }, parent_tool_use_id: parent }) as unknown as SDKMessage
+    const result = (parent: string | null, id: string, text: string) =>
+      ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] }, parent_tool_use_id: parent }) as unknown as SDKMessage
+    const subagent = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        yield say(null, [{ type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: { description: 'ask', prompt: 'ask the user' } }])
+        yield say('toolu_agent', [{ type: 'tool_use', id: 'toolu_q1', name: ASK_USER_TOOL, input: { questions: QUESTIONS } }])
+        const verdict = await run.questionGate!({ tool: ASK_USER_TOOL, questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal })
+        verdicts.push(verdict)
+        yield result('toolu_agent', 'toolu_q1', 'answered')
+        yield result(null, 'toolu_agent', 'the user picked blue')
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: subagent, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+
+    const log = await events(m, session.id)
+    expect(log.filter((e) => e.type === 'tool.call').map((e) => (e.type === 'tool.call' ? [e.id, e.name, e.parent] : []))).toEqual([
+      ['toolu_agent', 'Agent', undefined],
+      ['toolu_q1', ASK_USER_TOOL, 'toolu_agent'],
+    ])
+    expect(log.filter((e) => e.type === 'tool.result').map((e) => (e.type === 'tool.result' ? [e.id, e.ok] : []))).toEqual([
+      ['toolu_q1', true],
+      ['toolu_agent', true],
+    ])
+    await expectPanelAccepts(log)
+
+    const rows = await db.sql`SELECT kind, action, tool_use_id, tier, outcome FROM ai_audit ORDER BY id`
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { kind: 'tool_call', action: ASK_USER_TOOL, tool_use_id: 'toolu_q1', tier: 'read', outcome: 'ok' },
+        { kind: 'tool_call', action: 'Agent', tool_use_id: 'toolu_agent', tier: expect.any(String), outcome: 'ok' },
+        { kind: 'question', action: 'answered', tool_use_id: 'toolu_q1', tier: 'read', outcome: 'ok' },
+      ]),
+    )
+  })
+
   it('only the user in the panel answers, once, with one answer per question', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
@@ -145,7 +302,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
   })
 
   it('an interrupt cancels the question: the model is told nobody answered, and nothing was chosen', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
     const id = await pendingQuestion(m, session.id)
 
@@ -158,6 +316,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect(resolved).toMatchObject({ id, answered: false, reason: expect.stringMatching(/interrupted/) })
     expect(resolved).not.toHaveProperty('answers')
     expect((await m.get(session.id, browser)).status).toBe('idle')
+    // #1075: a question nobody answered is in the audit log too, as ScadBuddy's cancellation.
+    expect(await db.sql`SELECT action, surface, principal_kind, tool_use_id, outcome, detail FROM ai_audit WHERE kind = 'question'`).toEqual([
+      {
+        action: 'cancelled',
+        surface: 'system',
+        principal_kind: 'system',
+        tool_use_id: 'toolu_q1',
+        outcome: 'refused',
+        detail: expect.stringMatching(new RegExp(`^AskUserQuestion question ${id}: .*interrupted`)),
+      },
+    ])
   })
 
   it('a question and an approval pending together: deciding the approval leaves the session waiting for the answer', async () => {
@@ -165,7 +334,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        const asked = run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal })
+        const asked = run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
         await run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         verdicts.push(await asked)
@@ -198,7 +367,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        const asked = run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal })
+        const asked = run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
         const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         verdicts.push(await asked)
@@ -231,7 +400,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
         const signal = new AbortController().signal
         const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
         await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal }))
         await approved
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -254,7 +423,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const parked = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal: new AbortController().signal }))
         yield* []
         throw new Error('Claude Code process aborted by user')
       })()
@@ -305,8 +474,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       (async function* () {
         await Promise.resolve()
         const signal = new AbortController().signal
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q1', signal }))
-        second = await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q2', signal })
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q1', signal }))
+        second = await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q2', signal })
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
@@ -334,7 +503,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const dropped = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: QUESTIONS, toolUseId: 'toolu_q', signal: withdraw.signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_q', signal: withdraw.signal }))
         await goOn
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -354,6 +523,86 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     expect((await events(m, session.id)).find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false })
     carryOn()
     await turn!.done
+  })
+
+  // #1075: a cancellation audits every question it ends, and an audit sink that
+  // fails costs neither the other rows nor the session's status.
+  it('cancelling two questions audits each, and a failing audit write costs neither the other row nor the status', async () => {
+    const real = new AuditLog({ sql: db.sql })
+    let failures = 1
+    const audit = {
+      hash: real.hash.bind(real),
+      // Only the first cancellation's write fails: another audit write may come first.
+      record: (entry: Parameters<AuditLog['record']>[0]) =>
+        entry.kind === 'question' && entry.action === 'cancelled' && failures-- > 0 ? Promise.reject(new Error('audit down')) : real.record(entry),
+    }
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const second = { ...QUESTIONS[0]!, question: 'And the top?' }
+        verdicts.push(
+          ...(await Promise.all([
+            run.questionGate!({ tool: ASK_USER_QUESTION, questions: QUESTIONS, toolUseId: 'toolu_a', signal }),
+            run.questionGate!({ tool: ASK_USER_TOOL, questions: [second], toolUseId: 'toolu_b', signal }),
+          ])),
+        )
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20, audit: audit as unknown as AuditLog })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me twice' })
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
+
+    expect(await m.questions.cancelPending(session.id, 'the test cancelled it')).toBe(2)
+    // Nothing is pending: the session no longer says it waits (running, or idle once the turn ends).
+    expect((await m.get(session.id, browser)).status).not.toBe('waiting_input')
+    await turn!.done
+    expect(verdicts).toHaveLength(2)
+    expect(verdicts.every((v) => !v.answered)).toBe(true)
+    // The first write failed; the second question's row still landed.
+    const rows = await db.sql<{ tool_use_id: string; detail: string }[]>`
+      SELECT tool_use_id, detail FROM ai_audit WHERE kind = 'question' AND action = 'cancelled'`
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.detail).toMatch(/the test cancelled it$/)
+  })
+
+  // #3255: the answer and the session's status are one commit, so a status write that fails
+  // takes the answer with it: the question stays answerable, never answered with the
+  // session left saying it waits. Nothing is audited until an answer commits.
+  it('a failed status write rolls the answer back, and the answer can be given again (#3255)', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const service = m.questions as unknown as { statusRefresh: () => Promise<ServerEvent[]> }
+    vi.spyOn(service, 'statusRefresh').mockRejectedValueOnce(new Error('status write failed'))
+
+    await expect(m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))).rejects.toThrow('status write failed')
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`).toEqual([{ outcome: null }])
+    expect((await m.get(session.id, browser)).status).toBe('waiting_input')
+    expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'question'`).toEqual([])
+
+    await m.questions.answer(browser, answer(session.id, id, ['Red', 'Cancel']))
+    await turn!.done
+    expect(await db.sql`SELECT action, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([{ action: 'answered', outcome: 'ok' }])
+  })
+
+  it('an answer given over the chat socket is audited with the socket client address', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    const chat = new ChatConnection(m, () => {}, { snapshotMs: 60_000, clientIp: '198.51.100.4' })
+    try {
+      await chat.receive(JSON.stringify(answer(session.id, id, ['Red', 'Cancel'])))
+      await turn!.done
+    } finally {
+      chat.close()
+    }
+    expect(await db.sql`SELECT surface, client_ip, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { surface: 'http', client_ip: '198.51.100.4', outcome: 'ok' },
+    ])
   })
 
   it('the chat socket names the question on an error that refused its answer', async () => {
@@ -388,7 +637,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     const askingColliding = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        verdicts.push(await run.questionGate!({ questions: colliding, toolUseId: 'toolu_c', signal: new AbortController().signal }))
+        verdicts.push(await run.questionGate!({ tool: ASK_USER_QUESTION, questions: colliding, toolUseId: 'toolu_c', signal: new AbortController().signal }))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingColliding, approvalPollMs: 20 })
@@ -446,5 +695,104 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
     await b.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
     await turn!.done
     expect(verdicts[0]).toMatchObject({ answered: true })
+  })
+
+  // #1077: a question has no expiry, so a wait that re-read its row every poll would cost
+  // ~86,400 reads a night. The poll backs off; another replica's answer still arrives.
+  it('backs off its poll while the question stays unanswered, and still sees another replica’s answer', async () => {
+    const paths = await tempPaths()
+    const a = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
+    const b = manager({ sql: db.sql, paths, run: asking, approvalPollMs: 20 })
+    const service = a.questions as unknown as { row(id: string): Promise<unknown> }
+    const real = service.row.bind(service)
+    let reads = 0
+    vi.spyOn(service, 'row').mockImplementation(async (rowId) => {
+      reads += 1
+      return real(rowId)
+    })
+    const { session, turn } = await a.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(a, session.id)
+    const before = reads
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    // At a fixed 20 ms that is ~50 reads; doubling from 20 ms, under 10.
+    expect(reads - before).toBeLessThan(12)
+
+    await b.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+    expect(verdicts[0]).toMatchObject({ answered: true })
+  }, 15_000)
+
+  // spec 2026-10-01 §6.6 Notifications: one input.requested and one input.resolved per entry.
+  it('logs input.requested after question.asked, and input.resolved after its resolution', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+    const id = await pendingQuestion(m, session.id)
+    await m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))
+    await turn!.done
+    const log = await events(m, session.id)
+    const types = log.map((e) => e.type)
+    expect(types.indexOf('input.requested')).toBe(types.indexOf('question.asked') + 1)
+    expect(types.indexOf('input.resolved')).toBe(types.indexOf('question.resolved') + 1)
+    expect(log.filter((e) => e.type.startsWith('input.'))).toEqual([
+      expect.objectContaining({
+        type: 'input.requested',
+        entry: expect.objectContaining({ id: `question:${id}`, kind: 'answer', prompt: QUESTIONS.map((q) => q.question).join('\n'), expires_at: expect.any(String) }),
+      }),
+      { v: PROTOCOL_VERSION, type: 'input.resolved', sessionId: session.id, id: `question:${id}`, kind: 'answer', outcome: 'answered' },
+    ])
+  })
+
+  // spec 2026-10-01 §6.6 Timeouts: a question's timer cancels it, never answers it.
+  describe('question expiry', () => {
+    const expiry = (seconds: unknown) => ({ get: async <T,>(key: string) => (key === 'question_expiry_seconds' ? (seconds as T) : undefined) })
+
+    it('bounds question_expiry_seconds to 10–86 400, default 3600', async () => {
+      const at = (v: unknown) => new QuestionService({ sql: db.sql, events: {} as EventLog, settings: expiry(v) }).expirySeconds()
+      expect(await at(undefined)).toBe(3600)
+      expect(await at(5)).toBe(10)
+      expect(await at(100_000)).toBe(86_400)
+      expect(await at('soon')).toBe(3600)
+    })
+
+    it('a parked question whose timer fires is cancelled, and the call is told nobody answered', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20, settings: expiry(10) })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      const [row] = await db.sql<{ ttl: number }[]>`
+        SELECT round(extract(epoch FROM expires_at - created_at))::int AS ttl FROM ai_questions WHERE id = ${id}`
+      expect(row?.ttl).toBe(10)
+      await turn!.done
+      expect(verdicts[0]).toMatchObject({ answered: false })
+      expect((verdicts[0] as { message: string }).message).toMatch(/nobody answered in time/)
+      const [after] = await db.sql<{ outcome: string; answers: unknown }[]>`SELECT outcome, answers FROM ai_questions WHERE id = ${id}`
+      expect(after).toEqual({ outcome: 'cancelled', answers: null })
+      expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved')).toHaveLength(1)
+    }, 40_000)
+
+    it('the sweep cancels an expired question once, and an answer after the timer is refused', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      await db.sql`UPDATE ai_questions SET expires_at = now() - interval '1 second' WHERE id = ${id}`
+      await expect(m.questions.answer(browser, answer(session.id, id, ['Blue', 'Approve']))).rejects.toMatchObject({ code: 'conflict' })
+      const [first, second] = await Promise.all([m.questions.expireDue(), m.questions.expireDue()])
+      expect(first + second).toBe(0)
+      await turn!.done
+      const [row] = await db.sql<{ outcome: string; reason: string }[]>`SELECT outcome, reason FROM ai_questions WHERE id = ${id}`
+      expect(row).toEqual({ outcome: 'cancelled', reason: 'nobody answered in time' })
+      expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved')).toHaveLength(1)
+      expect(verdicts[0]).toMatchObject({ answered: false })
+    })
+
+    it('the sweep cancels an expired question once', async () => {
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
+      const id = await pendingQuestion(m, session.id)
+      await db.sql`UPDATE ai_questions SET expires_at = now() - interval '1 second' WHERE id = ${id}`
+      expect(await m.questions.expireDue()).toBe(1)
+      expect(await m.questions.expireDue()).toBe(0)
+      await turn!.done
+      expect(verdicts[0]).toMatchObject({ answered: false })
+    })
   })
 })

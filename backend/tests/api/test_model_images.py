@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import lsp
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths, model_path
+from tests.support.operations import press
 
 PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + b"\1" * 32
 OTHER_PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + b"\2" * 32
@@ -135,6 +136,7 @@ def _upload(client: TestClient) -> dict[str, Any]:
         "/api/v1/models",
         files={"file": (f"{SLUG}.scad", b"cube(1);\n", "application/octet-stream")},
         data={"force": "true"},
+        headers=press(),
     )
     assert response.status_code == 201, response.text
     body: dict[str, Any] = response.json()

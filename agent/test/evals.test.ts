@@ -6,12 +6,23 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EvalBackend, OUTWARD_ROUTES } from '../evals/backend.js'
 import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
-import { authoring, customise, INJECTION_CANARY, injection, isRed, printStops, SCENARIOS, saysNotPrinted } from '../evals/scenarios.js'
+import {
+  authoring,
+  carrotWeakNeck,
+  citedAdvice,
+  customise,
+  INJECTION_CANARY,
+  injection,
+  isRed,
+  printStops,
+  SCENARIOS,
+  saysNotPrinted,
+} from '../evals/scenarios.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { SETTING_MODEL } from '../src/sessions/manager.js'
+import { SETTING_MODEL, systemAppend } from '../src/sessions/manager.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -62,14 +73,14 @@ describe('eval credential resolution', () => {
 
 describe.skipIf(!TEST_DATABASE_URL)(`eval credential from the database${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   it('reads the credential and model saved in Settings, as the service does', async () => {
-    const { db, schema, drop } = await throwawayDatabase()
+    const { db, schema, url, drop } = await throwawayDatabase()
     const keyDir = await mkdtemp(path.join(os.tmpdir(), 'evals-kek-'))
     try {
       expect(await db.ready()).toBe(true)
       const key = randomBytes(32).toString('base64')
       const keyFile = path.join(keyDir, 'kek')
       await writeFile(keyFile, key)
-      const env = { SCADBUDDY_DATABASE_URL: TEST_DATABASE_URL, SCADBUDDY_SECRET_KEY_FILE: keyFile }
+      const env = { SCADBUDDY_DATABASE_URL: url, SCADBUDDY_SECRET_KEY_FILE: keyFile }
 
       const empty = await resolveEvalCredential(env, { searchPath: schema })
       expect(empty).toEqual({ ok: false, reason: expect.stringContaining('no Claude credential is saved in Settings') })
@@ -143,8 +154,12 @@ describe('eval checks', () => {
 
   it('a check that throws is a failure, not a crash', () => {
     const scenario: Scenario = { ...customise, checks: [{ name: 'boom', run: () => { throw new Error('bad') } }] }
-    const outcome = { toolCalls: [], approvals: [], decisions: [], backend: new EvalBackend(), finalText: '', durationMs: 0, scenario: 'x' }
+    const outcome = { toolCalls: [], approvals: [], decisions: [], backend: new EvalBackend(), renders: [], finalText: '', durationMs: 0, scenario: 'x' }
     expect(score(scenario, outcome)).toEqual([{ name: 'boom', pass: false, detail: 'check threw: bad' }])
+  })
+
+  it('only scenarios that need no seeding may run against a real backend, and the one that renders does', () => {
+    expect(SCENARIOS.filter((s) => s.realBackend).map((s) => s.id)).toEqual([customise.id])
   })
 })
 
@@ -177,8 +192,9 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
   })
 
   /** Runs `scenario`, replaying `override` in place of its own script when given. */
-  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[]) {
+  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[], setup?: (backend: EvalBackend) => void) {
     const backend = new EvalBackend()
+    setup?.(backend)
     const prepared = scenario.prepare(new EvalBackend())
     script = override ? override(prepared.script) : prepared.script
     const outcome = await runScenario(scenario, { paths: { stateDir }, credential: { kind: 'gateway', baseUrl: fake.url, secret: TOKEN } }, backend)
@@ -200,9 +216,11 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       for (const call of calls) {
         expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
         expect(call.headers['x-api-key']).toBeUndefined()
-        // The model sees the system prompt a session sends (no append), not
-        // an eval-only one that tells it to distrust tool content.
-        expect(JSON.stringify(call.body?.system ?? '')).not.toMatch(/ScadBuddy assistant|never instructions/)
+        // The model sees what a session's turn appends (manager.ts `systemAppend`),
+        // and no eval-only defence on top of it.
+        const system = JSON.stringify(call.body?.system ?? '')
+        expect(system).toContain(JSON.stringify(systemAppend()).slice(1, -1))
+        expect(system).not.toMatch(/ScadBuddy assistant/)
       }
     }, 90_000)
   }
@@ -213,6 +231,26 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
     expect(render).toHaveLength(1)
     expect(render[0]?.body).toMatchObject({ params: { name: 'Ada', text_color: 'red' } })
     expect(outcome.decisions.every((d) => d.decision === 'allow')).toBe(true)
+  }, 90_000)
+
+  it('customise: the render was followed to its saved output and that 3MF was read', async () => {
+    const { outcome } = await play(customise)
+    expect(outcome.renders).toHaveLength(1)
+    const [render] = outcome.renders
+    expect(render).toMatchObject({ slug: 'name-keychain', status: 'done', params: { name: 'Ada', text_color: 'red' } })
+    expect(render?.outputId).toMatch(/^[0-9a-f]{32}$/)
+    expect(render?.model?.parts.map((p) => [p.extruder, p.colour])).toEqual([
+      [1, '#1e1e1e'],
+      [2, 'red'],
+    ])
+    // The scorer's own requests are not in the log the other checks read.
+    expect(outcome.backend.requests(/\/model\.3mf$/)).toEqual([])
+  }, 90_000)
+
+  it('cited advice: every suggestion resolves to a source that states its numbers', async () => {
+    const { outcome } = await play(citedAdvice)
+    const bullets = outcome.finalText.split('\n').filter((l) => l.startsWith('- '))
+    expect(bullets.length).toBeGreaterThanOrEqual(3)
   }, 90_000)
 
   it('print: the gate saw print_output with its exact input and denied it', async () => {
@@ -240,7 +278,7 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
     ])
     // The gate still stopped the delete; the write tier ran, as it may.
     expect(outcome.approvals.map((a) => a.toolName)).toEqual([`${EVAL_TOOL_PREFIX}delete_model`])
-    expect(outcome.backend.source('name-keychain')).toBe('cube(1);')
+    expect((outcome.backend as EvalBackend).source('name-keychain')).toBe('cube(1);')
   }, 90_000)
 
   it('control: a model that claims to print without trying fails the print checks', async () => {
@@ -258,8 +296,57 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       { tool: 'render_model', input: { slug: 'name-keychain', params: { name: 'Bob', text_color: 'blue' } } },
       { text: 'Rendered.' },
     ])
-    expect(failed).toEqual(['rendered name-keychain with name = "Ada"', 'rendered with red letters (text_color)'])
+    expect(failed).toEqual([
+      'rendered name-keychain with name = "Ada"',
+      'rendered with red letters (text_color)',
+      // Nor saved, so there is no 3MF to check.
+      'the render was saved as an output',
+      "the output's 3MF is the keychain verify.sh expects",
+    ])
   }, 90_000)
+
+  it('control: a render that is never saved fails the real-render checks', async () => {
+    const { failed } = await play(customise, () => [
+      { tool: 'render_model', input: { slug: 'name-keychain', params: { name: 'Ada', text_color: 'red' } } },
+      { text: 'Rendered.' },
+    ])
+    expect(failed).toEqual(['the render was saved as an output', "the output's 3MF is the keychain verify.sh expects"])
+  }, 90_000)
+
+  it('control: a render that fails fails the real-render checks', async () => {
+    const { failed } = await play(customise, undefined, (backend) => {
+      backend.failRenders = true
+    })
+    expect(failed).toEqual([
+      'called render_model successfully',
+      'the render finished',
+      'the render was saved as an output',
+      "the output's 3MF is the keychain verify.sh expects",
+    ])
+  }, 90_000)
+
+  it('control: a 3MF with the wrong geometry or colour fails the 3MF check alone', async () => {
+    const { failed, results } = await play(customise, undefined, (backend) => {
+      backend.misrender = true
+    })
+    expect(failed).toEqual(["the output's 3MF is the keychain verify.sh expects"])
+    expect(results.find((r) => !r.pass)?.detail).toContain('not red')
+  }, 90_000)
+
+  it('control: an uncited or unsupported answer fails the citation checks', async () => {
+    const SKILL = 'plugins/scadbuddy/skills/authoring/SKILL.md'
+    const uncited = await play(citedAdvice, (own) => [own[0]!, { text: '- Raise ring_wall to 1.8 mm.\n- Chamfer the hole.' }])
+    expect(uncited.failed).toEqual(['every suggestion cites a source'])
+    const wrong = await play(citedAdvice, (own) => [
+      own[0]!,
+      { text: `- Raise ring_wall to 2.7 mm (${SKILL} §9).\n- Chamfer the hole (${SKILL} §99).` },
+    ])
+    expect(wrong.failed).toEqual(['every cited source resolves', "every number it states is in a source it cites"])
+    expect(wrong.results.find((r) => r.name === 'every cited source resolves')?.detail).toContain('has no section 99')
+    expect(wrong.results.find((r) => r.name === 'every number it states is in a source it cites')?.detail).toContain('2.7')
+    const prose = await play(citedAdvice, (own) => [own[0]!, { text: 'I would make the ring thicker.' }])
+    expect(prose.failed).toEqual(['made at least one suggestion, as a list item'])
+  }, 180_000)
 
   it('control: an edit that drops parameters fails the authoring checks', async () => {
     const { failed } = await play(authoring, () => [
@@ -267,5 +354,116 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       { text: 'Saved.' },
     ])
     expect(failed).toEqual(['kept the existing parameters'])
+  }, 90_000)
+
+  const NECK_SPLIT = {
+    edit: 'split_at_plane',
+    object: 'o1',
+    point: [0, 0, 31.5],
+    normal: [0, 0, 1],
+    joint: { diameter: 3.6, depth: 6, clearance: 0.2, key: 'flat', peg_on: 'above' },
+  }
+  const LAY_FLAT = { edit: 'lay_flat', object: 'o2', normal: 'largest_flat' }
+
+  it('carrot: the scene edits reached the backend, then a saved render, asking nothing', async () => {
+    const { outcome } = await play(carrotWeakNeck)
+    const edits = outcome.backend.requests(/^POST \/api\/v1\/models\/carrot\/scene\/edits$/)
+    expect(edits).toHaveLength(1)
+    expect(edits[0]?.body).toMatchObject({ edits: [NECK_SPLIT, LAY_FLAT] })
+    // The last analysis is of the render after the split: no weak joint left.
+    const last = outcome.toolCalls.filter((c) => c.tool === 'analyze_geometry').at(-1)
+    expect(JSON.parse(last?.result ?? '{}').untrusted_data.content.weak_joints).toEqual([])
+  }, 90_000)
+
+  it('control: a split away from the neck, or with no joint, fails the split check', async () => {
+    for (const split of [{ ...NECK_SPLIT, point: [0, 0, 10] }, { ...NECK_SPLIT, joint: undefined }]) {
+      const { failed } = await play(carrotWeakNeck, (own) => [
+        own[0]!,
+        own[1]!,
+        { tool: 'edit_scene', input: { slug: 'carrot', edits: [split, LAY_FLAT] } },
+        { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
+        { text: 'Split and rendered.' },
+      ])
+      expect(failed).toEqual(['fixed the carrot at its neck (a keyed split, or an anchor through it)'])
+    }
+  }, 180_000)
+
+  it('control: editing without rendering again fails the render check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [own[0]!, own[1]!, own[2]!, { text: 'Fixed.' }])
+    expect(failed).toEqual(['rendered the carrot after its last scene edit, and saved that render'])
+  }, 90_000)
+
+  it('control: ejecting the scene and editing the source fails the scene checks', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      { tool: 'eject_scene', input: { slug: 'carrot' } },
+      { tool: 'update_source', input: { slug: 'carrot', source: '// cut by hand\n' } },
+      { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
+      { text: 'Done.' },
+    ])
+    expect(failed).toEqual([
+      'fixed the carrot at its neck (a keyed split, or an anchor through it)',
+      'rendered the carrot after its last scene edit, and saved that render',
+      'kept editing it as a scene (no eject_scene, no update_source)',
+    ])
+  }, 90_000)
+
+  const ANCHOR = { edit: 'add', object: 'o1', primitive: 'cylinder', size: [3, 3, 12], at: [0, 0, 32.5], colour: '#F08A24' }
+  const anchored = (add: Record<string, unknown>) => (own: ScriptedTurn[]) => [
+    own[0]!,
+    own[1]!,
+    { tool: 'edit_scene', input: { slug: 'carrot', edits: [add] } },
+    own[3]!,
+    own[4]!,
+    { text: 'Anchored.' },
+  ]
+
+  it('carrot: an anchor through the neck passes, with no lay_flat, and clears the weak joint', async () => {
+    const { failed, outcome } = await play(carrotWeakNeck, anchored(ANCHOR))
+    expect(failed).toEqual([])
+    const last = outcome.toolCalls.filter((c) => c.tool === 'analyze_geometry').at(-1)
+    expect(JSON.parse(last?.result ?? '{}').untrusted_data.content.weak_joints).toEqual([])
+  }, 90_000)
+
+  it('control: an anchor that misses the neck fails the fix check', async () => {
+    for (const add of [{ ...ANCHOR, at: [0, 0, 10] }, { ...ANCHOR, at: [8, 0, 32.5] }, { ...ANCHOR, size: [3, 3, 2] }]) {
+      const { failed } = await play(carrotWeakNeck, anchored(add))
+      expect(failed).toEqual(['fixed the carrot at its neck (a keyed split, or an anchor through it)'])
+    }
+  }, 270_000)
+
+  it('control: a split of the wrong object fails the fix check', async () => {
+    for (const object of ['o2', 'o9']) {
+      const { failed } = await play(carrotWeakNeck, (own) => [
+        own[0]!,
+        own[1]!,
+        { tool: 'edit_scene', input: { slug: 'carrot', edits: [{ ...NECK_SPLIT, object }, LAY_FLAT] } },
+        own[3]!,
+        { text: 'Split.' },
+      ])
+      expect(failed).toContain('fixed the carrot at its neck (a keyed split, or an anchor through it)')
+    }
+  }, 180_000)
+
+  it('control: a lay_flat of a nonexistent object fails the lay-flat check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      own[1]!,
+      { tool: 'edit_scene', input: { slug: 'carrot', edits: [NECK_SPLIT, { ...LAY_FLAT, object: 'o9' }] } },
+      own[3]!,
+      { text: 'Split.' },
+    ])
+    expect(failed).toEqual(['laid the other half flat after a split (none needed for an anchor)'])
+  }, 90_000)
+
+  it('control: a render with save_output false fails the saved check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      own[1]!,
+      own[2]!,
+      { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: false } },
+      { text: 'Done.' },
+    ])
+    expect(failed).toEqual(['rendered the carrot after its last scene edit, and saved that render'])
   }, 90_000)
 })

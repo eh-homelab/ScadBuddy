@@ -3,15 +3,20 @@ import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createApp } from '../src/app.js'
+import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
+import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { ownPluginEnabled, SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
+import { SettingsStore } from '../src/credentials.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { InlineCommands } from './support/commands.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -80,8 +85,50 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
           fetchPath: '',
           commit: installed.commit_sha,
           contentHash: installed.content_hash,
+          allowRefused: false,
         },
       ])
+    })
+
+    it('approves a pin the rules refuse only with allow_refused, and a re-pin is allowed anew', async () => {
+      const hook = { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] }
+      repos.greeter!.remove()
+      const repo = (repos.greeter = gitRepo({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ hooks: hook }) }))
+      const installed = await install()
+      expect(installed).toMatchObject({ approved: false, allow_refused: false })
+      expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringMatching(/allow_refused/),
+      })
+      const approved = await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      expect(approved).toMatchObject({ approved: true, allow_refused: true })
+      await store.setEnabled('greeter', true)
+      expect((await store.enabledPins())[0]?.allowRefused).toBe(true)
+      // Re-approving it without the flag is refused, not a silent downgrade.
+      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash, false)).rejects.toMatchObject({
+        status: 409,
+      })
+
+      // A clean re-pin: approved without the flag, and the allowance does not carry over.
+      const next = repo.commitFiles({ 'hooks/hooks.json': null })
+      const current = await store.pinOf('greeter')
+      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      expect(pending.pending?.review.refused).toEqual([])
+      const promoted = await store.approve('greeter', next, pending.pending!.content_hash, true)
+      expect(promoted).toMatchObject({ commit_sha: next, allow_refused: false, enabled: true })
+      await expect(db.sql`UPDATE ai_plugin_packages SET allow_refused = true, approved_at = NULL`).rejects.toThrow(
+        /check constraint/,
+      )
+    })
+
+    it('shows a review stored before refusals were listed as refusing nothing', async () => {
+      const installed = await install()
+      await db.sql`UPDATE ai_plugin_packages SET review = review - 'refused'`
+      expect((await store.get('greeter'))?.review.refused).toEqual([])
+      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash)).allow_refused).toBe(false)
+      // A clean pin re-approved with the flag stays without it: nothing was shown to allow.
+      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash, true)).allow_refused).toBe(false)
     })
 
     it('refuses a second install of the same name, and the table refuses an unapproved enable', async () => {
@@ -163,18 +210,19 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
   })
 
   describe('the routes', () => {
-    const app = () =>
-      createApp({
+    const appDeps = (): AppDeps => ({
         database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
         backend: () => Promise.resolve(true),
         kek: { ok: false, reason: 'not configured' },
         credentials: new MemoryCredentials(),
         pluginPackages: store,
         packageInstaller: installer,
+        commands: new InlineCommands(packageKinds({ packages: store, installer })),
         testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
         remoteAddress: () => '10.0.0.7',
         origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
       })
+    const app = () => createApp(appDeps())
     const json = (method: string, body: unknown, headers: Record<string, string> = UI) => ({
       method,
       headers: { ...headers, 'content-type': 'application/json' },
@@ -215,6 +263,143 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(() => rmSync(dir)).toThrow() // evicted from the cache
     })
 
+    it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {
+      const settings = new SettingsStore(db.sql)
+      const a = createApp({ ...appDeps(), settings })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
+        name: string
+        built_in?: boolean
+        enabled: boolean
+        review: { skills: string[] }
+      }[]
+      expect(listed.map((p) => [p.name, p.built_in, p.enabled])).toEqual([
+        ['scadbuddy', true, true],
+      ])
+      expect(listed[0]!.review.skills).toContain('scadbuddy:authoring')
+
+      const off = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
+      expect(((await off.json()) as { enabled: boolean }).enabled).toBe(false)
+      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(false)
+      expect(await ownPluginEnabled(settings)).toBe(false)
+      await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
+      expect(await settings.get(SETTING_OWN_PLUGIN)).toBe(true)
+      const one = await a.request('/api/v1/ai/plugin-packages/scadbuddy', { headers: READ })
+      expect(await one.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
+
+      for (const [method, url, body] of [
+        ['DELETE', '/api/v1/ai/plugin-packages/scadbuddy', undefined],
+        ['POST', '/api/v1/ai/plugin-packages/scadbuddy/approve', { commit_sha: 'a', content_hash: 'b' }],
+        ['POST', '/api/v1/ai/plugin-packages/scadbuddy/repin', {}],
+        ['DELETE', '/api/v1/ai/plugin-packages/scadbuddy/pending', undefined],
+      ] as const) {
+        const res = await a.request(url, body === undefined ? { method, headers: UI } : json(method, body))
+        expect(res.status, `${method} ${url}`).toBe(409)
+        expect(await res.json()).toMatchObject({ built_in: true })
+      }
+      // Without the settings store a built-in cannot be switched: 503, never a stored row.
+      const noSettings = await app().request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
+      expect(noSettings.status).toBe(503)
+    })
+
+    it('never loads a package stored under a built-in\'s name, and lets DELETE remove it', async () => {
+      // Stored before builtins.ts, when a reserved name was allowable.
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.setEnabled('greeter', true)
+      await db.sql`UPDATE ai_plugin_packages SET name = 'scadbuddy' WHERE name = 'greeter'`
+      const loaded = await loadPackagesForRun(store, installer)
+      expect(loaded.paths).toEqual([])
+      expect(loaded.problems).toEqual([expect.stringMatching(/scadbuddy was not loaded: "scadbuddy" is built in/)])
+
+      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
+        name: string
+        built_in?: boolean
+      }[]
+      expect(listed.map((p) => [p.name, p.built_in ?? false])).toEqual([
+        ['scadbuddy', true],
+        ['scadbuddy', false],
+      ])
+      // PATCH always switches the built-in: the stored row never loads.
+      const patched = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
+      expect(await patched.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
+      const del = () => a.request('/api/v1/ai/plugin-packages/scadbuddy', { method: 'DELETE', headers: UI })
+      expect((await del()).status).toBe(204)
+      expect(await store.list()).toEqual([])
+      expect((await del()).status).toBe(409) // the built-in stays
+    })
+
+    it("lists a package's files with their sizes and serves each one's content, the pending re-pin's too", async () => {
+      await install()
+      const a = app()
+      const files = await a.request('/api/v1/ai/plugin-packages/greeter/files', { headers: READ })
+      expect(files.status).toBe(200)
+      const listed = (await files.json()) as { files: { path: string; size: number }[] }
+      expect(listed.files).toContainEqual({ path: 'README.md', size: GREETER['README.md']!.length })
+      expect(listed.files.map((f) => f.path)).toEqual(Object.keys(GREETER).sort())
+
+      const read = (q: string) => a.request(`/api/v1/ai/plugin-packages/greeter/file?${q}`, { headers: READ })
+      const readme = await read('path=README.md')
+      expect(readme.status).toBe(200)
+      expect(await readme.json()).toEqual({
+        path: 'README.md',
+        size: GREETER['README.md']!.length,
+        binary: false,
+        media_type: 'text/markdown',
+        truncated: false,
+        too_large: false,
+        content: GREETER['README.md'],
+      })
+      // Only a path the pin lists: never one outside the package, or a file it does not have.
+      for (const q of ['path=../../etc/passwd', 'path=%2Fetc%2Fpasswd', 'path=missing.md', '']) {
+        expect((await read(q)).status, q).toBe(404)
+      }
+      expect((await read('path=README.md&pending=true')).status).toBe(404) // no re-pin yet
+
+      repos.greeter!.commitFiles({ 'commands/wave.md': 'Wave twice.\n', 'NOTES.md': 'new\n' })
+      await a.request('/api/v1/ai/plugin-packages/greeter/repin', json('POST', { ref: 'main' }))
+      const pending = await read('path=NOTES.md&pending=true')
+      expect(await pending.json()).toMatchObject({ content: 'new\n' })
+      expect(await (await read('path=commands/wave.md&pending=true')).json()).toMatchObject({ content: 'Wave twice.\n' })
+      expect(await (await read('path=commands/wave.md')).json()).toMatchObject({ content: GREETER['commands/wave.md'] })
+      expect((await read('path=NOTES.md')).status).toBe(404)
+      const pendingList = (await (
+        await a.request('/api/v1/ai/plugin-packages/greeter/files?pending=true', { headers: READ })
+      ).json()) as { files: { path: string }[] }
+      expect(pendingList.files.map((f) => f.path)).toContain('NOTES.md')
+
+      expect((await a.request('/api/v1/ai/plugin-packages/nope/files', { headers: READ })).status).toBe(404)
+      const crossSite = await a.request('/api/v1/ai/plugin-packages/greeter/file?path=README.md', {
+        headers: { ...READ, 'sec-fetch-site': 'cross-site' },
+      })
+      expect(crossSite.status).toBe(403)
+    })
+
+    it("serves a built-in plugin's files, and has no re-pin of one", async () => {
+      const a = createApp({ ...appDeps(), settings: new SettingsStore(db.sql) })
+      const listed = (await (await a.request('/api/v1/ai/plugin-packages/scadbuddy/files', { headers: READ })).json()) as {
+        files: { path: string }[]
+      }
+      expect(listed.files.map((f) => f.path)).toContain('skills/authoring/SKILL.md')
+      const skill = await a.request('/api/v1/ai/plugin-packages/scadbuddy/file?path=skills/authoring/SKILL.md', {
+        headers: READ,
+      })
+      expect(await skill.json()).toMatchObject({ binary: false, media_type: 'text/markdown', content: expect.stringMatching(/^---/) })
+      const outside = await a.request('/api/v1/ai/plugin-packages/scadbuddy/file?path=../package.json', { headers: READ })
+      expect(outside.status).toBe(404)
+      const pending = await a.request('/api/v1/ai/plugin-packages/scadbuddy/files?pending=true', { headers: READ })
+      expect(pending.status).toBe(404)
+    })
+
+    it('answers an install of a built-in plugin with 409 built_in, not a refusal', async () => {
+      repos.greeter!.remove()
+      repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) })
+      const res = await app().request('/api/v1/ai/plugin-packages', json('POST', { source: { kind: 'git', url: GIT_URL } }))
+      expect(res.status).toBe(409)
+      expect(await res.json()).toMatchObject({ built_in: true, detail: expect.stringMatching(/built in/) })
+      expect(await store.list()).toEqual([])
+    })
+
     it('refuses writes and reads from outside the UI, and plain-text bodies', async () => {
       const a = app()
       const body = JSON.stringify({ source: { kind: 'git', url: GIT_URL } })
@@ -237,18 +422,39 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(await store.list()).toEqual([])
     })
 
-    it('answers 422 with every problem for a refused package, and stores nothing', async () => {
+    it('installs a package the rules refuse, and approves it only with allow_refused', async () => {
       repos.bad = gitRepo({
         ...GREETER,
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad' }),
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }),
       })
       const res = await app().request(
         '/api/v1/ai/plugin-packages',
         json('POST', { source: { kind: 'git', url: 'https://git.test/bad.git' } }),
       )
+      expect(res.status).toBe(201)
+      const installed = (await res.json()) as PackageView
+      expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+      const pin = { commit_sha: installed.commit_sha, content_hash: installed.content_hash }
+      const plain = await app().request('/api/v1/ai/plugin-packages/bad/approve', json('POST', pin))
+      expect(plain.status).toBe(409)
+      const allowed = await app().request(
+        '/api/v1/ai/plugin-packages/bad/approve',
+        json('POST', { ...pin, allow_refused: true }),
+      )
+      expect(allowed.status).toBe(200)
+      expect(await allowed.json()).toMatchObject({ approved: true, allow_refused: true })
+    })
+
+    it('answers 422 with every problem for a package no approval can allow, and stores nothing', async () => {
+      repos.bad = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
+      const res = await app().request(
+        '/api/v1/ai/plugin-packages',
+        json('POST', { source: { kind: 'git', url: 'https://git.test/bad.git' } }),
+      )
       expect(res.status).toBe(422)
       expect(((await res.json()) as { problems: string[] }).problems).toEqual([
-        expect.stringMatching(/Stop has a "command" hook/),
+        expect.stringMatching(/^plugin name "bad name" is not 1–64/),
       ])
       expect(await store.list()).toEqual([])
     })
@@ -263,6 +469,9 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
   })
 
   describe('the session manager', () => {
+    // sessions/manager.ts: a package that declares an http MCP server is loaded as its copy without it.
+    const strippedCopy = (stateDir: string, contentHash: string) => path.join(stateDir, 'plugins-local', contentHash.replace(/^sha256:/, ''))
+
     it('loads the enabled packages into each turn by path, and reports the ones it cannot load', async () => {
       const installed = await install()
       await store.approve('greeter', installed.commit_sha, installed.content_hash)
@@ -285,15 +494,17 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
           yield { type: 'system', subtype: 'init', mcp_servers: [], plugins: [] } as unknown as SDKMessage
           yield* scripted.runner(run)
         })()
+      const paths = await tempPaths()
       const m = manager({
         sql: db.sql,
-        paths: await tempPaths(),
+        paths,
         run: runner,
         packagePlugins: () => loadPackagesForRun(store, installer),
       })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
-      expect(runs[0]?.pluginPaths).toEqual([installer.cacheDir({ ...(await store.enabledPins())[0]! })])
+      // The fixture declares an http MCP server: Claude Code gets the copy without it (#2320).
+      expect(runs[0]?.pluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
 
       const logged = (
         await db.sql<{ event: string }[]>`
@@ -306,6 +517,55 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         // The fake init message lists no plugins: the loaded one is reported as not loaded by Claude Code.
         'plugin package greeter was not loaded by Claude Code',
       ])
+    })
+
+    it('loads ScadBuddy\'s own plugin unless Settings switched it off', async () => {
+      const settings = new SettingsStore(db.sql)
+      const runs: HarnessRun[] = []
+      const scripted = scriptedRunner(() => ({ reply: 'hi' }))
+      const m = manager({
+        sql: db.sql,
+        paths: await tempPaths(),
+        settings,
+        ownPlugin: '/opt/own-plugin',
+        run: (run) => {
+          runs.push(run)
+          return scripted.runner(run)
+        },
+      })
+      await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
+      expect(runs[0]?.ownPlugin).toBe('/opt/own-plugin')
+
+      await settings.set(SETTING_OWN_PLUGIN, false, { actor: UI_ACTOR, surface: 'http' })
+      await (await m.start(agentA, { origin: 'mcp', prompt: 'hi' })).turn!.done
+      expect(runs[1]?.ownPlugin).toBeUndefined()
+    })
+
+    it('hands a package approved with allow_refused to the turn as allowed, not vetted', async () => {
+      repos.greeter!.remove()
+      repos.greeter = gitRepo({
+        ...GREETER,
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }),
+      })
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      await store.setEnabled('greeter', true)
+      const scripted = scriptedRunner(() => ({ reply: 'hi' }))
+      const runs: HarnessRun[] = []
+      const paths = await tempPaths()
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: (run) => {
+          runs.push(run)
+          return scripted.runner(run)
+        },
+        packagePlugins: () => loadPackagesForRun(store, installer),
+      })
+      const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      await turn!.done
+      expect(runs[0]?.pluginPaths).toBeUndefined()
+      expect(runs[0]?.allowedPluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
     })
   })
 })

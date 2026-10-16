@@ -73,11 +73,14 @@ describe('the option list', () => {
         'manual_start',
         'insert_at_top',
         'auto_off_after',
-        'project_id',
         'preheat_override',
         'preheat_chamber_target_override',
       ]),
     )
+  })
+
+  it('offers no project control: the Project picker is the one, and a run drops this one (#1047)', () => {
+    expect(PRINT_OPTIONS.map((spec) => spec.name)).not.toContain('project_id')
   })
 
   it('has a control kind for every option and a default for all but the two nullable ones', () => {

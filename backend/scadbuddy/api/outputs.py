@@ -2,65 +2,122 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import tarfile
 import zipfile
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-import psycopg
-from fastapi import APIRouter, File, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
+    AppState,
+    AssetsDep,
     CatalogueDep,
     ConfigDep,
-    EventsDep,
+    FetcherDep,
+    FontsDep,
+    HistoryDep,
     OutputIdPath,
     OutputsDep,
-    PrintLinksDep,
+    PathsDep,
+    ReadBudgetDep,
     RenderDep,
     SettingsStoreDep,
     SlugPath,
     StateDep,
     UploadsDep,
 )
-from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
-from scadbuddy.api.models import PNG_MAGIC, require_model
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.api.jobs import (
+    GLB_MEDIA_TYPE,
+    PNG_MEDIA_TYPE,
+    SNAPSHOT_UNAVAILABLE,
+    JobStatus,
+    RenderRequest,
+    ViewCamera,
+    ViewSize,
+    _job_status,
+    preview_view,
+    render_model,
+    require_job,
+    submit_problems,
+)
+from scadbuddy.api.models import (
+    PAGED_RESPONSES,
+    PNG_MAGIC,
+    TOTAL_COUNT_HEADER,
+    PageAfter,
+    PageLimit,
+    page_window,
+    require_model,
+    require_model_exists,
+)
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    Claimed,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
+from scadbuddy.api.template_ui import UI_FILE_HEADERS
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.download import download_3mf
+from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.library_objects import (
+    LibraryObjects,
+    NotArrangeableError,
+    read_library_objects,
+)
+from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
-    file_into_project,
-    project_stem,
 )
-from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
-from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
-from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.bambuddy.runs import PrintRunStore
+from scadbuddy.bambuddy.send import SendRequest, SendResult
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
-from scadbuddy.library.libraries import LibraryError, model_search_path
+from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.tracing import span
+from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import (
     MODEL_NAME,
+    OUTPUT_ID_PATTERN,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
+    BackfillState,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
+    require_output,
 )
+from scadbuddy.meshmodel.locate import attribute
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import Operation
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
-    InputsDisagreeError,
-    InputsError,
     legacy_inputs,
-    normalize_inputs,
 )
-from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
+from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.jobs import SnapshotUnavailableError, source_directory
+from scadbuddy.render.objects3mf import UnreadableObjectsError
+from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.workflows.arrange import GOALS, part_of
+from scadbuddy.workflows.models import ArrangeInputs, PackItem, SlotPlan
+from scadbuddy.workflows.pipeline_activities import plate_size
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +138,23 @@ class OutputDetail(OutputSummary):
     params: dict[str, ParamValue] = Field(default_factory=dict)
     #: The template inputs this output was saved with (spec §4.3).
     inputs: dict[str, Any] = Field(default_factory=dict)
+    #: A pipeline output's bill of materials, what reproduces it (§8.4), and the names
+    #: of its extra files (`GET /outputs/{id}/files/{name}`); empty or None otherwise.
+    bom: list[BomEntry] = Field(default_factory=list)
+    record: OutputRecord | None = None
+    files: list[str] = Field(default_factory=list)
+    #: The output's objects (spec 2026-09-27 §7); empty for one saved before phase 5,
+    #: which therefore cannot be arranged.
+    manifest: list[ManifestObject] = Field(default_factory=list)
+    #: For an arranged output, the outputs its objects came from (Task 5), and each
+    #: library file ScadBuddy did not make as `library:<id>` (#2284).
+    arranged_from: list[str] = Field(default_factory=list)
+    #: The re-render queued to give it a manifest (#902): pending while ``error`` is
+    #: None, failed with why otherwise; None when none was asked for or it attached.
+    backfill: BackfillState | None = None
+    #: The output's newest print run failed before it queued anything (#1831): nothing
+    #: else on the output records that run, and ``/progress`` reports its failure.
+    failed_before_queueing: bool = False
 
 
 class OutputPlate(BaseModel):
@@ -99,6 +173,9 @@ class CreateOutputRequest(BaseModel):
     #: The inputs on screen when Generate was pressed (spec §4.3). Their ``params``
     #: must be the ones the job rendered; left out, the job's own inputs are recorded.
     inputs: dict[str, Any] | None = None
+    #: Which of a pipeline job's outputs (§5.2); 0, the only one, otherwise. A factory
+    #: default, so the generated clients read it as optional (a literal one is required).
+    index: int = Field(default_factory=int, ge=0)
 
 
 class EditTarget(BaseModel):
@@ -115,34 +192,62 @@ class EditTarget(BaseModel):
     model_version: str | None = None
     #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
     source: Literal["record", "3mf"]
+    #: An arranged output's sources (spec 2026-09-27 §7): it has no one template state
+    #: to reopen, so the page says where its objects came from instead.
+    arranged_from: list[str] = Field(default_factory=list)
 
 
-def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+def detail(
+    store: OutputStore,
+    meta: OutputMeta,
+    library_files: list[LibraryCopy],
+    *,
+    failed_before_queueing: bool = False,
+) -> OutputDetail:
     params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
         params=params,
         inputs=store.inputs(meta.id, params),
+        bom=store.bom(meta.id),
+        record=store.record(meta.id),
+        files=store.files(meta.id),
+        manifest=store.manifest(meta.id),
+        arranged_from=store.arranged_from(meta.id),
+        backfill=store.backfill(meta.id),
         library_files=library_files,
+        failed_before_queueing=failed_before_queueing,
     )
+
+
+async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
+    """The outputs whose newest run failed before queueing; none with a database that
+    does not answer, as ``/progress`` reads them."""
+    try:
+        return await runs.failed_before_queueing([meta.id for meta in metas])
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; outputs listed without them")
+        return set()
 
 
 async def _details(
-    store: OutputStore, uploads: BambuddyUploadStore, metas: list[OutputMeta]
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    runs: PrintRunStore,
+    metas: list[OutputMeta],
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
-    # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(
-        lambda: [_detail(store, meta, copies[meta.id]) for meta in metas]
-    )
-
-
-def require_output(store: OutputStore, output_id: str) -> OutputMeta:
-    try:
-        return store.get(output_id)
-    except OutputNotFoundError:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
+    failed = await _failed_before_queueing(runs, metas)
+    # The thumbnail check and params read are file IO: off the event loop. A span of
+    # their own (#2755): on the NAS share they were most of a listing's time.
+    with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
+        return await asyncio.to_thread(
+            lambda: [
+                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
+                for meta in metas
+            ]
+        )
 
 
 @router.post(
@@ -150,79 +255,590 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
     response_model=OutputDetail,
     status_code=status.HTTP_201_CREATED,
     summary="Persist a finished render",
+    responses=OPERATION_RESPONSES,
 )
 async def create_output(
     slug: SlugPath,
     body: CreateOutputRequest,
-    catalogue: CatalogueDep,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_create`` operation (#1054): its check makes the 404 for the model
+    or the job, the 409 for a job of another model or not done and the 422 for an
+    ``index`` the job has no output for; its run fetches the result, compares
+    ``inputs`` with what the job rendered (422) and copies it."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_create"],
+        subject=slug,
+        request={"slug": slug, **body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
+
+
+Goal = Literal["fewest_plates", "fewest_swaps", "by_colour", "keep_together"]
+assert get_args(Goal) == GOALS
+#: Arrange's refusal of outputs saved before manifests (#902): the UI offers to
+#: re-render them (`output_ids`) and arranges once they have one.
+NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
+#: POST /outputs/{id}/backfill's 409: the output records its objects already.
+ALREADY_BACKFILLED = "already_backfilled"
+#: How long after its re-render finished a still-pending backfill is answered with that
+#: job rather than a new one. The attach runs as the job settles, so this is seconds;
+#: past it, the attach is failing, and answering the same done job forever would leave
+#: every Arrange waiting out its whole wait (#1849). Shorter than Arrange's 5 minutes.
+BACKFILL_ATTACH_GRACE = timedelta(minutes=2)
+
+
+class NeedsBackfillProblem(BaseModel):
+    """Arrange's 409 for outputs saved before manifests (RFC 9457, #902)."""
+
+    type: str = Field(examples=[NEEDS_BACKFILL_PROBLEM])
+    title: str
+    status: int
+    detail: str
+    instance: str | None = None
+    code: Literal["needs_backfill"]
+    #: Every chosen output that needs POST /outputs/{id}/backfill, in request order.
+    output_ids: list[str]
+
+
+#: The most copies one arrange places, summed over its objects.
+MAX_ARRANGE_COPIES = 2000
+
+
+#: Arrange's 422 for a library file whose objects cannot be read from its 3MF (#1863): a
+#: sliced file, one past the download cap, one painted in PrusaSlicer or coloured by a
+#: texture (#2147), or one cut by a negative part. A part painted in Bambu Studio is
+#: arranged with its painting (#1965).
+LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
+
+
+#: A colour as a manifest states one.
+HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
+#: Swaps one object may ask for: far past the colours one object prints in.
+MAX_RECOLOURS = 64
+
+
+class ArrangeObject(BaseModel):
+    """One source's object, or every object of it (#1864). The source is an output, or
+    a Bambuddy library file: one ScadBuddy uploaded is read through the output it is a
+    copy of (`output_bambuddy_uploads`, #455), any other from its 3MF (#1863)."""
+
+    #: An output id, as `OutputIdPath` takes it: the store looks it up by directory
+    #: glob, so "*" must never reach it.
+    output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
+    #: A Bambuddy library file id, in place of `output_id`.
+    library_file_id: int | None = Field(default=None, ge=1)
+    #: A `manifest` entry's `part` (a library file's: GET /print/library/{id}/objects);
+    #: omitted is every object of the source.
+    part: str | None = None
+    #: Copies to place (of each object, with `part` omitted); 0 leaves it out, and
+    #: omitted is the object's own count in its source.
+    count: int | None = Field(default=None, ge=0, le=500)
+    #: With `goal = keep_together`: objects sharing a group share a plate.
+    group: str | None = Field(default=None, max_length=100)
+    #: These copies print in other colours (#3637): each of the object's own colours
+    #: named here (its manifest entry's `colours`) prints in the colour it maps to, and
+    #: a new colour is a filament slot of its own. `{}` is the object's own colours;
+    #: omitted is as its source has it (an arranged output's entry may be recoloured).
+    #: The same object twice, once recoloured, is the same model in two colourings.
+    #: A part an arranged output holds in two colourings is picked by these colours;
+    #: when they match neither entry, the first is taken (its count when `count` is
+    #: omitted) and recoloured as asked.
+    recolour: dict[HexColour, HexColour] | None = Field(default=None, max_length=MAX_RECOLOURS)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> ArrangeObject:
+        if (self.output_id is None) == (self.library_file_id is None):
+            raise ValueError("an object names one source: output_id or library_file_id")
+        if self.recolour is not None:
+            # Upper case, and a colour "swapped" for itself is no swap.
+            self.recolour = {
+                k.upper(): v.upper() for k, v in self.recolour.items() if k.upper() != v.upper()
+            }
+        return self
+
+
+class ArrangeRequest(BaseModel):
+    objects: list[ArrangeObject] = Field(min_length=1, max_length=200)
+    goal: Goal = "fewest_plates"
+    #: The printer whose plate to pack for; omitted means the configured one, and with
+    #: none configured the default plate.
+    printer_id: int | None = None
+    filament_plan: FilamentPlan | None = None
+    #: The filament order the plan's slots refer to; omitted means the first object's
+    #: output's colours, then any colour the others add. Omitted, a source colour every
+    #: copy swaps away (`recolour`) is left out; given, every slot named keeps its place.
+    colours: list[str] | None = None
+    name: str | None = Field(default=None, max_length=200)
+    #: The template the result is filed under (#1864): one of the outputs', omitted the
+    #: first one's. With a plain library file among them, any template (#2284); with
+    #: library files only, required.
+    slug: str | None = Field(default=None, max_length=200)
+    #: What reading each plain library file may spend (#2087), each omitted budget the
+    #: setting's; none past its ceiling.
+    read_budget: ReadBudgetOverride | None = None
+
+    @model_validator(mode="after")
+    def _copies_within_the_cap(self) -> ArrangeRequest:
+        # The packer checks every candidate spot against the plate; this keeps a request
+        # well inside the pack activity's SHORT timeout. An omitted count is checked
+        # again once `arrange_inputs` has read it.
+        _check_copies(sum(o.count or 0 for o in self.objects))
+        return self
+
+
+def _check_copies(total: int) -> None:
+    if total > MAX_ARRANGE_COPIES:
+        raise ValueError(f"{total} copies is more than one arrange places ({MAX_ARRANGE_COPIES})")
+
+
+async def live_outputs_for_files(
+    uploads: BambuddyUploadStore, outputs: OutputStore, library_file_ids: Iterable[int]
+) -> dict[int, str]:
+    """The output each of ``library_file_ids`` ScadBuddy uploaded is a copy of (#1864),
+    while that output still exists: the upload row outlives a deleted output, and a file
+    whose output is gone is any other library file (#2138). The library listing and
+    Arrange both ask this, so they cannot disagree about a file."""
+    made = await uploads.outputs_for_files(library_file_ids)
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
+def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """Those of ``output_ids`` the output store still has."""
+    found: set[str] = set()
+    for output_id in output_ids:
+        try:
+            outputs.directory(output_id)
+        except OutputNotFoundError:
+            continue
+        found.add(output_id)
+    return found
+
+
+async def resolve_library_files(
+    uploads: BambuddyUploadStore, outputs: OutputStore, body: ArrangeRequest
+) -> tuple[ArrangeRequest, list[int]]:
+    """``body`` with each library file ScadBuddy uploaded named by the output it is a
+    copy of (#1864), and the plain files left, which are read from their 3MF (#1863). A
+    file whose output has since been deleted is a plain file (#2138)."""
+    wanted = list(dict.fromkeys(o.library_file_id for o in body.objects if o.library_file_id))
+    if not wanted:
+        return body, []
+    found = await live_outputs_for_files(uploads, outputs, wanted)
+    objects = [
+        o
+        if o.library_file_id not in found
+        else o.model_copy(update={"output_id": found[o.library_file_id], "library_file_id": None})
+        for o in body.objects
+    ]
+    plain = [file_id for file_id in wanted if file_id not in found]
+    return body.model_copy(update={"objects": objects}), plain
+
+
+async def read_plain_files(
+    client: BambuddyClient, file_ids: list[int], state: AppState, budget: ReadBudget
+) -> dict[int, LibraryObjects]:
+    """Each plain library file's objects, read from its 3MF (#1863) once per file hash
+    (#1973), their pieces stored. Every file that cannot be arranged is refused at
+    once, each with why."""
+    read: dict[int, LibraryObjects] = {}
+    refused: list[NotArrangeableError] = []
+    for file_id in file_ids:
+        try:
+            read[file_id] = await read_library_objects(
+                client,
+                file_id,
+                blobs=state.store.blobs,
+                cache=state.paths.cache,
+                budget=budget,
+                downloads=state.store.downloads,
+            )
+        except NotArrangeableError as error:
+            refused.append(error)
+    if refused:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{len(refused)} library file(s) cannot be arranged: "
+            + "; ".join(str(error) for error in refused),
+            code=LIBRARY_FILE_NOT_ARRANGEABLE,
+            library_file_ids=[error.file_id for error in refused],
+        )
+    return read
+
+
+def arrange_inputs(
+    outputs: OutputStore,
+    body: ArrangeRequest,
+    *,
+    plate_model: str | None,
+    library: Mapping[int, LibraryObjects] | None = None,
+) -> tuple[str, ArrangeInputs]:
+    """Resolve the objects against the outputs' manifests, and a plain library file's
+    against its objects as ``library`` read them, so every refusal happens here rather
+    than on a worker (spec §10). Every library file ScadBuddy uploaded names its output
+    by now (`resolve_library_files`)."""
+    library = library or {}
+    # Each source's entries; an arranged output may hold one part twice, in two
+    # colourings (#3637).
+    manifests: dict[str, list[ManifestObject]] = {}
+    items: list[PackItem] = []
+    provenance: dict[str, ManifestObject] = {}
+    # A colour list is slot order (slot N = colours[N-1]), and an arranged output's can
+    # name a slot no part uses, so it is never paired with `parts` by index.
+    colours: list[str] = list(body.colours or [])
+    slugs: list[str] = []
+    # Library files that placed an object, as `library:<id>` (#2284, #2540).
+    files: list[str] = []
+    # Every output first, so one refusal names all that need a re-render (#902).
+    chosen = list(dict.fromkeys(o.output_id for o in body.objects if o.output_id is not None))
+    for output_id in chosen:
+        require_output(outputs, output_id)
+    unrecorded = [i for i in chosen if not outputs.manifest(i)]
+    if unrecorded:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{len(unrecorded)} output(s) were saved before Arrange existed, so nothing"
+            " records their objects; re-render them (POST /outputs/{id}/backfill) to"
+            " arrange them",
+            type_=NEEDS_BACKFILL_PROBLEM,
+            code="needs_backfill",
+            output_ids=unrecorded,
+        )
+    for obj in body.objects:
+        if obj.output_id is not None:
+            source = obj.output_id
+            what = f"output {source}"
+            meta = require_output(outputs, source)
+            if meta.slug not in slugs:
+                slugs.append(meta.slug)
+            if source not in manifests:
+                manifests[source] = outputs.manifest(source)
+                if body.colours is None:
+                    colours += [c for c in meta.colors if c not in colours]
+        else:
+            file_id = obj.library_file_id
+            if file_id is None or file_id not in library:
+                raise ValueError(f"library file {file_id} reaches arrange_inputs unread")
+            source = f"library:{file_id}"
+            what = f"library file {file_id}"
+            manifests.setdefault(source, list(library[file_id].objects))
+        entries = _chosen_entries(manifests[source], obj, what)
+        for entry in entries:
+            count = entry.count if obj.count is None else obj.count
+            if count == 0:
+                continue
+            recolour = entry.recolour if obj.recolour is None else obj.recolour
+            if entry.plates > 1:
+                # The packer places objects on shared plates; one that lays out its own
+                # plates cannot be one of them, even alone.
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"object {entry.part} ({entry.file}) of {what} lays out its"
+                    f" own {entry.plates} plates, so it cannot be arranged; print that"
+                    " output as it is",
+                )
+            item = PackItem(part=part_of(entry), count=count, group=obj.group, recolour=recolour)
+            items.append(item)
+            if obj.output_id is None and source not in files:
+                # Only a file that placed something is a source (#2540).
+                files.append(source)
+            provenance.setdefault(
+                entry.part,
+                entry
+                if obj.output_id is None
+                else entry.model_copy(update={"source_output": entry.source_output or source}),
+            )
+            if body.colours is None:
+                printed = item.colours() if recolour else entry.colours
+                colours += [c for c in printed if c not in colours]
+    if not items:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
+        )
+    if body.colours is None:
+        # A source's colour every copy swapped away prints nowhere: no slot for it
+        # (#3637). A slot no part used before keeps its place, as it always has.
+        drawn = {c.upper() for item in items for c in item.colours()}
+        gone = {c for item in items for c in item.recolour} - drawn
+        colours = [c for c in colours if c.upper() not in gone]
+    try:
+        _check_copies(sum(item.count for item in items))
+    except ValueError as too_many:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(too_many)) from None
+    if not slugs and body.slug is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a result of library files alone is filed under a template: name one in slug",
+        )
+    # #2284: with a library file in the mix the result is anyone's to file, so it may go
+    # under any template (`arrange_outputs` checks it exists), not only its outputs'.
+    if slugs and not files and body.slug is not None and body.slug not in slugs:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the result is filed under one of its objects' templates ({', '.join(slugs)}),"
+            f" not {body.slug}",
+        )
+    slug = body.slug or slugs[0]
+    # A library file's objects belong to no template: filing the result under one does
+    # not make them its (#2284), so their entries keep the empty slug they were read with.
+    return slug, ArrangeInputs(
+        items=items,
+        goal=body.goal,
+        plate=plate_size(plate_model),
+        plate_model=plate_model,
+        filament_plan=SlotPlan.of(body.filament_plan),
+        colours=colours,
+        name=body.name,
+        provenance=provenance,
+        # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
+        sources=[*chosen, *files],
+    )
+
+
+def _chosen_entries(
+    manifest: list[ManifestObject], obj: ArrangeObject, what: str
+) -> list[ManifestObject]:
+    """The entries of ``manifest`` that ``obj`` names: every one, or its part's. A part an
+    arranged output holds in two colourings is both, unless ``obj`` says which colours
+    it wants: then the one in them, else the first, recoloured as it asks (#3637). Every
+    colour it swaps must be one the chosen entries print with."""
+    if obj.part is None:
+        entries = list(manifest)
+    else:
+        entries = [m for m in manifest if m.part == obj.part]
+        if not entries:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{what} has no object {obj.part}"
+            )
+        if obj.recolour is not None:
+            same = [m for m in entries if m.recolour == obj.recolour]
+            entries = (same or entries)[:1]
+    if obj.recolour:
+        own = {c.upper() for m in entries for c in m.colours}
+        missing = sorted(c for c in obj.recolour if c not in own)
+        if missing:
+            which = ", ".join(missing)
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"object {obj.part} of {what} does not print in {which}, so it cannot be swapped"
+                if obj.part is not None
+                else f"no object of {what} prints in {which}, so it cannot be swapped",
+            )
+    return entries
+
+
+@router.post(
+    "/outputs/arrange",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Arrange objects onto plates",
+    responses={
+        status.HTTP_409_CONFLICT: {
+            # Named in components by main's `_name_in_openapi`.
+            "content": {
+                PROBLEM_MEDIA_TYPE: {
+                    "schema": {"$ref": "#/components/schemas/NeedsBackfillProblem"}
+                }
+            },
+            "description": "Outputs saved before Arrange existed: re-render each of"
+            " `output_ids` with POST /outputs/{id}/backfill, then arrange again",
+        }
+    },
+    description="Lay out objects from saved outputs and Bambuddy library files again for a"
+    " goal, printer and spool plan (spec §7). No re-render. Outputs may come from any"
+    " template; a library file ScadBuddy uploaded stands for the output it is a copy of"
+    " (#1864), and any other 3MF or STL is read from the file itself (#1863; its objects:"
+    " GET /print/library/{file_id}/objects). A part painted in Bambu Studio keeps its"
+    " painting (#1965). A file that cannot be read (sliced, too large, painted in"
+    " PrusaSlicer) is a 422 with code `library_file_not_arrangeable`. Poll the job"
+    " with GET /jobs/{id}, then save it as an output under the job's `slug`.",
+)
+async def arrange_outputs(
+    body: ArrangeRequest,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     render: RenderDep,
     store: SettingsStoreDep,
-    events: EventsDep,
+    catalogue: CatalogueDep,
     state: StateDep,
-) -> OutputDetail:
-    await asyncio.to_thread(require_model, catalogue, slug)
-    job = await asyncio.to_thread(require_job, render, body.job_id)
-    if job.slug != slug:
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
+) -> JobStatus:
+    body, plain = await resolve_library_files(uploads, outputs, body)
+    stored = await asyncio.to_thread(store.load)
+    printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
+    # No printer: the plate the preview falls back to (Settings), else the default plate.
+    plate_model = stored.default_plate
+    library: dict[int, LibraryObjects] = {}
+    if printer_id is not None or plain:
+        # `printer()` declares Scope.READ_STATUS, and the client's `_send` maps a refusal
+        # through bambuddy/errors.py, so a key without it gets a 403 naming the scope.
+        async with client_for(stored) as client:
+            if printer_id is not None:
+                plate_model = (await client.printer(printer_id)).model
+            budget = budget_of(state.settings, body.read_budget)
+            library = await read_plain_files(client, plain, state, budget)
+    slug, inputs = await asyncio.to_thread(
+        arrange_inputs, outputs, body, plate_model=plate_model, library=library
+    )
+    if plain:
+        # Filed under any template (#2284), so it must be one.
+        await asyncio.to_thread(require_model_exists, catalogue, slug)
+    with submit_problems():
+        # #2280: a re-send while the start is still accepting keeps its key, so it is the
+        # same request, answered with the first outcome.
+        job = await render.arrange(slug, inputs, request_id=idempotency_key)
+    await attribute_request(activity.index, f"render:{job.id}")
+    return _job_status(job, None)
+
+
+@router.post(
+    "/outputs/{output_id}/backfill",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-render an output saved before Arrange, to record its objects",
+    description="Queues an ordinary render of the output's recorded inputs at its recorded"
+    " revision (#902). When it finishes the output gains its manifest and holds its Parts;"
+    " it keeps its id, name and files. Poll the job with GET /jobs/{id}, then the output's"
+    " `backfill` and `manifest`.",
+)
+async def backfill_output(
+    output_id: OutputIdPath,
+    request: Request,
+    outputs: OutputsDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    render: RenderDep,
+    assets: AssetsDep,
+    fetcher: FetcherDep,
+    fonts: FontsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
+) -> JobStatus:
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    if await asyncio.to_thread(outputs.manifest, output_id):
         raise ApiError(
-            status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
+            status.HTTP_409_CONFLICT,
+            f"output {output_id} already records its objects",
+            # Arrange's needs_backfill is a 409 too: the code is what tells them apart (#1007).
+            code=ALREADY_BACKFILLED,
         )
-    if job.state != "done" or job.result is None:
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
         raise ApiError(
-            status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} was arranged, not rendered: there is nothing to render again",
         )
-    inputs: dict[str, Any] | None = None
-    if body.inputs is not None:
-        rendered = f"inputs.params are not the parameters job {job.id} rendered"
-        # One pass: the shape checks, then the typed comparison with what the job
-        # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
+    # A second POST (History and Print both offer it, and double clicks) while the
+    # re-render is still in flight answers that one rather than queueing another.
+    # So does one that lands after the re-render finished but before it was attached
+    # (#1007): the attach is on its way, and another render would only be thrown away.
+    # Only just after, though: one finished longer ago is not being attached (#1849).
+    pending = await asyncio.to_thread(outputs.backfill, output_id)
+    if pending is not None and pending.error is None:
         try:
-            inputs = normalize_inputs(body.inputs, job.params).data
-        except InputsDisagreeError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
-        except InputsError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-        # The job with no params: nothing was compared above, so compare here.
-        if inputs["params"] != job.params:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
-    # The copy reads the job's files, which on the bambuddy backend come through the cache.
-    await materialize_result(state.store.blobs, job.result)
-    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
-    # fetched, and the copy would fail with a server path in its message: say so instead.
-    files = (job.result.model_3mf, job.result.preview_glb)
-    if not all((outputs.paths.root / name).is_file() for name in files):
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
-    public_url = (await asyncio.to_thread(store.load)).public_url
-    try:
-        meta = await asyncio.to_thread(
-            outputs.create, job, name=body.name, public_url=public_url, inputs=inputs
+            inflight = await asyncio.to_thread(render.store.read, pending.job_id)
+        except (JobNotFoundError, ValueError):
+            # Gone, or a row that does not validate (which the attach keeps retrying,
+            # #1007): not one to answer with, so a POST re-queues instead of a 500.
+            inflight = None
+        if inflight is not None and (
+            inflight.state in ("pending", "running")
+            or (
+                inflight.state == "done"
+                and inflight.finished_at is not None
+                and datetime.now(UTC) - inflight.finished_at < BACKFILL_ATTACH_GRACE
+            )
+        ):
+            return _job_status(inflight, None)
+    version = meta.model_version
+    if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} records no revision of {meta.slug} to render again",
         )
-    except OSError:
-        # Evicted or swept after the check above, or unreadable: the same answer, not
-        # the copy's path.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
-    emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
-    # A new output has no uploads yet: no read to make.
-    return _detail(outputs, meta, [])
+    params = await asyncio.to_thread(outputs.params, output_id)
+    inputs = await asyncio.to_thread(outputs.inputs, output_id, params)
+    try:
+        accepted = await render_model(
+            meta.slug,
+            RenderRequest(inputs=inputs, version=version),
+            request,
+            catalogue,
+            history,
+            paths,
+            config,
+            render,
+            assets,
+            fetcher,
+            fonts,
+            activity,
+            # #2280: as the render route's, so a re-send still accepting is one claim.
+            idempotency_key,
+        )
+    except ApiError as error:
+        # Matched by its code, not its status: any other 409 passes through (#1849).
+        if error.extensions.get("code") == SNAPSHOT_UNAVAILABLE:
+            # No snapshot of that revision and no history to make one from: as permanent
+            # as a missing revision, and a 409 here means "already recorded" (#1007).
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"output {output_id} cannot be rendered again: {error.detail}",
+                code=SNAPSHOT_UNAVAILABLE,
+            ) from None
+        if error.status != status.HTTP_404_NOT_FOUND:
+            raise
+        # The template, that revision of it, or something it needs is gone: this output
+        # cannot be made again. The detail says which (#1007).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} cannot be rendered again from {meta.slug}@{version[:12]}:"
+            f" {error.detail}",
+        ) from None
+    await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
+    job = await asyncio.to_thread(require_job, render, accepted.job_id)
+    return _job_status(job, None)
 
 
-@router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
+@router.get(
+    "/models/{slug}/outputs",
+    response_model=list[OutputDetail],
+    summary="Output history",
+    responses=PAGED_RESPONSES,
+)
 async def list_outputs(
-    slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep, uploads: UploadsDep
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    state: StateDep,
+    response: Response,
+    limit: PageLimit = None,
+    after: PageAfter = None,
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
-    a summary list would make it fetch every row again one at a time."""
+    a summary list would make it fetch every row again one at a time. Newest first;
+    `after` is an output id, and only the page's outputs are built into details (#843)."""
     await asyncio.to_thread(require_model, catalogue, slug)
     metas = await asyncio.to_thread(outputs.list_for, slug)
-    return await _details(outputs, uploads, metas)
+    response.headers[TOTAL_COUNT_HEADER] = str(len(metas))
+    metas = metas[page_window([meta.id for meta in metas], after, limit, "output")]
+    return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
 async def get_output(
-    output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep
+    output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep, state: StateDep
 ) -> OutputDetail:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
-    [detail] = await _details(outputs, uploads, [meta])
+    [detail] = await _details(outputs, uploads, state.print_runs.store, [meta])
     return detail
 
 
@@ -272,20 +888,22 @@ def get_edit_target(
         inputs=outputs.inputs(output_id, params),
         model_version=meta.model_version,
         source="record",
+        arranged_from=outputs.arranged_from(output_id),
     )
 
 
 @router.delete(
-    "/outputs/{output_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an output"
+    "/outputs/{output_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an output",
+    responses=OPERATION_RESPONSES,
 )
 async def delete_output(
     output_id: OutputIdPath,
-    outputs: OutputsDep,
-    uploads: UploadsDep,
-    links: PrintLinksDep,
-    events: EventsDep,
-    store: SettingsStoreDep,
+    response: Response,
+    ops: OperationsDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
     """Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's
     inbox folder (#316).
@@ -295,26 +913,20 @@ async def delete_output(
     sliced files, which a queued print may still reference. A Bambuddy delete that
     fails stops here, before the record goes — it is the only pointer to the file.
     """
-    meta = require_output(outputs, output_id)
-    if delete_inbox_copies and await uploads.for_output(meta.id):
-        settings = store.load()
-        async with client_for(settings) as client:
-            await remove_inbox_copies(client, uploads, meta, settings)
-    outputs.delete(output_id)
-    # After the files: a failed delete keeps the output, and so must keep its records.
-    # Best effort once the files are gone, as for a deleted model: the output is. Each
-    # on its own, so a failed upload cleanup cannot leave links serving its archives.
-    try:
-        await uploads.delete_outputs([output_id])
-    except (DatabaseRequiredError, psycopg.Error):
-        logger.exception(
-            "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
-        )
-    try:
-        await links.delete_outputs([output_id])
-    except (DatabaseRequiredError, psycopg.Error):
-        logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
-    emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_delete"],
+        subject=output_id,
+        request={"output_id": output_id, "delete_inbox_copies": delete_inbox_copies},
+        idempotency_key=idempotency_key,
+    )
+    return _no_content(result)
+
+
+def _no_content(result: dict[str, Any] | Operation) -> Response:
+    if isinstance(result, Operation):
+        return JSONResponse(result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -324,30 +936,70 @@ async def delete_output(
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-async def download_output(
-    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
-) -> Response:
+async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # For the default printer, on its real presets (#769), with the template's own
-    # print settings (#770).
-    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+    # The saved file as it is (#2652): its presets and print settings were written when
+    # it was saved.
+    return download_3mf(path, meta)
 
 
 @router.get(
     "/outputs/{output_id}/preview.glb",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="The output's preview mesh",
 )
-def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def get_output_preview(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    budget: ReadBudgetDep,
+    plate: Annotated[int | None, Query(ge=1)] = None,
+) -> Response:
+    """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
+    file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
     require_output(outputs, output_id)
+    if plate is not None:
+        payload = await outputs.model_3mf(output_id)
+        if payload is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+        try:
+            data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+        except NoSuchPlateError as error:
+            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+        except UnreadableObjectsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except ReadOutOfMemoryError as error:
+            # #2767: the refusal a library file's plate gives for the same read (library_view.py).
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        return Response(data, media_type=GLB_MEDIA_TYPE)
     path = outputs.directory(output_id) / PREVIEW_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
     return FileResponse(path, media_type=GLB_MEDIA_TYPE)
+
+
+@router.get(
+    "/outputs/{output_id}/files/{name}",
+    response_class=FileResponse,
+    summary="Download one of a pipeline output's extra files",
+)
+def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> FileResponse:
+    """An extra file a pipeline wrote (§10): served as a download, never as a page."""
+    try:
+        path = outputs.file_path(output_id, name)
+    except OutputNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"no file {name!r} on output {output_id}"
+        ) from None
+    return FileResponse(
+        path,
+        filename=name,
+        headers=UI_FILE_HEADERS,
+        media_type="image/svg+xml" if name.endswith(".svg") else "application/octet-stream",
+    )
 
 
 @router.get(
@@ -368,10 +1020,11 @@ def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileRe
     "/outputs/{output_id}/views/{view}.png",
     response_class=Response,
     responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
-    summary="Output preview from a named view",
+    summary="Output preview from a named view or a camera",
     description=(
         "The saved output's preview mesh drawn from `view` (iso, front, back, left, "
-        "right, top, bottom) as a shaded PNG."
+        "right, top, bottom) as a shaded PNG, turned and framed further by the camera "
+        "parameters, as the job view route's."
     ),
 )
 async def get_output_view(
@@ -379,6 +1032,7 @@ async def get_output_view(
     view: ViewName,
     outputs: OutputsDep,
     config: ConfigDep,
+    camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
     require_output(outputs, output_id)
@@ -388,6 +1042,7 @@ async def get_output_view(
         size,
         config=config,
         owner=f"output {output_id!r}",
+        camera=camera,
     )
 
 
@@ -438,21 +1093,25 @@ def get_output_plate_thumbnail(
     response_model=GeometryAnalysis,
     summary="Mesh geometry analysis",
 )
-def get_output_geometry(
+async def get_output_geometry(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    paths: PathsDep,
+    history: HistoryDep,
     plate: Annotated[int, Query(ge=1, description="The plate to measure (1-based)")] = 1,
 ) -> GeometryAnalysis:
     """Printability measurements of the closed per-colour solids on one plate of the
     output (#284): open and non-manifold edges with their locations, bounding box,
-    bed contact, height-to-base ratio, overhang area by angle, and estimates of the
-    thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
-    as in the preview. A 3MF with more than one plate (#289) is measured a plate at
-    a time; ``plates`` in the result says how many there are. Computed on first ask
-    and cached beside the output."""
+    bed contact, height-to-base ratio, overhang area by angle, estimates of the
+    thinnest wall and smallest feature, and weak joints (#2146): level sections narrow
+    enough to snap, each with a `split_at_plane` edit whose `object` names the scene
+    object for a mesh model's output. Coordinates are the model's own (mm, Z up), as in
+    the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
+    ``plates`` in the result says how many there are. Computed on first ask and cached
+    beside the output."""
     require_output(outputs, output_id)
     try:
-        return outputs.geometry(output_id, plate)
+        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:
@@ -462,38 +1121,142 @@ def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
+    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
+
+
+async def _attributed(
+    analysis: GeometryAnalysis,
+    outputs: OutputStore,
+    output_id: str,
+    plate: int,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+) -> GeometryAnalysis:
+    """``analysis`` with its weak joints naming their scene objects, when the output is
+    a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
+    arranged output's objects were moved off the scene's frame, so it is left as it is,
+    as is one whose revision is not a commit or cannot be read. A named analysis is
+    cached beside the output's geometry (a revision's scene never changes, and
+    `ANALYSIS_VERSION` moves with the analysis); one left as it is never, since the
+    cause may be a git or disk error that passes."""
+    if not analysis.weak_joints:
+        return analysis
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
+        return analysis
+    meta = await asyncio.to_thread(outputs.get, output_id)
+    version = meta.model_version
+    if version is None or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        # No revision to read the scene at: the live scene may have been edited since
+        # the render, and would name the wrong object.
+        logger.info("weak joints of %s left unattributed: no commit recorded", output_id)
+        return analysis
+    cached = await asyncio.to_thread(outputs.attributed, output_id, plate, version)
+    if cached is not None:
+        return cached
+    try:
+        directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
+    except (
+        # What `source_directory` raises: `last_commit` and `export` (GitError, its
+        # timeout and unavailable kinds), a revision or model path absent at the commit
+        # (RevisionNotFoundError, as a deleted model's older one can be), no history to
+        # export from (SnapshotUnavailableError), and the extraction or the move into
+        # place (a damaged tar, OSError).
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
+        logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
+        return analysis
+    if not directory.is_dir():
+        logger.warning("weak joints of %s left unattributed: %s is gone", output_id, meta.slug)
+        return analysis
+    named = await asyncio.to_thread(attribute, analysis, directory)
+    if named is not analysis:
+        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+    return named
 
 
 @router.put(
     "/outputs/{output_id}/thumbnail",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Upload the canvas capture",
+    responses=OPERATION_RESPONSES,
 )
 async def put_output_thumbnail(
     output_id: OutputIdPath,
-    outputs: OutputsDep,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
     file: Annotated[UploadFile, File(description="PNG captured by the viewer")],
+    idempotency_key: IdempotencyKey = None,
 ) -> Response:
-    require_output(outputs, output_id)
     png = await file.read()
     if not png.startswith(PNG_MAGIC):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
-    outputs.write_thumbnail(output_id, png)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # By claim: a canvas capture may be past a workflow payload's limit (#1054).
+    claims = ClaimStore(paths.claims)
+    held = await asyncio.to_thread(claims.hold, png)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_thumbnail"],
+        subject=output_id,
+        request={"output_id": output_id, "png": held.name},
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, [held]),
+    )
+    return _no_content(result)
+
+
+class RenameOutputRequest(BaseModel):
+    #: The output's new name; empty or null clears it, and History shows its short id.
+    name: str | None = Field(default=None, max_length=200)
+
+
+@router.patch(
+    "/outputs/{output_id}",
+    response_model=OutputDetail,
+    summary="Rename an output",
+    responses=OPERATION_RESPONSES,
+)
+async def rename_output(
+    output_id: OutputIdPath,
+    body: RenameOutputRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_rename`` operation (#2288): its check makes the 404, its run writes
+    the name and answers the output as it now reads."""
+    name = (body.name or "").strip() or None
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_rename"],
+        subject=output_id,
+        request={"output_id": output_id, "name": name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
 
 
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
     summary="Upload the 3MF to the Bambuddy library",
+    responses=OPERATION_RESPONSES,
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
     body: SendRequest,
+    response: Response,
     outputs: OutputsDep,
-    uploads: UploadsDep,
-    store: SettingsStoreDep,
-) -> SendResult:
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> SendResult | JSONResponse:
     """Upload ``model.3mf`` to the configured library folder, laid out for the printer
     set in Settings, and note the "Edit in ScadBuddy" link on it.
 
@@ -505,72 +1268,32 @@ async def send_output_to_bambuddy(
     laid out for the same printer, and replaces it otherwise (#316).
     """
     del body  # validated for its ``mode`` alone
-    meta = require_output(outputs, output_id)
-    settings = store.load()
-    async with client_for(settings) as client:
-        return await send_output(client, outputs, uploads, meta, settings)
-
-
-def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
-    """The model's param defaults from its cached schema, or ``{}`` when the renderer
-    would not use that cache entry (:func:`load_cached_schema`: another source, cache
-    version, schema format or set of library pins).
-
-    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
-    clone) is run for them; a pinned checkout missing from the volume means no defaults.
-    Every render of the live model caches the schema.
-    """
-    try:
-        source = paths.model_source(slug).read_text(encoding="utf-8")
-        schema = load_cached_schema(
-            paths.model_schema_cache(slug),
-            source_sha256(source),
-            library_path=model_search_path(paths, slug),
-        )
-    except (OSError, ValueError, LibraryError):
-        return {}
-    if schema is None:
-        return {}
-    return {param.name: param.initial for param in schema.parameters}
-
-
-def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
-    params = outputs.params(meta.id)
-    try:
-        template = catalogue.record(meta.slug).name
-    except ModelNotFoundError:
-        return project_stem(meta.slug, params, {}, name=meta.name)
-    defaults = _cached_defaults(outputs.paths, meta.slug)
-    return project_stem(template, params, defaults, name=meta.name)
-
-
-async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
-    """The name a project file of this output goes by (#317): the template's name and
-    the params that differ from its defaults (`project_stem`).
-
-    Naming never fails what it names: when the model, its params or its cached schema
-    cannot be read, the name falls back to the slug and the output's own name.
-    """
-    try:
-        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
-    except Exception:
-        logger.warning("could not name the project file; using a plain name", exc_info=True)
-        return project_stem(meta.slug, {}, {}, name=meta.name)
+    require_output(outputs, output_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["send"],
+        subject=output_id,
+        request={"output_id": output_id},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, SendResult)
 
 
 @router.post(
     "/outputs/{output_id}/project-file",
     response_model=ProjectFile,
     summary="File this output's 3MF in a project's Bambuddy folder",
+    responses=OPERATION_RESPONSES,
 )
 async def post_project_file(
     output_id: OutputIdPath,
     body: ProjectFileRequest,
+    response: Response,
     outputs: OutputsDep,
-    uploads: UploadsDep,
-    store: SettingsStoreDep,
-    catalogue: CatalogueDep,
-) -> ProjectFile:
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ProjectFile | JSONResponse:
     """Upload the editable project 3MF into the project's folder (#317), as Generate does
     when a project is chosen.
 
@@ -579,10 +1302,13 @@ async def post_project_file(
     (#316). The folder is created and linked if the project has none. Every Bambuddy
     call is made here, so the API key never reaches the browser.
     """
-    meta = require_output(outputs, output_id)
-    settings = store.load()
-    stem = await output_stem(meta, outputs, catalogue)
-    async with client_for(settings) as client:
-        return await file_into_project(
-            client, outputs, uploads, meta, settings, body.project_id, stem=stem
-        )
+    require_output(outputs, output_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["project_file"],
+        subject=output_id,
+        request={"output_id": output_id, "project_id": body.project_id},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ProjectFile)

@@ -625,12 +625,9 @@ module IN2(k, u) { difference() { W2(k, u); F2(k, u); } }
 
 module paper2d(k, u) { intersection() { IN2(k, u); band(band_paper(k)); } }
 
-module pattern_in(k, u, which) {
-    intersection() {
-        paper2d(k, u);
-        wallpaper2d(which, kind_len(k, u), CH, crs(k) == "upper" ? CH : 0);
-    }
-}
+module pattern_raw(k, u, which) { wallpaper2d(which, kind_len(k, u), CH, crs(k) == "upper" ? CH : 0); }
+
+module pattern_in(k, u, which) { intersection() { paper2d(k, u); pattern_raw(k, u, which); } }
 
 // pattern colour 2 never touches colour 1 by construction; subtract anyway
 module pattern2_in(k, u) { difference() { pattern_in(k, u, 2); pattern_in(k, u, 1); } }
@@ -714,8 +711,11 @@ module wall_piece(k, u) {
             if (exterior == "brick") bricks2d(L, CH, yoff); else stones2d(L, CH, yoff);
         }
     }
-    // inside
-    wall_part(wall_inside_color, k, u) slab(0, S) difference() { paper2d(k, u); pattern_in(k, u, 1); pattern2_in(k, u); }
+    // inside. The plain colour subtracts the raw pattern, not pattern_in: cutting by
+    // pattern_in's already-clipped outline put the crossings of a pattern edge with a
+    // curved opening's lining at slightly different points in the two parts, and the
+    // sliver between them failed the 3MF export (#415)
+    wall_part(wall_inside_color, k, u) slab(0, S) difference() { paper2d(k, u); pattern_raw(k, u, 1); pattern_raw(k, u, 2); }
     wall_part(wallpaper_color, k, u) slab(0, S) pattern_in(k, u, 1);
     wall_part(wallpaper_color_2, k, u) slab(0, S) pattern2_in(k, u);
     wall_part(wainscot_color, k, u) slab(0, S) intersection() { IN2(k, u); band(band_wain(k)); }

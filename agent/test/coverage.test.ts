@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
-import { NOT_A_TOOL, PENDING_ROUTES } from '../src/tools/coverage.js'
+import { AGENT_ROUTES, NOT_A_TOOL, PENDING_ROUTES } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { connect, testApp } from './helpers/mcp.js'
 
@@ -94,5 +94,27 @@ describe('openapi coverage over /mcp tools/list', () => {
     const coveredByListed = new Set<string>(ALL_TOOLS.filter((t) => names.has(t.name)).flatMap((t) => [...t.routes]))
     const uncovered = operations.filter((op) => !coveredByListed.has(op) && !allowlisted.has(op) && !pending.has(op))
     expect(uncovered, 'a route whose tool /mcp does not list').toEqual([])
+  })
+})
+
+// The agent's own routes (plan 5b Task 10): each names a tool or says why it has none.
+describe('agent route coverage', () => {
+  it('names a tool that exists, or gives a reason, for every entry', () => {
+    const names = new Set(ALL_TOOLS.map((t) => t.name))
+    for (const entry of AGENT_ROUTES) {
+      if (entry.tool !== undefined) expect(names.has(entry.tool), entry.route).toBe(true)
+      else expect(entry.reason?.length ?? 0, entry.route).toBeGreaterThan(20)
+    }
+  })
+
+  it('lists only routes the app serves', async () => {
+    const { app } = testApp()
+    for (const { route } of AGENT_ROUTES) {
+      const [method, path] = route.split(' ') as [string, string]
+      const url = `http://localhost${path.replace('{id}', '00000000-0000-4000-8000-000000000001').replace('{request_id}', 'approval:x')}`
+      const res = await app.request(url, { method, ...(method === 'POST' ? { body: '{}' } : {}) })
+      // Hono's not-found is a 404 in text; the routes answer JSON (403 off-origin, 503 with no database).
+      expect(res.headers.get('content-type') ?? '', route).toContain('application/json')
+    }
   })
 })

@@ -1,8 +1,18 @@
 import type {
+  InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
+  ArrangeRequest,
+  MeshModelCreate,
+  BackgroundTask,
   DecisionCreate,
+  FixApply,
+  FixPreview,
+  FixRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -17,14 +27,44 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
-  HeadlessBrowserSetting,
+  GlyphCoverage,
   HttpRequestSetting,
+  BrowserOriginsSetting,
+  ModelSetting,
+  PrinterCameraSetting,
+  ImageSettings,
+  MemorySettings,
+  WorkspaceFile,
+  WorkspaceFileList,
+  WorkspaceSettings,
+  AttachmentView,
+  AiSessionEdit,
   AiSessionView,
+  RenderLimits,
   SessionLimits,
+  SessionRuntime,
+  BlankTemplate,
+  SessionModeSetting,
+  DurableSubagentsSetting,
+  SessionResource,
+  ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  DependencyReport,
+  LibraryFileObjects,
+  LibraryCopyResult,
+  LibraryDeleteResult,
+  LibraryFileName,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryListing,
+  LibrarySearch,
+  LibraryMoveResult,
+  LibraryRenameResult,
+  LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
   LibraryCheck,
@@ -32,8 +72,11 @@ import type {
   LibraryRepinRequest,
   LibraryUser,
   MediaView,
+  MigrateResult,
   ModelPatch,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -49,13 +92,50 @@ import type {
   PlateFit,
   PrinterBedType,
   PrinterRackAlgorithm,
+  PrinterRackUsage,
   RackAlgorithm,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
+  ActivityDetail,
+  ActivityFacets,
+  ActivityPage,
   PrintProgress,
+  PrintersNow,
+  QueueItem,
+  ArchiveStats,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
+  TrayAssigned,
   PrintRun,
+  FlowDecided,
+  FlowProposal,
+  FlowRunQueue,
+  FlowDefinition,
+  FlowGrantSpec,
+  FlowGrantView,
+  FlowHostInterface,
+  FlowRegister,
+  FlowRunOptions,
+  FlowScriptCheck,
+  FlowReset,
+  FlowResetPoints,
+  FlowResetPreview,
+  FlowRun,
+  FlowRunStarted,
+  FlowRunView,
+  FlowState,
+  FlowStandingGrant,
+  FlowSummary,
+  FlowTrigger,
+  FlowTriggerCreate,
+  FlowTriggerUpdate,
+  FlowVersion,
+  Operation,
+  OperationAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -75,11 +155,13 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  SourceFile,
   StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
   VersionDiff,
+  NeedsBackfillProblem,
 } from './types'
 import type {
   McpAuthSetting,
@@ -88,18 +170,40 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
-import type { AiConnectionTest, AiCredentialUpdate, AiCredentialView } from './aiCredential'
+import type {
+  AiConnectionTest,
+  AiCredentialCreate,
+  AiCredentialEntry,
+  AiCredentialList,
+  AiCredentialSave,
+} from './aiCredential'
+import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
+import type { Within } from '../lib/traceAction'
 
 export const API_BASE = '/api/v1'
+
+/**
+ * #1424 — the backend's `THUMBNAIL_VERSION` (`api/media.py`): a media thumbnail is
+ * cached as `immutable` only when asked for at this version. Bump the two together;
+ * `client.test.ts` fails when they differ (#1691).
+ */
+export const MEDIA_THUMBNAIL_VERSION = 1
 
 /** What a model thumbnail's URL is keyed on (#179). */
 export type ThumbnailKeyed = Pick<
   ModelSummary,
   'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
 >
+
+/** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
+export interface ColourBreakdown {
+  image: Blob
+  colours: string[]
+  columns: number
+}
 
 /** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
@@ -132,7 +236,21 @@ export class ApiError extends Error {
   }
 }
 
+
+/**
+ * How long a `GET /settings` in flight is shared. A read that has not answered by then
+ * may never (fetch has no timeout): later callers start their own instead of joining
+ * it, so one hung request cannot wedge every reader of the settings (#1856).
+ */
+export const SETTINGS_SHARE_MS = 5_000
+/** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
+let settingsInFlight: { read: Promise<Settings>; started: number } | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await requestWithStatus<T>(path, init)).body
+}
+
+/** `request`, keeping the status: a 202 from an operation's route is not its body. */
+async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -148,9 +266,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(await readProblem(response))
   }
   if (response.status === 204) {
-    return undefined as T
+    return { status: 204, body: undefined as T }
   }
-  return (await response.json()) as T
+  return { status: response.status, body: (await response.json()) as T }
 }
 
 /**
@@ -177,11 +295,22 @@ export const AI_NOT_ROUTED = 'urn:scadbuddy:ai-not-routed'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
 /**
+ * The `type` of the problem `command()` writes when it stops following an operation
+ * still running after `printRunPoll.operationFollowMs`. The client writes it, so it is a
+ * `urn:scadbuddy:` type like `UNANSWERED`, not a server's `https://scadbuddy.dev/problems/`.
+ */
+export const OPERATION_UNFINISHED = 'urn:scadbuddy:operation-unfinished'
+/**
  * The backend's problem for a Bambuddy call that timed out, dropped or answered an
  * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
+ * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
+ */
+export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['code']
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -282,13 +411,21 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
- * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
- * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice. A failed print run (#470) says so itself: its
- * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ * Or the backend said its start may have reached Temporal (`may_have_started`, on a
+ * `temporal-unavailable` or `temporal-refused`), or an operation was still running when
+ * `command()` stopped following it. Any other problem the backend wrote, a 503 (nothing
+ * upstream took it) and an offline browser all mean it did not. For a request with a
+ * physical effect (a print), retrying one of these blind can do it twice. A failed print
+ * run (#470) says so itself: its `may_have_queued` is whether it had tried to queue,
+ * which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  // Its run may be checking still, and will print once it is accepted (#1052).
+  if (error.problem.type === STILL_ACCEPTING) return true
+  // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
+  if (error.problem.may_have_started === true) return true
+  if (error.problem.type === OPERATION_UNFINISHED) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -309,11 +446,57 @@ function bambuddyUnanswered(problem: Problem): boolean {
 
 const seg = encodeURIComponent
 
+/** #2329 — a workspace file's route, each path segment encoded (under `API_BASE`). */
+const sessionFilePath = (id: string, path: string) =>
+  `/ai/sessions/${seg(id)}/files/${path.split('/').map(seg).join('/')}`
+
 /**
- * How often `runPrint` reads a running print run (#470), and how many times it tries a
- * request no ScadBuddy answer described again before giving up; tests shorten it.
+ * How often `runPrint` reads a running print run (#470), how many times it tries a
+ * request no ScadBuddy answer described again before giving up, and how long it keeps
+ * sending one the server is still accepting (#1052: past the accept's own worst case,
+ * three 60 s checks); tests shorten them.
  */
-export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+/**
+ * `followMs` bounds how long a run is followed (review #1061). The server ends a run whose
+ * execution is gone within minutes; this is the backstop, past any run's own length.
+ * `operationFollowMs` is the same for an operation (review #1063): it must exceed the
+ * longest run, `send`'s 3 attempts of `RUN_TIMEOUT` (300 s, backend
+ * `workflows/operation.py`) with 3 s of backoff, plus one `LOST_RUN_INTERVAL` (300 s,
+ * `main.py`) for the reconciler to end a lost one: 1203 s. The agent does not follow
+ * that long: it follows for `COMMAND_FOLLOW_MS` (the backend's answer deadline plus a
+ * margin, agent/src/tools/command.ts), then hands back the running operation for
+ * `get_operation`.
+ */
+export const printRunPoll = {
+  intervalMs: 1000,
+  reattempts: 3,
+  acceptingMs: 240_000,
+  followMs: 3_600_000,
+  operationFollowMs: 1_260_000,
+}
+
+/**
+ * How long the print dialog waits for one rack-algorithm save before counting it as
+ * failed. Its saves go one at a time, so an unanswered one would otherwise hold every
+ * later one back (#1086 review). Aborting only stops the browser waiting, so the server
+ * bounds its database work well below this (`RACK_ALGORITHM_WRITE_TIMEOUT`, 5 s, #1129):
+ * once a save reaches the store it commits or fails within twice that bound, one for
+ * the pool wait and one for the write (#1264). Time before it reaches
+ * the store is not bounded, so a save held up there can still land after the next one:
+ * each save's version orders them (#1216), and the server refuses the older one.
+ */
+export const rackAlgorithmSave = { timeoutMs: 25_000 }
+
+let lastRackAlgorithmVersion = 0
+/**
+ * #1216 — the version a rack-algorithm save is sent with: the clock, but never less than
+ * one above the last, so it grows across saves, dialogs and page loads in this browser.
+ * A count that started again at 1 on each load would be refused for good after a reload.
+ */
+export function nextRackAlgorithmVersion(): number {
+  lastRackAlgorithmVersion = Math.max(Date.now(), lastRackAlgorithmVersion + 1)
+  return lastRackAlgorithmVersion
+}
 
 /**
  * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
@@ -325,16 +508,22 @@ export function newRequestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** ScadBuddy's 503 while Temporal has not yet answered a print's start (#1052). */
+export const STILL_ACCEPTING = 'https://scadbuddy.dev/problems/command-still-accepting'
+/** Temporal did not answer: nothing was started, or a start that reached it is unknown. */
+export const TEMPORAL_UNAVAILABLE = 'https://scadbuddy.dev/problems/temporal-unavailable'
+
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ * Or ScadBuddy answered that the same request is still being accepted, or that Temporal
+ * may hold a start of it (`may_have_started`, review #1066 (10) 4): the same key follows it.
  */
 function unanswered(caught: unknown): boolean {
-  return (
-    caught instanceof ApiError &&
-    caught.problem.type === UNANSWERED &&
-    [0, 502, 503, 504, 524].includes(caught.status)
-  )
+  if (!(caught instanceof ApiError)) return false
+  if (caught.problem.type === STILL_ACCEPTING) return true
+  if (caught.problem.may_have_started === true) return true
+  return caught.problem.type === UNANSWERED && [0, 502, 503, 504, 524].includes(caught.status)
 }
 
 /** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
@@ -356,16 +545,159 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  for (let tries = 0; ; tries++) {
+/**
+ * `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run.
+ * A still-accepting answer is re-sent for up to `acceptingMs`, unless `bounded`: then it
+ * counts toward `reattempts` like any other, for a body too large to send that often.
+ * With `finish`, `signal` aborting between re-sends sends once more, at once, instead of
+ * giving up: the request may already hold a claim, and that answer names it (review #1066
+ * 1.1). Still unanswered then, it gives up. `within` wraps each attempt.
+ */
+async function reattach<T>(
+  attempt: () => Promise<T>,
+  signal?: AbortSignal,
+  { bounded = false, finish = false, within }: { bounded?: boolean; finish?: boolean; within?: Within } = {},
+): Promise<T> {
+  // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
+  const began = performance.now()
+  let last = false
+  for (let tries = 0; ; ) {
     try {
-      return await attempt()
+      return await (within ? within(attempt) : attempt())
     } catch (caught) {
-      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
-      await wait(printRunPoll.intervalMs, signal)
+      if (last || !unanswered(caught)) throw caught
+      if (signal?.aborted) {
+        if (!finish) throw caught
+        last = true
+        continue
+      }
+      const accepting = caught instanceof ApiError && caught.problem.type === STILL_ACCEPTING
+      if (
+        accepting && !bounded
+          ? performance.now() - began >= printRunPoll.acceptingMs
+          : tries++ >= printRunPoll.reattempts
+      ) {
+        throw caught
+      }
+      // The server's Retry-After paces a re-send it answered (review #1061 4a).
+      const after = caught instanceof ApiError ? caught.problem.retry_after : undefined
+      try {
+        await wait(Math.max(printRunPoll.intervalMs, typeof after === 'number' ? after * 1000 : 0), signal)
+      } catch (reason) {
+        if (!finish) throw reason
+        last = true
+      }
     }
   }
+}
+
+/**
+ * A Bambuddy write as an operation (#1053, spec 2026-10-01 §4.2): one `Idempotency-Key`
+ * per call, which a re-send after an answer that never arrived keeps, so the server
+ * answers it with the first outcome and does nothing twice. The route answers its own
+ * body, or 202 with an operation still running, followed here through
+ * `GET /operations/{id}` to that body, or to the problem the route would have answered.
+ */
+export async function command<T>(
+  path: string,
+  init: RequestInit = {},
+  /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
+  operations = '/operations',
+  /**
+   * The press's key. A caller offering "Try again" after a failure passes the failed
+   * attempt's, so the retry follows a start that may have happened rather than doing it
+   * a second time; a new press gets a new one.
+   */
+  key: string = newRequestId(),
+): Promise<T> {
+  const signal = init.signal ?? undefined
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
+  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
+  return followOperation<T>(first, signal, operations)
+}
+
+/**
+ * A multipart upload as a command (#1054). XHR rather than `fetch`, which reports no
+ * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
+ * to 1. `form` builds the body afresh for each re-send.
+ */
+function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+  // A command (#1054): one key for this upload, kept on a re-send after an answer
+  // that never arrived, so the server adds the item once.
+  const key = newRequestId()
+  const send = () =>
+    new Promise<{ status: number; body: T | OperationAccepted }>((resolve, reject) => {
+      const body = form()
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}${path}`)
+      xhr.setRequestHeader('Accept', 'application/json')
+      xhr.setRequestHeader('Idempotency-Key', key)
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+      })
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) as T | OperationAccepted })
+          return
+        }
+        reject(new ApiError(xhrProblem(xhr)))
+      }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
+      xhr.onerror = () =>
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
+      xhr.onabort = () =>
+        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+      xhr.send(body)
+    })
+  // Bounded: each re-send streams the whole file again, up to a gigabyte (review 3e final I2).
+  return reattach(send, undefined, { bounded: true }).then((first) => followOperation<T>(first))
+}
+
+/**
+ * A command's first answer to its end: the route's own body, or a 202's operation
+ * followed through `GET /operations/{id}` to its result, or to the problem the route
+ * would have answered.
+ */
+async function followOperation<T>(
+  first: { status: number; body: T | OperationAccepted },
+  signal?: AbortSignal,
+  operations = '/operations',
+): Promise<T> {
+  if (first.status !== 202) return first.body as T
+  let op: Operation = first.body as OperationAccepted
+  const began = performance.now()
+  while (op.status === 'running') {
+    if (performance.now() - began >= printRunPoll.operationFollowMs) {
+      throw new ApiError({
+        type: OPERATION_UNFINISHED,
+        title: 'Still running',
+        status: 504,
+        detail: `This is still running as operation ${op.id}. It may have been done anyway: check before trying again.`,
+      })
+    }
+    await wait(printRunPoll.intervalMs, signal)
+    const id = op.id
+    op = await reattach(() => request<Operation>(`${operations}/${seg(id)}`, { signal }), signal)
+  }
+  if (op.status === 'failed') {
+    const error = op.error
+    throw new ApiError({
+      ...error?.extensions,
+      type: error?.type,
+      title: error?.title ?? 'Failed',
+      status: error?.status ?? 500,
+      detail: error?.detail ?? 'The operation ended without a result.',
+    })
+  }
+  return (op.result ?? undefined) as T
 }
 
 /**
@@ -374,18 +706,32 @@ async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Pro
  * slices and queues in the background, since that takes longer than the proxies in
  * front wait. A repeat of the same request (the same `request_id`) is the same run, so
  * re-sending it after an answer that never arrived re-attaches to that run and never
- * queues a second print. `signal` stops following; the run itself goes on.
+ * queues a second print. `signal` stops following; the run itself goes on. `within`
+ * (a traced action's) wraps each attempt at the POST, retries included; the polls are not.
  */
 async function followPrintRun(
   path: string,
   body: PrintRunRequest,
   signal?: AbortSignal,
+  within?: Within,
 ): Promise<PrintRunResult> {
   let run = await reattach(
     () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
     signal,
+    { within },
   )
+  const began = performance.now()
   while (run.status === 'running') {
+    if (performance.now() - began >= printRunPoll.followMs) {
+      throw new ApiError({
+        type: 'urn:scadbuddy:print-run-unfinished',
+        title: 'Still preparing',
+        status: 504,
+        detail: 'ScadBuddy is still preparing this print after an hour. Check Bambuddy’s queue before printing it again.',
+        // It may be queued by now: the dialog says to check before printing again.
+        may_have_queued: true,
+      })
+    }
     await wait(printRunPoll.intervalMs, signal)
     const id = run.id
     run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
@@ -410,9 +756,177 @@ async function followPrintRun(
 }
 
 export const api = {
+  // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
+  // a decision is an operation, keyed per call (`command`); a stale one is a 409
+  // `stale-entry`.
+  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+    const params = new URLSearchParams()
+    if (query.session) params.set('session', query.session)
+    if (query.definition_id) params.set('definition_id', query.definition_id)
+    const search = params.toString()
+    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
+  },
+
+  getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
+
+  answerFlowRun: (id: string, callId: string, answer: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, answer }),
+    }),
+
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
+      method: 'POST',
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(reason ? { reason } : {}),
+        // #2482: approve a parent's proposal, exactly the one shown (its hash).
+        ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+      }),
+    }),
+
+  /** #2482 — a run's one queue, from the agent: its own calls, its child sessions' and its grant request. */
+  getFlowRunQueue: (id: string) => request<FlowRunQueue>(`/ai/flow-runs/${seg(id)}/queue`),
+
+  /** #2482 — a parent's proposal beside the call it narrows (the person's only). */
+  getFlowProposal: (id: string, callId: string) =>
+    request<FlowProposal>(`/workflow-runs/${seg(id)}/proposals/${seg(callId)}`),
+
+  // #2350 — the Flows tab: every registered flow version, one with its script, and a
+  // run started from it. #2487: its editor's Save, check, completion, diff and restore.
+  // #2485: archived and deleted flows too with `archived`.
+  listFlows: ({ archived = false }: { archived?: boolean } = {}) =>
+    request<FlowSummary[]>(`/workflows${archived ? '?archived=true' : ''}`),
+
+  /** #2485 — archive a flow (every version): hidden, and never started until unarchived. */
+  archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
+  unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
+  /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
+  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+
+  /**
+   * One flow's versions, newest first: the one place the page reads them from, its git
+   * history (#2503). `GET /workflows` lists only each name's newest version.
+   */
+  listFlowVersions: (name: string) => request<FlowVersion[]>(`/workflows/names/${seg(name)}/versions`),
+
+  getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
+
+  /** #2487 — the editor's Save: a new version (a commit), never an edit. A 422 lists `problems`. */
+  registerFlow: (body: FlowRegister) =>
+    request<FlowDefinition>('/workflows', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** The check a registration runs, storing nothing; with the inputs schema it would be saved with (#2483). */
+  checkFlowScript: (script: string, signal?: AbortSignal, inputsSchema?: Record<string, unknown> | null) =>
+    request<FlowScriptCheck>('/workflow-script/check', {
+      method: 'POST',
+      body: JSON.stringify(inputsSchema ? { script, inputs_schema: inputsSchema } : { script }),
+      signal,
+    }),
+
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
+
+  getFlowVersionSource: (name: string, commit: string) =>
+    requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
+
+  /** A new version with the script at `commit`: a new commit, type-checked first. */
+  restoreFlowVersion: (name: string, commit: string) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+
+  /**
+   * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
+   * `options.grant` (#2481) is approved as sent; `options.inputs` (#2483) are the run's typed
+   * inputs, and a 422 `flow-inputs` lists the ones that do not fit.
+   */
+  startFlowRun: (id: string, key: string = newRequestId(), options: FlowRunOptions = {}) =>
+    reattach(() =>
+      request<FlowRunStarted>(`/workflows/${seg(id)}/runs`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify(options),
+      }),
+    ),
+
+  // #2481 — a run's grant: a person approves a requested one (as asked, or edited),
+  // declines it, or revokes one. Each is final; a second answers 409 `flow-grant-state`.
+  approveFlowGrant: (id: string, spec?: FlowGrantSpec) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec } : {}),
+    }),
+  declineFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
+  // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
+  // as whoever made it. A standing grant is approved as sent from here; only a person
+  // approves or declines an agent's.
+  /** The newest 200, the route's most. */
+  listFlowTriggers: (name?: string) =>
+    request<FlowTrigger[]>(`/flow-triggers?limit=200${name ? `&name=${encodeURIComponent(name)}` : ''}`),
+  getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
+  createFlowTrigger: (body: FlowTriggerCreate) =>
+    request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
+  updateFlowTrigger: (id: string, body: FlowTriggerUpdate) =>
+    request<FlowTrigger>(`/flow-triggers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  pauseFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/pause`, { method: 'POST' }),
+  resumeFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/resume`, { method: 'POST' }),
+  deleteFlowTrigger: (id: string) => request<void>(`/flow-triggers/${seg(id)}`, { method: 'DELETE' }),
+  /** `seen` is the trigger's as it was shown: the server refuses (409) when it changed since. */
+  attachFlowTriggerGrant: (id: string, spec: FlowGrantSpec, seen: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, seen }),
+    }),
+  approveFlowTriggerGrant: (id: string, seen: string, spec?: FlowGrantSpec) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec, seen } : { seen }),
+    }),
+  declineFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
+  /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
+  deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
+
+  getFlowResetPoints: (id: string) => request<FlowResetPoints>(`/workflow-runs/${seg(id)}/reset-points`),
+
+  previewFlowReset: (id: string, eventId: number) =>
+    request<FlowResetPreview>(`/workflow-runs/${seg(id)}/reset-preview?event_id=${eventId}`),
+
+  /** Pinned to the preview the person saw: a 409 `flow-reset-changed` carries the new one. */
+  resetFlowRun: (id: string, preview: Pick<FlowResetPreview, 'event_id' | 'as_of_event_id' | 'workflow_run_id'>) =>
+    command<FlowReset>(`/workflow-runs/${seg(id)}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({
+        event_id: preview.event_id,
+        as_of_event_id: preview.as_of_event_id,
+        workflow_run_id: preview.workflow_run_id,
+      }),
+    }),
+
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
+
+  /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
+  createMeshModel: (body: MeshModelCreate) =>
+    command<ModelSummary>('/models/from-mesh', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
    * `extras` are the other files of a bundled model's directory (#179). `filename`
@@ -425,14 +939,14 @@ export const api = {
     if (extras.meta) body.append('meta', extras.meta)
     if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
     if (extras.readme) body.append('readme', extras.readme)
-    return request<ModelSummary>('/models', { method: 'POST', body })
+    return command<ModelSummary>('/models', { method: 'POST', body })
   },
 
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+    return command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
   },
 
   /**
@@ -440,7 +954,7 @@ export const api = {
    * a generated model falls back to its first output's plate image.
    */
   removeThumbnail: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
 
   /** The README's Markdown, or null when the model has none. */
   getReadme: async (slug: string): Promise<string | null> => {
@@ -453,32 +967,32 @@ export const api = {
   },
 
   setReadme: (slug: string, content: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, {
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, {
       method: 'PUT',
       body: JSON.stringify({ content }),
     }),
 
   removeReadme: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
   /** The template's shipped presets, then the ones saved on it. */
   listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
 
   createPreset: (slug: string, body: ParamPresetCreate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   /** Copies any preset, shipped or saved, to a new saved one with the same values. */
   duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
-    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+    command<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -488,22 +1002,24 @@ export const api = {
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
-    request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #153 — fetched on the server, then created through the same path as a paste. */
   importModel: (body: UrlImport) =>
-    request<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
+    command<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
   /**
    * Replaces the source as one revision in the model's history, named by `message`
-   * when given. Parse-checked server-side unless `force`.
+   * when given. Parse-checked server-side unless `force`. With `base`, the version the
+   * edit was made against, a model that has moved past it is a 409 whose `current`
+   * names where it is now, and nothing is written (#1054).
    */
-  replaceSource: (slug: string, source: string, force = false, message?: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+  replaceSource: (slug: string, source: string, force = false, message?: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/source`, {
       method: 'PUT',
-      body: JSON.stringify({ source, force, message: message ?? null }),
+      body: JSON.stringify({ source, force, message: message ?? null, base: base ?? null }),
     }),
 
   /**
@@ -525,41 +1041,59 @@ export const api = {
 
   /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
-    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    command<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
   duplicateModel: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
+    command<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
       method: 'POST',
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
   /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
   deleteModel: (slug: string, force = false) =>
-    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+    command<unknown>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }).then(() => undefined),
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
 
   /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
   mergeUpstream: (slug: string) =>
-    request<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+    command<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
 
   dismissUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
 
   detachUpstream: (slug: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+    command<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
 
   /**
    * Saves the resolution of a conflicted upstream merge: the same write as
    * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
    */
   resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
+
+  /** #1290 — the model's `.scad` files, `model.scad` first (`GET /models/{slug}/files`). */
+  listSourceFiles: (slug: string) => request<SourceFile[]>(`/models/${seg(slug)}/files`),
+
+  /**
+   * #1290 — writes a `.scad` file beside `model.scad` as one revision. With `base`, a
+   * 409 naming the `current` revision when the model has moved on since, writing
+   * nothing. `model.scad` itself is written with `replaceSource`.
+   */
+  writeSourceFile: (slug: string, name: string, content: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, message: null, base: base ?? null }),
+    }),
+
+  /** #1290 — removes a `.scad` file beside `model.scad` as one revision. */
+  deleteSourceFile: (slug: string, name: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, { method: 'DELETE' }),
 
 
   /**
@@ -592,6 +1126,17 @@ export const api = {
     item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
 
   /**
+   * #624 — a small copy of an image or of a video's poster, for a strip of
+   * thumbnails; undefined for a video with no poster, which has none. It is
+   * cached as `immutable`, so the URL carries the thumbnail version (#1424).
+   * `card` asks for a larger copy, sized for a catalogue card's cover (#1034).
+   */
+  mediaThumbnailUrl: (slug: string, item: Pick<MediaView, 'id' | 'kind' | 'poster'>, size?: 'card') =>
+    item.kind === 'video' && !item.poster
+      ? undefined
+      : `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/thumbnail?v=${MEDIA_THUMBNAIL_VERSION}${size ? `&size=${size}` : ''}`,
+
+  /**
    * #274 — adds an image or video as the template's last item. XHR rather than
    * `fetch`, which reports no upload progress; a video runs to a gigabyte.
    * `onProgress` gets the fraction sent, 0 to 1.
@@ -601,50 +1146,28 @@ export const api = {
     file: File,
     options: { caption?: string; poster?: File } = {},
     onProgress?: (fraction: number) => void,
-  ) =>
-    new Promise<ModelSummary>((resolve, reject) => {
-      const body = new FormData()
-      body.append('file', file)
-      if (options.caption) body.append('caption', options.caption)
-      if (options.poster) body.append('poster', options.poster)
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
-      xhr.setRequestHeader('Accept', 'application/json')
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
-      })
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText) as ModelSummary)
-          return
-        }
-        reject(new ApiError(xhrProblem(xhr)))
-      }
-      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
-      // have landed, and `mayHaveRun` says so.
-      xhr.onerror = () =>
-        reject(
-          new ApiError({
-            type: UNANSWERED,
-            title: 'The upload failed',
-            status: 0,
-            detail: 'The upload failed',
-          }),
-        )
-      xhr.onabort = () =>
-        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
-      xhr.send(body)
-    }),
+  ): Promise<ModelSummary> =>
+    uploadForm<ModelSummary>(
+      `/models/${seg(slug)}/media`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (options.caption) body.append('caption', options.caption)
+        if (options.poster) body.append('poster', options.poster)
+        return body
+      },
+      onProgress,
+    ),
 
   patchMedia: (slug: string, id: string, caption: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ caption }),
     }),
 
   /** `ids` names every item once, in the new order; the first is the cover. */
   reorderMedia: (slug: string, ids: string[]) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/order`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/order`, {
       method: 'PUT',
       body: JSON.stringify({ ids }),
     }),
@@ -655,13 +1178,13 @@ export const api = {
    * it ships.
    */
   setMediaCover: (slug: string, id: string | null) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+    command<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
       method: 'PUT',
       body: JSON.stringify({ id }),
     }),
 
   deleteMedia: (slug: string, id: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
+    command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
@@ -670,7 +1193,7 @@ export const api = {
   uploadAsset: (slug: string, file: File) => {
     const body = new FormData()
     body.append('file', file)
-    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+    return command<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
   },
 
   getAsset: (slug: string, id: string) =>
@@ -721,7 +1244,7 @@ export const api = {
     ),
 
   restoreVersion: (slug: string, version: string) =>
-    request<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
+    command<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
       method: 'POST',
     }),
 
@@ -729,21 +1252,62 @@ export const api = {
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
    * has started it yet. Refused (503 + `Retry-After`) only when the server sets
-   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait. `signal` (a superseded
+   * preview) stops the re-sends after one more, sent at once: the request may already
+   * hold a claim on a job, and that answer names the job the next render supersedes. A
+   * request already sent is never aborted, for the same reason. Unanswered even then, the
+   * claim is left to the render it made, which runs to its end (review #1066 1.1).
+   * `requestId` is the `Idempotency-Key`: a caller that sends the render again itself
+   * passes the same one, so the server counts every send as one claim (review #1066 (7) 3).
    */
-  render: (slug: string, inputs: JsonObject, version?: string, supersedes?: string) =>
-    request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-      method: 'POST',
-      body: JSON.stringify({
-        inputs,
-        version: version ?? null,
-        ...(supersedes ? { supersedes } : {}),
-      }),
-    }),
+  render: (
+    slug: string,
+    inputs: JsonObject,
+    version?: string,
+    supersedes?: string,
+    signal?: AbortSignal,
+    requestId: string = newRequestId(),
+  ) => {
+    // Sent again while the server is still accepting it (#1053), with one
+    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () =>
+        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs,
+            version: version ?? null,
+            ...(supersedes ? { supersedes } : {}),
+          }),
+        }),
+      signal,
+      { finish: true },
+    )
+  },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
+
+  /**
+   * #1289 — the job drawn once per colour (`GET /jobs/{id}/colours.png`): the grid, and
+   * its tiles' colours row by row with the grid's width, from the route's own headers.
+   */
+  getJobColours: async (jobId: string, view: string, signal?: AbortSignal): Promise<ColourBreakdown> => {
+    const response = await send(`${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`, {
+      headers: { Accept: 'image/png' },
+      ...(signal ? { signal } : {}),
+    })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const colours = (response.headers.get('X-ScadBuddy-Colours') ?? '').split(',').filter(Boolean)
+    const columns = Number(response.headers.get('X-ScadBuddy-Colour-Columns'))
+    if (colours.length === 0 || !Number.isInteger(columns) || columns < 1) {
+      throw new ApiError({ title: 'The colour breakdown came without its legend', status: response.status })
+    }
+    return { image: await response.blob(), colours, columns }
+  },
 
   /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
   uiFileUrl: (slug: string, version: string | undefined, path: string) =>
@@ -752,11 +1316,60 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject) =>
-    request<Output>(`/models/${seg(slug)}/outputs`, {
+  /**
+   * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
+   * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
+   */
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
+    )
+  },
+
+  /**
+   * #902 — re-render an output saved before Arrange; poll the job, then the output's
+   * `backfill`. #2280 — its render is started like any other, so it is sent again with
+   * the same key while the server is still accepting it, until `signal` aborts.
+   */
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
+  },
+
+  /**
+   * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
+   * default. `key` is a retried press's (`command`), so the retry saves one output.
+   */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number, key?: string) =>
+    command<Output>(
+      `/models/${seg(slug)}/outputs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          job_id: jobId,
+          name: name ?? null,
+          ...(inputs ? { inputs } : {}),
+          ...(index !== undefined ? { index } : {}),
+        }),
+      },
+      undefined,
+      key,
+    ),
+
+  /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
+  migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
+    request<MigrateResult>(`/models/${seg(slug)}/inputs/migrate`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, name: name ?? null, ...(inputs ? { inputs } : {}) }),
+      body: JSON.stringify({ inputs, version: version ?? null }),
     }),
+
+  /** An extra file a pipeline wrote beside an output (spec 2026-09-27 §5.2). */
+  outputFileUrl: (outputId: string, name: string) =>
+    `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
@@ -765,9 +1378,13 @@ export const api = {
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
-    request<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
+    command<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
       method: 'DELETE',
     }),
 
@@ -780,14 +1397,55 @@ export const api = {
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
+  /**
+   * #2360 — a print's timelapse stills and Bambuddy's probe of it, read after the detail:
+   * Bambuddy makes them with ffmpeg, which can take tens of seconds.
+   */
+  getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
+
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
-  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+  reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
   /** #311 — attaches a timelapse still on the printer to the print. */
   pullTimelapse: (archiveId: number, filename: string) =>
-    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+    command<void>(`/prints/${archiveId}/timelapse/pull`, {
       method: 'POST',
       body: JSON.stringify({ filename }),
+    }),
+
+  /** #309 — adds a photo or video of the finished object to the print. */
+  addPrintAttachment: (
+    archiveId: number,
+    file: File,
+    caption: string,
+    onProgress?: (fraction: number) => void,
+  ): Promise<PrintAttachment> =>
+    uploadForm<PrintAttachment>(
+      `/prints/${archiveId}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        if (caption) body.append('caption', caption)
+        return body
+      },
+      onProgress,
+    ),
+
+  /** #309 — an empty caption takes it off. */
+  captionPrintAttachment: (archiveId: number, id: number, caption: string) =>
+    command<PrintAttachment>(`/prints/${archiveId}/attachments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    }),
+
+  deletePrintAttachment: (archiveId: number, id: number) =>
+    command<void>(`/prints/${archiveId}/attachments/${id}`, { method: 'DELETE' }),
+
+  /** #309 — copies the attachment into the template's gallery. */
+  promotePrintAttachment: (archiveId: number, id: number, slug: string) =>
+    command<ModelSummary>(`/prints/${archiveId}/attachments/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
     }),
 
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
@@ -798,14 +1456,19 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
+  /** #1723 — the output's preview mesh, every part in its colour. */
+  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
+  outputPreviewGlbUrl: (id: string, plate?: number) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
+
   sendOutput: (id: string, body: SendRequest) =>
-    request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
+    command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
   /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
   putThumbnail: (outputId: string, png: Blob) => {
     const body = new FormData()
     body.append('file', png, 'thumbnail.png')
-    return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
+    return command<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
@@ -822,12 +1485,24 @@ export const api = {
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
-  /** #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). */
-  putPrinterRackAlgorithm: (printerId: number, algorithm: RackAlgorithm | null) =>
+  /**
+   * #836 — how this printer's rack nozzle is ranked; `null` forgets it (Least used). A save
+   * with a lower `version` than the stored one is refused with 409 (#1216).
+   */
+  putPrinterRackAlgorithm: (
+    printerId: number,
+    algorithm: RackAlgorithm | null,
+    version: number = nextRackAlgorithmVersion(),
+    signal?: AbortSignal,
+  ) =>
     request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
       method: 'PUT',
-      body: JSON.stringify({ algorithm }),
+      body: JSON.stringify({ algorithm, version }),
+      signal,
     }),
+
+  /** #1298 — the recorded use of each hotend on this printer's rack, by position. */
+  getPrinterRackUsage: (printerId: number) => request<PrinterRackUsage>(`/print/printers/${printerId}/rack-usage`),
 
   /**
    * #87 — one read per output, because the join is the server's job. The spool
@@ -857,6 +1532,10 @@ export const api = {
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
    * installed nozzles, quality tiers and processes per nozzle size, plates with the
@@ -870,13 +1549,23 @@ export const api = {
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
 
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
+
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal),
+  runPrint: (outputId: string, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/outputs/${seg(outputId)}/run`, body, signal, within),
 
   /**
    * #755 — the check before Print for the body the run would take: `errors` are what
@@ -886,6 +1575,42 @@ export const api = {
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  /**
+   * #2169 — slice the dialog's choices in the background, through the run's own path,
+   * without queueing; follow it with `getPreviewSlice`.
+   */
+  previewSlice: (outputId: string, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — how an output's background slice stands, and what it came to once finished. */
+  getPreviewSlice: (outputId: string, jobId: number) =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+
+  /** #2169 — as `getPreviewSlice`, for a library file's. */
+  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+
+  /** #2072 — a finished background slice's toolpath, for the plate preview's slice views. */
+  previewToolpathUrl: (outputId: string, jobId: number) =>
+    `${API_BASE}/print/outputs/${seg(outputId)}/preview-slices/${jobId}/toolpath`,
+
+  /** #2072 — as `previewToolpathUrl`, for a library file's. */
+  libraryPreviewToolpathUrl: (fileId: number, jobId: number) =>
+    `${API_BASE}/print/library/${fileId}/preview-slices/${jobId}/toolpath`,
+
+  /**
+   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * on the person's own "yes".
+   */
+  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
+    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
+      method: 'POST',
+      body: JSON.stringify({ spool_id: spoolId }),
     }),
 
   /**
@@ -906,15 +1631,35 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #284 — a fix's whole diff, where each line lands, whether it can be applied yet, and
+   * the fingerprint an apply confirms against. Changes nothing (`post_preview`).
+   */
+  previewFix: (body: FixRequest) =>
+    request<FixPreview>('/analyzers/fixes/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — record a previewed fix as accepted at its scope (`post_apply`). A 409
+   * `analyzer-fix-stale` means the diff, scope, print or base moved since the preview.
+   */
+  applyFix: (body: FixApply) =>
+    request<AnalyzerDecision>('/analyzers/fixes/apply', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
   deleteDecision: (id: string) =>
     request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
-   * the one the last send went to so the picker opens where it was left. ScadBuddy
-   * models no relationship between a model and a project: which prints belong to a
-   * project is on the project's own page.
+   * the one the last send went to. ScadBuddy keeps no project membership: which prints
+   * belong to a project is on the project's own page. What it remembers per model is
+   * only the default the Customize page's picker opens on (#1660).
    */
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
@@ -924,7 +1669,7 @@ export const api = {
    * row — that makes Bambuddy's project page list the files.
    */
   createProject: (body: ProjectRequest) =>
-    request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+    command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
   /** #317 — the project both pickers open on; `null` is "No project". */
   rememberProject: (projectId: number | null) =>
@@ -933,12 +1678,22 @@ export const api = {
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
     }),
 
+  /** #1660 — the project this model was last filed into, per preset it was generated with. */
+  getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
+
+  /** #1660 — remember the project Generate filed this model into; a `null` project forgets it. */
+  putModelProject: (slug: string, body: ModelProjectPut) =>
+    request<ModelProjects>(`/print/models/${seg(slug)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
   /**
    * #317 — put a generated output's editable 3MF in the project's Bambuddy folder.
    * Idempotent: the same project again answers with the file already there.
    */
   fileIntoProject: (outputId: string, projectId: number) =>
-    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+    command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId }),
     }),
@@ -947,7 +1702,7 @@ export const api = {
    * sliced, and an archive only once a print has finished, so the ids come from the
    * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
-    request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
+    command<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -959,6 +1714,22 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #981 — the printer's live camera, Bambuddy's MJPEG for an `<img>`: closing the
+   * image (unmounting it) ends the stream. */
+  printerCameraStreamUrl: (printerId: number) => `${API_BASE}/print/printers/${printerId}/camera/stream`,
+  /** #796 — one camera frame; `at` makes each refresh a new request. */
+  printerCameraUrl: (printerId: number, at: number) => `${API_BASE}/print/printers/${printerId}/camera?at=${at}`,
+
+  /** #977 — every active printer's live state, whoever started its job. */
+  getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
+  getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
+    request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
+
+  /** #2351 — the farm's totals over every Bambuddy archive. */
+  getFarmStats: () => request<ArchiveStats>('/farm/stats'),
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
@@ -972,22 +1743,110 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<PrintPage>(`/prints${suffix}`)
   },
+  /** The activity list, newest first, a page at a time; `cursor` is the last page's
+   * `next_cursor`. A `kind` or `status` of several comma-joined values is sent repeated. */
+  listActivity: (query: ActivityQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(apiParams(query))) {
+      if (key === 'kind' || key === 'status') {
+        for (const one of splitList(value)) search.append(key, one)
+      } else search.set(key, value)
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ActivityPage>(`/activity${suffix}`)
+  },
+  activityFacets: (since?: string) =>
+    request<ActivityFacets>(`/activity/facets${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  getActivity: (id: string, advanced: boolean) =>
+    request<ActivityDetail>(`/activity/${seg(id)}${advanced ? '?advanced=1' : ''}`),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
-  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+  /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
+  listLibrary: (query: { folderId: number | null; all: boolean; fileId?: number }) => {
     const search = new URLSearchParams()
     if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    else if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
   },
+
+  /** #3630 — library files whose name or folder holds every word, from every folder. */
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+    const search = new URLSearchParams({ q: query.q })
+    if (query.all) search.set('all', 'true')
+    if (query.fresh) search.set('fresh', 'true')
+    return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
+  },
+
+  /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
+  deleteLibraryFiles: (fileIds: number[]) =>
+    command<LibraryDeleteResult>('/print/library/delete', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2167 — a delete's Undo: the files back from Bambuddy's trash. */
+  restoreLibraryFiles: (fileIds: number[]) =>
+    command<LibraryRestoreResult>('/print/library/restore', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2670 — files into another folder (`null`, the top level), each under its own id. */
+  moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryMoveResult>('/print/library/move', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a copy of each file in a folder (`null`, the top level), each a new file. */
+  copyLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryCopyResult>('/print/library/copy', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a new name for a file, its extension kept. */
+  renameLibraryFile: (fileId: number, filename: string) =>
+    command<LibraryRenameResult>('/print/library/rename', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, filename }),
+    }),
+
+  /** #3650 — a folder renamed, or moved under another (`parent_id` 0 is the top level). */
+  updateLibraryFolder: (folderId: number, update: LibraryFolderUpdate) =>
+    command<LibraryFolder>(`/print/library/folders/${folderId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  /** #3650 — a new folder, at the top level without `parent_id`. */
+  createLibraryFolder: (body: LibraryFolderCreate) =>
+    command<LibraryFolder>('/print/library/folders', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #3650 — a folder and everything in it: its files to Bambuddy's trash, then its folders. */
+  deleteLibraryFolder: (folderId: number) =>
+    command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
 
+  /** #1723 — one plate of the library file as a preview mesh (#1753). */
+  libraryPreviewGlbUrl: (fileId: number, plate: number) =>
+    `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
+
+  /** #2349 — library files' names by id; `name: null` for one Bambuddy no longer has. */
+  libraryFileNames: (ids: readonly number[]) =>
+    request<LibraryFileName[]>(`/print/library/names?${ids.map((id) => `ids=${id}`).join('&')}`),
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
+
+  /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
+  getLibraryObjects: (fileId: number) => request<LibraryFileObjects>(`/print/library/${fileId}/objects`),
 
   getLibraryChoices: (fileId: number, printerId?: number | null) => {
     const search = new URLSearchParams()
@@ -1011,11 +1870,30 @@ export const api = {
   },
 
   /** #742 — followed to its end like an output's run (`runPrint`). */
-  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
-    followPrintRun(`/print/library/${fileId}/run`, body, signal),
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal, within?: Within) =>
+    followPrintRun(`/print/library/${fileId}/run`, body, signal, within),
+
+  /** #1751 — the file's newest print, as `getPrintProgress` is an output's; `null` when
+   * ScadBuddy never queued it. */
+  getLibraryPrintProgress: (fileId: number) =>
+    request<PrintProgress | null>(`/print/library/${fileId}/progress`),
+
+  /** #1751 — as `attachToProject`; without ids, the file's newest run is filed. */
+  attachLibraryToProject: (fileId: number, body: ProjectAttach) =>
+    command<AttachResult>(`/print/library/${fileId}/project`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — slice the dialog's choices for a library file in the background. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1027,6 +1905,10 @@ export const api = {
     }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
+
+  /** #2358 — the characters of `text` the font has no glyph for, which a render leaves out. */
+  getGlyphs: (font: string, text: string) =>
+    request<GlyphCoverage>(`/fonts/glyphs?${new URLSearchParams({ font, text })}`),
 
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
   listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
@@ -1040,7 +1922,7 @@ export const api = {
 
   /** Downloads the family onto the data volume so the renderer can resolve it. */
   installFont: (family: string) =>
-    request<InstalledFamily>('/fonts/install', {
+    command<InstalledFamily>('/fonts/install', {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),
@@ -1073,15 +1955,20 @@ export const api = {
   /**
    * Clones the library at `ref` server-side and pins the resolved commit into this
    * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   * A command (#1054): a clone past the server's deadline is followed to the model.
    */
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
 
   /** #169 — library checkouts on the volume, with the models whose live pins read each. */
   listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
+
+  /** #2770 — removes one checkout from the volume; a 409 while any live pin or running render reads it. */
+  removeLibraryCheckout: (name: string, commit: string) =>
+    command<void>(`/libraries/${seg(name)}?commit=${encodeURIComponent(commit)}`, { method: 'DELETE' }),
 
   /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
   listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
@@ -1100,22 +1987,51 @@ export const api = {
 
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
   repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+    command<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #1285 — what each `include`/`use` of the saved source resolves to, a library that
+   * would provide each unresolved one, and the `font = "…"` families not installed.
+   * Read-only; nothing is cloned.
+   */
+  checkDependencies: (slug: string) =>
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
+
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
-    request<ModelSummary>(
+    command<ModelSummary>(
       `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
       { method: 'DELETE' },
     ),
 
-  getSettings: () => request<Settings>('/settings'),
+  /**
+   * #1039 — callers that ask at once share one request: the shell's unit and link
+   * loaders and the page all read it on the same load. Nothing is kept once it
+   * answers, so a later call always reads afresh, and a save stops later callers
+   * joining a read that started before it, as does one that has hung past
+   * `SETTINGS_SHARE_MS` (#1856). Each caller gets its own copy.
+   */
+  getSettings: (): Promise<Settings> => {
+    const now = Date.now()
+    if (!settingsInFlight || now - settingsInFlight.started >= SETTINGS_SHARE_MS) {
+      const shared = {
+        read: request<Settings>('/settings').finally(() => {
+          if (settingsInFlight === shared) settingsInFlight = undefined
+        }),
+        started: now,
+      }
+      settingsInFlight = shared
+    }
+    return settingsInFlight.read.then((settings) => structuredClone(settings))
+  },
 
-  putSettings: (body: SettingsUpdate) =>
-    request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  putSettings: (body: SettingsUpdate) => {
+    settingsInFlight = undefined
+    return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 
@@ -1144,20 +2060,7 @@ export const api = {
     request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
 
   registerSidebar: () =>
-    request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
-
-  /**
-   * The AI agent's headless browser (#349), served by the agent service under
-   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
-
-  putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
+    command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
    * The assistant's `http_request` tool (#827), served by the agent service. On by
@@ -1171,6 +2074,147 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  /**
+   * #982 — the headless browser's allow and deny lists, and the origins approved in each
+   * chat, served by the agent service. Fails (404 or 503) without the agent or its database.
+   */
+  getBrowserOrigins: () => request<BrowserOriginsSetting>('/ai/settings/browser-origins'),
+
+  putBrowserOrigins: (lists: { allow: string[]; deny: string[] }) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins', { method: 'PUT', body: JSON.stringify(lists) }),
+
+  /** #982 — "Always allow" on a browser approval card: one origin added to the allow list. */
+  allowBrowserOrigin: (rule: string) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins/allow', { method: 'POST', body: JSON.stringify({ rule }) }),
+
+  /** #982 — "Allow for this chat": the origin opens without asking for the rest of the session. */
+  approveBrowserOrigin: (sessionId: string, origin: string) =>
+    request<{ origin: string; scope: 'session' }>(`/ai/sessions/${seg(sessionId)}/browser-origins`, {
+      method: 'POST',
+      body: JSON.stringify({ origin }),
+    }),
+
+  revokeBrowserOrigin: (sessionId: string, origin: string) =>
+    request<void>(`/ai/sessions/${seg(sessionId)}/browser-origins?origin=${encodeURIComponent(origin)}`, { method: 'DELETE' }),
+
+  /**
+   * #1941 — uploads an image the user attached in the assistant panel; its message then
+   * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
+   * typed, never base64 in JSON.
+   */
+  uploadAttachment: (image: { mediaType: string; blob: Blob; preview: { mediaType: string; blob: Blob } }) => {
+    const body = new FormData()
+    body.append('image', new Blob([image.blob], { type: image.mediaType }), 'image')
+    body.append('preview', new Blob([image.preview.blob], { type: image.preview.mediaType }), 'preview')
+    return request<AttachmentView>('/ai/attachments', { method: 'POST', body })
+  },
+
+  /** #1941 — deletes an upload the user removed from the composer before sending it. */
+  deleteAttachment: (id: string) =>
+    request<void>(`/ai/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** The long edge the assistant panel scales attached images to, served by the agent service. */
+  getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
+
+  putImageSettings: (longEdge: number) =>
+    request<ImageSettings>('/ai/settings/images', {
+      method: 'PUT',
+      body: JSON.stringify({ long_edge: longEdge }),
+    }),
+
+  /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */
+  getMemorySettings: () => request<MemorySettings>('/ai/settings/memory'),
+
+  putMemorySettings: (recallMaxQueryChars: number) =>
+    request<MemorySettings>('/ai/settings/memory', {
+      method: 'PUT',
+      body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
+    }),
+
+  /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
+  getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
+
+  putWorkspaceSettings: (caps: { file_max_bytes: number; workspace_max_bytes: number }) =>
+    request<WorkspaceSettings>('/ai/settings/workspace', { method: 'PUT', body: JSON.stringify(caps) }),
+
+  /** #2329 — the files in a session's workspace, with its usage and caps. */
+  listAiSessionFiles: (id: string) => request<WorkspaceFileList>(`/ai/sessions/${seg(id)}/files`),
+
+  /**
+   * #2329 — one workspace file's bytes. The route always answers as an attachment, so
+   * the panel fetches it and hands the blob to `downloadBlob` or an object URL.
+   */
+  getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #2329 — uploads a file into a session's workspace at `path`. A path that exists is
+   * refused (409) unless `expectedSha256` is the sha256 it has now.
+   */
+  uploadAiSessionFile: (id: string, file: File, path: string, expectedSha256?: string) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('path', path)
+    if (expectedSha256 !== undefined) body.set('expected_sha256', expectedSha256)
+    return request<{ file: WorkspaceFile }>(`/ai/sessions/${seg(id)}/files`, { method: 'POST', body })
+  },
+
+  /** #2329 — deletes one file from a session's workspace. */
+  deleteAiSessionFile: (id: string, path: string) =>
+    request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
+
+  /** A session's background tasks (CronCreate, ScheduleWakeup): the active ones first, then the last ended. */
+  listAiBackgroundTasks: (id: string) => request<{ tasks: BackgroundTask[] }>(`/ai/sessions/${seg(id)}/background-tasks`),
+
+  /** Cancels one; the session's owner only. */
+  cancelAiBackgroundTask: (id: string, taskId: string) =>
+    request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
+
+  /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
+  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+
+  putSessionMode: (mode: SessionModeSetting['mode']) =>
+    request<SessionModeSetting>('/ai/settings/session-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
+
+  /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
+  getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),
+
+  putDurableSubagents: (setting: DurableSubagentsSetting) =>
+    request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
+      method: 'PUT',
+      body: JSON.stringify(setting),
+    }),
+
+  /**
+   * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
+   * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getPrinterCameraSetting: () => request<PrinterCameraSetting>('/ai/settings/printer-camera'),
+
+  putPrinterCameraSetting: (enabled: boolean) =>
+    request<PrinterCameraSetting>('/ai/settings/printer-camera', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
+  getModelSetting: () => request<ModelSetting>('/ai/settings/model'),
+
+  putModelSetting: (model: string | null) =>
+    request<ModelSetting>('/ai/settings/model', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
+    }),
+
+  /** #1291 — New model's "Start from blank template", served by the agent service. */
+  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
+
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
   getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
 
@@ -1180,9 +2224,45 @@ export const api = {
       body: JSON.stringify(limits),
     }),
 
-  /** #790 — "Continue in a new chat": a new session with this one's transcript and a fresh budget. */
-  forkAiSession: (id: string) =>
-    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST' }),
+  /** The park hold, warm process cache and turn limit, served by the agent service. */
+  getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
+
+  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+    request<SessionRuntime>('/ai/settings/session-runtime', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }),
+
+  /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */
+  getRenderLimits: () => request<RenderLimits>('/ai/settings/render-limits'),
+
+  putRenderLimits: (limits: RenderLimits) =>
+    request<RenderLimits>('/ai/settings/render-limits', {
+      method: 'PUT',
+      body: JSON.stringify(limits),
+    }),
+
+  /**
+   * #790, #794 — a new session with this one's transcript and a fresh budget: "Continue in
+   * a new chat", Fork, and with `upTo` (a reply's message id) "Fork from here", which
+   * keeps the conversation only through that reply.
+   */
+  forkAiSession: (id: string, options: { upTo?: string } = {}) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, {
+      method: 'POST',
+      ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
+    }),
+
+  /** #795, #1885 — renames a session, marks it done, or archives or unarchives it; only the session's owner can. */
+  updateAiSession: (id: string, edit: AiSessionEdit) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(edit),
+    }),
+
+  /** #1885 — the archived sessions, newest first: the switcher's Archived view. */
+  listArchivedAiSessions: (limit: number) =>
+    request<{ sessions: AiSessionView[] }>(`/ai/sessions?archived=true&limit=${limit}`),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>
@@ -1190,6 +2270,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ add_usd: addUsd }),
     }),
+
+  /** #1284 — withdraws the session's live handoff offer; `cancelled` is false when there was none. */
+  cancelAiSessionOffer: (id: string) =>
+    request<{ cancelled: boolean; session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/handoff`, {
+      method: 'DELETE',
+    }),
+
+  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
+  getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
+
+  /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
+  listAiSessionResources: (id: string) =>
+    request<{ resources: SessionResource[] }>(`/ai/sessions/${encodeURIComponent(id)}/resources`),
+
+  /** #931 — the sessions whose tool calls touched a resource, newest first. */
+  listAiResourceSessions: (resource: ResourceRef, limit: number) =>
+    request<{ sessions: AiSessionView[] }>(
+      `/ai/resources/${encodeURIComponent(resource.type)}/${encodeURIComponent(resource.id)}/sessions?limit=${limit}`,
+    ),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
@@ -1207,14 +2306,14 @@ export const api = {
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** #1000 — the agent's Claude credential: kind, base URL and last four only. */
   /**
-   * A non-JSON answer is the backend's SPA fallback (nothing routes `/api/v1/ai/*` to the
-   * agent), and rejects with a problem of type `AI_NOT_ROUTED`; a JSON answer that does not
-   * parse is a real failure and rejects as it would anywhere.
+   * #1000, #1093 — the agent's Claude credentials in priority order: kind, base URL, last
+   * four and status only. A non-JSON answer is the backend's SPA fallback (nothing routes
+   * `/api/v1/ai/*` to the agent), and rejects with a problem of type `AI_NOT_ROUTED`; a
+   * JSON answer that does not parse is a real failure and rejects as it would anywhere.
    */
-  getAiCredential: async (): Promise<AiCredentialView> => {
-    const response = await send(`${API_BASE}/ai/credentials`, { headers: { Accept: 'application/json' } })
+  listAiCredentials: async (): Promise<AiCredentialList> => {
+    const response = await send(`${API_BASE}/ai/credentials/entries`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     if (!(response.headers.get('content-type') ?? '').includes('application/json')) {
       throw new ApiError({
@@ -1224,14 +2323,28 @@ export const api = {
         detail: 'The agent service did not answer at /api/v1/ai.',
       })
     }
-    return (await response.json()) as AiCredentialView
+    return (await response.json()) as AiCredentialList
   },
 
-  putAiCredential: (body: AiCredentialUpdate) =>
-    request<AiCredentialView>('/ai/credentials', { method: 'PUT', body: JSON.stringify(body) }),
+  /** Added last, so it is tried after every existing one. */
+  createAiCredential: (body: AiCredentialCreate) =>
+    request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  deleteAiCredential: () => request<AiCredentialView>('/ai/credentials', { method: 'DELETE' }),
+  /** Every id exactly once, first tried first; a stale list answers 409. */
+  reorderAiCredentials: (ids: string[]) =>
+    request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
+
+  saveAiCredential: (id: string, body: AiCredentialSave) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  deleteAiCredential: (id: string) =>
+    request<AiCredentialList>(`/ai/credentials/entries/${seg(id)}`, { method: 'DELETE' }),
+
+  /** Back to `active`, for one disabled or cooling down. */
+  resetAiCredential: (id: string) =>
+    request<AiCredentialEntry>(`/ai/credentials/entries/${seg(id)}/reset`, { method: 'POST' }),
 
   /** Spends real tokens; a 429 carries `problem.retry_after` (seconds). */
-  testAiCredential: () => request<AiConnectionTest>('/ai/credentials/test', { method: 'POST' }),
+  testAiCredential: (id: string) =>
+    request<AiConnectionTest>(`/ai/credentials/entries/${seg(id)}/test`, { method: 'POST' }),
 }

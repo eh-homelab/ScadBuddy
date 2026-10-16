@@ -5,6 +5,7 @@ import type { HookCallback, HookInput, HookJSONOutput } from '@anthropic-ai/clau
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   actionLine,
+  capRecallQuery,
   createMemoryHooks,
   drainRetains,
   DEFAULT_MEMORY_HOOK_CONFIG,
@@ -13,7 +14,9 @@ import {
   type MemoryActivity,
   type MemoryHooksOptions,
   hindsightTarget,
+  retryQueryLength,
 } from '../src/memory/hindsight.js'
+import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -174,6 +177,115 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(logs).toEqual([])
   })
 
+  // The Claude Code Hindsight plugin's recallMaxQueryChars: the start of the query, 800
+  // characters by default, 0 for no cut.
+  const recallHook = (overrides: Partial<MemoryHooksOptions> = {}) => hooks(overrides).hooks.UserPromptSubmit?.[0]?.hooks[0]
+  const sentQueries = () => fake.recalls().map((r) => (r.body as { query: string }).query)
+  const SCAD = 'difference(){cube([10,20,30]);translate([1,1,1])cube([8,18,30]);}\n'
+
+  it('sends the start of a long prompt, 800 characters by default, as the Claude Code plugin does', async () => {
+    expect(DEFAULT_MEMORY_HOOK_CONFIG.recallMaxQueryChars).toBe(800)
+    const long = SCAD.repeat(40)
+    await call(recallHook(), prompt(long))
+    const [query] = sentQueries()
+    expect(query).toBe(long.slice(0, 800))
+    expect(logs).toEqual([])
+  })
+
+  it('takes another cap, and 0 sends the whole query', async () => {
+    const long = SCAD.repeat(40)
+    await call(recallHook({ hookConfig: { recallMaxQueryChars: 50 } }), prompt(long))
+    await call(recallHook({ hookConfig: { recallMaxQueryChars: 0 } }), prompt(long))
+    expect(sentQueries()).toEqual([long.slice(0, 50), long])
+  })
+
+  it('counts characters, never cutting an emoji or other non-BMP character in half', () => {
+    const astral = '🧱'.repeat(10)
+    expect(capRecallQuery(astral, 3)).toBe('🧱🧱🧱')
+    expect(capRecallQuery(`ab${astral}`, 3)).toBe('ab🧱')
+    expect(capRecallQuery('模型模型', 2)).toBe('模型')
+    expect(capRecallQuery('Make a box', 800)).toBe('Make a box')
+    expect(capRecallQuery('Make a box', 0)).toBe('Make a box')
+  })
+
+  it('retries once, shortened by the ratio the bank reported, when the bank still finds it too long', async () => {
+    // Punctuation-dense SCAD runs about one token per two characters, so 800 of them can
+    // still pass the bank's token limit.
+    fake.memories = ['The user prints in PETG.']
+    let refused = 0
+    fake.respond = () =>
+      refused++ === 0
+        ? { status: 400, json: { detail: 'Query too long: 1000 tokens exceeds maximum of 500. Please shorten your query.' } }
+        : undefined
+    const out = await call(recallHook(), prompt(SCAD.repeat(40)))
+    // 800 × 500/1000, less a fifth for margin.
+    expect(sentQueries().map((q) => q.length)).toEqual([800, 320])
+    expect(sentQueries()[1]).toBe(SCAD.repeat(40).slice(0, 320))
+    expect(JSON.stringify(out)).toContain('The user prints in PETG.')
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toMatch(/refused a 800-character recall query as too long.*retrying once with 320 characters/)
+  })
+
+  it('retries at half the length when the refusal does not say the numbers, and only once', async () => {
+    fake.respond = () => ({ status: 400, json: { detail: 'Query too long. Please shorten your query.' } })
+    const out = await call(recallHook(), prompt(SCAD.repeat(40)))
+    expect(sentQueries().map((q) => q.length)).toEqual([800, 400])
+    expect(out).toEqual({})
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toMatch(/recall from bank scadbuddy failed .*HTTP 400.*no memories were injected/)
+  })
+
+  it('does not retry any other refusal', async () => {
+    fake.respond = () => ({ status: 400, json: { detail: 'budget: invalid' } })
+    await call(recallHook(), prompt('Make a box'))
+    fake.respond = () => ({ status: 500, text: 'Query too long' })
+    await call(recallHook(), prompt('Make a box'))
+    expect(fake.recalls()).toHaveLength(2)
+  })
+
+  it.each([
+    ['Query too long: 6192 tokens exceeds maximum of 500.', 1000, 64],
+    ['Query too long', 1000, 500],
+    ['Query too long: 10 tokens exceeds maximum of 500.', 1000, 500],
+    ['Query too long: 0 tokens exceeds maximum of 500.', 1000, 500],
+  ])('retryQueryLength(%j) of %i characters is %i', (reply, sent, expected) => {
+    expect(retryQueryLength(sent, reply)).toBe(expected)
+  })
+
+  it('recalls once per hooks (one user message): the same prompt again reuses it, any other prompt gets nothing (#1896)', async () => {
+    fake.memories = ['The user prints in PETG.']
+    const seen: MemoryActivity[] = []
+    const h = hooks({ onActivity: (a) => void seen.push(a) })
+    const recall = h.hooks.UserPromptSubmit?.[0]?.hooks[0]
+    const first = await call(recall, prompt('Make a box'))
+    expect((first as { hookSpecificOutput?: unknown }).hookSpecificOutput).toBeDefined()
+    // A rerun of the same message (an attempt that never reached a transcript) gets the same memories.
+    expect(await call(recall, prompt('Make a box'))).toEqual(first)
+    // Any other prompt under the same hooks continues the message, whose memories are already in context.
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    await h.settled()
+    expect(fake.recalls()).toHaveLength(1)
+    expect(seen.filter((a) => a.action === 'recall')).toHaveLength(1)
+  })
+
+  it('does not reuse a failed recall: a rerun of the same message asks the bank again (#2144)', async () => {
+    fake.memories = ['The user prints in PETG.']
+    let calls = 0
+    fake.respond = () => (++calls === 1 ? { status: 500, text: 'busy' } : undefined)
+    const h = hooks()
+    const recall = h.hooks.UserPromptSubmit?.[0]?.hooks[0]
+    expect(await call(recall, prompt('Make a box'))).toEqual({})
+    // Another prompt still continues the message and asks nothing.
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    const rerun = await call(recall, prompt('Make a box'))
+    expect((rerun as { hookSpecificOutput?: unknown }).hookSpecificOutput).toBeDefined()
+    // Once one answered, it is reused as before.
+    expect(await call(recall, prompt('Make a box'))).toEqual(rerun)
+    expect(await call(recall, prompt('Continue where you left off.'))).toEqual({})
+    await h.settled()
+    expect(fake.recalls()).toHaveLength(2)
+  })
+
   it('uses a fixed recallQuery, tags and budget when configured, and injects nothing for no results', async () => {
     const h = hooks({
       budget: 'low',
@@ -193,10 +305,10 @@ describe('memory hooks against a fake Hindsight', () => {
 
   it('injects nothing and logs when recall times out', async () => {
     fake.respond = () => ({ hang: true })
-    const started = Date.now()
+    const started = performance.now()
     const out = await call(hooks({ recallTimeoutMs: 100 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
     expect(out).toEqual({})
-    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(performance.now() - started).toBeLessThan(2_000)
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatch(/recall from bank scadbuddy failed \(timed out after 100 ms\); no memories were injected/)
   })
@@ -269,13 +381,40 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(logs).toEqual([])
   })
 
+  // #3701: a turn that failed over to another credential (harness/fallback.ts) leaves in
+  // Claude Code's transcript the refused attempt's synthetic error message and the
+  // continuation prompt the next credential resumed with. Neither is conversation.
+  it("retains a failed-over turn as the user's message and the final reply only, never the failover's plumbing (#3701)", async () => {
+    const h = hooks()
+    const file = await transcript([
+      { type: 'user', timestamp: '2026-10-15T10:00:00.000Z', message: { role: 'user', content: 'What is the box width?' } },
+      {
+        type: 'assistant',
+        isApiErrorMessage: true,
+        error: 'rate_limit',
+        message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets Oct 18, 1pm (UTC)" }] },
+      },
+      { type: 'user', message: { role: 'user', content: CONTINUE_PROMPT } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: CONTINUE_PROMPT }] } },
+      { type: 'assistant', message: { model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'The box is 40 mm wide.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: 'What is the box width?', timestamp: '2026-10-15T10:00:00.000Z' },
+      { role: 'assistant', content: 'The box is 40 mm wide.' },
+    ])
+  })
+
   it('does not wait for the retain: the Stop hook returns while Hindsight is still answering', async () => {
     fake.respond = (r) => (r.path.endsWith('/memories') ? { delayMs: 500, json: {} } : undefined)
     const h = hooks()
     const file = await transcript(conversation)
-    const started = Date.now()
+    const started = performance.now()
     await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
-    expect(Date.now() - started).toBeLessThan(400)
+    expect(performance.now() - started).toBeLessThan(400)
     await h.settled()
     expect(fake.retains()).toHaveLength(1)
   })
@@ -480,9 +619,9 @@ describe('memory hooks against a fake Hindsight', () => {
             ? new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`db down ${CREDENTIAL}`)), 300))
             : Promise.reject(new Error('db down')),
       })
-      const started = Date.now()
+      const started = performance.now()
       const out = await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
-      expect(Date.now() - started).toBeLessThan(250)
+      expect(performance.now() - started).toBeLessThan(250)
       expect(out).toHaveProperty('hookSpecificOutput')
       expect(await call(h.hooks.Stop?.[0]?.hooks[0], stop(await transcript(conversation)))).toEqual({})
       await h.settled()

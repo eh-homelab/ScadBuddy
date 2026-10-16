@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.rack import usage
 from scadbuddy.rack.rank import Usage, rank_rack
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import (
+    STATEMENT_TIMEOUT_MS,
+    PickedHotend,
+    PickedSpool,
+    RackUsageStore,
+    SpoolUse,
+)
+from scadbuddy.render import pg_store
 from tests.rack.helpers import group, serial, slot
 
 pytestmark = pytest.mark.requires_postgres
@@ -50,8 +62,31 @@ async def test_a_hotend_moved_to_another_printer_keeps_its_age_and_history(
     printer_id, first_seen = _seen_rows(pg_conninfo)[A]
     assert (printer_id, first_seen) == (2, first[1])
     assert (await store.usage([A]))[A] == Usage(
-        prints=1, print_seconds=600, grams=12.5, first_seen_at=first[1]
+        prints=1, print_seconds=600, grams=12.5, first_seen_at=first[1], last_used_at=AT
     )
+
+
+def _row_version(conninfo: str, serial: str) -> str:
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT xmin::text FROM rack_nozzle_seen WHERE serial = %s", (serial,)
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def test_seeing_a_hotend_again_on_the_same_printer_makes_no_new_row_version(
+    store: RackUsageStore, pg_conninfo: str
+) -> None:
+    """#1082: /check records the rack on every debounced re-check, so an unchanged row
+    must not get a new version (its ``xmin`` stays); a move to another printer still does.
+    The skipped row is still locked, which this does not check."""
+    await store.seen(1, [A])
+    before = _row_version(pg_conninfo, A)
+    await store.seen(1, [A])
+    assert _row_version(pg_conninfo, A) == before
+    await store.seen(2, [A])
+    assert _row_version(pg_conninfo, A) != before
 
 
 async def test_seen_skips_empty_and_repeated_serials(
@@ -77,6 +112,105 @@ async def test_a_serial_with_no_rows_is_zeros_and_ranks_before_a_used_one(
     assert usage[A].prints == 1 and usage[A].grams == 0.0
     picks = rank_rack([group()], [slot(2), slot(3)], "least_used", usage, {})
     assert picks[0].position == 3
+
+
+def _age_picks(conninfo: str, by: timedelta) -> None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE rack_nozzle_picks SET picked_at = picked_at - %s", (by,))
+
+
+async def test_an_open_pick_counts_as_pending_until_its_print_settles(
+    store: RackUsageStore,
+) -> None:
+    """#1079: a pick with no print row yet is pending; its settle moves it into the
+    totals and out of ``pending``, and another group of the same item stays pending."""
+    await store.record_picks(
+        51,
+        1,
+        [
+            PickedHotend(group_id=0, position=2, serial=A),
+            PickedHotend(group_id=1, position=3, serial=B),
+        ],
+    )
+    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=2, serial=A)])
+    usage = await store.usage([A, B])
+    assert (usage[A].pending, usage[B].pending) == (2, 1)
+
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=60, grams=None
+    )
+
+    usage = await store.usage([A, B])
+    assert (usage[A].prints, usage[A].pending) == (1, 1)
+    assert (usage[B].prints, usage[B].pending) == (1, 0)
+
+
+async def test_each_unsettled_copy_of_a_pick_counts_as_pending(
+    store: RackUsageStore,
+) -> None:
+    """#2134: copies go to Bambuddy as one queue item, and each copy settles its own
+    print row. A 3-copy pick is 3 pending, still 2 after the first copy settles."""
+    await store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=A)], copies=3)
+    assert (await store.usage([A]))[A].pending == 3
+
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=60, grams=None
+    )
+    assert ((await store.usage([A]))[A].prints, (await store.usage([A]))[A].pending) == (1, 2)
+
+    for archive_id in (102, 103):
+        await store.record_prints(
+            archive_id=archive_id,
+            queue_item_id=51,
+            settled_at=AT,
+            print_seconds=60,
+            grams=None,
+        )
+    assert ((await store.usage([A]))[A].prints, (await store.usage([A]))[A].pending) == (3, 0)
+
+
+async def test_an_open_pick_stops_counting_once_it_is_older_than_the_pending_age(
+    store: RackUsageStore, pg_conninfo: str
+) -> None:
+    """#1079: a cancelled queue item never settles, so its pick ages out."""
+    await store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=A)])
+    _age_picks(pg_conninfo, usage.PENDING_PICK_MAX_AGE - timedelta(minutes=5))
+    assert (await store.usage([A]))[A].pending == 1
+
+    _age_picks(pg_conninfo, timedelta(minutes=10))
+
+    assert (await store.usage([A]))[A] == Usage()
+
+
+async def test_a_print_settled_before_the_pending_migration_closes_its_pick(
+    pg_conninfo: str,
+) -> None:
+    """#1079: a print row written before ``queue_item_id`` existed gets it from the
+    archive's link, so its pick is not counted as open after the upgrade."""
+    pending = "20261008T1351Z_rack_nozzle_pending"
+    with psycopg.connect(pg_conninfo) as conn:
+        pg_store.migrate(conn, tuple(m for m in pg_store.MIGRATIONS if m.id < pending))
+        conn.execute(
+            "INSERT INTO rack_nozzle_picks (queue_item_id, group_id, printer_id, serial)"
+            " VALUES (51, 0, 1, %s), (52, 0, 1, %s)",
+            (A, A),
+        )
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, queue_item_id)"
+            " VALUES ('output:o1', 101, 'queue_item', 51)"
+        )
+        conn.execute(
+            "INSERT INTO rack_nozzle_prints (archive_id, group_id, serial, settled_at)"
+            " VALUES (101, 0, %s, now())",
+            (A,),
+        )
+        conn.commit()
+    opened = RackUsageStore(pg_conninfo)
+    try:
+        found = (await opened.usage([A]))[A]
+    finally:
+        opened.close()
+    assert (found.prints, found.pending) == (1, 1)
 
 
 async def test_a_pick_written_twice_writes_once_and_says_so(store: RackUsageStore) -> None:
@@ -116,3 +250,165 @@ async def test_an_item_with_no_picks_records_no_print(store: RackUsageStore) -> 
         )
         == 0
     )
+
+
+async def test_every_query_on_the_store_is_bounded(store: RackUsageStore) -> None:
+    """#1086 review: a stuck read must release its thread even after the follow's
+    timeout has stopped waiting on it."""
+    await store.seen(1, [A])  # opens the pool, and migrates on one connection
+    pool = store._ready()
+    # Both of the pool's connections: the second never ran migrate().
+    with pool.connection() as first, pool.connection() as second:
+        rows = [conn.execute("SHOW statement_timeout").fetchone() for conn in (first, second)]
+    assert [row and row["statement_timeout"] for row in rows] == [
+        f"{STATEMENT_TIMEOUT_MS // 1000}s"
+    ] * 2
+
+
+async def test_every_pooled_connection_bounds_a_silent_peer(store: RackUsageStore) -> None:
+    """#1226: the settle hook reads through this pool too, and a half-open connection
+    never gets the server's ``statement_timeout`` cancel."""
+    await store.seen(1, [A])
+    pool = store._ready()
+    with pool.connection() as first, pool.connection() as second:
+        params = [conn.info.get_parameters() for conn in (first, second)]
+    for got in params:
+        assert {name: got.get(name) for name in TCP_KEEPALIVE} == {
+            name: str(value) for name, value in TCP_KEEPALIVE.items()
+        }
+
+
+async def test_a_lower_statement_timeout_in_the_conninfo_is_kept(pg_conninfo: str) -> None:
+    """#1086 review: the store lowers an operator's timeout, never raises it, and the
+    migration's unbounded run (``seen`` migrates first) gives it back afterwards."""
+    options = f"{conninfo_to_dict(pg_conninfo).get('options') or ''} -c statement_timeout=5s"
+    lower = RackUsageStore(make_conninfo(pg_conninfo, options=options.strip()))
+    try:
+        await lower.seen(1, [A])
+        pool = lower._ready()
+        with pool.connection() as first, pool.connection() as second:
+            rows = [conn.execute("SHOW statement_timeout").fetchone() for conn in (first, second)]
+    finally:
+        lower.close()
+    assert [row and row["statement_timeout"] for row in rows] == ["5s", "5s"]
+
+
+async def test_migrating_waits_out_another_process_holding_the_lock(
+    store: RackUsageStore, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1086 review: another replica migrating for longer than the statement timeout
+    must not cancel this store's wait for the migration lock."""
+    monkeypatch.setattr(usage, "STATEMENT_TIMEOUT_MS", 200)
+    # Advisory locks are database-wide: a key of this test's own keeps a concurrent run
+    # on the same test database from waiting on, or holding, the real one.
+    lock = secrets.randbits(62)
+    monkeypatch.setattr(pg_store, "MIGRATION_LOCK", lock)
+    with psycopg.connect(pg_conninfo) as holder, psycopg.connect(pg_conninfo) as watch:
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (lock,))
+        first = asyncio.create_task(store.seen(1, [A]))
+        # Proven waiting on the lock, not still connecting: a bigint key shows in
+        # pg_locks as its high and low 32 bits.
+        waiting = (
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            " AND classid::bigint = %s AND objid::bigint = %s"
+        )
+        for _ in range(200):
+            found = watch.execute(waiting, (lock >> 32, lock & 0xFFFF_FFFF)).fetchone()
+            if found and found[0]:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the store never waited on the migration lock")
+        # Past the 200 ms bound, which would have cancelled the wait without the fix.
+        await asyncio.sleep(0.5)
+        assert not first.done()
+        holder.commit()
+    await first
+    with store._ready().connection() as conn:
+        row = conn.execute("SHOW statement_timeout").fetchone()
+    assert row is not None and row["statement_timeout"] == "200ms"
+
+
+def _picked(serial: str, *spools: PickedSpool, group_id: int = 0) -> PickedHotend:
+    return PickedHotend(group_id=group_id, position=2, serial=serial, spools=list(spools))
+
+
+GREEN = PickedSpool(
+    slot_id=1,
+    spool_id=7,
+    label="Bambu PLA Basic Green",
+    material="PLA",
+    colour="#3F8E43",
+    grams=10.0,
+)
+BLACK = PickedSpool(
+    slot_id=2, spool_id=8, label="Inland PLA Black", material="PLA", colour="#000000", grams=2.5
+)
+
+
+async def test_each_spool_that_ran_through_a_hotend_is_recorded_by_its_serial(
+    store: RackUsageStore,
+) -> None:
+    """#2170: the spools follow the serial, whichever position, printer or item named it."""
+    await store.record_picks(51, 1, [_picked(A, GREEN, BLACK)])
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=600, grams=12.5
+    )
+    later = AT + timedelta(hours=1)
+    await store.record_picks(52, 2, [_picked(A, GREEN)])
+    await store.record_prints(
+        archive_id=102, queue_item_id=52, settled_at=later, print_seconds=60, grams=10.0
+    )
+    # Picked, never settled: not history yet.
+    await store.record_picks(53, 1, [_picked(A, BLACK)])
+    await store.record_picks(54, 1, [_picked(B, BLACK)])
+
+    history = await store.spool_history([A, B, ""])
+
+    assert list(history) == [A]
+    assert history[A] == [
+        SpoolUse(
+            spool_id=7,
+            label=GREEN.label,
+            material="PLA",
+            colour="#3F8E43",
+            prints=2,
+            grams=20.0,
+            last_used_at=later,
+        ),
+        SpoolUse(
+            spool_id=8,
+            label=BLACK.label,
+            material="PLA",
+            colour="#000000",
+            prints=1,
+            grams=2.5,
+            last_used_at=AT,
+        ),
+    ]
+
+
+async def test_a_slot_with_no_inventory_spool_is_kept_by_its_label(
+    store: RackUsageStore,
+) -> None:
+    await store.record_picks(
+        51,
+        1,
+        [
+            _picked(
+                A,
+                PickedSpool(slot_id=1, label="PLA", material="PLA", colour="#FFFFFF"),
+                PickedSpool(slot_id=2, label="PETG", material="PETG", colour="#FFFFFF"),
+            )
+        ],
+    )
+    await store.record_prints(
+        archive_id=101, queue_item_id=51, settled_at=AT, print_seconds=600, grams=None
+    )
+
+    history = await store.spool_history([A])
+
+    assert sorted((use.spool_id, use.label, use.grams) for use in history[A]) == [
+        (None, "PETG", 0.0),
+        (None, "PLA", 0.0),
+    ]

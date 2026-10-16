@@ -1,5 +1,5 @@
-import type { ServerEvent } from './protocol'
-import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
+import { type ServerEvent, ServerEventSchema } from './protocol'
+import { askedBy, budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
 const desktop = { kind: 'bearer', id: 'tok', label: 'Claude Desktop' } as const
@@ -18,6 +18,48 @@ const started = run([
   { type: 'started-new' },
   server({ type: 'session.started', sessionId: 's1', origin: 'chat', owner: you }),
 ])
+
+describe('the session switcher’s fields (#795)', () => {
+  const listed = (over: Record<string, unknown> = {}) =>
+    server({
+      type: 'sessions.snapshot',
+      sessions: [
+        { sessionId: 's1', title: 't', origin: 'chat', owner: you, status: 'idle', parentId: null, updatedAt: '2026-10-09T01:00:00Z', costUsd: 0.5, budgetUsd: 1 },
+        { sessionId: 'f1', title: 't (fork)', origin: 'chat', owner: you, status: 'idle', parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', costUsd: 0.25, budgetUsd: 2, ...over },
+      ],
+    })
+
+  it("takes each listed session's parent, last activity and spend", () => {
+    const state = run([listed()])
+    expect(state.sessions.f1).toMatchObject({ parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', budget: { costUsd: 0.25, budgetUsd: 2 } })
+    expect(state.sessions.s1).toMatchObject({ parentId: null, budget: { costUsd: 0.5, budgetUsd: 1 } })
+  })
+
+  it("keeps the open session's live spend over the list's older one", () => {
+    const live = run(
+      [server({ type: 'session.budget', sessionId: 's1', costUsd: 0.75, budgetUsd: 1 }), listed()],
+      started,
+    )
+    expect(live.sessions.s1?.budget).toEqual({ costUsd: 0.75, budgetUsd: 1 })
+  })
+
+  it('lays a route’s answer over a session, and adds one the panel has not heard of first', () => {
+    const renamed = run([{ type: 'session-patched', patch: { id: 's1', title: 'renamed', status: 'done' } }], started)
+    expect(renamed.sessions.s1).toMatchObject({ title: 'renamed', status: 'done' })
+    const forked = run([{ type: 'session-patched', patch: { id: 'f9', title: 'fork', parentId: 's1', costUsd: 0, budgetUsd: 1 } }], started)
+    expect(forked.order).toEqual(['f9', 's1'])
+    expect(forked.sessions.f9).toMatchObject({ title: 'fork', parentId: 's1', origin: 'chat', owner: you, status: 'idle', items: [] })
+  })
+
+  it('#1885 — keeps an archive a list read before it left out, and drops it when a newer list has the chat again', () => {
+    const archived = run([{ type: 'session-patched', patch: { id: 'f1', archived: true, updatedAt: '2026-10-09T03:00:00Z' } }], run([listed()], started))
+    expect(archived.sessions.f1?.archived).toBe(true)
+    // Read before the archive landed: still listed, and older than what the panel knows.
+    expect(run([listed()], archived).sessions.f1?.archived).toBe(true)
+    // Unarchived elsewhere: listed again, and newer.
+    expect(run([listed({ updatedAt: '2026-10-09T04:00:00Z' })], archived).sessions.f1?.archived).toBe(false)
+  })
+})
 
 describe('chatReducer', () => {
   it('adopts the session its own first turn started', () => {
@@ -93,6 +135,53 @@ describe('chatReducer', () => {
       sent,
     )
     expect(resolved.sessions.s1?.items[0]).toMatchObject({ state: 'approved', by: you })
+
+    // Refused by the respond route (#815): the buttons are live again, the reason beside them.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'Your decision was not taken: expired' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ kind: 'approval', state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your decision was not taken: expired' })
+    // A settled refusal (409/410) ends the card with its reason, without waiting on a
+    // resolve frame that may never come (#1385); no error row, the card says it.
+    const closed = run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'already denied', closed: 'it expired' }], sent)
+    expect(closed.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'approval', state: 'closed', reason: 'it expired' })])
+    // A resolve frame that does arrive still says how it really ended.
+    const late = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, by: you })], closed)
+    expect(late.sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    // An expiry or a cancel is not a denial (#979).
+    const expired = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, decision: 'expired', reason: 'no decision before it expired' })], waiting)
+    expect(expired.sessions.s1?.items[0]).toMatchObject({ state: 'expired' })
+    const cancelled = run([server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: false, decision: 'cancelled', reason: 'interrupted by You' })], waiting)
+    expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
+    // The route's own 2xx resolves the card without the socket.
+    expect(run([{ type: 'responded', sessionId: 's1', id: 'a1', outcome: 'denied', by: you }], sent).sessions.s1?.items[0]).toMatchObject({ state: 'denied', by: you })
+    // A decision whose answer was lost (#1359): the resolve frame drops the stale error,
+    // and an error added after it gets an id of its own.
+    const lostDecision = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        server({ type: 'error', sessionId: 's1', message: 'something else' }),
+        server({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: you }),
+        server({ type: 'error', sessionId: 's1', message: 'and another' }),
+      ],
+      sent,
+    )
+    const items = lostDecision.sessions.s1?.items ?? []
+    expect(items.map((i) => (i.kind === 'error' ? i.message : i.kind))).toEqual(['approval', 'something else', 'and another'])
+    expect(new Set(items.map((i) => i.id)).size).toBe(items.length)
+    expect(items[0]).toMatchObject({ state: 'approved' })
+    // A second click that the route refuses as no longer pending ends the card; the first error goes.
+    const twice = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'unreachable' },
+        { type: 'decided', sessionId: 's1', approvalId: 'a1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x', closed: 'it was already approved' },
+      ],
+      sent,
+    )
+    expect(twice.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'approval', state: 'closed' })])
+    // A failure that lands after the server resolved it changes nothing on the card.
+    expect(run([{ type: 'respond-failed', sessionId: 's1', id: 'a1', message: 'x' }], resolved).sessions.s1?.items[0]).toMatchObject({ state: 'approved' })
   })
 
   it('moves a question pending → sent → answered, and shows a cancelled one as not answered (#940)', () => {
@@ -125,6 +214,20 @@ describe('chatReducer', () => {
     )
     expect(answered.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'], by: you })
 
+    // A replay while the answer is still on its way rebuilds the card as sent, so the
+    // route's 2xx still lands on it; once resolved, a later replay starts it pending (#1395).
+    const replayed = run(
+      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
+      sent,
+    )
+    expect(replayed.sessions.s1?.items).toEqual([expect.objectContaining({ id: 'q1', state: 'sent' })])
+    const took = run([{ type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you }], replayed)
+    expect(took.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'] })
+    expect(
+      run([{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })], took)
+        .sessions.s1?.items[0],
+    ).toMatchObject({ state: 'pending' })
+
     const cancelled = run(
       [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'interrupted by You' })],
       waiting,
@@ -132,22 +235,47 @@ describe('chatReducer', () => {
     expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
     expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
 
-    // Answered while offline: queued, and still not live after the reconnect's replay.
-    const queued = run([{ type: 'answered', sessionId: 's1', questionId: 'q1', queued: true }], waiting)
-    expect(queued.sessions.s1?.items[0]).toMatchObject({ state: 'queued' })
-    const replayed = run(
-      [{ type: 'select', sessionId: 's1' }, server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions })],
-      queued,
-    )
-    expect(replayed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    // Refused by the respond route (#815): answerable again, with the reason beside it.
+    const failed = run([{ type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: stale' }], sent)
+    expect(failed.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
+    expect(failed.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'Your answer was not taken: stale' })
 
-    // Refused by the agent: answerable again, with the error beside it.
+    // The POST landed but its answer was lost (#1359): the card is live again with the
+    // error, and the resolve frame that follows ends the card and takes the error with it.
+    const lost = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 't9', name: 'x', input: {}, risk: 'read' }),
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'Your answer was not taken: The assistant could not be reached; try again.' },
+        server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you }),
+      ],
+      sent,
+    )
+    expect(lost.sessions.s1?.items.map((i) => i.kind)).toEqual(['question', 'tool'])
+    expect(lost.sessions.s1?.items[0]).toMatchObject({ state: 'answered' })
+    // A retry the route took clears it as well.
+    const retried = run(
+      [
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'unreachable' },
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'responded', sessionId: 's1', id: 'q1', outcome: 'answered', answers: ['Approve'], by: you },
+      ],
+      sent,
+    )
+    expect(retried.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
+
+    // Refused by the agent over the socket (a panel loaded before #815): the same.
     const refused = run(
       [server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each', questionId: 'q1' })],
       sent,
     )
     expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
-    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each' })
+    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each', about: 'q1' })
+    // …and, as the route's error is (#1359), it goes when the question resolves (#2133).
+    const refusedThenAnswered = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
+      refused,
+    )
+    expect(refusedThenAnswered.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
     // An unrelated error in the session leaves a sent answer alone.
     const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
     expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
@@ -155,6 +283,53 @@ describe('chatReducer', () => {
     // flight names no question: the answer may already be accepted, so the card stays sent.
     const unparsed = run([server({ type: 'error', code: 'invalid', message: 'ignored a malformed message' })], sent)
     expect(unparsed.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+  })
+
+  it('keeps an attention request as one, and parses its timer from the wire (#815)', () => {
+    const questions = [
+      {
+        question: 'The tab closed; reopen it?',
+        header: 'Tab disconnected',
+        multiSelect: false,
+        options: [
+          { label: "I'm here", description: '' },
+          { label: 'Carry on without me', description: '' },
+        ],
+      },
+    ]
+    const attention = { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: '2026-10-04T09:05:00.000Z' } as const
+    const frame = { v: 1, type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions, attention }
+    expect(ServerEventSchema.parse(frame)).toEqual(frame)
+    expect(ServerEventSchema.safeParse({ ...frame, attention: { ...attention, onTimeout: 'approve' } }).success).toBe(false)
+    const waiting = run([server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions, attention })], started)
+    expect(waiting.sessions.s1?.items[0]).toEqual({ kind: 'question', id: 'q1', tool: 't3', questions, attention, state: 'pending' })
+    const timedOut = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'nobody replied in time (on_timeout: proceed)' })],
+      waiting,
+    )
+    expect(timedOut.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', attention })
+    expect(timedOut.sessions.s1?.items[0]).not.toHaveProperty('reconnected')
+    const back = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'the ScadBuddy tab is connected again', reconnected: true })],
+      waiting,
+    )
+    expect(back.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reconnected: true })
+
+    // A closed card's reason is not a later resolve frame's: one without a reason
+    // must not read "No reply: <the refusal's reason>" (#1401).
+    const closed = run(
+      [
+        { type: 'answered', sessionId: 's1', questionId: 'q1' },
+        { type: 'respond-failed', sessionId: 's1', id: 'q1', message: 'x', closed: 'it is no longer waiting for a response' },
+      ],
+      waiting,
+    )
+    expect(closed.sessions.s1?.items[0]).toMatchObject({ state: 'closed', reason: 'it is no longer waiting for a response' })
+    const reasonless = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false })], closed)
+    expect(reasonless.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled' })
+    expect(reasonless.sessions.s1?.items[0]).not.toHaveProperty('reason')
+    const late = run([server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ["I'm here"] })], closed)
+    expect(late.sessions.s1?.items[0]).not.toHaveProperty('reason')
   })
 
   it('closes a half-streamed message when the session settles (an interrupt)', () => {
@@ -261,6 +436,23 @@ describe('chatReducer', () => {
     expect(state.activeId).toBe('s1')
   })
 
+  it('#2371 — keeps a known title and status when opening a chat replays its log', () => {
+    const listed = run([
+      server({
+        type: 'sessions.snapshot',
+        sessions: [{ sessionId: 'x', title: 'Renamed', origin: 'chat', owner: you, status: 'done' }],
+      }),
+    ])
+    const replayed = run(
+      [server({ type: 'session.started', sessionId: 'x', origin: 'chat', owner: you, title: 'The first prompt' })],
+      listed,
+    )
+    expect(replayed.sessions.x).toMatchObject({ title: 'Renamed', status: 'done' })
+    // A session the panel has not heard of takes the event's title, and is running.
+    const fresh = run([server({ type: 'session.started', sessionId: 'y', origin: 'chat', owner: you, title: 'Hello' })], listed)
+    expect(fresh.sessions.y).toMatchObject({ title: 'Hello', status: 'running' })
+  })
+
   it('records a handoff', () => {
     const state = run(
       [
@@ -345,5 +537,62 @@ describe('chatReducer', () => {
       expect(reattached.sessions.s1?.budgetSpent).toBe(false)
       expect(reattached.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
     })
+  })
+
+  it("says which subagent asked a question, from its call's parent Agent call (#1109)", () => {
+    const questions = [
+      {
+        question: 'Which?',
+        header: 'Pick',
+        multiSelect: false,
+        options: [
+          { label: 'A', description: '' },
+          { label: 'B', description: '' },
+        ],
+      },
+    ]
+    const ask = 'mcp__scadbuddy_questions__ask_user'
+    const state = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent1', name: 'Agent', input: { description: 'd', prompt: 'p', subagent_type: 'pkg:helper' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 'agent2', name: 'Agent', input: { truncated: true, preview: '{…' }, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't1', name: ask, input: {}, risk: 'read', parent: 'agent1' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't2', name: ask, input: {}, risk: 'read', parent: 'agent2' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't3', name: 'AskUserQuestion', input: {}, risk: 'read' }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't1', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q2', tool: 't2', questions }),
+        server({ type: 'question.asked', sessionId: 's1', id: 'q3', tool: 't3', questions }),
+        // Its call not (yet) in the feed: nothing is claimed.
+        server({ type: 'question.asked', sessionId: 's1', id: 'q4', tool: 't4', questions }),
+      ],
+      started,
+    )
+    const items = state.sessions.s1?.items ?? []
+    const of = (id: string) => {
+      const q = items.find((i) => i.kind === 'question' && i.id === id)
+      return q?.kind === 'question' ? askedBy(items, q) : 'missing'
+    }
+    expect(of('q1')).toBe('pkg:helper')
+    // A subagent whose type the feed does not show (a truncated input) is still a subagent.
+    expect(of('q2')).toBe('')
+    expect(of('q3')).toBeUndefined()
+    expect(of('q4')).toBeUndefined()
+  })
+})
+
+describe('workspace changes (#2329)', () => {
+  it('counts each workspace.file event, so the Files list reads again, and notes each in the feed (#2399)', () => {
+    const state = run(
+      [
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 }),
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'deleted', by: you }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.workspaceChanges).toBe(2)
+    expect(state.sessions.s1?.items.slice(started.sessions.s1?.items.length)).toEqual([
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 },
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'deleted', by: you },
+    ])
   })
 })

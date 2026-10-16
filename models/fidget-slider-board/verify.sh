@@ -17,6 +17,9 @@
 #   - every row can slide: each bead swept along its track by the free room,
 #     grown by clearance - 0.03, touches nothing of the board;
 #   - every track, knob and the name stay at least 3 mm inside the outline;
+#   - the name is never cut: the inlay is exactly as wide and as tall as the
+#     same text rendered on its own at the size the log reports (a box that
+#     clipped it, as the name's band once did, makes it smaller);
 #   - rendered once per colour the way ScadBuddy builds its closed parts, the
 #     colour parts do not overlap (the volume of the union equals the sum);
 #   - the render log's NOTE lines say what was dropped or shrunk.
@@ -67,10 +70,11 @@ WALL = 3
 
 # Defaults, mirrored from model.scad.
 D = dict(shape="heart", board_size=180, rows=4, beads_per_row=4, bead_size=15, free_places=1,
-         clearance=0.4, color_pattern="diagonal", bead_colors=6, name="MIA", name_size=14)
+         clearance=0.4, color_pattern="diagonal", bead_colors=6, name="MIA", name_size=13)
 BOARD = "#F8BBD0"
 BEADS = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#1E88E5", "#8E24AA", "#00ACC1", "#EC407A"]
 NAME = "#6A1B9A"
+FONT = "DejaVu Sans:style=Bold"
 
 # (case, overrides, NOTE substrings the log must carry, NOTE substrings it must not)
 CASES = [
@@ -98,6 +102,14 @@ CASES = [
                           name=""), ["free room cut to 1 bead places"], []),
     # A long name on a narrow shape shrinks rather than overflowing.
     ("star-long-name", dict(shape="star", board_size=150, rows=2, beads_per_row=3, name="ABCDEFGH"),
+     ["name letters are"], ["name does not fit"]),
+    # Round, wide capitals on the smallest board: shrunk to fit, never cut (#512).
+    ("heart-oscar", dict(board_size=100, rows=1, name="OSCAR"),
+     ["name letters are"], ["name does not fit"]),
+    # Ascenders and descenders at the full size: the band is as tall as the ink (#512).
+    ("heart-peggy", dict(board_size=280, name="Peggy"), [], ["NOTE"]),
+    # Wide letters at the most a name holds.
+    ("rrect-wide-12", dict(shape="rounded_rectangle", board_size=200, rows=2, name="WMWMWMWMWMWM"),
      ["name letters are"], ["name does not fit"]),
 ]
 # Expected bead counts, read off a render and checked by hand against the
@@ -228,7 +240,7 @@ for name, ov, want_notes, bad_notes in CASES:
     print("\n[%s] %s" % (name, " ".join("%s=%s" % kv for kv in ov.items()) or "defaults"))
     m = re.search(r'SB_FIDGET beads=(\d+) rows=\[\[([^\]]*)\]\] row_y=\[\[([^\]]*)\]\] '
                   r'x0=\[\[([^\]]*)\]\] pitch=(\S+) free_places=(\S+) free=(\S+) '
-                  r'name_size=(\S+) name_iv=.*? name_y=\S+ size=\[(\S+), (\S+)\] top=(\S+)"', log)
+                  r'name_size=(\S+) .*?name_iv=.*? name_y=\S+ size=\[(\S+), (\S+)\] top=(\S+)"', log)
     if not m:
         print(log[-2000:])
         sys.exit("FAIL: no SB_FIDGET echo for %s" % name)
@@ -301,6 +313,20 @@ for name, ov, want_notes, bad_notes in CASES:
     sl = real_points(read_stl("%s/%s_slide.stl" % (OUT, name)))
     check(not sl, "every bead slides %.1f mm along its track clear of the board (%d overlap vertices)"
           % (free, len(sl)))
+    if name_size > 0:
+        nx = [verts[i][0] for t in tris if mats[t[3]][1] == NAME for i in t[:3]]
+        ny = [verts[i][1] for t in tris if mats[t[3]][1] == NAME for i in t[:3]]
+        with open("%s/%s_text.scad" % (OUT, name), "w") as f:
+            f.write("linear_extrude(1) text(%s, size = %r, font = %s);\n"
+                    % (scad(p["name"]), name_size, scad(FONT)))
+        docker("openscad --backend=Manifold -o %s/%s_text.stl %s/%s_text.scad" % (OUT, name, OUT, name))
+        tv = [v for t in read_stl("%s/%s_text.stl" % (OUT, name)) for v in t]
+        tw = max(v[0] for v in tv) - min(v[0] for v in tv)
+        th = max(v[1] for v in tv) - min(v[1] for v in tv)
+        iw, ih = max(nx) - min(nx), max(ny) - min(ny)
+        check(abs(iw - tw) < 0.05 and abs(ih - th) < 0.05,
+              "the name is not cut: inlay %.2f x %.2f mm == the text alone %.2f x %.2f mm"
+              % (iw, ih, tw, th))
     wl = real_points(read_stl("%s/%s_wall.stl" % (OUT, name)))
     check(not wl, "tracks, knobs and name are >= %.2f mm inside the outline (%d vertices outside)"
           % (WALL - 0.05, len(wl)))

@@ -1,13 +1,22 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { useRef, type ReactNode } from 'react'
-import { Route, Routes } from 'react-router'
+import { HttpResponse, http } from 'msw'
+import { useRef, useState, type ReactNode } from 'react'
+import { Link, Route, Routes } from 'react-router'
 import { bridge } from '../../agent/bridge'
+import { respond } from '../../agent/respond'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
-import { setPendingApprovals } from '../../mocks/features/approvals'
+import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
+import { setRunningSessions, setSessionResources } from '../../mocks/features/assistantSessions'
+import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
+import { emitRealtime } from '../../mocks/realtime'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
+import { Dialog } from '../ui/Dialog'
+import { ResourceSessions } from './ResourceSessions'
 
 /** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
 const availability = vi.hoisted(() => {
@@ -92,7 +101,8 @@ describe('assistant panel', () => {
   it('keeps an open panel through an outage, and drops it only when the agent says AI is off', async () => {
     const { user } = renderShell()
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
-    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    // The panel is a lazy chunk: the first test waits for it past the default.
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' }, { timeout: 10_000 })
     await user.type(box, 'Make the name bigger{Enter}')
     const transcript = (await screen.findAllByText('Make the name bigger')).length
 
@@ -125,6 +135,23 @@ describe('assistant panel', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Assistant' })).toHaveFocus()
+  })
+
+  it('banners the panel while MCP authentication is off, linking to Settings (#1921)', async () => {
+    setMcpAuthMode('disabled', 'read')
+    renderShell()
+    fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
+    const panel = await screen.findByRole('complementary', { name: 'Assistant' })
+    const banner = await within(panel).findByTestId('mcp-auth-banner')
+    expect(banner).toHaveTextContent('with read-only access')
+    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+  })
+
+  it('has no banner while /mcp needs a token (#1921)', async () => {
+    renderShell()
+    fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    expect(screen.queryByTestId('mcp-auth-banner')).not.toBeInTheDocument()
   })
 
   it('comes out of full screen for Ctrl+` rather than opening out of sight', async () => {
@@ -178,14 +205,23 @@ describe('assistant panel', () => {
   })
 
   it('streams text, shows the tool call with its risk, sources and version', async () => {
-    await openAndSend()
+    const { user } = await openAndSend()
     const log = screen.getByRole('log', { name: 'Conversation' })
     expect(within(log).getByText(/make the/)).toBeInTheDocument()
     expect(within(log).getByText('name', { selector: 'strong' })).toBeInTheDocument()
-    const [write, send] = screen.getAllByTestId('agent-tool')
-    expect(within(write!).getByText('set_parameters')).toBeInTheDocument()
+    // #782: the write and the render view are one group, closed once both are done.
+    const steps = await screen.findByRole('button', { name: /2 steps/ })
+    await waitFor(() => expect(steps).toHaveAttribute('aria-expanded', 'false'))
+    expect(screen.getByRole('img', { name: 'Look at the render (iso)' })).toHaveAttribute(
+      'src',
+      expect.stringMatching(/^\/api\/v1\/ai\/sessions\/[^/]+\/blobs\/[0-9a-f]{64}\.png$/),
+    )
+    await user.click(steps)
+    const [write, , send] = screen.getAllByTestId('agent-tool')
+    expect(within(write!).getByText('Set text_size → 14 mm')).toBeInTheDocument()
     expect(within(write!).getByText('write')).toBeInTheDocument()
     expect(within(write!).getByText('Why? 2 sources')).toBeInTheDocument()
+    await user.click(within(write!).getByRole('button', { name: 'Why? 2 sources' }))
     expect(within(write!).getByRole('link', { name: 'OpenSCAD customizer parameters' })).toHaveAttribute(
       'href',
       'https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Customizer',
@@ -195,7 +231,8 @@ describe('assistant panel', () => {
       '/m/name-keychain/versions',
     )
     expect(within(send!).getByText('outward')).toBeInTheDocument()
-    expect(within(send!).getByText('running…')).toBeInTheDocument()
+    expect(within(send!).getByText('Print name-keychain × 2')).toBeInTheDocument()
+    expect(within(send!).getByTestId('agent-tool-status')).toHaveTextContent('Waiting for approval')
   })
 
   it('shows tool arguments only in Advanced, and remembers the switch per browser', async () => {
@@ -211,6 +248,20 @@ describe('assistant panel', () => {
     window.localStorage.removeItem('scadbuddy.assistant.advanced')
   })
 
+  it('says on an empty chat what Advanced will show, so the switch visibly takes effect (#1488)', async () => {
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: 'New chat' }))
+    const note = /Advanced: tool arguments, sources and memory details will be shown/
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.getByText(note)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced' }))
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+    window.localStorage.removeItem('scadbuddy.assistant.advanced')
+  })
+
   it('holds the outward step until Approve, then sends the decision', async () => {
     const { user } = await openAndSend()
     const card = screen.getByRole('region', { name: 'Needs your approval' })
@@ -223,25 +274,47 @@ describe('assistant panel', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     })
-    expect(sentOf('approval.decision')).toEqual([])
+    expect(respondRequests()).toEqual([])
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
     expect(screen.getByTestId('agent-status')).toHaveTextContent('Waiting for approval')
 
     await user.click(approve)
-    expect(sentOf('approval.decision')).toEqual([
-      { v: 1, type: 'approval.decision', sessionId: 'chat-1', id: expect.any(String), approve: true },
-    ])
-    await screen.findByText('Queued 2 copies in the Keychains project.')
+    // Through the one respond route (#815), not the socket.
+    expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
+    expect(sentOf('approval.decision')).toEqual([])
+    // #782: the call says it is done; what it returned is behind its Details.
+    const print = () => screen.getAllByTestId('agent-tool').find((t) => t.textContent?.includes('Print name-keychain × 2'))
+    await waitFor(() => expect(print()).toHaveAttribute('data-status', 'done'))
+    await user.click(within(print()!).getByRole('button', { name: /^Details/ }))
+    expect(within(print()!).getByTestId('agent-tool-result')).toHaveTextContent('Queued 2 copies in the Keychains project.')
     await screen.findByText('Sent. Two copies are in the queue.')
     expect(within(card).getByText('Approved by You.')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
   })
 
+  // #1383: the panel's live region announces an attention request, never a done summary.
+  it('announces an attention request, and keeps quiet about a done summary (#815)', async () => {
+    const view = renderShell()
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.type(box, 'post a summary when you are done{Enter}')
+    await screen.findByTestId('agent-done')
+    await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
+    expect(screen.queryByText('The assistant needs your attention.')).not.toBeInTheDocument()
+
+    await view.user.click(screen.getByRole('button', { name: 'New chat' }))
+    await view.user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'my tab dropped{Enter}')
+    await screen.findByRole('heading', { name: 'The assistant needs you: Tab disconnected' })
+    expect(await screen.findByText('The assistant needs your attention.')).toHaveAttribute('role', 'status')
+  })
+
   it('Deny sends a refusal and nothing is sent', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
-    expect(sentOf('approval.decision')).toMatchObject([{ approve: false }])
-    await screen.findByText('Denied: nothing was sent.')
+    expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
+    // The call reads as not run; the refusal its result carries is the model's, not shown (#2149).
+    await waitFor(() => expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Not run'))
+    expect(screen.queryByText('Denied: nothing was sent.')).not.toBeInTheDocument()
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })
 
@@ -249,13 +322,13 @@ describe('assistant panel', () => {
     setPendingApprovals(2)
     document.title = 'ScadBuddy'
     const { user } = renderShell()
-    const button = await screen.findByRole('button', { name: 'Assistant, 2 actions waiting for your approval' })
-    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 actions waiting for your approval')
+    const button = await screen.findByRole('button', { name: 'Assistant, 2 waiting for you' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 waiting for you (2 approvals)')
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('2')
     // Announced, not only shown: the badge appears while focus is elsewhere.
     const live = screen.getByTestId('assistant-attention-live')
     expect(live).toHaveAttribute('aria-live', 'polite')
-    expect(live).toHaveTextContent('2 actions waiting for your approval')
+    expect(live).toHaveTextContent('2 waiting for you')
     await waitFor(() => expect(document.title).toBe('(2) ScadBuddy'))
 
     // Decided elsewhere: toggling the panel reads again, and the badge goes.
@@ -266,6 +339,59 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {
+    setRunningSessions(1)
+    const { user } = renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, working' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): working')
+    expect(within(button).getByTestId('assistant-working')).toBeInTheDocument()
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    // Announced in its own region, so the waiting count is not read out again.
+    const live = screen.getByTestId('assistant-working-live')
+    expect(live).toHaveAttribute('aria-live', 'polite')
+    expect(live).toHaveTextContent('The assistant is working')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+
+    // Running and waiting at once (another session asked for an approval).
+    setPendingApprovals(1)
+    await user.click(button)
+    expect(await screen.findByRole('button', { name: 'Assistant, working, 1 waiting for you' })).toHaveAttribute(
+      'title',
+      'Assistant (Ctrl+`): working, 1 waiting for you (1 approval)',
+    )
+
+    // Idle: neither is shown. The click opened the panel, this one closes it.
+    setRunningSessions(0)
+    setPendingApprovals(0)
+    await user.click(screen.getByRole('button', { name: 'Assistant, working, 1 waiting for you' }))
+    const plain = await screen.findByRole('button', { name: 'Assistant' })
+    expect(within(plain).queryByTestId('assistant-working')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assistant-working-live')).toBeEmptyDOMElement()
+  })
+
+  it('shows a done summary beside the badge, not in the waiting count or the tab title (#815)', async () => {
+    setPendingAnswers(1, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you, 1 summary' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 1 waiting for you (1 question), 1 summary')
+    expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toHaveTextContent('1 waiting for you')
+    await waitFor(() => expect(document.title).toBe('(1) ScadBuddy'))
+  })
+
+  it('a done summary alone waits for nothing: no count, no title prefix, but still shown (#815)', async () => {
+    setPendingAnswers(0, 0, 1)
+    document.title = 'ScadBuddy'
+    renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 summary' })
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    expect(within(button).getByTestId('assistant-summaries')).toHaveTextContent('1 summary')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+    expect(document.title).toBe('ScadBuddy')
   })
 
   it('shows the badge embedded in Bambuddy, but leaves the frame\'s unseen title alone (#815)', async () => {
@@ -279,9 +405,18 @@ describe('assistant panel', () => {
       </Routes>,
       { route: '/' },
     )
-    const button = await screen.findByRole('button', { name: 'Assistant, 1 action waiting for your approval' })
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' })
     expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
     expect(document.title).toBe('ScadBuddy')
+  })
+
+  // #1538: the mocked agent says how a no-longer-pending entry ended, as the real one does (#1400).
+  it('a second response to an entry that already ended is refused with how it ended', async () => {
+    const { user } = await openAndSend()
+    await user.click(screen.getByRole('button', { name: 'Approve' }))
+    await screen.findByText('Approved by You.')
+    const [approved] = respondRequests()
+    await expect(respond(approved!.id, { kind: 'approval', decision: 'deny' })).rejects.toMatchObject({ status: 409, reason: 'it was already approved' })
   })
 
   it('Stop interrupts the turn', async () => {
@@ -291,6 +426,51 @@ describe('assistant panel', () => {
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+  })
+
+  describe('keyboard focus (#992)', () => {
+    it('Stop by keyboard leaves focus in the composer, not on <body>', async () => {
+      const { user } = await openAndSend()
+      screen.getByRole('button', { name: 'Stop' }).focus()
+      await user.keyboard('{Enter}')
+      await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent('Idle'))
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+      expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
+    })
+
+    it('picking a session by keyboard puts focus in its composer, and marks it the open one', async () => {
+      const { user } = await openAndSend()
+      await user.click(screen.getByRole('button', { name: 'New chat' }))
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const picker = screen.getByRole('navigation', { name: 'Sessions' })
+      within(picker).getByRole('button', { name: /^Make the name bigger/ }).focus()
+      await user.keyboard('{Enter}')
+
+      expect(screen.queryByRole('navigation', { name: 'Sessions' })).not.toBeInTheDocument()
+      await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus())
+
+      await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+      const reopened = screen.getByRole('navigation', { name: 'Sessions' })
+      const open = within(reopened).getByRole('button', { name: /^Make the name bigger/ })
+      expect(open).toHaveAttribute('aria-current', 'true')
+      expect(open).toHaveTextContent('Open')
+      for (const other of within(reopened).getAllByRole('button').filter((b) => b !== open)) {
+        expect(other).not.toHaveAttribute('aria-current')
+        expect(other).not.toHaveTextContent(/\bOpen\b/)
+      }
+    })
+
+    it("picking an agent's session puts focus on Take over, since its composer is locked", async () => {
+      const { user } = renderShell()
+      await user.click(screen.getByRole('button', { name: 'Assistant' }))
+      await user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+      within(screen.getByRole('navigation', { name: 'Sessions' }))
+        .getByRole('button', { name: /Tune the gridfinity bin/ })
+        .focus()
+      await user.keyboard('{Enter}')
+
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Take over' })).toHaveFocus())
+    })
   })
 
   it('lists sessions with origin and owner, and takes over one an agent controls', async () => {
@@ -314,6 +494,339 @@ describe('assistant panel', () => {
     expect(sentOf('session.handoff')).toEqual([{ v: 1, type: 'session.handoff', sessionId: EXTERNAL_SESSION_ID }])
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled())
     expect(screen.queryByText('Controlled by Claude Desktop')).not.toBeInTheDocument()
+    // #992 — Take over is gone: focus is where the next message is typed.
+    expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus()
+  })
+
+  it("opens a session that changed the page's model in the panel, closed or already open (#931)", async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    const panel = () => screen.queryByRole('complementary', { name: 'Assistant' })
+    expect(panel()).not.toBeInTheDocument()
+
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    expect(panel()).toBeVisible()
+    expect(sentOf('session.attach')).toEqual([{ v: 1, type: 'session.attach', sessionId: EXTERNAL_SESSION_ID }])
+
+    // Open and on another chat: picking it again switches back to it.
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+    await waitFor(() => expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    expect(sentOf('session.attach')).toHaveLength(2)
+  })
+
+  it('selects a requested session once: a remounted panel does not open it again (#931)', async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    // The assistant goes off (the panel unmounts) and comes back: a fresh panel, on nothing.
+    act(() => availability.set({ available: false, state: 'not_configured' }))
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument())
+    act(() => availability.set({ available: true }))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
+    expect(sentOf('session.attach')).toEqual([])
+    expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument()
+  })
+
+  it('drops a requested session the panel never got to when the assistant goes off (#931)', async () => {
+    const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
+    const item = await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ })
+    // Picked, and the assistant goes off before the panel has loaded.
+    act(() => {
+      fireEvent.click(item)
+      availability.set({ available: false, state: 'not_configured' })
+    })
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
+
+    act(() => availability.set({ available: true }))
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(agent.sent.some((m) => m.type === 'tab.bind')).toBe(true))
+    expect(sentOf('session.attach')).toEqual([])
+  })
+
+  it("filters the session picker to the sessions that changed this page's model (#931)", async () => {
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.type(box, 'Make the name bigger and send it{Enter}')
+    await screen.findByRole('region', { name: 'Needs your approval' })
+
+    await view.user.click(screen.getByRole('button', { name: 'Sessions (2)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    expect(within(picker).getAllByRole('listitem')).toHaveLength(2)
+    const only = within(picker).getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' })
+    expect(only).not.toBeChecked()
+    await view.user.click(only)
+    // The desktop agent's session changed gridfinity-bin; the new chat changed nothing.
+    await waitFor(() => expect(within(picker).getAllByRole('listitem')).toHaveLength(1))
+    expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+    // Below the cap, no notice about it (#1340).
+    expect(within(picker).queryByText(/most recently updated/)).not.toBeInTheDocument()
+
+    await view.user.click(only)
+    expect(within(picker).getAllByRole('listitem')).toHaveLength(2)
+  })
+
+  it("re-reads the model filter on the model's changes while the picker is open (#1340)", async () => {
+    let touching: { id: string }[] = []
+    server.use(http.get('/api/v1/ai/resources/:type/:id/sessions', () => HttpResponse.json({ sessions: touching })))
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' }))
+    expect(await within(picker).findByText('No session changed gridfinity-bin.')).toBeInTheDocument()
+
+    touching = [{ id: EXTERNAL_SESSION_ID }]
+    act(() => emitRealtime('model.updated', ['model:gridfinity-bin'], { slug: 'gridfinity-bin' }))
+    expect(await within(picker).findByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+  })
+
+  it("re-reads the model filter on a session's tool results while the picker is open (#1340)", async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', () => {
+        reads += 1
+        return HttpResponse.json({ sessions: [] })
+      }),
+    )
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' }))
+    expect(await screen.findByText('No session changed gridfinity-bin.')).toBeInTheDocument()
+    const before = reads
+
+    await view.user.type(screen.getByRole('textbox', { name: 'Message the assistant' }), 'Make the name bigger and send it{Enter}')
+    await screen.findByRole('region', { name: 'Needs your approval' })
+    expect(screen.getByRole('navigation', { name: 'Sessions' })).toBeInTheDocument()
+    await waitFor(() => expect(reads).toBeGreaterThan(before))
+  })
+
+  it('says when no session changed the model, and when the agent cannot say (#931)', async () => {
+    const view = renderShell('/m/name-keychain')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox', { name: 'Only sessions that changed name-keychain' }))
+    expect(await within(picker).findByText('No session changed name-keychain.')).toBeInTheDocument()
+
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', () =>
+        HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }),
+      ),
+    )
+    await view.user.click(within(picker).getByRole('checkbox'))
+    await view.user.click(within(picker).getByRole('checkbox'))
+    const alert = await within(picker).findByRole('alert')
+    expect(alert).toHaveTextContent('the AI database is unreachable')
+    // The list under it is not filtered, and says so.
+    expect(alert).toHaveTextContent('Showing every session')
+    // The full list stays usable.
+    expect(within(picker).getByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+
+    // Reopening the picker asks again (#1340).
+    server.use(http.get('/api/v1/ai/resources/:type/:id/sessions', () => HttpResponse.json({ sessions: [] })))
+    await view.user.click(screen.getByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: 'Sessions (1)' }))
+    const reopened = screen.getByRole('navigation', { name: 'Sessions' })
+    expect(await within(reopened).findByText('No session changed name-keychain.')).toBeInTheDocument()
+    expect(within(reopened).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it("doesn't say no session changed the model when the ones that did aren't loaded here (#931)", async () => {
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', () => HttpResponse.json({ sessions: [{ id: 'older-session' }] })),
+    )
+    const view = renderShell('/m/name-keychain')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText('None of the loaded sessions changed name-keychain.')).toBeInTheDocument()
+    expect(within(picker).queryByText('No session changed name-keychain.')).not.toBeInTheDocument()
+  })
+
+  it('shows a loading state, not the full list, while the model filter loads (#931)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', async () => {
+        await held
+        return HttpResponse.json({ sessions: [{ id: EXTERNAL_SESSION_ID }] })
+      }),
+    )
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText('Finding the sessions that changed gridfinity-bin…')).toBeInTheDocument()
+    expect(within(picker).queryByRole('listitem')).not.toBeInTheDocument()
+    act(() => release())
+    expect(await within(picker).findByRole('button', { name: /Tune the gridfinity bin/ })).toBeInTheDocument()
+  })
+
+  it('says when the model filter reached the most sessions it reads (#931)', async () => {
+    server.use(
+      http.get('/api/v1/ai/resources/:type/:id/sessions', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        return HttpResponse.json({
+          sessions: [{ id: EXTERNAL_SESSION_ID }, ...Array.from({ length: limit - 1 }, (_, i) => ({ id: `old-${i}` }))],
+        })
+      }),
+    )
+    const view = renderShell('/m/gridfinity-bin')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    const picker = screen.getByRole('navigation', { name: 'Sessions' })
+    await view.user.click(within(picker).getByRole('checkbox'))
+    expect(await within(picker).findByText(/the 500 most recently updated/)).toBeInTheDocument()
+  })
+
+  it("does not carry the model filter to another model's page, or back (#931, #1340)", async () => {
+    const links = (
+      <>
+        <Link to="/m/name-keychain">other model</Link>
+        <Link to="/m/gridfinity-bin">first model</Link>
+      </>
+    )
+    const view = renderShell('/m/gridfinity-bin', links)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' }))
+    await view.user.click(screen.getByRole('link', { name: 'other model' }))
+    expect(await screen.findByRole('checkbox', { name: 'Only sessions that changed name-keychain' })).not.toBeChecked()
+    // Back on the first model's page the filter is off: every page starts unfiltered.
+    await view.user.click(screen.getByRole('link', { name: 'first model' }))
+    expect(await screen.findByRole('checkbox', { name: 'Only sessions that changed gridfinity-bin' })).not.toBeChecked()
+  })
+
+  it('offers no model filter off a model page (#931)', async () => {
+    const view = renderShell('/')
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    expect(within(screen.getByRole('navigation', { name: 'Sessions' })).queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it("shows what a session touched, linking to each resource's page (#931)", async () => {
+    const { user } = renderShell('/')
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    const touched = screen.getByRole('button', { name: 'Touched' })
+    expect(touched).toHaveAttribute('aria-expanded', 'false')
+    await user.click(touched)
+    expect(touched).toHaveAttribute('aria-expanded', 'true')
+    const panel = screen.getByRole('region', { name: 'What this session touched' })
+    const revisions = await within(panel).findByRole('group', { name: 'Revisions' })
+    expect(within(revisions).getByRole('link', { name: /3f9c2a1/ })).toHaveAttribute(
+      'href',
+      '/m/gridfinity-bin?version=3f9c2a1b7d4e3f9c2a1b7d4e3f9c2a1b7d4e3f9c',
+    )
+
+    await user.click(touched)
+    expect(screen.queryByRole('region', { name: 'What this session touched' })).not.toBeInTheDocument()
+  })
+
+  it('reads Touched again when a tool call finishes, without waiting for the turn (#931)', async () => {
+    let inject: (frame: unknown) => void = () => {}
+    const spying = () => {
+      const inner = factory()
+      return {
+        ...inner,
+        connect: (h: Parameters<typeof inner.connect>[0]) => {
+          inject = (frame) => act(() => h.onFrame(frame as never))
+          inner.connect(h)
+        },
+      }
+    }
+    const view = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} assistantTransport={spying} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+    await view.user.click(screen.getByRole('button', { name: 'Touched' }))
+    const panel = screen.getByRole('region', { name: 'What this session touched' })
+    await within(panel).findByRole('group', { name: 'Presets' })
+
+    setSessionResources(EXTERNAL_SESSION_ID, [
+      { type: 'output', id: 'out-mid', action: 'created', model: 'gridfinity-bin', before: null, after: null, tool: 'save_output', at: '2026-10-03T09:01:00.000Z' },
+    ])
+    const status = screen.getByTestId('agent-status').textContent
+    const base = { v: 1, sessionId: EXTERNAL_SESSION_ID }
+    inject({ ...base, type: 'tool.call', id: 'tool-ext-2', name: 'mcp__scadbuddy__save_output', input: { slug: 'gridfinity-bin' }, risk: 'write' })
+    inject({ ...base, type: 'tool.result', id: 'tool-ext-2', ok: true, summary: 'Saved.' })
+
+    expect(await within(panel).findByRole('link', { name: /out-mid/ })).toHaveAttribute('href', '/edit/out-mid')
+    // Read on the tool result alone: the session's status never moved.
+    expect(screen.getByTestId('agent-status').textContent).toBe(status)
+  })
+
+  it("shows a session's Files, and reads them again when a file is uploaded (#2329)", async () => {
+    let inject: (frame: unknown) => void = () => {}
+    const spying = () => {
+      const inner = factory()
+      return {
+        ...inner,
+        connect: (h: Parameters<typeof inner.connect>[0]) => {
+          inject = (frame) => act(() => h.onFrame(frame as never))
+          inner.connect(h)
+        },
+      }
+    }
+    seedSessionFile(EXTERNAL_SESSION_ID, 'downloads/bin.3mf', new Uint8Array(10), 'model/3mf', { tool: 'workspace_save' })
+    const view = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} assistantTransport={spying} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    const files = screen.getByRole('button', { name: 'Files' })
+    expect(files).toHaveAttribute('aria-expanded', 'false')
+    await view.user.click(files)
+    const panel = screen.getByRole('region', { name: "This session's files" })
+    expect(await within(panel).findByText('downloads/bin.3mf')).toBeInTheDocument()
+    expect(within(panel).getByText(/by workspace_save/)).toBeInTheDocument()
+
+    seedSessionFile(EXTERNAL_SESSION_ID, 'uploads/new.stl', new Uint8Array(3), 'model/stl', { kind: 'upload' })
+    inject({
+      v: 1,
+      type: 'workspace.file',
+      sessionId: EXTERNAL_SESSION_ID,
+      path: 'uploads/new.stl',
+      change: 'uploaded',
+      by: { kind: 'browser', id: 'browser', label: 'You' },
+      size: 3,
+    })
+    expect(await within(panel).findByText('uploads/new.stl')).toBeInTheDocument()
+    // The feed notes it too (#2399).
+    expect(await screen.findByTestId('agent-file')).toHaveTextContent('You uploaded uploads/new.stl (3 B) to the workspace')
   })
 
   it('reports a malformed frame instead of rendering it', async () => {
@@ -334,5 +847,174 @@ describe('assistant panel', () => {
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
     expect(await screen.findByText(/Ignored a malformed message/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+})
+
+/** A page with a dialog, as the customizer's Print is. */
+function DialogPage({ startOpen = false }: { startOpen?: boolean }) {
+  const [open, setOpen] = useState(startOpen)
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Print…
+      </button>
+      <Dialog open={open} title="Print" onClose={() => setOpen(false)} footer={<button type="button">Print it</button>}>
+        <input aria-label="Copies" />
+      </Dialog>
+    </>
+  )
+}
+
+describe('the assistant beside a dialog (#798)', () => {
+  async function openBoth() {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    return { ...view, composer, dialog }
+  }
+
+  it('lets the chat be typed in while the dialog stays open', async () => {
+    const { user, composer, dialog } = await openBoth()
+    expect(within(dialog).getByRole('textbox', { name: 'Copies' })).toHaveFocus()
+
+    await user.click(composer)
+    await user.keyboard('Which spool is the grey one?')
+    expect(composer).toHaveValue('Which spool is the grey one?')
+    expect(dialog).toBeInTheDocument()
+  })
+
+  it('is not hidden from screen readers by the dialog while it is beside it', async () => {
+    const { user, dialog } = await openBoth()
+    expect(dialog).not.toHaveAttribute('aria-modal', 'true')
+
+    // Without the chat beside it, the dialog is modal again.
+    await user.click(screen.getByRole('button', { name: 'Close assistant' }))
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+  })
+
+  it('does not close the dialog for an Escape pressed in the chat', async () => {
+    const { user, composer } = await openBoth()
+    await user.click(composer)
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('moves between the dialog and the chat with Ctrl+`', async () => {
+    const { composer, dialog } = await openBoth()
+    const copies = within(dialog).getByRole('textbox', { name: 'Copies' })
+    expect(copies).toHaveFocus()
+
+    pressShortcut()
+    await waitFor(() => expect(composer).toHaveFocus())
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeVisible()
+    pressShortcut()
+    await waitFor(() => expect(copies).toHaveFocus())
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeVisible()
+  })
+
+  it('leaves focus in the chat when a dialog opens while the user is typing there', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    // As the agent's open_print_dialog does: the dialog opens without the user's click.
+    fireEvent.click(screen.getByRole('button', { name: 'Print…' }))
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(composer).toHaveFocus()
+  })
+})
+
+describe('a dialog with no room beside the assistant (#798)', () => {
+  /** Lays the panel out as on a phone: no 360px left of it for the dialog. */
+  function narrow() {
+    const panel = screen.getByRole('complementary', { name: 'Assistant' })
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+      left: 120, right: 520, width: 400, top: 0, bottom: 800, height: 800, x: 120, y: 0, toJSON: () => ({}),
+    })
+  }
+  afterEach(() => vi.restoreAllMocks())
+
+  it('covers the chat: modal, and takes focus from the composer when it opens', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    narrow()
+    // Opened as the agent's open_print_dialog does, with focus still in the chat.
+    fireEvent.click(screen.getByRole('button', { name: 'Print…' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+    expect(within(dialog).getByRole('textbox', { name: 'Copies' })).toHaveFocus()
+  })
+
+  it('does not send Ctrl+` focus into the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+
+    pressShortcut()
+    await act(async () => {})
+    expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
+  it('opens under a dialog that will cover it without taking the focus, at phone width (#2013)', async () => {
+    // A phone: the panel lies over the page (AppShell's PANEL_OVERLAYS_QUERY).
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query.includes('max-width'),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    try {
+      const view = renderShell('/m/name-keychain', <DialogPage />)
+      const toggle = screen.getByRole('button', { name: 'Assistant' })
+      // Not raised above the dialog's overlay: there it would only paint over the dialog.
+      expect(toggle.className).not.toContain('z-[60]')
+      // The panel, laid out once and closed, so the dialog measures it when it opens.
+      await view.user.click(toggle)
+      await screen.findByRole('textbox', { name: 'Message the assistant' })
+      narrow()
+      await view.user.click(screen.getByRole('button', { name: 'Close assistant' }))
+      await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+      const dialog = screen.getByRole('dialog', { name: 'Print' })
+      const copies = within(dialog).getByRole('textbox', { name: 'Copies' })
+      expect(copies).toHaveFocus()
+
+      // The shortcut: the panel opens under the dialog, and the focus stays in it.
+      pressShortcut()
+      await act(async () => {})
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      await waitFor(() => expect(dialog).toHaveAttribute('aria-modal', 'true'))
+      expect(copies).toHaveFocus()
+
+      // A click that reaches the toggle (jsdom does not hit-test the overlay) does not
+      // send the focus into the covered composer either.
+      await view.user.click(toggle)
+      await view.user.click(toggle)
+      await act(async () => {})
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('textbox', { name: 'Message the assistant', hidden: true })).not.toHaveFocus()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('owns Escape, even from the covered chat', async () => {
+    const view = renderShell('/m/name-keychain', <DialogPage />)
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const composer = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    narrow()
+    await view.user.click(screen.getByRole('button', { name: 'Print…' }))
+    composer.focus()
+
+    await view.user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Print' })).not.toBeInTheDocument()
   })
 })

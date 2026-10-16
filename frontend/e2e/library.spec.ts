@@ -28,12 +28,13 @@ test.describe('library', () => {
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })
 
-  test('Advanced lists a sliced file without Print, and is remembered', async ({ page }) => {
+  test('Advanced lists a sliced file with Print, and is remembered', async ({ page }) => {
     await page.goto('/library')
     await page.getByRole('switch', { name: 'Advanced' }).click()
     const sliced = page.getByTestId('library-file-104')
-    await expect(sliced).toContainText('Print it from Bambuddy')
-    await expect(sliced.getByRole('button', { name: 'Print' })).toHaveCount(0)
+    // #2671 — a sliced file prints as it is.
+    await expect(sliced.getByRole('button', { name: /^Print / })).toBeVisible()
+    await expect(sliced).not.toContainText('Print it from Bambuddy')
 
     await page.reload()
     await expect(page.getByTestId('library-file-104')).toBeVisible()
@@ -45,5 +46,142 @@ test.describe('library', () => {
     await expect(page.getByTestId('library-file-89')).toBeVisible()
     const scrollWidth = await page.evaluate('document.documentElement.scrollWidth')
     expect(scrollWidth).toBeLessThanOrEqual(375)
+  })
+
+  // #935 — two uploads of one output share a long generated name, cut at the end to the
+  // common prefix, and the cards showed nothing else: no date, no size.
+  test('tells identically named files apart at phone width', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 800 })
+    await page.goto('/library')
+    const first = page.getByTestId('library-file-89')
+    const second = page.getByTestId('library-file-91')
+    await expect(first).toBeVisible()
+    await expect(second).toBeVisible()
+    expect(await first.innerText()).not.toEqual(await second.innerText())
+    // The name is cut in the middle, so its end stays readable (#3634: two lines first).
+    await expect(first.getByTestId('library-name-89')).toHaveText('bag-clip-3155628dc2bb…6dba164efc')
+    await expect(first.getByTestId('library-name-89')).toBeVisible()
+    await expect(first.locator('time')).toHaveAttribute('datetime', '2026-09-26T17:05:45Z')
+    await expect(first).toContainText('110 kB')
+  })
+
+  // #2165 — the folders are a tree, and the URL follows the page.
+  test('walks the folder tree by mouse and keyboard, with Back and Forward', async ({ page }) => {
+    await page.goto('/library')
+    const tree = page.getByRole('tree', { name: 'Library folders' })
+    const spec = tree.getByRole('treeitem', { name: 'Spec' })
+    await expect(spec).toHaveAttribute('aria-expanded', 'false')
+    await page.getByTestId('library-folder-toggle-10').click()
+    await expect(spec).toHaveAttribute('aria-expanded', 'true')
+    await tree.getByRole('treeitem', { name: 'MakerWorld' }).nth(1).click()
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld$/)
+
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('ArrowRight')
+    await expect(page.getByTestId('library-folder-12')).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld\/Work$/)
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+
+    await page.goBack()
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld$/)
+    await expect(page.getByTestId('library-folder-11')).toHaveAttribute('aria-selected', 'true')
+    await page.goForward()
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+  })
+
+  test('deep links open a folder, a file and its print dialog', async ({ page }) => {
+    await page.goto('/library/Spec/MakerWorld/Work')
+    await expect(page.getByTestId('library-folder-12')).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByTestId('library-file-121')).toBeVisible()
+
+    await page.goto('/library?file=67')
+    await expect(page).toHaveURL(/\/library\/MakerWorld\?file=67$/)
+    await expect(page.getByTestId('library-file-67')).toHaveAttribute('aria-current', 'true')
+
+    await page.getByTestId('library-print-67').click()
+    await expect(page).toHaveURL(/print=67/)
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+    await page.goBack()
+    await expect(page.getByRole('dialog', { name: 'Print' })).toHaveCount(0)
+    await page.goForward()
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+
+    await page.goto('/library?print=89')
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+  })
+
+  // #2167 — deletes go to Bambuddy's trash, through a confirmation, with Undo.
+  test('deletes one file and undoes it, then several, reporting the one skipped', async ({ page }) => {
+    await page.goto('/library/Spec/MakerWorld/Work')
+    await page.getByRole('button', { name: 'Delete drawer-label.3mf' }).click()
+    let dialog = page.getByRole('alertdialog', { name: 'Delete drawer-label.3mf?' })
+    await expect(dialog).toContainText("It goes to Bambuddy's trash.")
+    await dialog.getByRole('button', { name: 'Delete file' }).click()
+    const toast = page.getByTestId('library-deleted')
+    await expect(toast).toContainText("Moved 1 file to Bambuddy's trash.")
+    await expect(page.getByTestId('library-file-120')).toHaveCount(0)
+    await toast.getByRole('button', { name: 'Undo' }).click()
+    await expect(toast).toContainText('Restored 1 file.')
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+
+    for (const name of ['drawer-label.3mf', 'alex-headphone-hook.3mf', 'nas-share-bracket.3mf']) {
+      await page.getByRole('checkbox', { name: `Select ${name}` }).check()
+    }
+    await page.getByRole('button', { name: 'Delete selected (3)' }).click()
+    dialog = page.getByRole('alertdialog', { name: 'Delete 3 files?' })
+    await expect(dialog.getByTestId('library-delete-external')).toContainText('cannot be restored')
+    await dialog.getByRole('button', { name: 'Delete 3 files' }).click()
+    await expect(toast).toContainText('Removed 1 external file for good.')
+    await expect(toast.getByTestId('library-skipped')).toContainText('alex-headphone-hook.3mf')
+    await expect(page.getByTestId('library-file-121')).toBeVisible()
+    await expect(page.getByTestId('library-file-122')).toHaveCount(0)
+  })
+
+  // #2368 — on a phone the tree folds behind a picker, so the files come first.
+  test('puts the files first at phone width, with the folders behind a picker', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/library')
+    const picker = page.getByRole('button', { name: /^Folder: Top level/ })
+    const tree = page.getByRole('tree', { name: 'Library folders' })
+    await expect(page.getByTestId('library-file-89')).toBeInViewport()
+    await expect(picker).toHaveAttribute('aria-expanded', 'false')
+    await expect(tree).toBeHidden()
+
+    await picker.click()
+    await expect(tree).toBeVisible()
+    await tree.getByRole('treeitem', { name: 'Spec' }).click()
+    await expect(page).toHaveURL(/\/library\/Spec$/)
+    await expect(tree).toBeHidden()
+    await expect(page.getByRole('button', { name: /^Folder: Spec/ })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  // #3637, #3638 — one file twice on a plate, a copy in other colours, filed under the
+  // file's own model rather than an unrelated one.
+  test('arranges a file twice in two colourings, filed under its own model', async ({ page }) => {
+    await page.goto('/library/MakerWorld')
+    await page.getByRole('checkbox', { name: "Select Clara's Wand.3mf" }).check()
+    await page.getByRole('button', { name: 'Arrange selected (1)' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Arrange' })
+    const wand = "Wand — Clara's Wand.3mf"
+    await expect(dialog.getByLabel(`Copies of ${wand}`)).toHaveValue('1')
+    await expect(dialog.getByLabel('File under').locator('option:checked')).toHaveText("A new model: Clara's Wand")
+
+    await dialog.getByRole('button', { name: `Add a copy of ${wand} in other colours` }).click()
+    const copy = `${wand}, copy 1 in other colours`
+    await dialog.getByLabel(`#7B1FA2 of ${copy} prints in`).fill('#ff00ff')
+    await expect(dialog.getByRole('img', { name: `${copy} prints in #FF00FF, #FFD54F` })).toBeVisible()
+    await dialog.getByRole('button', { name: 'Arrange', exact: true }).click()
+
+    const done = page.getByRole('status', { name: 'Arranged' })
+    await expect(done).toContainText("in Clara's Wand's history.")
+    await expect(page.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/clara-s-wand/history')
+  })
+
+  test('shows the tree beside the files on a wide screen, with no picker', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/library')
+    await expect(page.getByRole('tree', { name: 'Library folders' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Folder: / })).toBeHidden()
   })
 })

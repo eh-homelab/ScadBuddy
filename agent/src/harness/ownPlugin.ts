@@ -18,7 +18,7 @@ import type { TierResolver } from './permissions.js'
 // by #896). Both are `read`: a skill is instructions, and a subagent can call
 // only tools the session already has, each through the same permission seam
 // (canUseTool and the PreToolUse hook run for a subagent's calls too).
-// Measured on Claude Code 2.1.283 (test/harnessWiring.test.ts): the init
+// Measured on Claude Code 2.1.283 and 2.1.287 (test/harnessWiring.test.ts): the init
 // message lists the subagent tool as `Task`, its older name, and a call named
 // `Agent` runs it; neither asks canUseTool, so the PreToolUse hook is where
 // their tier applies.

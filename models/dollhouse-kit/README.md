@@ -10,13 +10,18 @@ piece made with the same **Grid** settings joins every other piece.
 
 ![A corner of a room: floor tile, corner posts, a plain lower course and a window upper course on the back wall, a door wall with its leaves swung open on the left](room.png)
 
+Generate builds the whole house in one go (`pipeline/pipeline.py`). Every piece
+the designer lists is rendered once and packed onto as many plates as it takes. The
+result is one 3MF with a bill of materials and an `assembly.svg`. Changing wallpaper
+re-renders the walls; the floors and the roof come straight from the store.
+
 The second picture is the hidden `preview = "room"` mode: one back corner of a
 2 x 2 module room, assembled. It is for this page only, not a print plate.
 
 **House designer.** ScadBuddy opens this template in its own designer (`ui/`).
 You enter a box house: modules wide and deep (at the Grid panel's module size), storeys, and windows
 per storey. It lists every piece that house needs, with counts. **Show** puts
-one piece in the preview on the one-module grid, and Generate keeps the piece
+one piece in the preview on the one-module grid, and the page's Generate keeps the piece
 shown, so a house is generated one piece at a time. The Grid sizes (module,
 course height, wall and floor thickness) and the style parameters (exterior,
 wallpaper, colours) stay editable and apply to every piece. Generating the whole house

@@ -85,6 +85,28 @@ describe('plugin tool results through the forwarder', () => {
     expect(JSON.parse(error.error.message)[UNTRUSTED_KEY].tool).toBe('mcp__mem__files_get')
   })
 
+  it("passes a browser tool's error as its result, so the browser guard screens it (#982); another tool's stays an error", () => {
+    const calls = () => ({ lists: new Set<unknown>(), calls: new Map<unknown, string>([[7, 'browser_navigate'], [8, 'files.get']]) })
+    const [failed, other] = rewriteMessages(
+      [
+        { jsonrpc: '2.0', id: 7, result: { isError: true, content: [{ type: 'text', text: '### Error\n- Page URL: https://evil.example/' }] } },
+        { jsonrpc: '2.0', id: 8, result: { isError: true, content: [{ type: 'text', text: 'no such file' }] } },
+      ],
+      calls(),
+      route,
+    ) as { result: { isError?: boolean; content: { text: string }[] } }[]
+    expect(failed!.result.isError).toBe(false)
+    expect(unwrapUntrusted(failed!.result.content[0]!.text)).toBe('### Error\n- Page URL: https://evil.example/')
+    expect(other!.result.isError).toBe(true)
+
+    const error = rewriteMessages({ jsonrpc: '2.0', id: 7, error: { code: -1, message: 'Page URL: https://evil.example/' } }, calls(), route) as {
+      error?: unknown
+      result: { content: { type: string; text: string }[] }
+    }
+    expect(error.error).toBeUndefined()
+    expect(unwrapUntrusted(error.result.content[0]!.text)).toBe('Page URL: https://evil.example/')
+  })
+
   it('rewrites a result that arrives as an SSE event', () => {
     const block = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'hi' }] } })}`
     const out = rewriteSseEvent(block, rewrites(), route)!
@@ -263,9 +285,9 @@ describe('plugin replies the rewrite cannot mark', () => {
 
 /** Waits for `check`, at most `timeoutMs`. */
 async function until(check: () => boolean, timeoutMs = 3000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   while (!check()) {
-    if (Date.now() > deadline) throw new Error('timed out')
+    if (performance.now() > deadline) throw new Error('timed out')
     await new Promise((r) => setTimeout(r, 5))
   }
 }

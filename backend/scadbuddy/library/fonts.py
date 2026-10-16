@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import time
+import unicodedata
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ FC_LIST = "fc-list"
 #: The faces OpenSCAD's ``FontCache::init_pattern`` asks fontconfig for.
 RENDERABLE = ":outline=true:scalable=true"
 FC_CACHE = "fc-cache"
+FC_MATCH = "fc-match"
 FC_TIMEOUT = 30.0
 
 CATALOGUE_CACHE_NAME = ".catalogue.json"
@@ -174,7 +176,7 @@ def parse_fc_list(output: str) -> list[FontFamily]:
     ]
 
 
-def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
+def _run_fc(argv: list[str], env: Mapping[str, str], timeout: float = FC_TIMEOUT) -> str | None:
     """Run an fc-* tool on the allowlisted environment (#281), whatever ``env`` holds."""
     if shutil.which(argv[0]) is None:
         logger.warning("%s is not on PATH", argv[0])
@@ -184,7 +186,7 @@ def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
             argv,
             capture_output=True,
             text=True,
-            timeout=FC_TIMEOUT,
+            timeout=timeout,
             check=True,
             env=minimal_env(env),
         )
@@ -223,6 +225,86 @@ def resolvable_families(env: Mapping[str, str] | None = None) -> set[str] | None
         for name in _split_fc(line.strip(), ",")
         if name.strip()
     }
+
+
+def parse_charset(text: str) -> list[tuple[int, int]]:
+    """fontconfig's ``%{charset}``: hex code points and ``first-last`` ranges, blank
+    separated (``20-7e a0-17f 2c6``), as inclusive ``(first, last)`` pairs."""
+    ranges: list[tuple[int, int]] = []
+    for token in text.split():
+        first, _, last = token.partition("-")
+        try:
+            ranges.append((int(first, 16), int(last or first, 16)))
+        except ValueError:
+            continue
+    return ranges
+
+
+def _covered(ranges: list[tuple[int, int]], point: int) -> bool:
+    return any(first <= point <= last for first, last in ranges)
+
+
+def _drawn(char: str) -> bool:
+    """Whether ``char`` is one a font needs a glyph for: not blank, a control or format
+    character (a zero-width joiner, an emoji tag), a variation selector (an emoji's
+    U+FE0F), or a skin-tone modifier, which only shades the emoji before it."""
+    if char.isspace():
+        return False
+    point = ord(char)
+    if 0xFE00 <= point <= 0xFE0F or 0xE0100 <= point <= 0xE01EF or 0x1F3FB <= point <= 0x1F3FF:
+        return False
+    return unicodedata.category(char) not in ("Cc", "Cf")
+
+
+#: How long a glyph check waits on fontconfig for one font's glyphs (#2358), in a render
+#: and in ``GET /fonts/glyphs`` alike. The check is advisory: a wedged fontconfig costs
+#: this per font, and then no warning, never the full ``FC_TIMEOUT``.
+GLYPH_CHECK_TIMEOUT = 5.0
+
+
+def font_coverage(
+    font: str, env: Mapping[str, str], timeout: float = FC_TIMEOUT
+) -> tuple[str, list[tuple[int, int]]] | None:
+    """The family fontconfig gives ``font`` (an OpenSCAD font string) among the faces a
+    render can draw, as its comma-separated list of names (a localized one included),
+    and the code points it has glyphs for; None without fontconfig, or when it takes
+    longer than ``timeout``. ``--`` ends the options, so a ``font`` that starts with
+    ``-`` is read as a pattern, never an option."""
+    output = _run_fc(
+        [FC_MATCH, "-f", "%{family}\n%{charset}", "--", f"{font}{RENDERABLE}"], env, timeout
+    )
+    if output is None:
+        return None
+    family, _, charset = output.partition("\n")
+    return family.strip(), parse_charset(charset)
+
+
+def missing_glyphs(
+    font: str, text: str, coverage: tuple[str, list[tuple[int, int]]] | None
+) -> list[str]:
+    """The characters of ``text`` the family ``font`` names has no glyph for, in the
+    order they first appear (#2358). OpenSCAD's ``text()`` leaves them out without a
+    word. None of them when the font is the default (it names no family), when
+    fontconfig could not answer, or when it gave another family: a family that is not
+    installed is reported on its own (#1286), not character by character. Any of the
+    names fontconfig gives the family counts, so a font named by a secondary one (a
+    localized name, say) is checked too."""
+    families = {normalise_family(family) for family in font_families(font)}
+    if not families or coverage is None:
+        return []
+    given = {normalise_family(name) for name in coverage[0].split(",") if name.strip()}
+    if not given & families:
+        return []
+    ranges = coverage[1]
+    missing: list[str] = []
+    seen: set[str] = set()
+    for char in text:
+        if char in seen:
+            continue
+        seen.add(char)
+        if _drawn(char) and not _covered(ranges, ord(char)):
+            missing.append(char)
+    return missing
 
 
 #: How long one fontconfig answer serves the render and preset checks
@@ -313,6 +395,10 @@ class FontService:
         if known is None:
             return None
         return [family for family in families if normalise_family(family) not in known]
+
+    def missing_glyphs(self, font: str, text: str) -> list[str]:
+        """:func:`missing_glyphs` under the render's own environment."""
+        return missing_glyphs(font, text, font_coverage(font, self.env(), GLYPH_CHECK_TIMEOUT))
 
     def refresh_cache(self) -> None:
         self._resolved = None

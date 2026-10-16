@@ -116,6 +116,13 @@ describe('event → resource mapping', () => {
     ])
   })
 
+  it('a job cancelled with no replacement touches the job (#607)', () => {
+    expect(affectedBy({ id: '1', kind: 'job.cancelled', job_id: 'j1', slug: 'k' })).toEqual({
+      uris: ['scadbuddy://jobs/j1'],
+      listChanged: false,
+    })
+  })
+
   it('a model created or deleted changes the list; an update does not', () => {
     expect(affectedBy({ id: '1', kind: 'model.created', slug: 'k' }).listChanged).toBe(true)
     expect(affectedBy({ id: '1', kind: 'model.deleted', slug: 'k' }).listChanged).toBe(true)
@@ -126,6 +133,18 @@ describe('event → resource mapping', () => {
     expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'o1', slug: 'k' }).uris).toEqual([
       'scadbuddy://print/outputs/o1/progress',
     ])
+  })
+
+  it("a library file's print touches the library progress resource, never an output URI (#1967)", () => {
+    for (const kind of ['print.progress', 'print.settled']) {
+      expect(affectedBy({ id: '1', kind, output_id: 'library:42', slug: 'library-42' }).uris, kind).toEqual([
+        'scadbuddy://print/library/42/progress',
+      ])
+    }
+    expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'library:x', slug: 's' }).uris).toEqual([])
+    expect(matchUri('scadbuddy://print/library/42/progress')?.def.tool).toBe('get_print_progress')
+    const def = RESOURCES.find((r) => r.template === 'scadbuddy://print/library/{file_id}/progress')!
+    expect(def.args?.({ file_id: '42' })).toEqual({ library_file_id: 42 })
   })
 
   it("a session's events touch it, and the list only when it moves in it (#300)", () => {
@@ -201,6 +220,19 @@ describe('subscriptions and coalescing', () => {
     // After a quiet window, the next event goes out at once again.
     subs.onEvent({ id: 'late', kind: 'job.done', job_id: 'j1', slug: 'k' })
     expect(sent).toHaveLength(3)
+  })
+
+  it('keeps coalescing when the wall clock steps forward (#1485)', () => {
+    vi.useFakeTimers()
+    const { sent, notify } = recorder()
+    const subs = new Subscriptions(notify, { minIntervalMs: 250 })
+    subs.add('scadbuddy://jobs/j1')
+    subs.onEvent({ id: '1', kind: 'job.running', job_id: 'j1', slug: 'k' })
+    vi.setSystemTime(Date.now() + 3_600_000)
+    subs.onEvent({ id: '2', kind: 'job.running', job_id: 'j1', slug: 'k' })
+    expect(sent).toEqual(['scadbuddy://jobs/j1'])
+    vi.advanceTimersByTime(250)
+    expect(sent).toHaveLength(2)
   })
 
   it('re-announces session resources after the bus reconnects, and nothing else (#300)', () => {

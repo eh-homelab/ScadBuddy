@@ -10,6 +10,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
@@ -45,7 +46,7 @@ def test_registering_creates_the_link_when_there_is_none(client: TestClient) -> 
     )
     create = respx.post(f"{API}/external-links/").mock(return_value=httpx.Response(200, json=LINK))
 
-    body = client.post("/api/v1/settings/register-sidebar").json()
+    body = client.post("/api/v1/settings/register-sidebar", headers=press()).json()
 
     assert body["created"] is True
     assert body["id"] == 3
@@ -70,7 +71,7 @@ def test_registering_again_patches_the_existing_link_by_name(client: TestClient)
         return_value=httpx.Response(200, json={**LINK, "url": f"{PUBLIC}/moved"})
     )
 
-    body = client.post("/api/v1/settings/register-sidebar").json()
+    body = client.post("/api/v1/settings/register-sidebar", headers=press()).json()
 
     assert body["created"] is False
     assert body["url"] == f"{PUBLIC}/moved"
@@ -89,7 +90,7 @@ def test_a_legacy_customize_link_to_this_url_is_renamed_not_duplicated(
     create = respx.post(f"{API}/external-links/")
     patch = respx.patch(f"{API}/external-links/3").mock(return_value=httpx.Response(200, json=LINK))
 
-    body = client.post("/api/v1/settings/register-sidebar").json()
+    body = client.post("/api/v1/settings/register-sidebar", headers=press()).json()
 
     assert body["created"] is False
     assert not create.called
@@ -107,7 +108,9 @@ def test_a_customize_link_to_another_url_is_left_alone(client: TestClient) -> No
     respx.post(f"{API}/external-links/").mock(return_value=httpx.Response(200, json=LINK))
     patch = respx.patch(f"{API}/external-links/1")
 
-    assert client.post("/api/v1/settings/register-sidebar").json()["created"] is True
+    assert (
+        client.post("/api/v1/settings/register-sidebar", headers=press()).json()["created"] is True
+    )
     assert not patch.called
 
 
@@ -122,7 +125,9 @@ def test_an_unrelated_link_is_left_alone(client: TestClient) -> None:
     respx.post(f"{API}/external-links/").mock(return_value=httpx.Response(200, json=LINK))
     patch = respx.patch(f"{API}/external-links/1")
 
-    assert client.post("/api/v1/settings/register-sidebar").json()["created"] is True
+    assert (
+        client.post("/api/v1/settings/register-sidebar", headers=press()).json()["created"] is True
+    )
     assert not patch.called
 
 
@@ -130,14 +135,14 @@ def test_an_unrelated_link_is_left_alone(client: TestClient) -> None:
 def test_registering_without_a_public_url_says_so(client: TestClient) -> None:
     configure(client, public_url="")
 
-    response = client.post("/api/v1/settings/register-sidebar")
+    response = client.post("/api/v1/settings/register-sidebar", headers=press())
 
     assert response.status_code == 409
     assert "public" in response.json()["detail"]
 
 
 def test_registering_without_a_bambuddy_url_is_a_conflict(client: TestClient) -> None:
-    assert client.post("/api/v1/settings/register-sidebar").status_code == 409
+    assert client.post("/api/v1/settings/register-sidebar", headers=press()).status_code == 409
 
 
 @respx.mock
@@ -147,7 +152,7 @@ def test_a_refused_key_names_the_scope(client: TestClient) -> None:
         return_value=httpx.Response(403, json={"detail": "forbidden"})
     )
 
-    response = client.post("/api/v1/settings/register-sidebar")
+    response = client.post("/api/v1/settings/register-sidebar", headers=press())
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Manage Library"

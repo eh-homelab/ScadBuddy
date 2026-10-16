@@ -5,6 +5,9 @@
 #   - the plate has exactly the colour parts the parameters imply, nothing on
 #     the Default material, sits on z=0, is `thickness` tall and fits the bed;
 #   - laid out straight, it is `length` long and at least `width` wide;
+#   - a critter grown too long for the plate in the pose asked lies in a more
+#     compact pose (straight -> wave -> curl) and the log says so, rather than
+#     the render failing on a name the customizer accepts (#963);
 #   - the print is exactly head + body segments + tail separate pieces (a fused
 #     joint would merge two);
 #   - measured on the rendered geometry, every gap between neighbouring
@@ -94,18 +97,27 @@ CASES = [
     ("name-grows", dict(animal="lizard", length=120, name="Maximilian12")),
     ("name-wide-grows", dict(animal="caterpillar", length=120, width=40, name="WQW")),
     ("name-8-default", dict(name="ALEXANDR")),
+    # Names that grow the critter past the plate in the pose asked: it lies in
+    # a more compact pose instead of failing the render (#963).
+    ("name-too-long-for-plate", dict(pose="straight", length=300, name="WWWWWWWWWWWW")),
+    ("name-12-wave-curls", dict(name="Maximilian12", length=300, segments=20, clearance=0.6,
+                                thickness=12)),
+    # Every numeric at its maximum and the widest letters: the tightest curl
+    # (about 203 x 311 mm on the 300 x 320 plate).
+    ("name-max-curls", dict(name="WMWMWMWMWMWM", width=40, length=300, segments=20,
+                            clearance=0.6, thickness=12)),
+    # A fish's wave already fits, so straight falls back to wave, not curl.
+    ("fish-straight-waves", dict(animal="fish", name="WWWWWWWWWWWW", width=40, length=300,
+                                 segments=20, clearance=0.6, thickness=12, pose="straight")),
 ]
 
 # Requests that cannot be met must fail the render with a message that says
 # what to change, never render a critter with letters missing.
 ERROR_CASES = [
-    # Twelve W's make a straight dragon longer than the plate even at 300 mm.
-    ("name-too-long-for-plate", dict(pose="straight", length=300, name="WWWWWWWWWWWW"),
-     "shorten the name"),
-    # The plate-fit assert fires. No customizer combination reaches it (the
-    # widest straight critter is about 100 mm across), so the plate is
-    # narrowed through the hidden bed size to prove the guard works.
-    ("bed-too-small", dict(bed_w=150), "more than the 150 x 320 mm plate"),
+    # The plate-fit assert fires only when no pose fits. No customizer
+    # combination reaches it (the curl fits every one, see name-max-curls), so
+    # the plate is narrowed through the hidden bed size to prove the guard works.
+    ("bed-too-small", dict(bed_w=150), "mm curled, more than the 150 x 320 mm plate"),
 ]
 
 # Cases asking for more segments than the length has room for at the minimum
@@ -116,7 +128,12 @@ DROPPED = {"snake-max-tight": 15, "caterpillar-fat-short": 3, "dragon-min": 2,
            "dragon-straight-name": 6, "name-wide-grows": 3}
 # Cases longer than asked, and the segments they have: even one segment does
 # not fit, or the name needs more segments than the length has room for.
-GROWS = {"dragon-grows": 1, "name-grows": 12, "name-wide-grows": 3, "name-8-default": 8}
+GROWS = {"dragon-grows": 1, "name-grows": 12, "name-wide-grows": 3, "name-8-default": 8,
+         "name-too-long-for-plate": 12, "name-12-wave-curls": 12, "name-max-curls": 12,
+         "fish-straight-waves": 12}
+# Cases too long for the plate in the pose asked, and the pose they lie in.
+REPOSED = {"name-too-long-for-plate": "curl", "name-12-wave-curls": "curl",
+           "name-max-curls": "curl", "fish-straight-waves": "wave"}
 
 
 def scad(v):
@@ -297,6 +314,12 @@ for name, ov in CASES:
     check(abs(min(zs)) < 1e-3 and abs(max(zs) - T) < 1e-3,
           "sits on z=0 and is %.1f mm tall (z %.3f .. %.3f)" % (T, min(zs), max(zs)))
     sx, sy = max(xs) - min(xs), max(ys) - min(ys)
+    if name in REPOSED:
+        check("NOTE: pose changed from %s to %s" % (p["pose"], REPOSED[name]) in I["log"],
+              "too long for the plate in pose %s: the log says it lies %s instead"
+              % (p["pose"], REPOSED[name]))
+    else:
+        check("NOTE: pose changed" not in I["log"], "lies in the pose asked (no pose note)")
     check(sx <= BED_X and sy <= BED_Y, "fits the %dx%d bed (%.1f x %.1f)" % (BED_X, BED_Y, sx, sy))
     # The model asserts its own plate fit from a bound it computes; that bound
     # must really contain the render, or the assert protects nothing.

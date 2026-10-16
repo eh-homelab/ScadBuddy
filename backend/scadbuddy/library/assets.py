@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import unicodedata
 import zipfile
@@ -277,6 +278,13 @@ def sanitise_svg(data: bytes) -> bytes:
     return cleaned
 
 
+#: In Pillow's ValueErrors for its PNG metadata limits, what tells them from another
+#: ValueError: a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK`` once
+#: decompressed (``_safe_zlib_decompress``), and text chunks over ``MAX_TEXT_MEMORY`` in
+#: all (``check_text_memory``). The upload keeps none of that metadata either way.
+PNG_METADATA_LIMITS = ("MAX_TEXT_CHUNK", "MAX_TEXT_MEMORY")
+
+
 def normalise_png(data: bytes) -> tuple[bytes, int, int]:
     """The PNG decoded, capped at `MAX_PNG_SIDE`, and re-encoded without metadata."""
     try:
@@ -298,8 +306,33 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
             out = io.BytesIO()
             picture.save(out, format="PNG")
             return out.getvalue(), picture.width, picture.height
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
-        raise AssetRejectedError(f"the PNG could not be decoded: {error}") from None
+    except Image.DecompressionBombError:
+        # Pillow refuses at open what declares over twice its own pixel limit, before the
+        # pixel check above can run: it is that refusal, said the same way.
+        raise AssetRejectedError(
+            f"the PNG is too large; at most {MAX_PNG_PIXELS} pixels are read"
+        ) from None
+    except AssetRejectedError:
+        # Its own refusals (a ValueError too) pass through as they are.
+        raise
+    except ValueError as error:
+        logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        if any(limit in str(error) for limit in PNG_METADATA_LIMITS):
+            # One of Pillow's limits on text or ICC chunks: metadata the upload keeps
+            # none of anyway, so re-exported without it the PNG reads.
+            raise AssetRejectedError(
+                "the PNG carries metadata too large to read; re-export it without metadata"
+            ) from None
+        # Any other ValueError Pillow raises while decoding is an unreadable PNG.
+        raise AssetRejectedError(
+            "the file is not a readable PNG; re-export it as PNG and try again"
+        ) from None
+    except (UnidentifiedImageError, OSError) as error:
+        # Pillow's text names its stream object by address (#2383): for the log, not the user.
+        logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        raise AssetRejectedError(
+            "the file is not a readable PNG; re-export it as PNG and try again"
+        ) from None
 
 
 def sniff(data: bytes) -> AssetKind:
@@ -313,7 +346,8 @@ def sniff(data: bytes) -> AssetKind:
 
 
 class AssetStoreUnavailableError(RuntimeError):
-    """The upload store's metadata lives in Postgres, and this store has no pool."""
+    """The upload store's metadata lives in Postgres, and this store has no pool: only
+    a template's pipeline check (`workflows/verify_pipeline.py`) builds one without."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -557,7 +591,12 @@ class AssetStore:
         return max(stamps) if stamps else None
 
     def sweep(
-        self, referenced: Collection[str], *, grace: float, now: float | None = None
+        self,
+        referenced: Collection[str],
+        *,
+        grace: float,
+        now: float | None = None,
+        stop: threading.Event | None = None,
     ) -> list[str]:
         """Remove every asset not in ``referenced`` and last used more than ``grace``
         seconds before ``now``; answer the ids removed.
@@ -578,6 +617,8 @@ class AssetStore:
         its bytes go, and an upload of the same content waits until they have.
         Anything that cannot be removed -- a file error or a database error -- is
         logged and skipped, like the other sweeps, and the rest are still tried.
+        ``stop``, once set, ends the sweep before its next asset (#2140): the rest wait
+        for the next sweep.
         """
         pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
@@ -595,7 +636,10 @@ class AssetStore:
         # read under the lock.
         candidates = sorted((stale | (blobs.keys() - owned)) - set(referenced))
         removed: list[str] = []
-        for asset_id in candidates:
+        for done, asset_id in enumerate(candidates):
+            if stop is not None and stop.is_set():
+                logger.info("asset sweep stopped early", extra={"left": len(candidates) - done})
+                break
             key = asset_lock_key(asset_id)
             try:
                 with pool.connection() as conn:

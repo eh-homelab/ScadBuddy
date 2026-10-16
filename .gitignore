@@ -223,3 +223,14 @@ __marimo__/
 backend/openapi.json
 frontend/src/api/schema.d.ts
 agent/src/api/schema.d.ts
+
+# Playwright MCP session output
+.playwright-mcp/
+
+# The Kiota run's scratch spec (scripts/generate-go-client.sh)
+tools/go/.spec/
+
+# Go vendor trees are committed whole: the rules above (env/, build/, lib/ …) must
+# not drop a vendored package, or CI's -mod=vendor build cannot find it.
+!/vendor/**
+!/tools/go/*/vendor/**

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -10,6 +10,7 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
+import { loadAgentDefinitions } from '../src/harness/agentDefinitions.js'
 import {
   buildHarnessOptions,
   credentialEnv,
@@ -28,12 +29,21 @@ import { startFakeHindsight } from './support/fakeHindsight.js'
 const API_KEY = 'sk-ant-api03-unit-test-key-000011112222'
 const GATEWAY_TOKEN = 'gw-unit-test-token-3333444455556666'
 
+const OAUTH_TOKEN = 'sk-ant-oat01-test-token-0000'
+
 describe('buildHarnessOptions', () => {
   const paths = { stateDir: '/var/lib/scadbuddy-agent' }
   const base: HarnessRun = { paths, credential: { kind: 'anthropic_api_key', secret: API_KEY }, prompt: 'hi' }
 
   it('passes an API key as ANTHROPIC_API_KEY and nothing else', () => {
     expect(credentialEnv({ kind: 'anthropic_api_key', secret: API_KEY })).toEqual({ ANTHROPIC_API_KEY: API_KEY })
+  })
+
+  it('passes a Claude Code OAuth token as CLAUDE_CODE_OAUTH_TOKEN and nothing else', () => {
+    // In x-api-key (ANTHROPIC_API_KEY) Anthropic answers an sk-ant-oat01- token with 401.
+    expect(credentialEnv({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN })).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN,
+    })
   })
 
   it('passes a gateway as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN', () => {
@@ -91,7 +101,17 @@ describe('buildHarnessOptions', () => {
     const options = buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] })
     expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('../plugins/scadbuddy') }])
     expect(typeof options.canUseTool).toBe('function')
-    expect(options.hooks?.PreToolUse).toHaveLength(1)
+    // The permission seam, then WebFetch's egress check (webFetchEgress.ts).
+    expect(options.hooks?.PreToolUse).toHaveLength(2)
+    expect(options.hooks?.PreToolUse?.[1]?.matcher).toBe('WebFetch')
+  })
+
+  it('adds the trace hooks after the permission seam (#988)', () => {
+    const traceHooks = { PreToolUse: [{ hooks: [() => Promise.resolve({})] }], PostToolUse: [{ hooks: [() => Promise.resolve({})] }] }
+    const options = buildHarnessOptions({ ...base, traceHooks })
+    expect(options.hooks?.PreToolUse).toHaveLength(3)
+    expect(options.hooks?.PreToolUse?.[2]).toBe(traceHooks.PreToolUse[0])
+    expect(options.hooks?.PostToolUse).toEqual(traceHooks.PostToolUse)
   })
 
   it("loads ScadBuddy's own plugin first, with Skill and Agent at read and no other built-in (#896)", () => {
@@ -106,6 +126,14 @@ describe('buildHarnessOptions', () => {
     expect(['Skill', 'Agent', 'Task'].map((t) => withPlugin(t))).toEqual(['read', 'read', 'read'])
     expect(withPlugin('Bash')).toBeUndefined()
     expect(harnessTierOf({})('Skill')).toBeUndefined()
+  })
+
+  it("offers Skill and Agent, at read, for a package's skills and agents with the own plugin off (#2320)", () => {
+    const options = buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] })
+    expect(options.tools).toEqual(['Skill', 'Agent'])
+    const tiers = harnessTierOf({ pluginPaths: ['../plugins/scadbuddy'] })
+    expect(['Skill', 'Agent', 'Task'].map((t) => tiers(t))).toEqual(['read', 'read', 'read'])
+    expect(harnessTierOf({ allowedPluginPaths: ['/x'] })('Skill')).toBe('read')
   })
 
   it('passes the session options through (#300)', () => {
@@ -137,6 +165,25 @@ describe('buildHarnessOptions', () => {
   it('refuses a plugin that would start a process with the credential env (spec §8.6)', () => {
     expect(() =>
       buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy', 'test/fixtures/plugins/command-hook'] }),
+    ).toThrow(PluginRefusedError)
+  })
+
+  it('loads a plugin package an admin allowed as it is, and lets its MCP servers start', () => {
+    const allowed = path.resolve('test/fixtures/plugins/command-hook')
+    const options = buildHarnessOptions({ ...base, allowedPluginPaths: [allowed] })
+    expect(options.plugins).toEqual([{ type: 'local', path: allowed }])
+    expect(options.strictMcpConfig).toBe(false)
+    // The built-ins it names are offered, and skill shell injection runs.
+    const withTools = buildHarnessOptions({ ...base, ownPlugin: OWN_PLUGIN_DIR, allowedPluginPaths: [allowed], builtinTools: ['Read', 'Bash', 'Skill'] })
+    expect(withTools.tools).toEqual(['Skill', 'Agent', 'Read', 'Bash'])
+    expect(withTools.settings).toMatchObject({ disableSkillShellExecution: false })
+    // Without an allowed package, neither.
+    const without = buildHarnessOptions({ ...base, builtinTools: ['Read'] })
+    expect(without.tools).toEqual([])
+    expect(without.settings).toMatchObject({ disableSkillShellExecution: true })
+    // The vetted list is still checked beside it.
+    expect(() =>
+      buildHarnessOptions({ ...base, allowedPluginPaths: [allowed], pluginPaths: ['test/fixtures/plugins/stdio-mcp'] }),
     ).toThrow(PluginRefusedError)
   })
 
@@ -242,9 +289,31 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(calls.flatMap((c) => c.body?.tools ?? [])).toEqual([])
     const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
     expect(init && 'tools' in init ? init.tools : undefined).toEqual([])
+    // The mode in which canUseTool decides every call (test/permissionMode.test.ts).
+    expect(init).toMatchObject({ permissionMode: 'default' })
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)
+  })
+
+  it("runs the turn as a plugin's subagent when given one (a Workflow agent's agentType, #2393)", async () => {
+    script = () => ({ text: 'ok' })
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Make a box',
+      model: 'claude-opus-5-5',
+      maxTurns: 1,
+      effort: 'low',
+      ownPlugin: OWN_PLUGIN_DIR,
+      agent: { name: 'model-author', definition: (await loadAgentDefinitions())['model-author']! },
+    })
+    expect(result).toMatchObject({ subtype: 'success' })
+    const call = fake.messageCalls().at(-1)!
+    // The definition's own prompt (plugins/scadbuddy/agents/model-author.md) is the system prompt.
+    expect(JSON.stringify(call.body?.system)).toContain('You author ScadBuddy templates')
+    // Claude Code sends effort only for a model that takes it (claude-sonnet-4-5 does not, measured).
+    expect(JSON.stringify(call.body)).toContain('"output_config":{"effort":"low"}')
   })
 
   it('recalls into the model’s context at the prompt and retains the transcript at the end (memory hooks)', async () => {
@@ -356,6 +425,37 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(decisions).toEqual([])
   })
 
+  // Claude Code's own WebFetch connects wherever it is told (measured on 2.1.296: a
+  // call to 127.0.0.1:9 tried to connect). An approval does not let it reach a cloud
+  // metadata address: the egress hook denies the call before the gate is asked.
+  it("refuses an approved WebFetch to a metadata address before Claude Code fetches it", async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'Refused.' }
+        : { toolUse: { name: 'WebFetch', input: { url: 'http://169.254.169.254/latest/meta-data/', prompt: 'keys?' } } }
+    const asked: string[] = []
+    // Built-ins are offered only beside a package an admin allowed as it is.
+    const allowed = path.join(stateDir, 'allowed')
+    await mkdir(path.join(allowed, '.claude-plugin'), { recursive: true })
+    await writeFile(path.join(allowed, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fetcher' }))
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Fetch it',
+      model: 'claude-sonnet-4-5',
+      allowedPluginPaths: [allowed],
+      builtinTools: ['WebFetch'],
+      approvalGate: (request) => {
+        asked.push(request.toolName)
+        return Promise.resolve({ approved: true, input: request.input })
+      },
+    })
+    expect(result.subtype).toBe('success')
+    const followUp = fake.messageCalls().at(-1)
+    expect(followUp && lastContent(followUp)).toMatch(/WebFetch refused: url host 169\.254\.169\.254 resolves to 169\.254\.169\.254, a link-local/)
+    expect(asked).toEqual([])
+  })
+
   it('stops at maxTurns', async () => {
     script = () => ({ toolUse: { name: 'mcp__stub__echo', input: { text: 'again' } } })
     const { result } = await collect({
@@ -392,7 +492,7 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       return { hang: true }
     }
     const messages: SDKMessage[] = []
-    const started = Date.now()
+    const started = performance.now()
     const run = (async () => {
       for await (const m of runHarness({
         paths: { stateDir },
@@ -404,9 +504,12 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
         messages.push(m)
       }
     })()
-    await expect(run).rejects.toThrow(/abort/i)
-    expect(messages.some((m) => m.type === 'result')).toBe(false)
-    expect(Date.now() - started).toBeLessThan(10_000)
+    // Interrupted first (run.ts stopFirst, #1168): Claude Code ends the turn
+    // with an error result, and the SDK throws on it.
+    await expect(run).rejects.toThrow(/error result/i)
+    expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'error_during_execution' })
+    expect(fake.messageCalls()).toHaveLength(1)
+    expect(performance.now() - started).toBeLessThan(10_000)
   })
 
   describe('testConnection', () => {

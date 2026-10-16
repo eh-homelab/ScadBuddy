@@ -1,15 +1,32 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
+import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
+import { CredentialStore } from '../src/credentials.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
-import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { PostgresSessionStore } from '../src/sessions/store.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
+import { kekFromBase64, SealError } from '../src/secrets.js'
+import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
+import {
+  displayUpdates,
+  type FakeAnthropic,
+  type RecordedRequest,
+  type Reply,
+  REPLY_COST_USD,
+  STALL,
+  STALL_COST_USD,
+  startFakeAnthropic,
+} from './support/fakeAnthropic.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -39,18 +56,22 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   let script: (request: RecordedRequest) => Reply
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let stop: AbortController
   const pools: Database[] = []
+  const replicas: SessionManager[] = []
 
   beforeEach(async () => {
     fake = await startFakeAnthropic((r) => script(r))
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     stop = new AbortController()
   })
   afterEach(async () => {
     stop.abort()
+    // Each replica's warm Claude Code processes (sessions/warm.ts), before the pool they mirror into.
+    await Promise.all(replicas.splice(0).map((m) => m.warm.close()))
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
@@ -60,18 +81,38 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   async function replica(extra: Partial<SessionManagerDeps> = {}): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+    const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
-    return manager({
+    const m = manager({
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...extra,
     })
+    replicas.push(m)
+    return m
   }
 
   const allEvents = async (m: SessionManager, id: string): Promise<LoggedEvent[]> => m.events.read(id, 0, 10_000)
+
+  /** Counts the Claude Code processes a replica spawns, through HarnessRun's `spawnClaudeCodeProcess` seam. */
+  function counting(): { spawned: () => number; deps: Partial<SessionManagerDeps> } {
+    let n = 0
+    return {
+      spawned: () => n,
+      deps: {
+        run: (run) =>
+          runHarness({
+            ...run,
+            spawnClaudeCodeProcess: (o) => {
+              n++
+              return spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
+            },
+          }),
+      },
+    }
+  }
 
   it('resumes a session on another replica through the Postgres store, with its history', async () => {
     let n = 0
@@ -168,6 +209,284 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(JSON.stringify(events)).not.toMatch(/API Error|Not logged in|gw-sessions/)
   }, 60_000)
 
+  // #1101: Claude Code reports a request the API refused as a `success`
+  // result with `is_error: true`, and its text as a synthetic assistant
+  // message. Neither a 429 with a long retry-after nor a 400 is retried, so
+  // the single credential's attempt ends with exactly those. A 401 is
+  // retried, and fallback.ts stops the attempt at the first retry and throws.
+  it.each([
+    {
+      status: 429,
+      type: 'rate_limit_error',
+      message: 'This request would exceed your rate limit',
+      headers: { 'retry-after': '120' },
+      code: 'api_error',
+      says: /rate limited \(HTTP 429\); try again later: .*exceed your rate limit/,
+    },
+    {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'messages: text content blocks must be non-empty (sent by gw-sessions-test-token)',
+      code: 'api_error',
+      says: /refused the request \(HTTP 400\): .*text content blocks must be non-empty/,
+    },
+    {
+      status: 400,
+      type: 'invalid_request_error',
+      message: 'Your credit balance is too low to access the Anthropic API',
+      // The probe confirms it: refused again.
+      confirmed: true,
+      code: 'api_error',
+      says: /the Claude credential was rejected \(HTTP 400\); check it under Settings → AI: .*credit balance is too low/i,
+    },
+    // A guard for the #1093 path: fallback.ts stops a 401 at its first retry and throws.
+    {
+      status: 401,
+      type: 'authentication_error',
+      message: 'invalid x-api-key',
+      code: 'turn_failed',
+      says: /the Claude credential \(.*\) was refused: HTTP 401/,
+    },
+  ])('a $status ($type) from the API ends the turn as an error ($code), not as a reply, and counts no turn (#1101)', async (c) => {
+    script = (r) =>
+      conversation(r).includes('second')
+        ? { text: 'second answer' }
+        : { error: { status: c.status, type: c.type, message: c.message, headers: c.headers ?? {} } }
+    const m = await replica({
+      probe: () =>
+        Promise.resolve(
+          c.status === 401 || ('confirmed' in c && c.confirmed)
+            ? { verdict: 'refused', reason: `the probe was refused (HTTP ${c.status})` }
+            : { verdict: 'unknown', until: new Date(Date.now() + 60_000) },
+        ),
+    })
+
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(c.says) })
+    // An API message that echoes the credential is redacted from the outcome too.
+    expect(JSON.stringify(done)).not.toContain('gw-sessions-test-token')
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, turnActive: false })
+
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    const errors = events.filter((e) => e.type === 'error')
+    expect(errors).toEqual([expect.objectContaining({ code: c.code, message: expect.stringMatching(c.says) })])
+    expect(JSON.stringify(events)).not.toContain('gw-sessions-test-token')
+    expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+
+    // The session is not spent: the next message is answered as usual.
+    expect(await (await m.send(session.id, browser, 'second question')).done).toMatchObject({
+      kind: 'result',
+      subtype: 'success',
+      turns: 1,
+    })
+  }, 60_000)
+
+  it('a refusal on every credential counts no turn for any of them, and names the last one’s failure (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-refused-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    // A's 429 is sent once. B's 400 is sent twice, the second time without the
+    // display beta: Claude Code's own re-send, on the same credential, which the
+    // fallback never sees (credentialErrors.ts). It reaches no third credential.
+    expect(fake.messageCalls().map((c) => [c.headers.authorization, displayUpdates(c)])).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_B}`, true],
+      [`Bearer ${TOKEN_B}`, false],
+    ])
+    // None of the three is a turn, and a refused request carries no usage to price.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, costUsd: 0 })
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'api_error' })])
+  }, 60_000)
+
+  it('a refusal the probe finds is not the credential’s says so, and does not send the user to Settings (#1101)', async () => {
+    script = () => ({ error: { status: 403, type: 'permission_error', message: 'blocked by policy' } })
+    const m = await replica({ probe: () => Promise.resolve({ verdict: 'answered', until: new Date(Date.now() + 1000) }) })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    const done = await turn!.done
+    expect(done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused this request \(HTTP 403\); the credential itself works/) })
+    expect(JSON.stringify(done)).not.toContain('Settings')
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0 })
+    // fallback.ts throws after yielding the held result on this path: the
+    // manager's catch must neither replace the refusal nor show its message.
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.filter((e) => e.type.startsWith('assistant.'))).toEqual([])
+    expect(events.filter((e) => e.type === 'error')).toEqual([
+      expect.objectContaining({ code: 'api_error', message: expect.stringMatching(/the credential itself works/) }),
+    ])
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 0 })])
+  }, 60_000)
+
+  it('a refused request on one credential is not a turn when the next one answers (#1101)', async () => {
+    const TOKEN_A = 'gw-sessions-limited-aaaa'
+    const TOKEN_B = 'gw-sessions-working-bbbb'
+    script = (r) =>
+      r.headers.authorization === `Bearer ${TOKEN_A}`
+        ? { error: { status: 429, type: 'rate_limit_error', message: 'slow down', headers: { 'retry-after': '120' } } }
+        : { text: 'a box' }
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+  }, 60_000)
+
+  /**
+   * #1101: a gateway that refuses `thinking.display`, and a replica with two
+   * credentials on it, after the first turn: Claude Code's re-send without the
+   * display beta was answered on the same credential, and nothing fell back.
+   * The second turn makes two tool calls, so it has more than one request after
+   * a refused one.
+   */
+  async function strictGateway() {
+    const TOKEN_A = 'gw-sessions-strict-aaaa'
+    const TOKEN_B = 'gw-sessions-strict-bbbb'
+    script = (r) => {
+      if (displayUpdates(r)) {
+        return { error: { status: 400, type: 'invalid_request_error', message: 'thinking.display: Extra inputs are not permitted' } }
+      }
+      const said = conversation(r)
+      if (said.includes('and a lid') && said.split('tool_result').length - 1 < 2) {
+        return { toolUse: { name: 'mcp__stub__lookup', input: { q: 'lid' } } }
+      }
+      return { text: 'a box' }
+    }
+    const lookup = tool('lookup', 'Look something up', { q: z.string() }, (args) =>
+      Promise.resolve({ content: [{ type: 'text' as const, text: `found ${args.q}` }] }),
+    )
+    const pooled = (id: string, secret: string) => ({
+      id,
+      epoch: 0,
+      label: id,
+      credential: { kind: 'gateway' as const, baseUrl: fake.url, secret },
+    })
+    const reports: string[] = []
+    const m = await replica({
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', TOKEN_A), pooled('b', TOKEN_B)]),
+        reporter: () => (attempt, outcome) => {
+          reports.push(`${attempt.id}: ${outcome.class}`)
+          return Promise.resolve()
+        },
+      },
+      probe: () => Promise.resolve({ verdict: 'unknown', until: new Date(Date.now() + 60_000) }),
+      mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [lookup] }) }),
+      tierOf: (name) => (name === 'mcp__stub__lookup' ? 'read' : undefined),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
+    const asked = (calls: RecordedRequest[]) => calls.map((c) => [c.headers.authorization, displayUpdates(c)])
+    expect(asked(fake.messageCalls())).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_A}`, false],
+    ])
+    expect(reports).toEqual(['a: ok'])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+    return { m, session, asked, TOKEN_A }
+  }
+
+  it('a gateway that refuses thinking.display costs one refused request a process, and no fallback (#1101)', async () => {
+    const { m, session, asked, TOKEN_A } = await strictGateway()
+    // The next turn runs on the same, warm Claude Code (spec 2026-10-13 §5.3),
+    // which dropped the field for the rest of its life after the refusal: the
+    // turn's three requests, the two tool calls' follow-ups among them, all go
+    // without it, and none is refused.
+    expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(asked(fake.messageCalls().slice(2))).toEqual([
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+    ])
+    // Three answered round trips this time, and the refused request is none of them.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
+  }, 60_000)
+
+  it('a fresh process after the refusal sends the field once more, and is refused once more (#1101)', async () => {
+    const { m, session, asked, TOKEN_A } = await strictGateway()
+    // The process is gone (an eviction: a plugin changed, say): the next turn's
+    // is new, and sends the field again, once. After its refusal it drops it for
+    // the rest of the process, so the two tool calls' follow-ups go without it.
+    await m.warm.evict(session.id, 'the test')
+    expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(asked(fake.messageCalls().slice(2))).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+    ])
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
+  }, 60_000)
+
+  it('a refusal after a tool call keeps what the turn did and counts the round trip that finished (#1101)', async () => {
+    script = (r) =>
+      conversation(r).includes('tool_result')
+        ? { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+        : { toolUse: { name: 'mcp__stub__lookup', input: { q: 'box' } } }
+    const lookup = tool('lookup', 'Look something up', { q: z.string() }, (args) =>
+      Promise.resolve({ content: [{ type: 'text' as const, text: `found ${args.q}` }] }),
+    )
+    const m = await replica({
+      mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [lookup] }) }),
+      tierOf: (name) => (name === 'mcp__stub__lookup' ? 'read' : undefined),
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
+    expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
+    // Three model requests: the tool call, which counts; the refused one; and
+    // Claude Code's re-send of it without the display beta (credentialErrors.ts),
+    // refused too. Neither refusal counts, or costs anything: the turn spent one
+    // priced round trip, as before.
+    const calls = fake.messageCalls()
+    expect(calls.map(displayUpdates)).toEqual([true, true, false])
+    expect(calls[2]?.body?.messages).toEqual(calls[1]?.body?.messages)
+    const row = await m.get(session.id, browser)
+    expect(row).toMatchObject({ status: 'failed', turns: 1 })
+    expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    const events = (await allEvents(m, session.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    // The panel's count follows the row's.
+    expect(events.filter((e) => e.type === 'session.result')).toEqual([expect.objectContaining({ turns: 1 })])
+    expect(events.map((e) => e.type).filter((t) => t.startsWith('tool.') || t.startsWith('assistant.') || t === 'error')).toEqual([
+      'tool.call',
+      'tool.result',
+      'error',
+    ])
+  }, 60_000)
+
   it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
     script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })
     const m = await replica({ newSessions: { max: 3, windowMs: 60_000 } })
@@ -248,6 +567,126 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     // Three Claude Code runs; past vitest's 5 s default on a loaded machine.
   }, 60_000)
 
+  it('fork of a sealed session resumes in the child', async () => {
+    script = (r) => ({ text: conversation(r).includes('left') ? 'went left' : 'at the fork' })
+    const a = await replica()
+    const { session: parent, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'walk to the fork', title: 'walk' })
+    await turn!.done
+
+    const child = await a.fork(parent.id, browser)
+    const rows = await db.sql<{ sealed: boolean; plain: boolean }[]>`
+      SELECT sealed IS NOT NULL AS sealed, entry IS NOT NULL AS plain FROM ai_session_entries WHERE session_id = ${child.id}`
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((r) => r.sealed && !r.plain)).toBe(true)
+
+    const keys = testPayloadKeys(db.sql)
+    const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
+    await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
+    const asChild = new PostgresSessionStore(db.sql, { keys })
+    expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
+
+    await (await a.send(child.id, browser, 'go left')).done
+    const call = conversation(fake.messageCalls().at(-1))
+    expect(call).toContain('walk to the fork')
+    expect(call).toContain('go left')
+  }, 60_000)
+
+  it('forks from a reply (#793): the child keeps the turns through it, and the model sees only those', async () => {
+    script = (r) => {
+      const said = conversation(r)
+      return { text: said.includes('go left') ? 'went left' : said.includes('make it taller') ? 'taller now' : 'a box, 20 mm' }
+    }
+    const m = await replica()
+    const { session: parent, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box', title: 'box' })
+    await turn!.done
+    await (await m.send(parent.id, browser, 'make it taller')).done
+    const first = (await allEvents(m, parent.id)).map((e) => e.event).find((e) => e.type === 'assistant.text.done')
+    if (first?.type !== 'assistant.text.done') throw new Error('no first reply')
+
+    const child = await m.fork(parent.id, browser, { upTo: first.messageId })
+    const events = (await allEvents(m, child.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.map((e) => e.type)).toEqual([
+      'session.started',
+      'user.turn',
+      'assistant.text.delta',
+      'assistant.text.done',
+      'session.status',
+    ])
+    expect(events[3]).toMatchObject({ messageId: first.messageId })
+
+    await (await m.send(child.id, browser, 'go left')).done
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('make a box')
+    expect(sent).toContain('a box, 20 mm')
+    expect(sent).toContain('go left')
+    expect(sent).not.toContain('make it taller')
+    expect(sent).not.toContain('taller now')
+    await expect(m.fork(parent.id, browser, { upTo: 'msg_nowhere:0' })).rejects.toMatchObject({ code: 'invalid' })
+  }, 60_000)
+
+  it('a fork’s first turn records only its own spend, not the parent’s again (#1648)', async () => {
+    // The fake prices every reply alike (10 input + 5 output tokens), so a
+    // turn costs the same in the parent and the child.
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const b = await replica()
+    const { session: parent, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'make a box', title: 'box' })
+    const first = await turn!.done
+    if (first.kind !== 'result') throw new Error(`parent turn: ${JSON.stringify(first)}`)
+    const reply = first.costUsd
+    expect(reply).toBeGreaterThan(0)
+
+    const child = await b.fork(parent.id, agentA)
+    const forked = await (await b.send(child.id, agentA, 'make it taller')).done
+    expect(forked).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (forked.kind !== 'result') throw new Error('unreachable')
+    // The child's own spend is its one turn; the lineage's pool holds both.
+    expect(forked.costUsd).toBeCloseTo(reply, 10)
+    expect(await b.get(child.id, agentA)).toMatchObject({ turns: 1 })
+    expect((await b.get(child.id, agentA)).ownCostUsd).toBeCloseTo(reply, 10)
+    expect((await b.get(child.id, agentA)).costUsd).toBeCloseTo(2 * reply, 10)
+    expect((await a.get(parent.id, agentA)).ownCostUsd).toBeCloseTo(reply, 10)
+
+    // And its second turn adds one more, not the parent's again either.
+    const again = await (await b.send(child.id, agentA, 'and wider')).done
+    if (again.kind !== 'result') throw new Error(`second child turn: ${JSON.stringify(again)}`)
+    expect(again.costUsd).toBeCloseTo(2 * reply, 10)
+    expect(await b.get(child.id, agentA)).toMatchObject({ turns: 2 })
+    expect((await b.get(child.id, agentA)).ownCostUsd).toBeCloseTo(2 * reply, 10)
+    expect((await b.get(child.id, agentA)).costUsd).toBeCloseTo(3 * reply, 10)
+  }, 60_000)
+
+  it('a fork of a session with a stopped turn charges the cut-off request once, to the parent (#1648, #991)', async () => {
+    const cut = STALL_COST_USD
+    const reply = REPLY_COST_USD
+    let stall = true
+    script = () => (stall ? STALL : { text: 'OK' })
+    const a = await replica()
+    const { session: parent } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(parent.id, browser, 'write a long essay')
+    for (let i = 0; i < 400; i++) {
+      if ((await allEvents(a, parent.id)).some((e) => e.event.type === 'assistant.text.delta')) break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    expect(await a.interrupt(parent.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect((await a.get(parent.id, browser)).ownCostUsd).toBeCloseTo(cut, 10)
+
+    stall = false
+    const child = await a.fork(parent.id, browser)
+    const forked = await (await a.send(child.id, browser, 'reply OK')).done
+    expect(forked).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (forked.kind !== 'result') throw new Error('unreachable')
+    expect(forked.costUsd).toBeCloseTo(reply, 10)
+    expect((await a.get(child.id, browser)).ownCostUsd).toBeCloseTo(reply, 10)
+    expect((await a.get(child.id, browser)).costUsd).toBeCloseTo(cut + reply, 10)
+    // The cut-off request stays the parent's, checked from both sides.
+    expect((await a.get(parent.id, browser)).ownCostUsd).toBeCloseTo(cut, 10)
+    const [row] = await db.sql<{ unpriced_cost_usd: number }[]>`SELECT unpriced_cost_usd FROM ai_sessions WHERE id = ${child.id}`
+    expect(row?.unpriced_cost_usd).toBe(0)
+  }, 60_000)
+
   it('keeps a turn stopped by a restart in the transcript, so the next turn on another replica has it', async () => {
     let n = 0
     script = (r) => (conversation(r).includes('kettle') && ++n === 1 ? { hang: true } : { text: `answer ${n}` })
@@ -281,10 +720,10 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     // Wait until the request reached the "model".
     for (let i = 0; i < 200 && fake.messageCalls().length === 0; i++) await new Promise((r) => setTimeout(r, 50))
     expect(fake.messageCalls().length).toBeGreaterThan(0)
-    const started = Date.now()
+    const started = performance.now()
     expect(await a.interrupt(session.id, browser)).toBe(true)
     expect(await turn.done).toEqual({ kind: 'interrupted' })
-    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(performance.now() - started).toBeLessThan(10_000)
     expect(await a.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
     const last = (await allEvents(a, session.id)).map((e) => e.event).slice(-2)
     expect(last).toEqual([
@@ -292,6 +731,58 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
     ])
   })
+
+  it('charges a turn stopped mid-reply for the request it cut off, once, across the resumed turn (#991)', async () => {
+    // Measured: Claude Code prices the cut-off request at nothing (its
+    // `aborted_streaming` result reports 0), and the next resumed query's
+    // total leaves it out too. The manager prices it from the stream
+    // (STALL_COST_USD).
+    const cut = STALL_COST_USD
+    let stall = true
+    script = () => (stall ? STALL : { text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(session.id, browser, 'write a long essay')
+    for (let i = 0; i < 400; i++) {
+      if ((await allEvents(a, session.id)).some((e) => e.event.type === 'assistant.text.delta')) break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    expect(await a.interrupt(session.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(cut, 10)
+
+    stall = false
+    const reply = REPLY_COST_USD
+    const next = await (await a.send(session.id, browser, 'reply OK')).done
+    expect(next).toMatchObject({ kind: 'result', subtype: 'success' })
+    if (next.kind !== 'result') throw new Error('unreachable')
+    expect(next.costUsd).toBeCloseTo(cut + reply, 10)
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(cut + reply, 10)
+    await expectPanelAccepts((await allEvents(a, session.id)).map((e) => e.event))
+  }, 60_000)
+
+  // #1661, measured on SDK 0.3.289: when the endpoint ends a stream with an SSE
+  // `error` event after message_start, Claude Code never passes that event on.
+  // It closes the request itself (content_block_stop and message_stop, which
+  // the endpoint never sent) and sends it again without streaming. Neither it
+  // nor the manager (unpricedSpend.ts) charges the cut-off request.
+  it.each([
+    ['answers when it is sent again', 'once' as const, 'success', REPLY_COST_USD],
+    ['fails every time', 'always' as const, 'failed', 0],
+  ])('charges nothing for a request the endpoint cut off with a stream error, which %s (#1661)', async (_label, mode, ended, cost) => {
+    const cutOff: Reply = { ...STALL, streamError: { type: 'overloaded_error', message: 'Overloaded' } }
+    let n = 0
+    script = () => (mode === 'always' || ++n === 1 ? cutOff : { text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const outcome = await (await a.send(session.id, browser, 'write a long essay')).done
+    expect(fake.messageCalls()).toHaveLength(2)
+    expect(outcome).toMatchObject(ended === 'success' ? { kind: 'result', subtype: 'success' } : { kind: 'failed' })
+    const after = await a.get(session.id, browser)
+    expect(after.costUsd).toBeCloseTo(cost, 10)
+    const [row] = await db.sql<{ unpriced_cost_usd: number }[]>`SELECT unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
+    expect(row?.unpriced_cost_usd).toBe(0)
+  }, 60_000)
 
   it('streams tool calls and results, and a late attach replays the same sequence a live watcher saw', async () => {
     script = (r) =>
@@ -335,5 +826,77 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.result',
       'session.status',
     ])
+  }, 60_000)
+
+  it('two sends in a row use one Claude Code process', async () => {
+    script = () => ({ text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    expect(await (await a.send(session.id, browser, 'one')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await (await a.send(session.id, browser, 'two')).done).toMatchObject({ kind: 'result', subtype: 'success', turns: 2 })
+    expect(count.spawned()).toBe(1)
+    // The second turn's request carried the first: one conversation, not two.
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('one')
+    expect(sent).toContain('two')
+    await a.stopTurns({ graceMs: 0, abortWaitMs: 1_000 })
+    expect(a.warm.size()).toBe(0)
+  }, 60_000)
+
+  it('cost per turn is the difference of total_cost_usd', async () => {
+    script = () => ({ text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const first = await (await a.send(session.id, browser, 'one')).done
+    const second = await (await a.send(session.id, browser, 'two')).done
+    expect(count.spawned()).toBe(1)
+    expect(first).toMatchObject({ kind: 'result', costUsd: expect.closeTo(REPLY_COST_USD, 10) })
+    expect(second).toMatchObject({ kind: 'result', costUsd: expect.closeTo(2 * REPLY_COST_USD, 10) })
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(2 * REPLY_COST_USD, 10)
+  }, 60_000)
+
+  it('an interrupt keeps the process', async () => {
+    let hang = true
+    script = () => (hang ? { hang: true } : { text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(session.id, browser, 'think forever')
+    for (let i = 0; i < 200 && fake.messageCalls().length === 0; i++) await new Promise((r) => setTimeout(r, 50))
+    expect(await a.interrupt(session.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect(a.warm.size()).toBe(1)
+    hang = false
+    expect(await (await a.send(session.id, browser, 'reply OK')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(count.spawned()).toBe(1)
+  }, 60_000)
+
+  it('handoff evicts', async () => {
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(agentA, { origin: 'mcp' })
+    await (await a.send(session.id, agentA, 'one')).done
+    expect(a.warm.size()).toBe(1)
+    await a.handoff(session.id, browser, browser)
+    expect(a.warm.size()).toBe(0)
+  }, 60_000)
+
+  it('a credential change evicts on every replica', async () => {
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const b = await replica()
+    for (const [m, pool] of [[a, pools.at(-2)], [b, pools.at(-1)]] as const) {
+      await pool!.sql.listen(WARM_EVICT_CHANNEL, evictOnNotify(m.warm))
+    }
+    const one = await a.start(browser, { origin: 'chat' })
+    const two = await b.start(browser, { origin: 'chat' })
+    await (await a.send(one.session.id, browser, 'one')).done
+    await (await b.send(two.session.id, browser, 'two')).done
+    expect([a.warm.size(), b.warm.size()]).toEqual([1, 1])
+    const kek = kekFromBase64(randomBytes(32).toString('base64'))
+    await new CredentialStore(db.sql).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' }, kek)
+    await expect.poll(() => [a.warm.size(), b.warm.size()]).toEqual([0, 0])
   }, 60_000)
 })

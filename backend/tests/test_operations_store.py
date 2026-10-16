@@ -1,0 +1,333 @@
+"""`OperationStore` (#1053, spec 2026-10-01 §4.2 "Our record"): a generic command's
+record, written only by its `Operation` workflow's activities."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Iterator
+from datetime import timedelta
+from typing import Any, cast
+
+import psycopg
+import pytest
+from psycopg import Connection
+from temporalio.client import WorkflowHandle
+from temporalio.service import RPCError, RPCStatusCode
+
+from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.events import Event, OperationEvent
+from scadbuddy.operations.store import Operation, OperationStore
+from scadbuddy.render.projection import JobProjection
+from scadbuddy.workflows import client as client_module
+from scadbuddy.workflows.client import reconcile_lost_operations
+from scadbuddy.workflows.problems import operation_lost
+from tests.support.temporal import DownClient, temporal_client
+
+pytestmark = pytest.mark.requires_postgres
+
+FAILED = PrintRunError(status=502, title="Bad Gateway", detail="Bambuddy said no")
+
+
+class Events:
+    def __init__(self) -> None:
+        self.published: list[Event] = []
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None:
+        self.published.append(event)
+
+
+@pytest.fixture
+def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
+    store = JobProjection(pg_conninfo, pool_size=2)
+    store.open()
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+@pytest.fixture
+def events() -> Events:
+    return Events()
+
+
+@pytest.fixture
+def store(jobs: JobProjection, events: Events) -> OperationStore:
+    return OperationStore(jobs.pool, events=events)
+
+
+async def insert(
+    store: OperationStore,
+    op_id: str,
+    *,
+    key: str = "k",
+    run: str = "r1",
+    retention: timedelta | None = None,
+) -> Operation:
+    return await store.insert(
+        op_id,
+        kind="reprint",
+        subject="archive:5",
+        operation_key=key,
+        request={"archive_id": 5},
+        workflow_id=f"op-reprint-{key}",
+        workflow_run_id=run,
+        retention=retention,
+    )
+
+
+async def test_insert_twice_for_one_execution_returns_the_first_row_and_publishes_once(
+    store: OperationStore, events: Events
+) -> None:
+    first = await insert(store, "a")
+    again = await insert(store, "b")
+    assert again.id == first.id == "a"
+    assert again.status == "running"
+    assert [
+        (e.operation_id, e.op_kind, e.subject)
+        for e in events.published
+        if isinstance(e, OperationEvent)
+    ] == [("a", "reprint", "archive:5")]
+
+
+async def test_find_returns_the_keys_newest_operation_whatever_its_status(
+    store: OperationStore,
+) -> None:
+    assert await store.find("k") is None
+    await insert(store, "a")
+    await store.finish("a", error=FAILED)
+    found = await store.find("k")
+    assert found is not None and found.id == "a"
+    assert found.status == "failed" and found.error == FAILED
+
+
+async def test_finish_changes_only_a_running_row_and_announces_it_once(
+    store: OperationStore, events: Events
+) -> None:
+    await insert(store, "a")
+    done = await store.finish("a", result={"queue_item_id": 7})
+    again = await store.finish("a", error=FAILED)
+    assert done.status == again.status == "succeeded"
+    assert again.result == {"queue_item_id": 7} and again.finished_at is not None
+    assert len(events.published) == 2
+
+
+async def test_get_reads_one_operation(store: OperationStore) -> None:
+    await insert(store, "a")
+    got = await store.get("a")
+    assert got is not None and got.kind == "reprint" and got.subject == "archive:5"
+    assert await store.get("nope") is None
+
+
+async def test_insert_prunes_operations_finished_before_the_retention(
+    store: OperationStore, pg_conninfo: str
+) -> None:
+    await insert(store, "old", key="k1", run="r1")
+    await store.finish("old", result={})
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE operations SET finished_at = now() - interval '2 days' WHERE id = 'old'"
+        )
+    await insert(store, "new", key="k2", run="r2", retention=timedelta(days=1))
+    assert await store.get("old") is None
+    assert await store.get("new") is not None
+
+
+async def test_named_by_running_finds_names_only_in_running_requests(
+    store: OperationStore,
+) -> None:
+    """Review 3c 1.2: a claim a running operation names is not dropped under it."""
+    held, done, loose = "a" * 64, "b" * 64, "c" * 64
+    for op_id, name in (("x", held), ("y", done)):
+        await store.insert(
+            op_id,
+            kind="model_create",
+            subject="w",
+            operation_key=op_id,
+            request={"source": name},
+            workflow_id=f"op-model_create-{op_id}",
+            workflow_run_id="r1",
+            retention=None,
+        )
+    await store.finish("y", result={})
+    assert await store.named_by_running([held, done, loose]) == {held}
+
+
+async def test_keyed_finds_a_kind_and_subject_sent_with_that_key(
+    store: OperationStore,
+) -> None:
+    """Review #1126 1.3: whatever the body, so a keyed upload is known before it is read."""
+    await store.insert(
+        "x",
+        kind="model_create",
+        subject="w",
+        operation_key="k",
+        request={},
+        workflow_id="op-model_create-k",
+        workflow_run_id="r1",
+        retention=None,
+        idempotency_key="key",
+    )
+    assert await store.keyed("model_create", "w", "key")
+    assert not await store.keyed("model_create", "w", "other")
+    assert not await store.keyed("model_create", "v", "key")
+    assert not await store.keyed("model_patch", "w", "key")
+
+
+async def test_running_executions_names_each_running_rows_execution(
+    store: OperationStore,
+) -> None:
+    running = await insert(store, "a", key="k1", run="w1")
+    await insert(store, "b", key="k2", run="w2")
+    await store.finish("b", result={})
+    assert await store.running_executions(timedelta(0)) == [
+        (running.id, "op-reprint-k1", "w1", "reprint")
+    ]
+    assert await store.running_executions(timedelta(hours=1)) == []
+
+
+async def test_a_lost_operation_says_what_its_kind_says_to_check(store: OperationStore) -> None:
+    """#1174: a lost library operation points at the model, not Bambuddy; by the row's
+    own kind, not one read back out of its workflow ID (this one names another)."""
+    async with temporal_client() as client:
+        handle = await client.start_workflow(
+            "Operation",
+            "x",
+            id=f"op-send-model_upload-{uuid.uuid4().hex[:8]}",
+            task_queue=f"unserved-{uuid.uuid4().hex[:8]}",
+        )
+        await handle.terminate("an operator ended it")
+        await store.insert(
+            "lost",
+            kind="model_upload",
+            subject="m",
+            operation_key="lost",
+            request={},
+            workflow_id=handle.id,
+            workflow_run_id=handle.result_run_id or "",
+            retention=None,
+        )
+        ended = await reconcile_lost_operations(
+            client,
+            store,
+            older_than=timedelta(0),
+            where={"model_upload": "the model and its libraries"},
+        )
+    assert ended == 1
+    lost = await store.get("lost")
+    assert lost is not None and lost.error is not None
+    assert "Check the model and its libraries before" in lost.error.detail
+
+
+async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
+    store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1063 1: an execution terminated after ``op_insert`` never runs
+    ``op_finish``; its row ends ``failed``, not ``running`` forever. One still running,
+    or whose workflow still runs under a later run id (a reset), is left alone."""
+    async with temporal_client() as client:
+        queue = f"unserved-{uuid.uuid4().hex[:8]}"
+
+        async def started(name: str) -> WorkflowHandle[Any, Any]:
+            return await client.start_workflow(
+                "Operation", "x", id=f"op-{name}-{uuid.uuid4().hex[:8]}", task_queue=queue
+            )
+
+        live, killed = await started("live"), await started("killed")
+        await killed.terminate("an operator ended it")
+        reset_first = await started("reset")
+        await reset_first.terminate("reset")
+        reset = await client.start_workflow("Operation", "x", id=reset_first.id, task_queue=queue)
+        for op_id, handle in (("live", live), ("killed", killed), ("reset", reset_first)):
+            await store.insert(
+                op_id,
+                kind="reprint",
+                subject="archive:5",
+                operation_key=op_id,
+                request={},
+                workflow_id=handle.id,
+                workflow_run_id=handle.result_run_id or "",
+                retention=None,
+            )
+        await insert(store, "gone", key="gone", run=str(uuid.uuid4()))
+        get = store.get
+
+        async def no_read_per_row(op_id: str) -> Operation | None:
+            raise AssertionError(f"read {op_id} again for its kind (#2997 review)")
+
+        # Each row's kind comes with the sweep's one read.
+        monkeypatch.setattr(store, "get", no_read_per_row)
+        try:
+            ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+        finally:
+            monkeypatch.setattr(store, "get", get)
+            await live.terminate("test over")
+            await reset.terminate("test over")
+    assert ended == 2
+    assert (await store.get("live")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("reset")).status == "running"  # type: ignore[union-attr]
+    killed_op = await store.get("killed")
+    assert killed_op is not None and killed_op.status == "failed"
+    # No `where` given: a kind it names nothing for says Bambuddy.
+    assert killed_op.error == operation_lost("Bambuddy")
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]
+
+
+async def _unavailable() -> Any:
+    raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def _denied() -> Any:
+    raise RPCError("request unauthorized", RPCStatusCode.PERMISSION_DENIED, b"")
+
+
+@pytest.mark.parametrize(
+    ("describe", "level"),
+    [(_unavailable, logging.WARNING), (_denied, logging.ERROR)],
+    ids=["unavailable", "denied"],
+)
+async def test_temporal_down_stops_the_operations_pass_once(
+    store: OperationStore,
+    caplog: pytest.LogCaptureFixture,
+    describe: Any,
+    level: int,
+) -> None:
+    """Review #1316 (11) 3: as the print-run pass, a failure about Temporal stops the
+    pass at the first describe with one log line, never one traceback per row (or an
+    escape to the loop's own traceback)."""
+    for op_id in ("one", "two"):
+        await insert(store, op_id, key=op_id, run=str(uuid.uuid4()))
+    client = DownClient(describe)
+
+    with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+        ended = await reconcile_lost_operations(cast(Any, client), store, older_than=timedelta(0))
+
+    assert ended == 0
+    assert len(client.timeouts) == 1
+    assert (await store.get("one")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("two")).status == "running"  # type: ignore[union-attr]
+    records = [r for r in caplog.records if r.name == client_module.__name__]
+    assert [r.levelno for r in records] == [level]
+
+
+async def test_one_failing_operation_does_not_stop_the_reconcile(
+    store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (11) 3: one row that cannot be ended is logged and left for the next
+    pass; the others are still ended, as the print-run pass does (review #1316 (9) 3a)."""
+    await insert(store, "bad", key="bad", run=str(uuid.uuid4()))
+    await insert(store, "gone", key="gone", run=str(uuid.uuid4()))
+    finish = store.finish
+
+    async def failing(op_id: str, **kwargs: Any) -> Operation:
+        if op_id == "bad":
+            raise RuntimeError("a database blip")
+        return await finish(op_id, **kwargs)
+
+    monkeypatch.setattr(store, "finish", failing)
+    async with temporal_client() as client:
+        ended = await reconcile_lost_operations(client, store, older_than=timedelta(0))
+    assert ended == 1
+    assert (await store.get("bad")).status == "running"  # type: ignore[union-attr]
+    assert (await store.get("gone")).status == "failed"  # type: ignore[union-attr]

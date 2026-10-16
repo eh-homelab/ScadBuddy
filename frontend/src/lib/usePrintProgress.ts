@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../api/client'
+import { readPrintProgress } from './printSource'
 import type { PrintProgress } from '../api/types'
 import { getRealtime } from './realtime'
 
@@ -14,7 +14,7 @@ const POLL_MS = 2000
 const LIVE_BACKSTOP_MS = 30_000
 
 export interface PrintProgressState {
-  /** The last answer for this output, or `null` when it has never been printed. */
+  /** The last answer for this print's subject, or `null` when it has never been printed. */
   progress: PrintProgress | null
   error: Error | undefined
   /** True from the first read until the print settles: "watching". */
@@ -24,7 +24,7 @@ export interface PrintProgressState {
 /**
  * Follows a print to its queue entries (#89) until the backend says it has settled.
  * #268: the backend's own watcher (`bambuddy/watcher.py`) follows the print and
- * publishes `print.*` on `print:<output id>`; this reads once now and once per
+ * publishes `print.*` on `print:<subject>`; this reads once now and once per
  * event, polls every 2 s while the realtime socket is unavailable, and reads every
  * 30 s regardless (`LIVE_BACKSTOP_MS`). A
  * sibling of `useRenderJob`, superseded by generation, cleared on unmount.
@@ -41,9 +41,12 @@ export interface PrintProgressState {
  *   nothing to wait for, so the poll stops rather than retrying.
  * - **The queue item does not exist until the plate has sliced.** That is why this
  *   polls at all rather than reading one response once.
+ *
+ * `subject` is `printSubject`'s (#1751): an output's id, or a library file's
+ * `library:<file id>`, whose print is followed the same way.
  */
 export function usePrintProgress(
-  outputId: string | undefined,
+  subject: string | undefined,
   enabled: boolean,
 ): PrintProgressState {
   const [progress, setProgress] = useState<PrintProgress | null>(null)
@@ -52,14 +55,14 @@ export function usePrintProgress(
   const generation = useRef(0)
 
   useEffect(() => {
-    if (!outputId || !enabled) return
+    if (!subject || !enabled) return
 
     const mine = ++generation.current
     let timer: ReturnType<typeof setTimeout> | undefined
     let unfollow: (() => void) | undefined
     let stopped = false
     let finished = false
-    let lastRead = 0
+    let lastRead = Number.NEGATIVE_INFINITY
     let reading = false
     let again = false
 
@@ -87,9 +90,9 @@ export function usePrintProgress(
         return
       }
       reading = true
-      lastRead = Date.now()
+      lastRead = performance.now()
       try {
-        const next = await api.getPrintProgress(id)
+        const next = await readPrintProgress(id)
         if (isStale()) return
         setProgress(next)
         if (next === null || next.settled) finish()
@@ -106,14 +109,14 @@ export function usePrintProgress(
       }
     }
 
-    const id = outputId
+    const id = subject
     const realtime = getRealtime()
     void read(id)
     unfollow = realtime.subscribe(`print:${id}`, () => void read(id))
     const fallback = () => {
       timer = setTimeout(() => {
         if (finished || isStale()) return
-        if (realtime.status === 'unavailable' || Date.now() - lastRead >= LIVE_BACKSTOP_MS) {
+        if (realtime.status === 'unavailable' || performance.now() - lastRead >= LIVE_BACKSTOP_MS) {
           void read(id)
         }
         fallback()
@@ -126,7 +129,7 @@ export function usePrintProgress(
       unfollow?.()
       if (timer) clearTimeout(timer)
     }
-  }, [outputId, enabled])
+  }, [subject, enabled])
 
   return { progress, error, polling }
 }

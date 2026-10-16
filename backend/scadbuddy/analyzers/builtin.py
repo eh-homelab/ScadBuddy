@@ -21,6 +21,7 @@ from scadbuddy.analyzers.model import (
     Fix,
     change,
 )
+from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
 from scadbuddy.bambuddy.filaments import check as check_filaments
 from scadbuddy.render.bambu3mf import plates_of, replate_3mf
 from scadbuddy.render.geometry import OVERHANG_ANGLES, MeshEdge
@@ -234,7 +235,8 @@ SILK_NOZZLE_TEMPERATURE = 235
 SILK_FIX = "silk-gloss"
 #: Nozzles the silk guide says are not recommended, in millimetres.
 SILK_UNRECOMMENDED_NOZZLES = (0.6, 0.8)
-#: Both spellings of the Cool Plate SuperTack the resolver's ``BED_TYPES`` offers.
+#: Both spellings of the Cool Plate SuperTack Bambuddy's ``SliceRequest`` takes: a
+#: remembered choice may be either (``hardware.BED_TYPE_ALIASES``).
 SUPERTACK = frozenset({"Supertack Plate", "Cool Plate (SuperTack)"})
 
 
@@ -456,11 +458,40 @@ def _low_filament(context: AnalysisContext, analyzer: Analyzer) -> list[Analyzer
                         origin="bambuddy:/library/files/{id}/filament-requirements",
                     ),
                     Evidence(label="copies", value=copies, origin="request"),
+                    *_shared_evidence(options, plan, warning.slot_id, copies),
                 ],
                 slots=[warning.slot_id],
             )
         )
     return found
+
+
+def _shared_evidence(
+    options: FilamentOptions, plan: FilamentPlan, slot_id: int, copies: int
+) -> list[Evidence]:
+    """For a spool other slots print from too (#2851): what they all need of it, since
+    this slot's own need can be less than what is left."""
+    spool_id = plan.spool_for(slot_id)
+    on = [
+        slot
+        for slot in options.slots
+        if slot.used_grams is not None and plan.spool_for(slot.slot_id) == spool_id
+    ]
+    if len(on) < 2:
+        return []
+    return [
+        Evidence(
+            label="needed with the other slots on this spool",
+            value=round(sum((slot.used_grams or 0.0) * copies for slot in on), 1),
+            unit="g",
+            origin="bambuddy:/library/files/{id}/filament-requirements",
+        ),
+        Evidence(
+            label="slots on this spool",
+            value=", ".join(str(slot.slot_id) for slot in sorted(on, key=lambda s: s.slot_id)),
+            origin="request",
+        ),
+    ]
 
 
 LOW_FILAMENT = Analyzer(

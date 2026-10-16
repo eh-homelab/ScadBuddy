@@ -1,8 +1,8 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { BROKEN_SOURCE, keychainSchema, keychainSource } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { NewModelPage } from './NewModelPage'
@@ -38,6 +38,7 @@ function renderNew() {
       <Routes>
         <Route path="/new" element={<NewModelPage />} />
         <Route path="/m/:slug" element={<h1>Customizer</h1>} />
+        <Route path="/" element={<h1>Catalogue</h1>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -49,23 +50,51 @@ async function paste(user: ReturnType<typeof userEvent.setup>, text: string) {
   await user.paste(text)
 }
 
+describe('NewModelPage, unsaved source (#997)', () => {
+  it('asks before leaving a pasted source behind', async () => {
+    const { user } = renderNew()
+    await paste(user, 'cube(1);\n')
+
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('cube(1);\n')
+
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByRole('heading', { name: 'Catalogue' })).toBeInTheDocument()
+  })
+
+  it('leaves an empty page without asking', async () => {
+    const { user } = renderNew()
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    expect(await screen.findByRole('heading', { name: 'Catalogue' })).toBeInTheDocument()
+  })
+})
+
 describe('NewModelPage', () => {
   it('abandons a superseded check on the wire, not just on arrival', async () => {
     // The server checks under a small concurrency budget, so a check nobody is
     // waiting for any more must release its permit.
-    const seen: AbortSignal[] = []
+    let arrived = 0
     server.use(
-      http.post('*/api/v1/models/check', async ({ request }) => {
-        seen.push(request.signal)
+      http.post('*/api/v1/models/check', async () => {
+        arrived += 1
         await new Promise((resolve) => setTimeout(resolve, 10_000))
         return HttpResponse.json({ ok: true, checked: true, diagnostics: [], parameters: 0 })
       }),
     )
+    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
+    // does not abort it when the client drops a reused keep-alive connection.
+    const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
 
     const { user, unmount } = renderNew()
     await paste(user, keychainSource)
-    await waitFor(() => expect(seen).toHaveLength(1), { timeout: 3_000 })
-    const inflight = seen[0]
+    await waitFor(() => expect(arrived).toBe(1), { timeout: 3_000 })
+    const checks = sent.mock.calls.filter(([url]) => String(url).endsWith('/api/v1/models/check'))
+    expect(checks).toHaveLength(1)
+    const inflight = checks[0]?.[1]?.signal
 
     unmount()
     await waitFor(() => expect(inflight?.aborted).toBe(true), { timeout: 3_000 })
@@ -284,5 +313,37 @@ describe('NewModelPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Save and customize' }))
     expect(await screen.findByText(/check timed out/)).toBeInTheDocument()
+  })
+})
+
+describe('NewModelPage, blank template (#1291)', () => {
+  it("fills an empty editor with the agent's blank starter, and then offers it no more", async () => {
+    const { user } = renderNew()
+    await user.click(await screen.findByRole('button', { name: 'Start from blank template' }))
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue(
+      '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n',
+    )
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+  })
+
+  it('never offers to replace a pasted source', async () => {
+    const { user } = renderNew()
+    await screen.findByRole('button', { name: 'Start from blank template' })
+    await paste(user, 'cube(1);\n')
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+  })
+
+  it('offers no button when the agent service does not answer', async () => {
+    let asked = false
+    server.use(
+      http.get('/api/v1/ai/templates/blank', () => {
+        asked = true
+        return new HttpResponse(null, { status: 502 })
+      }),
+    )
+    renderNew()
+    await waitFor(() => expect(asked).toBe(true))
+    expect(screen.queryByRole('button', { name: 'Start from blank template' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('')
   })
 })

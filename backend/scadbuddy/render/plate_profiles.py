@@ -248,3 +248,25 @@ BED_TYPES: dict[str, tuple[str, ...]] = {
         "Supertack Plate",
     ),
 }
+
+#: ``printer_model`` -> (``extruder_clearance_radius``,
+#: ``extruder_clearance_height_to_rod``, ``extruder_clearance_height_to_lid``), mm:
+#: what a by-object print's objects must clear (#956). Bambu Studio refuses to slice a
+#: by-object plate whose objects sit closer than the radius, or where more than one is
+#: taller than the rod (the gantry) or any is taller than the lid.
+CLEARANCES: dict[str, tuple[float, float, float]] = {
+    "Bambu Lab A1": (57.0, 25.0, 256.0),
+    "Bambu Lab A1 mini": (57.0, 25.0, 180.0),
+    "Bambu Lab A2L": (57.0, 25.0, 325.0),
+    "Bambu Lab H2C": (49.0, 47.4, 201.0),
+    "Bambu Lab H2D": (49.0, 47.4, 201.0),
+    "Bambu Lab H2D Pro": (49.0, 47.4, 201.0),
+    "Bambu Lab H2S": (30.0, 33.0, 187.0),
+    "Bambu Lab P1P": (57.0, 34.0, 90.0),
+    "Bambu Lab P1S": (57.0, 34.0, 90.0),
+    "Bambu Lab P2S": (72.0, 32.5, 141.5),
+    "Bambu Lab X1": (57.0, 34.0, 90.0),
+    "Bambu Lab X1 Carbon": (57.0, 34.0, 90.0),
+    "Bambu Lab X1E": (57.0, 34.0, 90.0),
+    "Bambu Lab X2D": (13.0, 32.8, 133.0),
+}

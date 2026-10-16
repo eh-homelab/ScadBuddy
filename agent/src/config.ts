@@ -1,4 +1,3 @@
-import { BrowserOriginsError, parseBrowserAllowedOrigins } from './harness/browserOrigins.js'
 import { OriginConfigError, originPolicy } from './http/origins.js'
 
 // The agent service's whole environment surface. Design spec §9
@@ -12,10 +11,8 @@ import { OriginConfigError, originPolicy } from './http/origins.js'
 // key-encryption key (and the previous one while rotating it), and how the pod
 // is reached (its public URL and the proxies in front of it). The last two
 // cannot live in Settings: they decide which requests may change Settings.
-// SCADBUDDY_BROWSER_ALLOWED_ORIGINS is here for the same reason: it decides
-// what on the network the headless browser inside the pod may reach
-// (harness/browserOrigins.ts), which is the operator's call, not a setting a
-// request could change.
+// The Temporal address and namespace are where the
+// `agent-tools` worker polls (#1055), infrastructure like the database URL.
 
 export type Config = {
   /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
@@ -41,14 +38,29 @@ export type Config = {
   /** CIDR list of proxies whose X-Forwarded-* headers are believed. Unset → none. */
   trustedProxies: string | undefined
   /**
-   * Origins beyond the backend's that the headless browser may open, each once
-   * a human approves it for the session (harness/browserOrigins.ts): a
-   * comma-separated list, or `*` for any. Unset → none.
+   * The Temporal frontend's host:port, the same SCADBUDDY_TEMPORAL_ADDRESS the backend
+   * reads. The `agent-tools` worker and the commands run on it (spec 2026-10-01 §6.3,
+   * #1055). Unset → neither: /healthz says so, and plugin installs answer 503.
    */
-  browserAllowedOrigins: string | undefined
+  temporalAddress: string | undefined
+  /** The backend's SCADBUDDY_TEMPORAL_NAMESPACE (default `scadbuddy`). */
+  temporalNamespace: string
+  /**
+   * The backend's SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert §4.2's Search Attributes,
+   * once the deployment has registered them.
+   */
+  temporalSearchAttributes: boolean
+  /**
+   * SCADBUDDY_PAYLOAD_DIR: where a durable session's large Temporal payloads are kept,
+   * on the data share agent-durable mounts at the same path (#2243). Unset → none are
+   * stored, and a stored one cannot be read.
+   */
+  payloadDir: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
+/** The backend's `DEFAULT_TEMPORAL_NAMESPACE` (backend/scadbuddy/core/config.py). */
+export const DEFAULT_TEMPORAL_NAMESPACE = 'scadbuddy'
 
 /** The only variable names this service reads. Tests assert nothing else is consulted. */
 export const ENV_VARS = [
@@ -59,7 +71,10 @@ export const ENV_VARS = [
   'SCADBUDDY_PUBLIC_URL',
   'SCADBUDDY_ALLOWED_ORIGINS',
   'SCADBUDDY_AGENT_TRUSTED_PROXIES',
-  'SCADBUDDY_BROWSER_ALLOWED_ORIGINS',
+  'SCADBUDDY_TEMPORAL_ADDRESS',
+  'SCADBUDDY_TEMPORAL_NAMESPACE',
+  'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+  'SCADBUDDY_PAYLOAD_DIR',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -72,6 +87,21 @@ export class ConfigError extends Error {
 function present(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
+}
+
+/** A Temporal value has no whitespace inside, as the backend's settings require. */
+function temporalValue(name: string, value: string | undefined): string | undefined {
+  if (value !== undefined && /\s/.test(value)) throw new ConfigError(`${name} must not contain whitespace`)
+  return value
+}
+
+/** A boolean as pydantic reads the backend's same variable. */
+function flag(name: string, value: string | undefined): boolean {
+  if (value === undefined) return false
+  const lower = value.toLowerCase()
+  if (['true', '1', 'yes', 'on'].includes(lower)) return true
+  if (['false', '0', 'no', 'off'].includes(lower)) return false
+  throw new ConfigError(`${name} must be true or false, not ${value}`)
 }
 
 export function loadConfig(env: Env = process.env): Config {
@@ -111,13 +141,6 @@ export function loadConfig(env: Env = process.env): Config {
     if (err instanceof OriginConfigError) throw new ConfigError(err.message)
     throw err
   }
-  const browserAllowedOrigins = present(env.SCADBUDDY_BROWSER_ALLOWED_ORIGINS)
-  try {
-    parseBrowserAllowedOrigins(browserAllowedOrigins)
-  } catch (err) {
-    if (err instanceof BrowserOriginsError) throw new ConfigError(err.message)
-    throw err
-  }
 
   return {
     databaseUrl,
@@ -128,6 +151,14 @@ export function loadConfig(env: Env = process.env): Config {
     publicUrl,
     allowedOrigins,
     trustedProxies,
-    browserAllowedOrigins,
+    temporalAddress: temporalValue('SCADBUDDY_TEMPORAL_ADDRESS', present(env.SCADBUDDY_TEMPORAL_ADDRESS)),
+    temporalNamespace:
+      temporalValue('SCADBUDDY_TEMPORAL_NAMESPACE', present(env.SCADBUDDY_TEMPORAL_NAMESPACE)) ??
+      DEFAULT_TEMPORAL_NAMESPACE,
+    temporalSearchAttributes: flag(
+      'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+      present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
+    ),
+    payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
   }
 }

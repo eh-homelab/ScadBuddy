@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { BUILTIN_SLUG } from '../../mocks/fixtures'
 import {
   BREAKING_MESSAGE,
@@ -9,12 +9,15 @@ import {
   SLOW_REF,
   UNCHECKED_REF,
   setMockLibraryPin,
+  setMockUnusedCheckouts,
 } from '../../mocks/features/libraryUpgrade'
+import { printRunPoll } from '../../api/client'
 import { mockModels, problem, replaceMockModel, setMockInvalidLibraries } from '../../mocks/handlers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LibraryUpgrade } from './LibraryUpgrade'
+import { choose, optionsOf } from '../../test/select'
 
 const URL_ = 'https://github.com/BelfrySCAD/BOSL2.git'
 const OLD = { name: 'BOSL2', url: URL_, ref: 'v2.0.700', commit: 'a1b2c3d4'.repeat(5) }
@@ -22,21 +25,24 @@ const OLD = { name: 'BOSL2', url: URL_, ref: 'v2.0.700', commit: 'a1b2c3d4'.repe
 /** Every request the flow sends to a library route, in order. */
 function recorded() {
   const calls: { method: string; path: string; body: unknown }[] = []
-  server.events.on('request:start', ({ request }) => {
+  const record = ({ request }: { request: Request }) => {
     const path = new URL(request.url).pathname
     if (request.method === 'GET' || !path.includes('/libraries/')) return
     void request
       .clone()
       .json()
       .then((body: unknown) => calls.push({ method: request.method, path, body }))
-  })
+  }
+  server.events.on('request:start', record)
+  // Left on, it reads every later test's library writes too, a body-less DELETE included.
+  onTestFinished(() => server.events.removeListener('request:start', record))
   return calls
 }
 
 async function open(ref?: string) {
   const view = renderPage(<LibraryUpgrade />)
   const { user } = view
-  await user.selectOptions(await screen.findByLabelText('Library'), 'BOSL2')
+  await choose(user, await screen.findByLabelText('Library'), 'BOSL2')
   const input = screen.getByLabelText('Candidate ref')
   if (ref !== undefined) {
     await user.clear(input)
@@ -77,8 +83,8 @@ describe('LibraryUpgrade', () => {
     setMockLibraryPin('gridfinity-bin', pin)
     const { user } = renderPage(<LibraryUpgrade />)
     const select = await screen.findByLabelText('Library')
-    expect(within(select).getByRole('option', { name: 'threads' })).toBeInTheDocument()
-    await user.selectOptions(select, 'threads')
+    expect(await optionsOf(user, select)).toContain('threads')
+    await choose(user, select, 'threads')
     // Not in the catalogue, so no ref is suggested.
     expect(screen.getByLabelText('Candidate ref')).toHaveValue('')
     const list = await screen.findByRole('list', { name: 'Models that pin threads' })
@@ -88,15 +94,15 @@ describe('LibraryUpgrade', () => {
   })
 
   it('offers a library pinned elsewhere while the panel is open (#766)', async () => {
-    renderPage(<LibraryUpgrade />)
+    const { user } = renderPage(<LibraryUpgrade />)
     const select = await screen.findByLabelText('Library')
-    expect(within(select).queryByRole('option', { name: 'threads' })).toBeNull()
+    expect(await optionsOf(user, select)).not.toContain('threads')
 
     setMockLibraryPin('gridfinity-bin', { name: 'threads', url: 'https://github.com/rcolyer/threads-scad.git', ref: 'v2.1', commit: 'c0ffee00'.repeat(5) })
     // Re-sent until it lands: an event before the subscription is confirmed reaches no one.
-    await waitFor(() => {
+    await waitFor(async () => {
       emitRealtime('library.changed', ['libraries', 'model:gridfinity-bin'], { slug: 'gridfinity-bin', name: 'threads' })
-      expect(within(screen.getByLabelText('Library')).getByRole('option', { name: 'threads' })).toBeInTheDocument()
+      expect(await optionsOf(user, screen.getByLabelText('Library'))).toContain('threads')
     })
   })
 
@@ -110,11 +116,11 @@ describe('LibraryUpgrade', () => {
     // The mount's read, and the live-update resync's: neither depends on the library.
     const mounted = reads
     expect(mounted).toBeGreaterThan(0)
-    await user.selectOptions(screen.getByLabelText('Library'), 'threads')
+    await choose(user, screen.getByLabelText('Library'), 'threads')
     // Named at once from the list already read: no slug while a fetch is in flight.
     const list = await screen.findByRole('list', { name: 'Models that pin threads' })
     expect(within(list).getByRole('listitem', { name: 'Name Keychain' })).toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    await choose(user, screen.getByLabelText('Library'), 'BOSL2')
     await screen.findByRole('list', { name: 'Models that pin BOSL2' })
     expect(row('Name Keychain')).toBeInTheDocument()
     expect(reads).toBe(mounted)
@@ -126,13 +132,13 @@ describe('LibraryUpgrade', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Could not read the models, so rows show slugs: the catalogue is offline',
     )
-    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    await choose(user, screen.getByLabelText('Library'), 'BOSL2')
     expect(await screen.findByRole('listitem', { name: 'name-keychain' })).toHaveTextContent('Pinned to v2.0.700')
   })
 
   it('says so when no model pins the library', async () => {
     const { user } = renderPage(<LibraryUpgrade />)
-    await user.selectOptions(await screen.findByLabelText('Library'), 'dotSCAD')
+    await choose(user, await screen.findByLabelText('Library'), 'dotSCAD')
     expect(await screen.findByText('No model pins dotSCAD.')).toBeInTheDocument()
   })
 
@@ -200,23 +206,26 @@ describe('LibraryUpgrade', () => {
   })
 
   it('aborts an in-flight check when the rows unmount, so it stops holding the check permit', async () => {
-    let aborted = false
     let started = false
     server.use(
-      http.post('/api/v1/models/:slug/libraries/:name/check', async ({ request }) => {
+      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
         started = true
-        request.signal.addEventListener('abort', () => {
-          aborted = true
-        })
         await delay('infinite')
         return undefined
       }),
     )
+    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
+    // does not abort it when the client drops a reused keep-alive connection.
+    const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
     const { user, unmount } = await open()
     await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
     await waitFor(() => expect(started).toBe(true))
+    const checks = sent.mock.calls.filter(([url]) => /\/libraries\/[^/]+\/check$/.test(String(url)))
+    expect(checks).toHaveLength(1)
+    const inflight = checks[0]?.[1]?.signal
     unmount()
-    await waitFor(() => expect(aborted).toBe(true))
+    await waitFor(() => expect(inflight?.aborted).toBe(true))
   })
 
   it('disables the Library select while a check or a move runs', async () => {
@@ -390,5 +399,99 @@ describe('LibraryUpgrade', () => {
     expect(within(builtin).queryByRole('checkbox')).toBeNull()
     await user.click(within(builtin).getByRole('button', { name: 'Check' }))
     expect(await within(builtin).findByTestId('library-check')).toHaveTextContent('Parses at v2.0.761')
+  })
+
+  // #2770: a checkout no live pin reads can be removed; a pinned one is not offered.
+  it('lists the checkouts no model uses, and removes one by its commit', async () => {
+    const stale = { name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }
+    setMockUnusedCheckouts([stale])
+    const sent: string[] = []
+    const record = ({ request }: { request: Request }) => {
+      if (request.method === 'DELETE') sent.push(new URL(request.url).pathname + new URL(request.url).search)
+    }
+    server.events.on('request:start', record)
+    onTestFinished(() => server.events.removeListener('request:start', record))
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    expect(within(list).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual(['BOSL2 deadbee'])
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(sent).toEqual([`/api/v1/libraries/BOSL2?commit=${stale.commit}`])
+  })
+
+  it('follows a removal answered 202 through its operation to the end', async () => {
+    const poll = printRunPoll.intervalMs
+    printRunPoll.intervalMs = 1
+    onTestFinished(() => {
+      printRunPoll.intervalMs = poll
+    })
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    const op = { id: 'op-remove', kind: 'library_remove', status: 'running', created_at: '2026-10-14T00:00:00Z' }
+    let reads = 0
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => HttpResponse.json(op, { status: 202 })),
+      http.get('/api/v1/operations/op-remove', () => {
+        reads += 1
+        if (reads < 2) return HttpResponse.json(op)
+        setMockUnusedCheckouts([])
+        return HttpResponse.json({ ...op, status: 'succeeded', result: null })
+      }),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(reads).toBe(2)
+  })
+
+  // A refusal shown beside another row is not kept next to a row that may now be removable.
+  it("drops another row's refusal once a removal goes through", async () => {
+    const [a, b] = ['deadbeef', 'feedface'].map((c) => ({ name: 'BOSL2', commit: c.repeat(5), used_by: [] }))
+    setMockUnusedCheckouts([a!, b!])
+    server.use(
+      http.delete('/api/v1/libraries/:name', ({ request }) => {
+        if (new URL(request.url).searchParams.get('commit') === a!.commit) {
+          return problem(409, 'Conflict', 'a running render reads BOSL2 deadbeef: job j1')
+        }
+        setMockUnusedCheckouts([a!])
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef')
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 feedfac' }))
+    await waitFor(() => {
+      const left = screen.getByRole('list', { name: 'Checkouts no model uses' })
+      expect(within(left).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual([
+        'BOSL2 deadbee',
+      ])
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('keeps the chosen library on screen while a removal re-lists the checkouts', async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    const { user } = renderPage(<LibraryUpgrade />)
+    await choose(user, await screen.findByLabelText('Library'), 'BOSL2')
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    // No "Loading libraries" in between: the library, its checks and ticks stay.
+    expect(screen.queryByText('Loading libraries')).toBeNull()
+    expect(screen.getByLabelText('Library')).toHaveTextContent('BOSL2')
+  })
+
+  it("says why a removal was refused, and keeps the row", async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => problem(409, 'Conflict', 'a running render reads BOSL2 deadbeef: job j1')),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef: job j1')
+    expect(within(list).getByRole('listitem', { name: 'BOSL2 deadbee' })).toBeInTheDocument()
   })
 })

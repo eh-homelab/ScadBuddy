@@ -348,7 +348,9 @@ def test_hf_on_either_side_still_names_bambus_own_printer_preset(
     assert printer_preset_name(nozzles) == "Bambu Lab H2C 0.4 nozzle"
 
 
-def test_high_flow_slices_as_standard_with_a_warning() -> None:
+def test_high_flow_names_bambus_own_preset_with_no_warning() -> None:
+    """#484: the flow is stated in the 3MF (``replate_3mf``), not by a preset, so High
+    Flow resolves as Standard does and is no longer said to slice as Standard."""
     resolved = resolve(
         options(BASIC),
         plan(1),
@@ -359,7 +361,7 @@ def test_high_flow_slices_as_standard_with_a_warning() -> None:
         {},
     )
     assert resolved.printer_preset == PresetRef(source="cloud", id="GM041")
-    assert "hf-unsupported" in [w.kind for w in resolved.warnings]
+    assert resolved.warnings == []
     assert resolved.errors == []
 
 

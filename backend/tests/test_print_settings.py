@@ -21,6 +21,7 @@ from scadbuddy.library.catalogue import (
     meta_from_raw,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
@@ -45,6 +46,8 @@ def test_every_allowlisted_key_is_accepted() -> None:
         "wipe_tower_no_sparse_layers": "0",
         "enable_support": "1",
         "support_type": "tree(auto)",
+        "support_threshold_angle": "40",
+        "support_on_build_plate_only": "1",
         "brim_width": "5",
         "brim_type": "outer_only",
         "print_sequence": "by object",
@@ -72,6 +75,12 @@ def test_every_allowlisted_key_is_accepted() -> None:
                 "no_brim",
             )
         ],
+        # #1899: whole degrees from vertical.
+        ("support_threshold_angle", "0"),
+        ("support_threshold_angle", "30"),
+        ("support_threshold_angle", "90"),
+        ("support_on_build_plate_only", "0"),
+        ("support_on_build_plate_only", "1"),
         ("brim_width", "0"),
         ("brim_width", "2.5"),
         ("brim_width", "10"),
@@ -91,6 +100,11 @@ def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
         ("enable_support", "", "must be one of '0', '1'"),
         ("support_type", "tree", "must be one of 'normal(auto)'"),
         ("brim_type", "outer", "must be one of 'auto_brim'"),
+        ("support_threshold_angle", "91", "whole number of degrees from 0 to 90"),
+        ("support_threshold_angle", "30.5", "whole number of degrees from 0 to 90"),
+        ("support_threshold_angle", "-5", "whole number of degrees from 0 to 90"),
+        ("support_threshold_angle", "", "whole number of degrees from 0 to 90"),
+        ("support_on_build_plate_only", "yes", "must be one of '0', '1'"),
         ("print_sequence", "by_object", "must be one of 'by layer', 'by object'"),
         ("brim_width", "-1", "non-negative number"),
         ("brim_width", "wide", "non-negative number"),
@@ -145,7 +159,7 @@ def _catalogue(tmp_path: Path, meta: dict[str, object]) -> Catalogue:
     paths.model_dir("demo").mkdir(parents=True)
     paths.model_source("demo").write_text("cube(1);\n", encoding="utf-8")
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
-    return Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_the_catalogue_answers_a_templates_print_settings(tmp_path: Path) -> None:

@@ -140,6 +140,7 @@ color_8 = "#FF80AB"; // color
 $fn = 48;
 BED_X = 300;          // H2C plate using both nozzles
 BED_Y = 320;
+SEP = 0.01;           // corner-touch separation, in mosaic pixels
 PIN = 0.004;          // probe size, in mosaic pixels
 TAB_WALL = 2.5;       // material around the mount hole
 HOLE_CLEAR = 1.2;     // hole edge to the mosaic, at least
@@ -351,10 +352,21 @@ module grooves_2d() {
 // A mosaic region, in mm, centred on the origin, with the grooves cut.
 module to_mm() {
     translate([-GW / 2, -GH / 2]) scale(PS) translate([0.5, 0.5]) difference() {
-        children();
+        // Shrink, then regrow with rounded corners: pixels of one colour that
+        // meet only at a corner pull apart instead of sharing an edge of four
+        // faces, which no closed solid can hold (#1883). Pixels that share a
+        // side stay merged. Sides and concave corners come back where they
+        // were; each convex corner loses SEP²(1 - π/4), which is why verify.sh
+        // compares volumes within a tolerance rather than exactly. A radius of
+        // SEP needs no smooth arc: $fn = 8 keeps the polygon count of a large
+        // mosaic near its pixel count instead of ~12 segments a corner.
+        offset(r = SEP, $fn = 8) offset(delta = -SEP) children();
         if (pixel_gap > 0) grooves_2d();
     }
 }
+// Not rounded like to_mm: only the colour parts need corners pulled apart
+// (#1883). The backing and frame keep the exact pixel outline, so at a convex
+// corner they and the art no longer meet exactly; they differ by under SEP px.
 module to_mm_solid() { translate([-GW / 2, -GH / 2]) scale(PS) translate([0.5, 0.5]) children(); }
 
 // ===========================================================================
@@ -386,8 +398,24 @@ module tab_2d() {
     }
 }
 
-MAGNETS = magnet_count == 4 ? [[-GW / 4, -GH / 4], [GW / 4, -GH / 4], [-GW / 4, GH / 4], [GW / 4, GH / 4]]
-        : magnet_count == 2 ? [[-GW / 4, 0], [GW / 4, 0]] : [[0, 0]];
+// Each pocket needs its diameter plus MAGNET_WALL on both sides: the 4 sit
+// at the quarter points (a GW/2 x GH/2 cell each), the 2 at the side quarter
+// points (GW/2 x GH). Fewer pockets when they would run into each other or
+// out of the mosaic, with a NOTE.
+MAGNET_SPAN = magnet_diameter + magnet_clearance + 2 * MAGNET_WALL;
+function magnets_fit(n) = n == 4 ? GW / 2 >= MAGNET_SPAN && GH / 2 >= MAGNET_SPAN
+                        : n == 2 ? GW / 2 >= MAGNET_SPAN && GH >= MAGNET_SPAN : true;
+MC = magnet_count >= 4 && magnets_fit(4) ? 4 : magnet_count >= 2 && magnets_fit(2) ? 2 : 1;
+if (MAGNET && MC < magnet_count)
+    echo(str("NOTE: magnet_count reduced from ", magnet_count, " to ", MC, " so the ", magnet_diameter,
+             " mm pockets do not run into each other on the ", GW, " x ", GH, " mm mosaic"));
+// One pocket too big for the plaque: its pad of backing is the only thing
+// round it, so keep the pad, past the plaque's edge, and say so.
+if (MAGNET && !CUT && MAGNET_SPAN / 2 > min(GW, GH) / 2 + frame_width)
+    echo(str("NOTE: the magnet pocket and its ", MAGNET_WALL, " mm wall (", MAGNET_SPAN,
+             " mm) are bigger than the plaque, so its backing pad reaches past the edge"));
+MAGNETS = MC == 4 ? [[-GW / 4, -GH / 4], [GW / 4, -GH / 4], [-GW / 4, GH / 4], [GW / 4, GH / 4]]
+        : MC == 2 ? [[-GW / 4, 0], [GW / 4, 0]] : [[0, 0]];
 
 module backing() {
     difference() {

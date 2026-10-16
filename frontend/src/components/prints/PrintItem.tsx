@@ -1,10 +1,10 @@
 import { Link } from 'react-router'
-import { api } from '../../api/client'
+import { libraryOptionsScope, readPrintProgress } from '../../lib/printSource'
 import type { PrintSummary } from '../../api/types'
 import { formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
-import { printerLabel, printLabel, printPath } from './prints'
+import { libraryPrintsPath, printerLabel, printLabel, printPath } from './prints'
 import { PrintStatus } from './PrintStatus'
 import { DELETED_STATUS } from './status'
 
@@ -26,6 +26,7 @@ interface Props {
  */
 export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
   const label = printLabel(print)
+  const subject = subjectOf(print)
   const raised = 'relative z-10'
   const cards = view === 'cards'
   return (
@@ -51,9 +52,25 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
           </h2>
           <PrintStatus status={print.status} />
         </div>
-        {templateName && <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>}
+        {templateName &&
+          (print.library_file_id !== null ? (
+            // #1755 — every print of the file, above the item's own link.
+            <p className="mt-0.5 truncate text-[12px] text-muted">
+              <Link
+                to={libraryPrintsPath(print.library_file_id)}
+                title="Every print of this file"
+                className={`${raised} hover:text-ink hover:underline`}
+              >
+                {templateName}
+              </Link>
+            </p>
+          ) : (
+            <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>
+          ))}
         <Facts print={print} />
-        {print.status === 'printing' && <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />}
+        {print.status === 'printing' && subject !== null && (
+          <PrintingNow subject={subject} named={print.printer_name !== null || print.printer_id !== null} />
+        )}
         <ParamsDiff diff={print.params_diff} />
       </div>
     </li>
@@ -158,13 +175,19 @@ function Facts({ print }: { print: PrintSummary }) {
  * `print:<output id>`. That read follows the output's latest send, which is this print
  * while it is the one printing.
  */
-function PrintingNow({ outputId, named }: { outputId: string; named: boolean }) {
-  const { data } = useAsync(() => api.getPrintProgress(outputId), [outputId], [`print:${outputId}`])
+/** #1751 — what a print's live progress is read by: its output, or its library file. */
+function subjectOf(print: PrintSummary): string | null {
+  if (print.output_id !== null) return print.output_id
+  return print.library_file_id !== null ? libraryOptionsScope(print.library_file_id) : null
+}
+
+function PrintingNow({ subject, named }: { subject: string; named: boolean }) {
+  const { data } = useAsync(() => readPrintProgress(subject), [subject], [`print:${subject}`])
   const copies = data?.copies_detail ?? []
   const copy = copies.find((c) => c.stage === 'running') ?? copies[0]
   if (!copy) return null
   const text = copy.message ?? copy.waiting_reason
-  // The list names the archive's printer; the read's is only a fallback.
+  // The list names the archive's printer (#2363); the read's is only for a print with none.
   const printer = named ? null : copy.printer_name
   if (!printer && !text) return null
   return (
@@ -184,14 +207,21 @@ function ParamsDiff({ diff }: { diff: PrintSummary['params_diff'] }) {
   }
   const rest = entries.length - PARAMS_SHOWN
   return (
-    <dl className="mt-2 flex flex-wrap gap-1 text-[11px]" aria-label="Changed parameters">
-      {entries.slice(0, PARAMS_SHOWN).map(([name, value]) => (
-        <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-[3px] bg-surface-2 px-1.5 py-0.5">
-          <dt className="text-muted">{name}</dt>
-          <dd className="sb-num truncate text-ink">{formatValue(value)}</dd>
-        </div>
-      ))}
-      {rest > 0 && <div className="px-1 py-0.5 text-faint">+{rest} more</div>}
-    </dl>
+    // #2457 — "+N more" sits beside the list, not in it: a <dl> holds only term groups.
+    <div className="mt-2 flex flex-wrap items-start gap-1 text-[11px]">
+      <dl className="flex min-w-0 flex-wrap gap-1" aria-label="Changed parameters">
+        {entries.slice(0, PARAMS_SHOWN).map(([name, value]) => (
+          <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-[3px] bg-surface-2 px-1.5 py-0.5">
+            <dt className="text-muted">{name}</dt>
+            <dd className="sb-num truncate text-ink">{formatValue(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      {rest > 0 && (
+        <p className="px-1 py-0.5 text-faint">
+          +{rest} more
+        </p>
+      )}
+    </div>
   )
 }

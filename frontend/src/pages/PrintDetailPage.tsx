@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { Job, PrintDetail, PrinterMedia } from '../api/types'
@@ -6,28 +6,25 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
-import { DELETED_STATUS, statusLabel } from '../components/prints/status'
+import { PrintAttachments } from '../components/prints/PrintAttachments'
+import { PrintFiles } from '../components/prints/PrintFiles'
+import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
+import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
-import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
+import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { fineLength, useDisplayUnit } from '../lib/units'
 
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 
-type PrintFile = PrintDetail['files'][number]
 type Run = PrintDetail['outcome']['runs'][number]
 
 
-const FILE_LABELS: Record<PrintFile['kind'], string> = {
-  output_3mf: 'ScadBuddy 3MF',
-  preview_glb: 'Preview mesh',
-  sliced: 'Sliced file',
-  source: 'Source 3MF',
-}
 
 function formatWhen(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -38,6 +35,11 @@ function formatWhen(iso: string | null | undefined): string | null {
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/** A video attachment's type, from the extension its bytes gave it (#309). */
+function videoType(filename: string): string {
+  return filename.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4'
 }
 
 /** The print's photos, timelapse, plate image and attachments, in that order. */
@@ -62,7 +64,7 @@ function gallerySlides(print: PrintDetail): Slide[] {
       key: 'timelapse',
       kind: 'video',
       src: media.timelapse.url,
-      poster: media.timelapse.poster_frames[0]?.data_url,
+      poster: media.timelapse.poster_url,
       alt: 'Timelapse',
       contentType: 'video/mp4',
     })
@@ -72,8 +74,9 @@ function gallerySlides(print: PrintDetail): Slide[] {
       key: `plate-${plate.index}`,
       kind: 'image',
       src: plate.url,
-      alt: `Plate ${plate.index} as sliced`,
-      caption: "The slicer's plate image",
+      alt: `${plate.name ?? `Plate ${plate.index}`} as sliced`,
+      // #2055 — the plate by what it holds, when that is known.
+      caption: plate.name ? `${plate.name}, as sliced` : "The slicer's plate image",
     })
   }
   media.attachments.forEach((attachment, index) => {
@@ -83,23 +86,10 @@ function gallerySlides(print: PrintDetail): Slide[] {
       src: attachment.url,
       alt: attachment.caption ?? `Attachment ${index + 1}`,
       caption: attachment.caption ?? undefined,
+      contentType: attachment.kind === 'video' ? videoType(attachment.filename) : undefined,
     })
   })
   return slides
-}
-
-/** Fetched as a blob and saved through `lib/embed`, so it works inside Bambuddy's iframe. */
-async function download(url: string, name: string): Promise<void> {
-  await downloadBlob(async () => {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.blob()
-  }, name)
-}
-
-function paramsFileName(print: PrintDetail): string {
-  const own = print.files.find((file) => file.kind === 'output_3mf')
-  return own ? `${own.name.replace(/\.3mf$/i, '')}-params.json` : `print-${print.archive_id}-params.json`
 }
 
 export function PrintDetailPage() {
@@ -148,22 +138,34 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
             Prints
           </Link>
           <span className="text-faint">/</span>
-          <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
-            {print.slug}
-          </Link>
+          {print.slug !== null ? (
+            <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
+              {print.slug}
+            </Link>
+          ) : print.library_file_id !== null ? (
+            // #1755 — the file by its name, linking to every print of it.
+            <Link to={libraryPrintsPath(print.library_file_id)} className="text-muted hover:text-ink">
+              {print.library_file_name ?? 'Bambuddy library file'}
+            </Link>
+          ) : (
+            <span className="text-muted">Bambuddy library file</span>
+          )}
         </nav>
         <header className="mb-5 flex flex-wrap items-center gap-3">
           <h1 className="text-[17px] font-medium">{title}</h1>
           <StatusBadge status={print.status} />
           <span className="sb-num text-[12px] text-faint">Archive #{print.archive_id}</span>
           <div className="ml-auto flex flex-wrap gap-2">
-            <Link
-              to={print.provenance.edit_url}
-              className="inline-flex items-center rounded-[6px] border border-line bg-surface-2 px-3 py-1.5 text-[13px] text-ink hover:border-line-strong"
-            >
-              Customize from this
-            </Link>
-            {!deleted && (
+            {print.provenance && (
+              <Link
+                to={print.provenance.edit_url}
+                className="inline-flex items-center rounded-[6px] border border-line bg-surface-2 px-3 py-1.5 text-[13px] text-ink hover:border-line-strong"
+              >
+                Customize from this
+              </Link>
+            )}
+            {/* #2736 — not while it is still going: its outcome is not known yet. */}
+            {!deleted && !isUnfinished(print.status) && (
               <Button onClick={() => setReprinting(true)}>Print again</Button>
             )}
             {print.links.bambuddy_url && (
@@ -180,7 +182,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
             className="mb-4 rounded-[6px] border border-warn/40 bg-warn/8 px-3 py-2 text-[13px] text-warn"
           >
             This print was deleted in Bambuddy. Its photos, timelapse and sliced file went with
-            it; ScadBuddy still has the parameters and its own files.
+            it{print.provenance ? '; ScadBuddy still has the parameters and its own files.' : '.'}
           </p>
         )}
 
@@ -188,8 +190,26 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           {!deleted && <GallerySection print={print} />}
           <RenderSection print={print} />
           {!deleted && <TimelapseSection print={print} onPulled={reload} />}
+          {!deleted && (
+            <Section title="Photos and videos">
+              <PrintAttachments print={print} onChanged={reload} />
+            </Section>
+          )}
           <OutcomeSection print={print} />
-          <ProvenanceSection print={print} />
+          {print.provenance ? (
+            <ProvenanceSection provenance={print.provenance} />
+          ) : (
+            <Section title="Provenance">
+              {/* #1860 — say why there is none, rather than leave the section out. */}
+              <p className="text-[13px] text-muted">
+                {print.library_file_id !== null
+                  ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
+                  : 'The ScadBuddy output this print came from is not known.'}
+              </p>
+            </Section>
+          )}
+          {print.slicing && <SlicingSection slicing={print.slicing} />}
+          {print.record && <RecordSection record={print.record} />}
           <FilesSection print={print} />
         </div>
       </div>
@@ -241,36 +261,71 @@ function GallerySection({ print }: { print: PrintDetail }) {
   )
 }
 
-/** ScadBuddy's own render of the output, beside the photos for comparison. */
+/**
+ * ScadBuddy's view of what was printed, beside the photos for comparison: the output's
+ * render, or the library file's plate, read from its 3MF as a print of it reads it (#1753).
+ */
 function RenderSection({ print }: { print: PrintDetail }) {
   const glb = print.files.find((file) => file.kind === 'preview_glb')
   const output = useAsync(
-    async () => (glb ? await api.getOutput(print.output_id).catch(() => null) : null),
+    async () => (glb && print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
     [print.output_id, glb?.url],
   )
-  const job = useMemo<Job | undefined>(
-    () =>
-      glb
-        ? {
-            id: print.output_id,
-            slug: print.slug,
-            status: 'done',
-            created_at: output.data?.created_at ?? '',
-            preview_url: glb.url,
-            bbox_mm: output.data?.bbox_mm ?? null,
-            colors: output.data?.colors ?? null,
-          }
-        : undefined,
-    [glb, print.output_id, print.slug, output.data],
-  )
-  if (!glb) return null
+  const job = useMemo<Job | undefined>(() => {
+    const subject =
+      print.output_id !== null && print.slug !== null
+        ? { id: print.output_id, slug: print.slug }
+        : print.library_file_id !== null
+          ? { id: `library-${print.library_file_id}`, slug: '' }
+          : null
+    if (!glb || !subject) return undefined
+    return {
+      ...subject,
+      status: 'done',
+      created_at: output.data?.created_at ?? '',
+      preview_url: glb.url,
+      bbox_mm: output.data?.bbox_mm ?? null,
+      colors: output.data?.colors ?? null,
+    }
+  }, [glb, print.output_id, print.slug, print.library_file_id, output.data])
+  // #2731 — a library file's plate mesh is the whole file's geometry for that plate (11 MB
+  // for one print): its image first, and the mesh only when asked for.
+  // Keyed by the mesh's URL (#2915): another print shown in this same section starts on
+  // its image again, rather than loading its mesh unasked.
+  const [meshAskedFor, setMeshAskedFor] = useState<string | null>(null)
+  // #2915 — the plate image that would not load: shown as a placeholder, not a broken image.
+  const [brokenImage, setBrokenImage] = useState<string | null>(null)
+  if (!glb || !job) return null
+  const meshAsked = meshAskedFor === glb.url
+  const library = print.library_file_id
+  const plate = Number(new URL(glb.url, window.location.origin).searchParams.get('plate') ?? '1')
   return (
-    <Section title="ScadBuddy render">
-      <div className="aspect-[4/3] overflow-hidden rounded-[4px]">
-        {!output.loading && (
-          <Suspense fallback={null}>
-            <Preview job={job} rendering={false} />
-          </Suspense>
+    <Section title={print.output_id !== null ? 'ScadBuddy render' : 'Library file'}>
+      <div className="relative aspect-[4/3] overflow-hidden rounded-[4px]">
+        {library !== null && !meshAsked ? (
+          <>
+            {brokenImage === api.libraryPlateThumbnailUrl(library, plate) ? (
+              <p className="flex size-full items-center justify-center bg-surface-2 text-[12px] text-faint">
+                No image of plate {plate}
+              </p>
+            ) : (
+              <img
+                src={api.libraryPlateThumbnailUrl(library, plate)}
+                alt={`Plate ${plate} of the library file`}
+                className="size-full bg-surface-2 object-contain"
+                onError={() => setBrokenImage(api.libraryPlateThumbnailUrl(library, plate))}
+              />
+            )}
+            <Button size="sm" className="absolute right-2 bottom-2" onClick={() => setMeshAskedFor(glb.url)}>
+              Show in 3D
+            </Button>
+          </>
+        ) : (
+          !output.loading && (
+            <Suspense fallback={null}>
+              <Preview job={job} rendering={false} />
+            </Suspense>
+          )
         )}
       </div>
     </Section>
@@ -284,6 +339,11 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   const [onPrinter, setOnPrinter] = useState<PrinterMedia | null>(null)
   const [pulling, setPulling] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // #2360 — read after the page shows: Bambuddy can take tens of seconds over them.
+  const stills = useAsync(
+    async () => (timelapse ? await api.getTimelapseFrames(print.archive_id).catch(() => null) : null),
+    [print.archive_id, timelapse?.frames_url],
+  )
 
   async function look() {
     setLooking(true)
@@ -313,7 +373,8 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   }
 
   if (timelapse) {
-    const info = timelapse.info
+    const info = stills.data?.info ?? null
+    const frames = stills.data?.frames ?? []
     return (
       <Section title="Timelapse">
         {/* Native controls against the Range proxy: a seek fetches only those bytes.
@@ -321,7 +382,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
         <video
           ref={video}
           src={timelapse.url}
-          poster={timelapse.poster_frames[0]?.data_url}
+          poster={timelapse.poster_url}
           controls
           controlsList={isEmbedded() ? 'nofullscreen' : undefined}
           playsInline
@@ -333,9 +394,9 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
             {clock(info.duration)} · {info.width}×{info.height} · {formatBytes(info.file_size)}
           </p>
         )}
-        {timelapse.poster_frames.length > 1 || (timelapse.poster_frames.length === 1 && info) ? (
+        {frames.length > 1 || (frames.length === 1 && info) ? (
           <ul aria-label="Timelapse frames" className="mt-2 flex gap-1.5 overflow-x-auto">
-            {timelapse.poster_frames.map((frame) => (
+            {frames.map((frame) => (
               <li key={frame.timestamp} className="shrink-0">
                 <button
                   type="button"
@@ -345,7 +406,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
                   }}
                   className="block overflow-hidden rounded-[4px] focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
                 >
-                  <img src={frame.data_url} alt="" className="h-12 w-auto" />
+                  <img src={frame.url} alt="" loading="lazy" className="h-12 w-auto" />
                 </button>
               </li>
             ))}
@@ -406,6 +467,37 @@ function duration(seconds: number | null | undefined): string | null {
   return seconds === null || seconds === undefined ? null : formatDuration(seconds)
 }
 
+/** A measured amount, rounded for reading: Bambuddy's floats can end `…000001`. */
+function amount(value: number | null | undefined, unit: string): string | null {
+  if (value === null || value === undefined) return null
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} ${unit}`
+}
+
+/** A percentage, rounded as {@link amount} rounds. */
+function percent(value: number): string {
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+}
+
+/** A link Bambuddy keeps, opened outside the frame; only an http(s) one is a link. */
+function LinkFact({ label, url }: { label: string; url: string | null | undefined }) {
+  if (!url) return null
+  const web = /^https?:\/\//i.test(url)
+  return (
+    <Fact
+      label={label}
+      value={
+        web ? (
+          <button type="button" className="break-all text-left text-accent underline" onClick={() => openExternal(url)}>
+            {url}
+          </button>
+        ) : (
+          url
+        )
+      }
+    />
+  )
+}
+
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   if (value === null || value === undefined || value === '') return null
   return (
@@ -430,7 +522,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
         <Fact label="Failure" value={outcome.failure_reason} />
         <Fact
           label="Printer"
-          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? `#${outcome.printer_id}` : null)}
+          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? printerLabel(outcome.printer_id) : null)}
         />
         <Fact label="Started" value={formatWhen(print.started_at)} />
         <Fact label="Finished" value={formatWhen(print.completed_at)} />
@@ -443,12 +535,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
             value={
               <span className="flex gap-1">
                 {colours.map((colour) => (
-                  <span
-                    key={colour}
-                    title={colour}
-                    className="inline-block h-3.5 w-3.5 rounded-full border border-line"
-                    style={{ background: colour }}
-                  />
+                  <Swatch key={colour} colour={colour} />
                 ))}
               </span>
             }
@@ -470,6 +557,114 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
   )
 }
 
+/** A colour as Bambuddy reports one: `#RGB`, `#RRGGBB` or with alpha, nothing else. */
+const HEX_COLOUR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+
+/**
+ * One filament colour. Only a hex colour is painted: the value is Bambuddy's, and a CSS
+ * `background` would otherwise load whatever `url(...)` it named.
+ */
+function Swatch({ colour }: { colour: string }) {
+  const paint = HEX_COLOUR.test(colour.trim()) ? colour.trim() : undefined
+  return (
+    <span
+      title={colour}
+      className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-line"
+      style={paint ? { background: paint } : undefined}
+    />
+  )
+}
+
+/** #1860 — what the sliced file says: the printer, bed, layers, nozzle and each slot. */
+function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing']> }) {
+  const unit = useDisplayUnit()
+  const metres = slicing.filament_used_mm !== null ? `${(slicing.filament_used_mm / 1000).toFixed(2)} m` : null
+  return (
+    <Section title="Slicing">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Sliced for" value={slicing.sliced_for_model} />
+        <Fact label="Bed" value={slicing.bed_type} />
+        <Fact
+          label="Layer height"
+          value={slicing.layer_height_mm !== null ? `${fineLength(slicing.layer_height_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Layers" value={slicing.total_layers} />
+        <Fact
+          label="Nozzle"
+          value={slicing.nozzle_diameter_mm !== null ? `${fineLength(slicing.nozzle_diameter_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Nozzle temp" value={slicing.nozzle_temperature_c !== null ? `${slicing.nozzle_temperature_c} °C` : null} />
+        <Fact label="Bed temp" value={slicing.bed_temperature_c !== null ? `${slicing.bed_temperature_c} °C` : null} />
+        <Fact label="Objects" value={slicing.objects.length > 0 ? slicing.objects.join(', ') : null} />
+        <Fact label="Filament length" value={metres} />
+      </dl>
+      {slicing.filament_slots.length > 0 && (
+        <>
+          <h3 className="mt-3 text-[12px] font-medium text-muted">Filament by slot</h3>
+          <ul aria-label="Filament by slot" className="mt-1 space-y-1">
+            {slicing.filament_slots.map((slot) => (
+              <li key={slot.slot_id} className="sb-num flex items-center gap-2 text-[13px] text-ink">
+                {slot.color && <Swatch colour={slot.color} />}
+                <span>Slot {slot.slot_id}</span>
+                {slot.filament_type && <span className="text-muted">{slot.filament_type}</span>}
+                {slot.used_grams !== null && <span>{amount(slot.used_grams, 'g')}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </Section>
+  )
+}
+
+/** #1860 — Bambuddy's bookkeeping, and every field of its archive not shown elsewhere. */
+function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> }) {
+  const other = Object.entries(record.other)
+  return (
+    <Section title="In Bambuddy">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Project" value={record.project_name} />
+        <Fact label="Designer" value={record.designer} />
+        <Fact label="Dispatched" value={formatWhen(record.created_at)} />
+        <Fact label="Last run" value={formatWhen(record.last_run_at)} />
+        <Fact
+          label="Runs"
+          value={`${record.successful_run_count} succeeded, ${record.failed_run_count} failed`}
+        />
+        <Fact label="Copies" value={record.quantity > 1 ? record.quantity : null} />
+        <Fact
+          label="Time accuracy"
+          value={record.time_accuracy_percent !== null ? percent(record.time_accuracy_percent) : null}
+        />
+        <Fact label="Filament read" value={amount(record.filament_actual_grams, 'g')} />
+        <Fact label="Energy" value={amount(record.energy_kwh, 'kWh')} />
+        <Fact
+          label="Energy cost"
+          value={record.energy_cost !== null ? `${record.energy_cost.toFixed(2)} (in Bambuddy's currency)` : null}
+        />
+        <Fact label="Favourite" value={record.is_favorite ? 'Yes' : null} />
+        <Fact label="Tags" value={record.tags} />
+        <Fact label="Notes" value={record.notes} />
+        <LinkFact label="MakerWorld" url={record.makerworld_url} />
+        <LinkFact label="Link" url={record.external_url} />
+      </dl>
+      {other.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[12px] text-muted">All other fields ({other.length})</summary>
+          <dl aria-label="All other fields" className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+            {other.map(([name, value]) => (
+              <Fragment key={name}>
+                <dt className="sb-num text-[12px] text-faint">{name}</dt>
+                <dd className="sb-num text-[13px] break-all text-ink">{value === null ? '—' : String(value)}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </details>
+      )}
+    </Section>
+  )
+}
+
 function RunRow({ run }: { run: Run }) {
   return (
     <li className="flex flex-wrap gap-x-3 text-[12px]">
@@ -478,16 +673,23 @@ function RunRow({ run }: { run: Run }) {
       {run.duration_seconds != null && (
         <span className="sb-num text-faint">{duration(run.duration_seconds)}</span>
       )}
-      {run.filament_used_grams != null && (
-        <span className="sb-num text-faint">{run.filament_used_grams} g</span>
-      )}
+      {run.filament_used_grams != null &&
+        (run.filament_reading_suspect ? (
+          <span
+            className="sb-num text-warn"
+            title="Far more than this print used, most likely a spool's weight; not used for the cost"
+          >
+            {`${run.filament_used_grams} g, not this print's`}
+          </span>
+        ) : (
+          <span className="sb-num text-faint">{run.filament_used_grams} g</span>
+        ))}
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
   )
 }
 
-function ProvenanceSection({ print }: { print: PrintDetail }) {
-  const { provenance } = print
+function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail['provenance']> }) {
   const params = Object.entries(provenance.params)
   const version = provenance.model_version
   return (
@@ -531,73 +733,9 @@ function ProvenanceSection({ print }: { print: PrintDetail }) {
 }
 
 function FilesSection({ print }: { print: PrintDetail }) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function save(file: PrintFile) {
-    setBusy(file.url)
-    setError(null)
-    try {
-      await download(file.url, file.name)
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : `Could not download ${file.name}.`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function saveParams() {
-    setError(null)
-    const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
-    try {
-      await downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : 'Could not save the parameters.')
-    }
-  }
-
   return (
     <Section title="Files">
-      <ul className="space-y-1.5">
-        {print.files.map((file) => (
-          <li key={file.url} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-[13px] text-ink">{FILE_LABELS[file.kind]}</span>
-            <span className="sb-num min-w-0 truncate text-[12px] text-faint">{file.name}</span>
-            {file.size !== null && (
-              <span className="sb-num text-[12px] text-faint">{formatBytes(file.size)}</span>
-            )}
-            <Button
-              size="sm"
-              className="ml-auto"
-              aria-label={`Download ${file.name}`}
-              onClick={() => void save(file)}
-              disabled={busy !== null}
-            >
-              {busy === file.url && <Spinner />}
-              Download
-            </Button>
-          </li>
-        ))}
-        <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="text-[13px] text-ink">Parameters</span>
-          <span className="sb-num min-w-0 truncate text-[12px] text-faint">
-            {paramsFileName(print)}
-          </span>
-          <Button
-            size="sm"
-            className="ml-auto"
-            aria-label="Download parameters as JSON"
-            onClick={() => void saveParams()}
-          >
-            Download
-          </Button>
-        </li>
-      </ul>
-      {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
-          {error}
-        </p>
-      )}
+      <PrintFiles print={print} />
     </Section>
   )
 }

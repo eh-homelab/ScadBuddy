@@ -7,6 +7,7 @@ import type {
   SessionStore,
   SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
+import { CONTINUE_PROMPT } from '../harness/continuePrompt.js'
 import { pinnedFetch } from '../http/pinned.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
@@ -36,7 +37,7 @@ import { redact } from '../secrets.js'
 //     refuses command hooks because the process would inherit the credential
 //     env, and the Python package is not usable here.
 //   - Recall is injected as `hookSpecificOutput.additionalContext`, not
-//     `systemMessage`. sdk.d.ts (0.3.283) types `additionalContext` on
+//     `systemMessage`. sdk.d.ts (0.3.283 and 0.3.287) types `additionalContext` on
 //     `UserPromptSubmitHookSpecificOutput`, which Claude Code adds to the
 //     model's context; `systemMessage` is, per Claude Code's hooks reference,
 //     a message shown to the user. The memories are untrusted data (#258,
@@ -77,6 +78,10 @@ import { redact } from '../secrets.js'
 //     the bank, the document id, the count, the timing and the outcome, never
 //     the query or a memory. A report is not awaited by the turn, and a
 //     failing one is logged like the hooks' other failures.
+//   - Recall runs once per hooks, that is per user message (#1896): a
+//     credential fallback resumes with a continuation prompt, which fires
+//     UserPromptSubmit again (harness/fallback.ts drops the hook there; the
+//     hook itself also answers a repeat from its first recall).
 //   - The PostToolUse matcher is anchored (`^(?:a|b)$`); upstream's bare
 //     alternation also matches tool names that merely contain one.
 //
@@ -102,6 +107,77 @@ export const DEFAULT_BUDGET: Budget = 'mid'
 export const DEFAULT_MAX_TOKENS = 4096
 export const DEFAULT_RECALL_TAGS_MATCH: TagsMatch = 'any'
 
+/**
+ * The longest recall query sent, in characters (code points): the start of the redacted
+ * query is kept, as the Claude Code Hindsight plugin does (`recallMaxQueryChars`, env
+ * `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`), with the same default of 800 and
+ * `0` for no cut. Settings → Assistant plugins sets it (`ai_settings`
+ * `memory_recall_max_query_chars`, routes/memorySettings.ts), read at each turn.
+ *
+ * The bank has its own limit in tokens, `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (default
+ * 500, counted with tiktoken), and refuses a longer query with HTTP 400 "Query too long"
+ * (seen in prod 2026-10-12 on a 6192-token prompt). The two are set apart, so a recall the
+ * bank still refuses is retried once, shortened by the ratio it reported
+ * (`retryQueryLength`).
+ */
+export const SETTING_RECALL_MAX_QUERY_CHARS = 'memory_recall_max_query_chars'
+export const DEFAULT_RECALL_MAX_QUERY_CHARS = 800
+export const MAX_RECALL_MAX_QUERY_CHARS = 100_000
+
+/** The stored cap, or the default for anything the PUT could not have written. */
+export function recallMaxQueryChars(stored: unknown): number {
+  return typeof stored === 'number' && Number.isInteger(stored) && stored >= 0 && stored <= MAX_RECALL_MAX_QUERY_CHARS
+    ? stored
+    : DEFAULT_RECALL_MAX_QUERY_CHARS
+}
+
+/** Reads ai_settings (sessions/manager.ts `SettingsReader`). */
+export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
+
+/** A turn's recall cap: the setting when it is stored, else the hook config's, else the default. */
+export async function turnRecallMaxQueryChars(
+  settings: SettingsReader | undefined,
+  hookConfig: Partial<MemoryHookConfig> | undefined,
+): Promise<number> {
+  const stored = await settings?.get<unknown>(SETTING_RECALL_MAX_QUERY_CHARS)
+  if (stored === undefined || stored === null) return hookConfig?.recallMaxQueryChars ?? DEFAULT_RECALL_MAX_QUERY_CHARS
+  return recallMaxQueryChars(stored)
+}
+
+/**
+ * The first `maxChars` code points of `text` (`0`: all of it). Code points, as Python's
+ * slice counts them, so an emoji or other non-BMP character is never cut in half.
+ */
+export function capRecallQuery(text: string, maxChars: number): string {
+  if (maxChars <= 0) return text
+  let count = 0
+  let end = 0
+  for (const ch of text) {
+    if (count === maxChars) return text.slice(0, end)
+    count += 1
+    end += ch.length
+  }
+  return text
+}
+
+/**
+ * The query length, in code points, to retry a recall the bank refused as too long: the
+ * sent length scaled by the bank's maximum over the tokens it counted, less a fifth for
+ * margin. Half the length when the reply does not say both numbers.
+ */
+export function retryQueryLength(sentChars: number, reply: string): number {
+  const match = /(\d+) tokens exceeds maximum of (\d+)/.exec(reply)
+  const tokens = match ? Number(match[1]) : 0
+  const max = match ? Number(match[2]) : 0
+  const ratio = tokens > 0 && max > 0 && max < tokens ? (max / tokens) * 0.8 : 0.5
+  return Math.max(1, Math.floor(sentChars * ratio))
+}
+
+/** True for the bank's refusal of an over-long query (Hindsight api/http.py). */
+export function isQueryTooLong(err: unknown): err is HindsightError {
+  return err instanceof HindsightError && err.status === 400 && /query too long/i.test(err.body)
+}
+
 /** hooks.py `MemoryHookConfig`, same fields in camelCase, plus `retainMode`. */
 export type MemoryHookConfig = {
   /** Inject relevant memories on each `UserPromptSubmit`. */
@@ -120,6 +196,8 @@ export type MemoryHookConfig = {
   retainPrefix: string
   /** ScadBuddy's: the whole conversation as one upserted document, or upstream's last result only. */
   retainMode: 'transcript' | 'result'
+  /** The Claude Code plugin's `recallMaxQueryChars`: the query's longest start sent; 0 sends it whole. */
+  recallMaxQueryChars: number
 }
 
 export const DEFAULT_MEMORY_HOOK_CONFIG: MemoryHookConfig = {
@@ -132,6 +210,7 @@ export const DEFAULT_MEMORY_HOOK_CONFIG: MemoryHookConfig = {
   retainTags: ['source:claude-agent-sdk'],
   retainPrefix: 'Agent session result: ',
   retainMode: 'transcript',
+  recallMaxQueryChars: DEFAULT_RECALL_MAX_QUERY_CHARS,
 }
 
 /** Where the plugin's Hindsight is: its API base, the bank, and how to reach it. */
@@ -176,6 +255,14 @@ export type RetainItem = {
 
 export class HindsightError extends Error {
   override name = 'HindsightError'
+  /** The HTTP status, and the start of the reply's body, when the bank answered. */
+  readonly status: number | undefined
+  readonly body: string
+  constructor(message: string, status?: number, body = '') {
+    super(message)
+    this.status = status
+    this.body = body
+  }
 }
 
 /** The two REST calls, over the pinned address. */
@@ -195,7 +282,8 @@ export class HindsightClient {
     if (this.target.header) headers[this.target.header.name] = this.target.header.value
     const res = await pinnedFetch(url, this.target.address, { method: 'POST', headers, body: JSON.stringify(body), signal })
     if (res.status < 200 || res.status >= 300) {
-      throw new HindsightError(`POST ${path} answered HTTP ${res.status}: ${res.body.slice(0, 200)}`)
+      const body = res.body.slice(0, 200)
+      throw new HindsightError(`POST ${path} answered HTTP ${res.status}: ${body}`, res.status, body)
     }
     try {
       return JSON.parse(res.body) as unknown
@@ -224,11 +312,12 @@ export class HindsightClient {
 type TranscriptLine = {
   type?: unknown
   isMeta?: unknown
+  isApiErrorMessage?: unknown
   isSidechain?: unknown
   isCompactSummary?: unknown
   timestamp?: unknown
   result?: unknown
-  message?: { content?: unknown }
+  message?: { content?: unknown; model?: unknown }
 }
 
 export type Turn = { role: string; content: string; timestamp?: string }
@@ -312,6 +401,22 @@ function entriesOf(jsonl: string): TranscriptLine[] {
   return out
 }
 
+/**
+ * A credential failover's plumbing, never conversation (#3701): the refused attempt's
+ * synthetic error message ("You've hit your weekly limit…", model `<synthetic>`), and the
+ * continuation prompt the next credential resumed with (harness/fallback.ts).
+ */
+function failover(line: TranscriptLine): boolean {
+  if (line.type === 'assistant') return line.isApiErrorMessage === true || line.message?.model === '<synthetic>'
+  const content = line.message?.content
+  if (typeof content === 'string') return content.trim() === CONTINUE_PROMPT
+  return (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((b: { type?: unknown; text?: unknown }) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim() === CONTINUE_PROMPT)
+  )
+}
+
 /** coding-agents `readClaudeTranscript`, over parsed entries. */
 export function transcriptTurns(entries: readonly TranscriptLine[]): Turn[] {
   const turns: Turn[] = []
@@ -319,6 +424,7 @@ export function transcriptTurns(entries: readonly TranscriptLine[]): Turn[] {
     if (line.type !== 'user' && line.type !== 'assistant') continue
     if (line.isMeta === true || line.isSidechain === true || line.isCompactSummary === true) continue
     if (typeof line.message !== 'object' || line.message === null) continue
+    if (failover(line)) continue
     for (const turn of renderLine(line.message.content, line.type)) {
       turns.push(typeof line.timestamp === 'string' ? { ...turn, timestamp: line.timestamp } : turn)
     }
@@ -351,6 +457,12 @@ export function extractResultFromTranscript(entries: readonly TranscriptLine[]):
 }
 
 // ------------------------------------------------------------------- hooks
+
+/**
+ * Automatic memory's hook knobs, as a session's turns take them (classic: SessionManager,
+ * durable: memoryActivities); `false` turns it off. main.ts builds one and gives both (#2420).
+ */
+export type MemoryOptions = Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
 
 export type MemoryHooksOptions = {
   client: HindsightClient
@@ -508,13 +620,16 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
 
   if (cfg.autoRecall) {
-    const recall: HookCallback = async (input, _toolUseId, { signal }): Promise<HookJSONOutput> => {
-      if (input.hook_event_name !== 'UserPromptSubmit') return {}
+    /** Answers the hook; `failed` marks a recall the bank did not answer, which is not reused. */
+    const recall = async (
+      input: { prompt: string },
+      signal: AbortSignal,
+    ): Promise<{ output: HookJSONOutput; failed?: true }> => {
       let query = input.prompt
-      if (!query) return {}
+      if (!query) return { output: {} }
       if (cfg.recallQuery !== '$prompt') query = cfg.recallQuery
       // The query leaves for the bank like a retain does, so it is redacted the same way.
-      const body: RecallBody = { query: scrub(query), budget, max_tokens: maxTokens }
+      const body: RecallBody = { query: capRecallQuery(scrub(query), cfg.recallMaxQueryChars), budget, max_tokens: maxTokens }
       if (options.recallTags?.length) {
         body.tags = options.recallTags
         body.tags_match = options.recallTagsMatch ?? DEFAULT_RECALL_TAGS_MATCH
@@ -523,17 +638,31 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       const timeout = AbortSignal.timeout(recallTimeoutMs)
       const startedAt = new Date()
       try {
-        results = await client.recall(body, AbortSignal.any([signal, timeout]))
+        const both = AbortSignal.any([signal, timeout])
+        try {
+          results = await client.recall(body, both)
+        } catch (err) {
+          // The bank's token limit is set apart from the cap above, so it may still refuse:
+          // once, shorter by the ratio it reported. A second refusal is the failure below.
+          if (!isQueryTooLong(err)) throw err
+          const sent = [...body.query].length
+          body.query = capRecallQuery(body.query, retryQueryLength(sent, err.body))
+          log(
+            `hindsight: bank ${client.bankId} refused a ${sent}-character recall query as too long (${err.body}); ` +
+              `retrying once with ${[...body.query].length} characters`,
+          )
+          results = await client.recall(body, both)
+        }
       } catch (err) {
         const why = timeout.aborted ? `timed out after ${recallTimeoutMs} ms` : describe(err)
         log(`hindsight: recall from bank ${client.bankId} failed (${why}); no memories were injected`)
         // Not awaited: the turn goes on while it is recorded.
         void report({ action: 'recall', outcome: timeout.aborted ? 'timeout' : 'error', reason: why, input: body.query, startedAt })
-        return {}
+        return { output: {}, failed: true }
       }
       const lines = results.slice(0, cfg.recallMaxResults).map((text, i) => `${i + 1}. ${text}`)
       void report({ action: 'recall', outcome: 'ok', count: lines.length, input: body.query, memories: lines, startedAt })
-      if (lines.length === 0) return {}
+      if (lines.length === 0) return { output: {} }
       // JSON leaves `<` and `>` as they are, so a memory holding "</hindsight_memories>"
       // could close the outer tag early; escaped, the envelope is still the same JSON.
       const memories = wrapUntrustedText(
@@ -544,14 +673,39 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         .replaceAll('<', '\\u003c')
         .replaceAll('>', '\\u003e')
       return {
-        hookSpecificOutput: {
-          hookEventName: 'UserPromptSubmit',
-          additionalContext: `<hindsight_memories>${cfg.recallPrefix}${memories}\n</hindsight_memories>`,
+        output: {
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: `<hindsight_memories>${cfg.recallPrefix}${memories}\n</hindsight_memories>`,
+          },
         },
       }
     }
+    // One recall per hooks, which serve one user message (#1896; the session
+    // manager builds them per turn). harness/fallback.ts already gives a
+    // resumed attempt no UserPromptSubmit hook; this is the backstop. The same
+    // prompt again is a rerun of the message in a fresh context (an attempt
+    // that never reached a transcript) and gets the same memories without
+    // asking the bank again; any other prompt continues the message, whose
+    // memories are already in context, and gets nothing. A recall that failed
+    // or timed out is not reused: a rerun of the message asks the bank again (#2144).
+    let recalled: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } | undefined
+    const recallOnce: HookCallback = (input, _toolUseId, { signal }) => {
+      if (input.hook_event_name !== 'UserPromptSubmit') return Promise.resolve({})
+      if (recalled && recalled.prompt !== input.prompt) return Promise.resolve({})
+      if (recalled && !recalled.failed) return recalled.output
+      const mine: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } = {
+        prompt: input.prompt,
+        output: recall(input, signal).then(({ output, failed }) => {
+          if (failed) mine.failed = true
+          return output
+        }),
+      }
+      recalled = mine
+      return mine.output
+    }
     // The SDK's own limit, a little past ours, in case the pinned request ignores its signal.
-    hooks.UserPromptSubmit = [{ hooks: [recall], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
+    hooks.UserPromptSubmit = [{ hooks: [recallOnce], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
   }
 
   if (cfg.autoRetain) {
@@ -578,11 +732,11 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
     const retain: HookCallback = async (input): Promise<HookJSONOutput> => {
       if (input.hook_event_name !== 'Stop') return {}
       const sessionId = input.session_id
-      // Measured on Claude Code 2.1.283 (test/run.test.ts): when Stop fires, the
+      // Measured on Claude Code 2.1.283 and 2.1.287 (test/run.test.ts): when Stop fires, the
       // transcript file does not hold the turn's final assistant message yet.
       // The SDK hands it over as `last_assistant_message` ("Text content of the
       // last assistant message before stopping. Avoids the need to read and
-      // parse the transcript file", sdk.d.ts 0.3.283), so it is used for the
+      // parse the transcript file", sdk.d.ts 0.3.283 and 0.3.287), so it is used for the
       // last reply; the next turn's retain finds it in the file.
       const last = input.last_assistant_message?.trim() ?? ''
       const refId = `conversation:${sessionId}`

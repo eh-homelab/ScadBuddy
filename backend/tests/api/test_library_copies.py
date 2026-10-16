@@ -22,9 +22,15 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_filaments import (
+    queue_route,
+    slice_kept,
+    slice_routes,
+    slots_from_bambuddy,
+)
 from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
+from tests.support.operations import press
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
 pytestmark = pytest.mark.requires_postgres
@@ -114,6 +120,7 @@ def set_up(client: TestClient, model: str) -> str:
     run_routes()
     project_routes()
     slice_routes()
+    slice_kept()
     queue_route()
     allow_reprints(client)
     return make_output(client, model)
@@ -276,10 +283,10 @@ def test_a_send_still_fails_on_a_failing_existence_check(client: TestClient, mod
     output_id = set_up(client, model)
     uploads(41)
     send = f"/api/v1/outputs/{output_id}/send"
-    assert client.post(send, json={"mode": "library"}).status_code == 200
+    assert client.post(send, json={"mode": "library"}, headers=press()).status_code == 200
 
     respx.get(f"{API}/library/files/41").mock(return_value=httpx.Response(500, json={}))
-    response = client.post(send, json={"mode": "library"})
+    response = client.post(send, json={"mode": "library"}, headers=press())
 
     assert response.status_code >= 500
 
@@ -296,6 +303,8 @@ def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: s
 
 
 # --- the filament step reads any copy (#457) -------------------------------------------
+# An output's slots are read from its own 3MF since #2720; these tests cover the copy
+# Bambuddy reads when they cannot be (``slots_from_bambuddy``).
 
 
 def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
@@ -306,9 +315,12 @@ def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
 
 
 @respx.mock
-def test_a_dialog_open_after_a_run_does_not_upload_again(client: TestClient, model: str) -> None:
+def test_a_dialog_open_after_a_run_does_not_upload_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The first open has nothing to read and uploads; the run needs its own layout and
     uploads again, superseding the first. From then on the dialog reads the run's copy."""
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     upload = uploads(41, 42)
     deletes()
@@ -338,7 +350,10 @@ def test_the_dialog_reads_a_projects_copy_without_moving_it(client: TestClient, 
 
 
 @respx.mock
-def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) -> None:
+def test_a_copy_deleted_in_bambuddy_is_not_read(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     upload = uploads(41, 42)
     deletes()
@@ -352,8 +367,11 @@ def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) 
 
 
 @respx.mock
-def test_a_recolored_copy_still_shows_the_models_colors(client: TestClient, model: str) -> None:
+def test_a_recolored_copy_still_shows_the_models_colors(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The run's copy is in the spools' colors (#476); the dialog shows the model's."""
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     uploads(41)
     run(client, output_id)
@@ -384,7 +402,9 @@ def test_an_old_records_copy_is_not_reused_and_the_next_send_uploads_afresh(
     path.write_text(json.dumps(meta), encoding="utf-8")
     upload = uploads(42)
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    )
 
     assert response.json()["library_file_id"] == 42
     assert upload.call_count == 1
@@ -424,7 +444,9 @@ def test_deleting_an_output_can_take_its_inbox_copies_and_never_a_projects(
     run(client, output_id)
     run(client, output_id, project_id=7)
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code == 204
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
@@ -442,7 +464,7 @@ def test_deleting_an_output_leaves_bambuddy_alone_unless_asked(
     delete = deletes()
     run(client, output_id)
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert not delete.called
 
 
@@ -459,7 +481,9 @@ def test_an_inbox_copy_that_cannot_be_deleted_keeps_the_output(
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
 
-    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+    response = client.delete(
+        f"/api/v1/outputs/{output_id}?delete_inbox_copies=true", headers=press()
+    )
 
     assert response.status_code >= 500
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
@@ -480,7 +504,7 @@ def test_deleting_a_model_forgets_its_outputs_upload_records(
     store = upload_store(client)
     assert asyncio.run(store.for_outputs([output_id, other])) != {output_id: [], other: []}
 
-    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
     assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
     assert not delete.called
@@ -506,7 +530,7 @@ def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
 
     monkeypatch.setattr(links, "delete_outputs", forget)
 
-    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
     # The upload records' failure does not keep the links serving its archives.
     assert forgotten == [[output_id]]

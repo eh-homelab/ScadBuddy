@@ -9,6 +9,11 @@ import {
   defaultValues,
   diffFromDefaults,
   extrudersOf,
+  extrudersIn,
+  colourHex,
+  outOfRange,
+  paramLabel,
+  rangeProblem,
 } from './params'
 
 describe('defaultValues', () => {
@@ -49,6 +54,102 @@ describe('colour order', () => {
   })
 })
 
+// #2357 — a name is its hex for the extruders; a value that is no colour is never padded.
+describe('extrudersOf, by colour', () => {
+  it('shares an extruder between a name and its hex, and pads nothing', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: ['a', 'b', 'c', 'd'].map((name) => ({ name, type: 'color', initial: '#000000', group: 'Colours' })),
+    }
+    const values = { a: 'red', b: '#FF0000', c: '#RREEDD', d: '#RR0000' }
+    expect(extrudersOf(schema, values)).toEqual(
+      new Map([
+        ['a', 1],
+        ['b', 1],
+        ['c', 2],
+        ['d', 3],
+      ]),
+    )
+  })
+})
+
+// #938 — once a render has said which colours it used, that decides the extruders.
+describe('extrudersIn', () => {
+  const values = defaultValues(keychainSchema)
+
+  it("numbers each colour parameter by its colour's place in the render", () => {
+    expect(extrudersIn(keychainSchema, values, ['#E8532F', '#1b6ca8'], values)).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', 1],
+      ]),
+    )
+  })
+
+  it('marks a colour the render never used as in no extruder (null)', () => {
+    // A hard-coded colour took extruder 1; neither parameter was drawn with.
+    expect(extrudersIn(keychainSchema, values, ['#3366FF'], values)).toEqual(
+      new Map([
+        ['body_color', null],
+        ['text_color', null],
+      ]),
+    )
+  })
+
+  it('says nothing about a colour changed since the render, rather than "not in this render"', () => {
+    // The render ran with the defaults; Text has since changed to a colour it never saw.
+    const edited = { ...values, text_color: '#00FF00' }
+    expect(extrudersIn(keychainSchema, edited, ['#E8532F', '#1B6CA8'], values)).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', undefined],
+      ]),
+    )
+  })
+
+  it('keeps the label when the colour was only retyped in another case or shorthand (#1686)', () => {
+    // The same colour as the render ran with, written differently: not a change.
+    const retyped = {
+      ...values,
+      text_color: String(values['text_color']).toLowerCase(),
+      body_color: String(values['body_color']).toUpperCase(),
+    }
+    expect(extrudersIn(keychainSchema, retyped, ['#E8532F', '#1B6CA8'], values)).toEqual(
+      new Map([
+        ['body_color', 2],
+        ['text_color', 1],
+      ]),
+    )
+  })
+
+  it('keeps the label when the colour was retyped as its shorthand (#1686)', () => {
+    const ran = { ...values, body_color: '#EE5533' }
+    const retyped = { ...values, body_color: '#e53' }
+    expect(extrudersIn(keychainSchema, retyped, ['#EE5533', String(values['text_color'])], ran)).toEqual(
+      new Map([
+        ['body_color', 1],
+        ['text_color', 2],
+      ]),
+    )
+  })
+
+  it('reads a colour name as its hex, as the render reports it resolved', () => {
+    // The backend resolves CSS names; the render reports "red" as #FF0000.
+    const named = { ...values, body_color: 'red' }
+    expect(extrudersIn(keychainSchema, named, ['#FF0000', '#E8532F'], named)).toEqual(
+      new Map([
+        ['body_color', 1],
+        ['text_color', 2],
+      ]),
+    )
+  })
+
+  it('says nothing about a value that is no colour', () => {
+    const odd = { ...values, body_color: 'not-a-colour' }
+    expect(extrudersIn(keychainSchema, odd, ['#E8532F'], odd).get('body_color')).toBeUndefined()
+  })
+})
+
 describe('diffFromDefaults', () => {
   it('is empty for the defaults', () => {
     expect(diffFromDefaults(keychainSchema, defaultValues(keychainSchema))).toEqual([])
@@ -82,14 +183,30 @@ describe('checkParamValue (#254)', () => {
 
   it('normalises a colour the way the colour field does', () => {
     expect(checkParamValue(param({ type: 'color' }), 'f80')).toEqual({ ok: true, value: '#FF8800' })
-    expect(checkParamValue(param({ type: 'color' }), 'orange').ok).toBe(false)
+    // #2357: the field turns a colour name into its hex, so an agent's name is taken the same way.
+    expect(checkParamValue(param({ type: 'color' }), 'orange')).toEqual({ ok: true, value: '#FFA500' })
+    expect(checkParamValue(param({ type: 'color' }), 'orangeish').ok).toBe(false)
   })
 
   it('holds numbers to their type and limits', () => {
     expect(checkParamValue(param({ type: 'integer', min: 1, max: 4 }), 2.5).ok).toBe(false)
     expect(checkParamValue(param({ type: 'slider', min: 1, max: 4 }), 0).ok).toBe(false)
-    expect(checkParamValue(param({ type: 'number' }), '3').ok).toBe(false)
     expect(checkParamValue(param({ type: 'slider', min: 1, max: 4 }), 2.5)).toEqual({ ok: true, value: 2.5 })
+  })
+
+  it('reads a numeric string as the number a model meant (#948)', () => {
+    // A top-level `value` in set_param can reach the tab as "30" where the same value
+    // nested in set_params arrives as 30: one write must not need a retry.
+    expect(checkParamValue(param({ type: 'slider', min: 5, max: 60 }), '30')).toEqual({ ok: true, value: 30 })
+    expect(checkParamValue(param({ type: 'number' }), ' -2.5 ')).toEqual({ ok: true, value: -2.5 })
+    expect(checkParamValue(param({ type: 'integer' }), '1e2')).toEqual({ ok: true, value: 100 })
+    // Still held to the type and limits once read.
+    expect(checkParamValue(param({ type: 'integer' }), '2.5').ok).toBe(false)
+    expect(checkParamValue(param({ type: 'slider', min: 5, max: 60 }), '99').ok).toBe(false)
+    // Anything that is not a plain decimal number is still refused.
+    for (const text of ['', ' ', 'big', '3mm', '0x10', 'Infinity', 'NaN', '1,5']) {
+      expect(checkParamValue(param({ type: 'number' }), text)).toEqual({ ok: false, message: '"p" takes a number.' })
+    }
   })
 
   it('lets a file parameter take a sample or an uploaded asset, never a path', () => {
@@ -98,5 +215,82 @@ describe('checkParamValue (#254)', () => {
     expect(checkParamValue(file, 'a'.repeat(64)).ok).toBe(true)
     expect(checkParamValue(file, '').ok).toBe(true)
     expect(checkParamValue(file, '../model.scad').ok).toBe(false)
+  })
+})
+
+describe('rangeProblem (#921)', () => {
+  const size: Param = { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: 'Letter height', min: 8, max: 40 }
+
+  it('names the field by its caption and gives the range', () => {
+    expect(rangeProblem(size, 500)).toBe('Letter height must be between 8 and 40.')
+    expect(rangeProblem(size, 2)).toBe('Letter height must be between 8 and 40.')
+  })
+
+  it('accepts the bounds themselves', () => {
+    expect(rangeProblem(size, 8)).toBeNull()
+    expect(rangeProblem(size, 40)).toBeNull()
+  })
+
+  it('names the one bound a half-open range has', () => {
+    expect(rangeProblem({ ...size, max: null }, 2)).toBe('Letter height must be at least 8.')
+    expect(rangeProblem({ ...size, min: null }, 50)).toBe('Letter height must be at most 40.')
+  })
+
+  it('falls back to the variable name, and ignores what is not a number', () => {
+    expect(rangeProblem({ ...size, caption: null }, 500)).toBe('text_size must be between 8 and 40.')
+    expect(rangeProblem({ ...size, type: 'string', min: null, max: null }, 'x')).toBeNull()
+    expect(rangeProblem({ ...size, type: 'slider' }, 41)).not.toBeNull()
+  })
+
+  // #2357
+  it('refuses a colour value that is no colour, and takes a hex or a colour name', () => {
+    const colour: Param = { group: 'Colours', name: 'base_color', type: 'color', initial: '#FF1493', caption: 'Base' }
+    for (const bad of ['#RREEDD', 'red-ish', '#12', '']) {
+      expect(rangeProblem(colour, bad)).toBe('Base must be a colour: a hex such as #FF8800, or a name such as red.')
+    }
+    for (const good of ['#FF0000', '#f00', '#FF000080', 'Red', ' navy ', '#FF1493']) {
+      expect(rangeProblem(colour, good)).toBeNull()
+    }
+    // A model's own default is the model's business, as it always rendered.
+    expect(rangeProblem({ ...colour, initial: 'chartreuse-ish' }, 'chartreuse-ish')).toBeNull()
+    expect(colourHex('red')).toBe('#FF0000')
+    expect(colourHex('#abc')).toBe('#AABBCC')
+    expect(colourHex('#RREEDD')).toBeNull()
+    // The renderer needs the `#`: a bare hex reads as an unknown name there.
+    for (const bare of ['FF0000', 'add', 'f00']) {
+      expect(colourHex(bare)).toBeNull()
+      expect(rangeProblem(colour, bare)).not.toBeNull()
+    }
+    for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(colourHex(inherited)).toBeNull()
+      expect(rangeProblem(colour, inherited)).not.toBeNull()
+    }
+  })
+
+  it('finds the first out-of-range value in a schema', () => {
+    const values = defaultValues(keychainSchema)
+    expect(outOfRange(keychainSchema, values)).toBeUndefined()
+    expect(outOfRange(keychainSchema, { ...values, text_size: 500 })?.name).toBe('text_size')
+  })
+})
+
+// #3287 — one rule for a parameter's label: an empty caption is no caption.
+describe('paramLabel', () => {
+  const blank: Param = { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: '', min: 8, max: 40 }
+
+  it('is the caption, or the name when the caption is missing or empty', () => {
+    expect(paramLabel({ name: 'text_size', caption: 'Letter height' })).toBe('Letter height')
+    expect(paramLabel({ name: 'text_size', caption: null })).toBe('text_size')
+    expect(paramLabel({ name: 'text_size', caption: '' })).toBe('text_size')
+  })
+
+  it('is what every message and the change list say for an empty caption', () => {
+    expect(rangeProblem(blank, 500)).toBe('text_size must be between 8 and 40.')
+    const colour: Param = { group: 'Colours', name: 'base_color', type: 'color', initial: '#FF1493', caption: '' }
+    expect(rangeProblem(colour, 'red-ish')).toBe('base_color must be a colour: a hex such as #FF8800, or a name such as red.')
+    const schema: CustomizerSchema = { parameters: [blank] } as unknown as CustomizerSchema
+    expect(diffFromDefaults(schema, { text_size: 20 })).toEqual([
+      { name: 'text_size', caption: 'text_size', value: 20, initial: 14 },
+    ])
   })
 })

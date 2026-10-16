@@ -7,6 +7,12 @@
 #   select-models.sh all              every models/<slug>/ that has a verify.sh
 #   select-models.sh changed < FILES  the templates a PR touches; FILES is the
 #                                     PR's changed paths, one per line
+#   select-models.sh pipelines < SLUGS
+#                                     of a selection, the templates whose
+#                                     verify.sh runs their pipeline (they have a
+#                                     pipeline/verify-inputs.json): the `models`
+#                                     job builds the image that check needs only
+#                                     when there is one
 #
 # The rules, in order:
 #
@@ -20,9 +26,13 @@
 #   2. Otherwise a template runs when any path under models/<slug>/ changed and
 #      models/<slug>/verify.sh exists in this tree. A template deleted by the PR
 #      has no verify.sh left and drops out on its own.
-#   3. Nothing else selects anything. No model reaches outside its own directory
-#      (`use <../...>` appears in none of them), so a backend or frontend change
-#      cannot move a template's geometry.
+#   3. A change to the pipeline engine (backend/scadbuddy/workflows/,
+#      backend/scadbuddy/render/, backend/scadbuddy/template.py, or the backend
+#      lockfile) also selects every template that has a pipeline/: their verify.sh
+#      runs that engine with real OpenSCAD (spec 2026-09-27 §5.5).
+#   4. Nothing else selects anything. No model reaches outside its own directory
+#      (`use <../...>` appears in none of them), so any other backend or frontend
+#      change cannot move a template's geometry.
 #
 # Deciding WHEN to call `changed` (pull_request, and only when the diff could be
 # computed) is the caller's job; on any doubt it calls `all`. A selector that
@@ -41,6 +51,22 @@ TOOLING=(
   .github/scripts/select-models.sh
   .github/scripts/verify-models.sh
 )
+
+ENGINE=(
+  backend/scadbuddy/workflows/
+  backend/scadbuddy/render/
+  backend/scadbuddy/template.py
+  backend/uv.lock
+)
+
+pipeline_models() {
+  local f
+  for f in "$MODELS_DIR"/*/pipeline; do
+    if [ -d "$f" ] && [ -f "$(dirname "$f")/verify.sh" ]; then
+      basename "$(dirname "$f")"
+    fi
+  done
+}
 
 all_models() {
   local f
@@ -71,6 +97,15 @@ case "$mode" in
     slugs="$(printf '%s\n' "$changed" \
       | sed -n "s|^${MODELS_DIR}/\([^/][^/]*\)/.*|\1|p" \
       | sort -u)"
+    for e in "${ENGINE[@]}"; do
+      # A prefix for a directory, the whole path for a file. awk, not grep -q: a
+      # PR that touches none of them matches nothing, which must not be an error.
+      if [ -n "$(printf '%s\n' "$changed" | awk -v e="$e" 'index($0, e) == 1' | head -n 1)" ]; then
+        echo "select-models: $e changed, so every template with a pipeline runs" >&2
+        slugs="$(printf '%s\n%s\n' "$slugs" "$(pipeline_models)" | sed '/^$/d' | sort -u)"
+        break
+      fi
+    done
     selected=0
     for s in $slugs; do
       if [ -f "$MODELS_DIR/$s/verify.sh" ]; then
@@ -82,8 +117,16 @@ case "$mode" in
     done
     echo "select-models: $selected changed template(s)" >&2
     ;;
+  pipelines)
+    # `|| [ -n "$s" ]`: a last line without a newline is still a slug.
+    while IFS= read -r s || [ -n "$s" ]; do
+      if [ -n "$s" ] && [ -f "$MODELS_DIR/$s/pipeline/verify-inputs.json" ]; then
+        echo "$s"
+      fi
+    done | sort -u
+    ;;
   *)
-    echo "usage: $0 all | changed < changed-files" >&2
+    echo "usage: $0 all | changed < changed-files | pipelines < slugs" >&2
     exit 2
     ;;
 esac

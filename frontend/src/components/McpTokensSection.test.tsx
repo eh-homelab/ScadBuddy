@@ -6,6 +6,7 @@ import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { McpTokensSection } from './McpTokensSection'
+import { choose } from '../test/select'
 
 async function listed() {
   return await screen.findByRole('list', { name: 'Tokens' })
@@ -42,8 +43,8 @@ describe('McpTokensSection', () => {
     const button = screen.getByRole('button', { name: 'Create token' })
     expect(button).toBeDisabled()
     await user.type(screen.getByLabelText('Token name'), '  Claude Code  ')
-    await user.selectOptions(screen.getByLabelText('Access'), 'write')
-    await user.selectOptions(screen.getByLabelText('Expires after'), '30')
+    await choose(user, screen.getByLabelText('Access'), 'Write')
+    await choose(user, screen.getByLabelText('Expires after'), '30 days')
     await user.click(button)
 
     expect(create).toHaveBeenCalledWith({ name: 'Claude Code', tier: 'write', expires_in: 30 * 86400 })
@@ -65,6 +66,98 @@ describe('McpTokensSection', () => {
     await user.click(screen.getByRole('button', { name: 'Done' }))
     expect(screen.queryByTestId('minted-token')).toBeNull()
     expect(document.body.textContent).not.toContain(token)
+  })
+
+  it('fills the connect snippet with a token just minted, until Done (#1910)', async () => {
+    const { user } = renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
+    await listed()
+    const snippet = () => screen.getByTestId('mcp-snippet-claude-code').textContent ?? ''
+    expect(snippet()).toContain("'https://scadbuddy.example/mcp' --header 'Authorization: Bearer <your token>'")
+
+    await user.type(screen.getByLabelText('Token name'), 'Claude Code')
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+    const token = (await screen.findByTestId('minted-token-value')).textContent!
+    expect(snippet()).toContain(`Authorization: Bearer ${token}`)
+
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+    expect(snippet()).toContain('<your token>')
+    expect(document.body.textContent).not.toContain(token)
+  })
+
+  it('leaves the header out of the snippet while MCP authentication is off (#1910)', async () => {
+    setMcpAuthMode('disabled')
+    renderPage(<McpTokensSection publicUrl="https://scadbuddy.example" />)
+    await listed()
+    expect(screen.getByTestId('mcp-snippet-claude-code').textContent).toBe(
+      "claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp'",
+    )
+  })
+
+  it('offers the approval grant only for an Outward token, worded as system-wide (#804)', async () => {
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    const grant = () => screen.queryByRole('checkbox', { name: /approve or deny any agent/i })
+
+    // Read and Write tokens cannot hold it (the route answers 400), so it is not offered.
+    expect(grant()).toBeNull()
+    await choose(user, screen.getByLabelText('Access'), 'Write')
+    expect(grant()).toBeNull()
+
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
+    const box = grant() as HTMLInputElement
+    expect(box).not.toBeChecked()
+    // The label itself states the scope: every agent, every session, not only this token's own.
+    expect(box.labels![0]).toHaveTextContent(
+      "This token can approve or deny any agent's outward action, in any session",
+    )
+    const help = document.getElementById(box.getAttribute('aria-describedby')!)!
+    expect(help).toHaveTextContent('System-wide')
+    expect(help).toHaveTextContent('not only sessions this token started')
+    expect(help).toHaveTextContent('never its own')
+  })
+
+  it('mints an Outward token with the grant, and badges tokens that hold it (#804)', async () => {
+    const create = vi.spyOn(api, 'createMcpToken')
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    await user.type(screen.getByLabelText('Token name'), 'Reviewer agent')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
+    await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+
+    expect(create).toHaveBeenCalledWith({
+      name: 'Reviewer agent',
+      tier: 'outward',
+      expires_in: 90 * 86400,
+      approval_grant: true,
+    })
+    await waitFor(() => expect(within(screen.getByRole('list')).getAllByTestId('mcp-token')).toHaveLength(3))
+    const [row, plain] = within(screen.getByRole('list')).getAllByTestId('mcp-token')
+    const badge = within(row!).getByTestId('mcp-token-grant')
+    expect(badge).toHaveTextContent('Approves for any session')
+    // Said in a tooltip, on hover and on focus.
+    await user.hover(badge)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/any agent's outward action, in any session/)
+    await user.unhover(badge)
+    expect(within(plain!).queryByTestId('mcp-token-grant')).toBeNull()
+
+    // The form forgets the grant with the name, so the next token does not inherit it.
+    expect(screen.getByRole('checkbox', { name: /approve or deny any agent/i })).not.toBeChecked()
+  })
+
+  it('drops a checked grant when the tier moves off Outward (#804)', async () => {
+    const create = vi.spyOn(api, 'createMcpToken')
+    const { user } = renderPage(<McpTokensSection />)
+    await listed()
+    await user.type(screen.getByLabelText('Token name'), 'ci')
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
+    await user.click(screen.getByRole('checkbox', { name: /approve or deny any agent/i }))
+    await choose(user, screen.getByLabelText('Access'), 'Write')
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+    expect(create).toHaveBeenCalledWith({ name: 'ci', tier: 'write', expires_in: 90 * 86400 })
+
+    await choose(user, screen.getByLabelText('Access'), 'Outward')
+    expect(screen.getByRole('checkbox', { name: /approve or deny any agent/i })).not.toBeChecked()
   })
 
   it('copies the token with the Clipboard API', async () => {
@@ -122,18 +215,18 @@ describe('McpTokensSection', () => {
     await listed()
 
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    let dialog = screen.getByRole('dialog', { name: 'Revoke Claude Desktop?' })
+    let dialog = screen.getByRole('alertdialog', { name: 'Revoke Claude Desktop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(revoke).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    dialog = screen.getByRole('dialog', { name: 'Revoke Claude Desktop?' })
+    dialog = screen.getByRole('alertdialog', { name: 'Revoke Claude Desktop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Revoke token' }))
     expect(revoke).toHaveBeenCalledWith('6f1c2b1e-0d5c-4c7e-9a51-3b2f0b6f1a01')
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Revoke Claude Desktop' })).toBeNull())
-    expect(screen.getAllByTestId('mcp-token')[0]).toHaveTextContent(/Revoked \d{4}-\d{2}-\d{2}/)
+    expect((await screen.findAllByTestId('mcp-token'))[0]).toHaveTextContent(/Revoked \d{4}-\d{2}-\d{2}/)
   })
 
   it('keeps the dialog open with the reason when a revoke fails', async () => {
@@ -145,7 +238,7 @@ describe('McpTokensSection', () => {
     const { user } = renderPage(<McpTokensSection />)
     await listed()
     await user.click(screen.getByRole('button', { name: 'Revoke Claude Desktop' }))
-    const dialog = screen.getByRole('dialog')
+    const dialog = screen.getByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Revoke token' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the AI database is unreachable')
   })

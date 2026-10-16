@@ -112,6 +112,17 @@ describe('global tools', () => {
     expect(screen.getByLabelText('API key')).toHaveValue('')
   })
 
+  it('adds no confirm note when a field in an already open dialog rejects the value', async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
+    await bridge.call('click', { role: 'button', name: 'send to bambuddy' })
+    await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+
+    // A number input sanitises "two" to "", so the value differs from what was asked.
+    const outcome = await bridge.call('fill', { label: 'Copies', value: 'two' })
+    expect(outcome).toEqual({ ok: true, result: { filled: 'Copies', value: '' } })
+  })
+
   it('clicks by role and name, but never a confirmation only the user may press', async () => {
     const onSend = renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('click'))
@@ -126,6 +137,26 @@ describe('global tools', () => {
 
     const missing = await bridge.call('click', { role: 'link', name: 'Nowhere' })
     expect(!missing.ok && missing.error.code).toBe('invalid_args')
+  })
+
+  it('highlights by role and name and changes nothing, a user-only confirmation included (#1919)', async () => {
+    const onSend = renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('highlight'))
+
+    const pointed = await bridge.call('highlight', { role: 'button', name: 'send to bambuddy' })
+    expect(pointed).toEqual({ ok: true, result: { highlighted: { role: 'button', name: 'Send to Bambuddy' } } })
+    expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toHaveClass(TOUCH_CLASS)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await bridge.call('click', { role: 'button', name: 'send to bambuddy' })
+    await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    expect(await bridge.call('highlight', { role: 'button', name: 'Send' })).toMatchObject({ ok: true })
+    expect(screen.getByRole('button', { name: 'Send' })).toHaveClass(TOUCH_CLASS)
+    expect(onSend).not.toHaveBeenCalled()
+
+    const missing = await bridge.call('highlight', { role: 'link', name: 'Nowhere' })
+    expect(!missing.ok && missing.error.code).toBe('invalid_args')
+    expect(!missing.ok && missing.error.message).toBe('No visible link named "Nowhere". Take a snapshot to see what is on screen.')
   })
 
   it('navigates in-app only, and reports where it landed', async () => {

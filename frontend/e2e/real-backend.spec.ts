@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { expect, test } from '@playwright/test'
+import { deleteModel, idempotencyKey } from './operations'
 
 /**
  * The real stack: a real OpenSCAD behind the real FastAPI app, no msw anywhere.
@@ -76,6 +77,19 @@ test.describe('real backend', () => {
     expect(bambu.meshes).toEqual(['3D/Objects/object_1.model', '3D/Objects/object_2.model'])
   })
 
+  test('lists a render in Activity as the user\'s and reaches Succeeded', async ({ page }) => {
+    test.setTimeout(180_000)
+
+    await page.goto('/')
+    await page.getByRole('link', { name: /Name Keychain/ }).click()
+    await expect(page.getByTestId('bbox-readout')).toContainText('mm', { timeout: 120_000 })
+
+    await page.getByRole('link', { name: 'Activity' }).click()
+    const row = page.getByTestId(/^activity-row-render/).filter({ hasText: /Render .*name-keychain/ }).first()
+    await expect(row).toContainText('You', { timeout: 30_000 })
+    await expect(row).toContainText('Succeeded', { timeout: 120_000 })
+  })
+
   /**
    * Issue #82's acceptance, end to end: Pacifico is NOT one of the image's font
    * packages, so this only passes if the picker downloaded it onto the data volume and
@@ -131,6 +145,7 @@ test.describe('real backend', () => {
     const second = first.replace('width = 10;', 'width = 24;')
 
     const created = await request.post('/api/v1/models', {
+      headers: idempotencyKey(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(first) },
       },
@@ -141,6 +156,7 @@ test.describe('real backend', () => {
 
     try {
       const edited = await request.put(`/api/v1/models/${slug}/source`, {
+        headers: idempotencyKey(),
         data: { source: second, message: 'Widen the block' },
       })
       expect(edited.ok()).toBeTruthy()
@@ -170,12 +186,13 @@ test.describe('real backend', () => {
         .last()
         .getByRole('button', { name: 'Restore this version' })
         .click()
+      await page.getByRole('dialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
       await expect(versions.locator('li')).toHaveCount(3)
       expect(await (await request.get(`/api/v1/models/${slug}/source`)).text()).toContain(
         'width = 10;',
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await deleteModel(request, slug)
     }
   })
 
@@ -191,6 +208,7 @@ test.describe('real backend', () => {
     // A parameter to change: the customizer renders on a change, not on open.
     const source = `// ${slug}\ntag = "a";\ncolor("red") linear_extrude(2) import("pic.svg");\n`
     const created = await request.post('/api/v1/models', {
+      headers: idempotencyKey(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(source) },
       },
@@ -205,7 +223,7 @@ test.describe('real backend', () => {
         'OpenSCAD could not open pic.svg',
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await deleteModel(request, slug)
     }
   })
 
@@ -222,6 +240,7 @@ test.describe('real backend', () => {
     // a keystroke.
     const slug = `e2e-lsp-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: idempotencyKey(),
       multipart: {
         file: {
           name: `${slug}.scad`,
@@ -253,7 +272,7 @@ test.describe('real backend', () => {
         { timeout: 30_000 },
       )
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await deleteModel(request, slug)
     }
   })
 
@@ -264,6 +283,7 @@ test.describe('real backend', () => {
   test('shows details edited in one tab in another', async ({ context, request }) => {
     const slug = `e2e-live-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: idempotencyKey(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
       },
@@ -285,7 +305,7 @@ test.describe('real backend', () => {
         timeout: 15_000,
       })
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await deleteModel(request, slug)
     }
   })
 
@@ -315,6 +335,7 @@ test.describe('real backend', () => {
 
     const slug = `e2e-ws-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
+      headers: idempotencyKey(),
       multipart: {
         file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
       },
@@ -325,7 +346,7 @@ test.describe('real backend', () => {
         .poll(async () => (await frames()).find((f) => f.kind === 'model.created')?.data?.slug)
         .toBe(slug)
     } finally {
-      await request.delete(`/api/v1/models/${slug}`)
+      await deleteModel(request, slug)
     }
   })
 })

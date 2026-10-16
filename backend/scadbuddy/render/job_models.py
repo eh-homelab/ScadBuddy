@@ -80,6 +80,96 @@ class JobResult(BaseModel):
     libraries: list[ModelLibrary] = Field(default_factory=list)
 
 
+class BomEntry(BaseModel):
+    """One line of an output's bill of materials (spec §5.2): structured, shown as a table."""
+
+    piece: str
+    label: str
+    count: int = Field(ge=1)
+    #: 1-based plates the piece is on, when the pipeline says.
+    plates: list[int] = Field(default_factory=list)
+    #: The piece's `piece_key` (a PartRef).
+    part: str | None = None
+
+
+class OutputRecord(BaseModel):
+    """What reproduces an output (§8.4)."""
+
+    revision: str | None
+    ui_api: int | None
+    pipeline_api: int
+    pipeline_version: str
+    inputs_v: int
+    #: `SCADBUDDY_REVISION` of the worker image that wrote it.
+    image_revision: str = ""
+    openscad_version: str = ""
+    plate_key: str
+    #: The store refs (piece keys) of every Part it was built from.
+    parts: list[str]
+    #: Which of its job's outputs it is (`ctx.output`'s index), recorded when an output is
+    #: saved: two outputs of one job built from the same Parts differ only in it
+    #: (#1007). None in a job's own record, and in outputs saved before it was recorded.
+    output_index: int | None = None
+
+
+#: An extra output file's name: plain, no path, no leading dot.
+FILE_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+
+
+class ManifestObject(BaseModel):
+    """One object of an output (spec 2026-09-27 §7): what Arrange lays out again.
+
+    ``part`` is the Part's store key (its `piece_key`), held by the output's
+    `blob_refs` so it outlives the job that rendered it.
+    """
+
+    part: str
+    file: str
+    slug: str
+    revision: str | None
+    bbox: BoundingBox
+    #: Width and depth on the plate, mm: the rectangle the packer places.
+    footprint: tuple[float, float]
+    #: The part's colours, `#RRGGBB`, in its own slot order.
+    colours: list[str]
+    #: Each colour's material (`filament_type`), where the source states one: a library
+    #: file's project settings do, a render does not. An arranged 3MF states them, so a
+    #: slicer does not guess one for a slot (a PLA keychain offered ABS).
+    materials: dict[str, str] = Field(default_factory=dict)
+    #: Copies of this object in this output's layout.
+    count: int = Field(ge=1)
+    #: More than one: the part lays out its own plates (base spec §6.4) and is only
+    #: ever written alone.
+    plates: int = 1
+    #: The BOM entry naming this Part, when the pipeline wrote one.
+    bom_piece: str | None = None
+    #: The output an arranged object came from.
+    source_output: str | None = None
+    #: The Bambuddy library file an arranged object was read from (#1863).
+    library_file_id: int | None = None
+    notes: list[str] = Field(default_factory=list)
+    #: These copies print in other colours (#3637): each of `colours` named here prints
+    #: in the colour it maps to. Another entry may place the same `part` in its own.
+    recolour: dict[str, str] = Field(default_factory=dict)
+
+
+class PipelineOutput(BaseModel):
+    """One `ctx.output` (§5.2): Generate saves each as an output."""
+
+    name: str | None
+    result: JobResult
+    bom: list[BomEntry] = Field(default_factory=list)
+    #: Extra files, by name, under ``files/`` in the blob ``files_key``.
+    files: list[str] = Field(default_factory=list)
+    #: The blob holding ``files/`` (always `output_key(job_id, index)`); None without files.
+    files_key: str | None = None
+    #: The blobs this output reads; the job holds a ref on each.
+    blob_keys: list[str]
+    record: OutputRecord
+    #: The output's objects, each once with its count (§7): what Arrange reads.
+    manifest: list[ManifestObject] = Field(default_factory=list)
+
+
 class Job(BaseModel):
     # `model_version` is the name #90 asks for on the wire; without this pydantic
     # warns that it collides with its own `model_` namespace.
@@ -109,13 +199,21 @@ class Job(BaseModel):
     result: JobResult | None = None
     #: Which workflow `render-<id>` runs (spec §3.4): a render, or (phase 5) an arrange.
     kind: JobTableKind = "render"
+    #: The first caller's ``traceparent`` (spec 2026-10-01 §4): what a coalesced
+    #: request links to. None before
+    #: tracing, when the sampler dropped the request, or with the SDK disabled.
+    traceparent: str | None = None
     #: Template-owned inputs (spec §4.3). For a params-only template, `{"params": …}`;
     #: `params` is kept beside it through phase 1 and dropped by phase 2's migration.
     inputs: dict[str, Any] = Field(default_factory=dict)
     #: sha256 of the pipeline source `load_pipeline` recorded, or "default" (§3.2).
     pipeline_version: str = "default"
     steps: list[StepInfo] = Field(default_factory=list)
+    outputs: list[PipelineOutput] = Field(default_factory=list)
     workflow_id: str | None = None
+    #: The execution that inserted the row (#1053); None on a row the API inserted
+    #: before renders moved to update-with-start, whose workflow is `render-<id>`.
+    workflow_run_id: str | None = None
     #: Submitters still waiting on this job (coalesced identical requests).
     claims: int = 1
     #: Which try this is, as the store that handed the job to a worker numbered it.
@@ -136,7 +234,8 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-SUPERSEDED_ERROR = "superseded by a newer render before it started"
+SUPERSEDED_ERROR = "superseded by a newer render"
+CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 
 
 class QueueFullError(Exception):

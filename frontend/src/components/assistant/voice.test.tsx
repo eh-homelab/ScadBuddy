@@ -112,14 +112,14 @@ describe('voice feature detection', () => {
   it('hides the mic and the spoken-replies toggle when the browser has neither API', async () => {
     await openPanel()
     expect(screen.queryByRole('button', { name: 'Voice input' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('checkbox', { name: 'Read replies aloud' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Read replies aloud' })).not.toBeInTheDocument()
   })
 
   it('shows each control only for the API that exists', async () => {
     installSpeech({ recognition: false })
     await openPanel()
     expect(screen.queryByRole('button', { name: 'Voice input' })).not.toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: 'Read replies aloud' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Read replies aloud' })).toBeInTheDocument()
   })
 
   it('says, by the mic, that the browser may send the audio to its servers', async () => {
@@ -137,11 +137,19 @@ describe('voice feature detection', () => {
     expect(screen.queryByText(/Voice input is transcribed by your browser/)).not.toBeInTheDocument()
   })
 
+  it('#2443 — keeps "Read replies aloud" on one line in a row that wraps, so it stays in the panel', async () => {
+    installSpeech()
+    await openPanel()
+    const toggle = screen.getByRole('switch', { name: 'Read replies aloud' }).closest('label')!
+    expect(toggle).toHaveClass('whitespace-nowrap', 'shrink-0')
+    expect(screen.getByTestId('composer-actions')).toHaveClass('flex-wrap')
+  })
+
   it('marks the mic and the voice setting user-only', async () => {
     installSpeech()
     await openPanel()
     expect(screen.getByRole('button', { name: 'Voice input' })).toHaveAttribute('data-agent-user-only')
-    expect(screen.getByRole('checkbox', { name: 'Read replies aloud' })).toHaveAttribute('data-agent-user-only')
+    expect(screen.getByRole('switch', { name: 'Read replies aloud' })).toHaveAttribute('data-agent-user-only')
   })
 })
 
@@ -219,13 +227,30 @@ describe('speech to text', () => {
     installSpeech()
     const { user } = await openPanel()
     const mic = screen.getByRole('button', { name: 'Voice input' })
-    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1_000)
     await user.pointer({ keys: '[MouseLeft>]', target: mic })
     expect(mic).toHaveAttribute('aria-pressed', 'true')
     now.mockReturnValue(2_000)
     await user.pointer({ keys: '[/MouseLeft]', target: mic })
     expect(FakeRecognition.instances[0]!.stop).toHaveBeenCalledOnce()
     now.mockRestore()
+  })
+
+  it('measures the hold in elapsed time, not on a wall clock that steps (#1485)', async () => {
+    installSpeech()
+    const { user } = await openPanel()
+    const mic = screen.getByRole('button', { name: 'Voice input' })
+    const elapsed = vi.spyOn(performance, 'now').mockReturnValue(1_000)
+    const wall = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    await user.pointer({ keys: '[MouseLeft>]', target: mic })
+    // A quick click, during which the wall clock steps an hour on: still a toggle.
+    elapsed.mockReturnValue(1_100)
+    wall.mockReturnValue(3_601_000)
+    await user.pointer({ keys: '[/MouseLeft]', target: mic })
+    expect(FakeRecognition.instances[0]!.stop).not.toHaveBeenCalled()
+    expect(mic).toHaveAttribute('aria-pressed', 'true')
+    elapsed.mockRestore()
+    wall.mockRestore()
   })
 
   it('toggles from the keyboard', async () => {
@@ -253,7 +278,7 @@ describe('speech to text', () => {
     await openPanel()
     const click = await bridge.call('click', { role: 'button', name: 'Voice input' })
     expect(!click.ok && click.error.code).toBe('refused')
-    const toggle = await bridge.call('click', { role: 'checkbox', name: 'Read replies aloud' })
+    const toggle = await bridge.call('click', { role: 'switch', name: 'Read replies aloud' })
     expect(!toggle.ok && toggle.error.code).toBe('refused')
     expect(FakeRecognition.instances).toEqual([])
     expect(window.localStorage.getItem(SPEAK_REPLIES_KEY)).toBeNull()
@@ -315,13 +340,15 @@ describe('spoken replies', () => {
   it('is off by default and remembers the choice in localStorage', async () => {
     installSpeech()
     const { user, unmount } = await openPanel()
-    const toggle = screen.getByRole('checkbox', { name: 'Read replies aloud' })
+    const toggle = screen.getByRole('switch', { name: 'Read replies aloud' })
     expect(toggle).not.toBeChecked()
     await user.click(toggle)
     expect(window.localStorage.getItem(SPEAK_REPLIES_KEY)).toBe('on')
     unmount()
+    // A new tab: it has the browser's setting, not this tab's open panel (#2372).
+    window.sessionStorage.clear()
     await openPanel()
-    expect(screen.getByRole('checkbox', { name: 'Read replies aloud' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Read replies aloud' })).toBeChecked()
   })
 
   it('survives storage that throws', async () => {
@@ -333,7 +360,7 @@ describe('spoken replies', () => {
       throw new Error('blocked')
     })
     const { user } = await openPanel()
-    const toggle = screen.getByRole('checkbox', { name: 'Read replies aloud' })
+    const toggle = screen.getByRole('switch', { name: 'Read replies aloud' })
     await user.click(toggle)
     expect(toggle).toBeChecked()
     await user.click(toggle)
@@ -343,7 +370,7 @@ describe('spoken replies', () => {
   it('reads the reply to the user’s message aloud, and Stop speaking cancels it', async () => {
     installSpeech()
     const { user } = await openPanel()
-    await user.click(screen.getByRole('checkbox', { name: 'Read replies aloud' }))
+    await user.click(screen.getByRole('switch', { name: 'Read replies aloud' }))
     await user.type(composer(), 'Make the name bigger and send it{Enter}')
     await waitFor(() => expect(synth.speak).toHaveBeenCalled())
     const spoken = (synth.speak.mock.calls[0]![0] as FakeUtterance).text

@@ -17,6 +17,7 @@ import {
   cooldownUntil,
   probeCredential,
 } from './credentialErrors.js'
+import { CONTINUE_PROMPT } from './continuePrompt.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
 // Several Claude credentials, in priority order, with fallback (#1093).
@@ -28,19 +29,30 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 // on the next. Each credential is tried at most once per turn, which is the
 // cap on how many keys spend on one failing turn; one whose failure is not
 // the credential's (a bad request, a turn or budget limit) is not retried at
-// all, since the next key would fail the same way.
+// all, since the next key would fail the same way. (Claude Code 2.1.287 itself
+// sends a gateway's refused 400 or 422 once more on the same key, without the
+// `thinking.display` field it added, before it reports the failure; this file
+// sees only the final refusal: credentialErrors.ts.)
 //
 // MID-TURN FAILURES RESUME, THEY DO NOT RESTART. Claude Code writes the
 // session transcript as the turn goes: the user's prompt before the first
 // model request, then every tool call and result. Measured on Claude Code
-// 2.1.283 against the fake endpoint (test/fallback.e2e.test.ts): after a
-// failed request, a query with `resume` and the prompt CONTINUE_PROMPT sends
-// the model the original prompt, every finished tool call and its result,
+// 2.1.283 and 2.1.287 against the fake endpoint (test/fallback.e2e.test.ts):
+// after a failed request, a query with `resume` and the prompt CONTINUE_PROMPT
+// sends the model the original prompt, every finished tool call and its result,
 // and then CONTINUE_PROMPT; the synthetic "API Error" message is left out.
 // No tool runs twice. Sending the original prompt again instead would put it
 // in the context twice. So the next credential always resumes the session
 // Claude Code reported in its init message, when there was one; a query that
 // never got that far runs again as it was.
+//
+// A CONTINUATION IS NOT A USER MESSAGE (#1896). CONTINUE_PROMPT is submitted
+// like a prompt, so Claude Code fires `UserPromptSubmit` for it, and the
+// memory hooks' recall (memory/hindsight.ts) ran again: one Hindsight recall
+// and one more `<hindsight_memories>` block per fallback, on top of the one the
+// resumed transcript already holds from the first attempt. So a resumed
+// attempt runs without the memory hooks' `UserPromptSubmit`
+// (`continuationRun`); its other hooks (retain at Stop) stay.
 //
 // What the caller sees: the failed attempt's messages up to the failure
 // (text and tool calls that did happen), never its synthetic error message
@@ -98,7 +110,7 @@ export type AttemptOutcome =
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
   /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
-  candidates(): Promise<PooledCredential[]>
+  candidates(options?: { includeCooling?: boolean }): Promise<PooledCredential[]>
   /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
@@ -113,9 +125,7 @@ export class NoUsableCredentialError extends Error {
   }
 }
 
-/** Sent as the next credential's prompt when it resumes a turn another one started. */
-export const CONTINUE_PROMPT =
-  'The request to the model failed and was sent again with another Claude credential. Continue where you left off.'
+export { CONTINUE_PROMPT }
 
 /** Claude Code's retries of a transient failure on one credential, when there is another to fall back to. */
 export const DEFAULT_TRANSIENT_RETRIES = 2
@@ -138,6 +148,43 @@ export type FallbackOptions = {
    * resumed query's `total_cost_usd` includes it (see `Spend`). 0 by default.
    */
   priorCostUsd?: number
+  /**
+   * Called when the turn ends on a failed model request, before its held
+   * synthetic message and result are yielded (#1101), so the caller knows
+   * the result is not a reply by the time it sees it: the failure as this
+   * file judged it, and what the probe said of a refused credential, when
+   * one was asked (`probe` is undefined otherwise). The result's `num_turns`
+   * counts that refused request; an earlier attempt's never is. Not called
+   * for a turn the caller stopped.
+   */
+  onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
+  /**
+   * Called as each attempt after the first starts, once the caller has seen
+   * every message of the attempts before it. The caller cannot tell otherwise:
+   * only the first attempt's init message is passed on. The session manager
+   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666),
+   * and points the turn's own model calls (WebFetch's nested query) at the
+   * credential the turn is now on (#2973).
+   */
+  onAttempt?: (credential: PooledCredential) => void
+  /**
+   * The SDK session every attempt runs in, when the caller fixes it: a warm
+   * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
+   * a turn it serves after its first sees no init message. A failed attempt
+   * is then continued there as one that reported an init is.
+   */
+  session?: string
+}
+
+/**
+ * A resumed attempt's run: no memory hook on `UserPromptSubmit`, since its
+ * prompt is CONTINUE_PROMPT and the user's message, with what was recalled
+ * for it, is already in the transcript it resumes (#1896).
+ */
+function continuationRun(run: Omit<HarnessRun, 'credential'>): Omit<HarnessRun, 'credential'> {
+  if (!run.memoryHooks?.UserPromptSubmit) return run
+  const { UserPromptSubmit: _submit, ...memoryHooks } = run.memoryHooks
+  return { ...run, memoryHooks }
 }
 
 function linked(signal: AbortSignal | undefined): AbortController {
@@ -174,8 +221,8 @@ function apiFailure(
 }
 
 /**
- * Costs across attempts. Measured on Claude Code 2.1.283 against the fake
- * endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
+ * Costs across attempts. Measured on Claude Code 2.1.283 and 2.1.287 against
+ * the fake endpoint (test/fallback.e2e.test.ts): a RESUMED query's `total_cost_usd`
  * already includes everything the session spent before it, restored from the
  * transcript's `cost-state` (an attempt that spent 0.000105 and failed, then
  * the resumed one: 0.00021), while `num_turns` and the `maxBudgetUsd` check
@@ -192,18 +239,30 @@ type Spend = {
   turns: number
 }
 
+/**
+ * USD: how far below what it should carry a resumed total may read and still
+ * have carried it. The prior the manager passes is a float difference
+ * (`cost_usd - unpriced_cost_usd`, #991) that can land an ulp or two above
+ * the total the transcript restores; a restore that did not happen is short
+ * by a whole turn's spend, far more than this.
+ */
+export const RESTORED_EPSILON = 1e-9
+
+/** Whether a resumed total holds `carried`, what it should have carried in. */
+export const carries = (total: number, carried: number): boolean => total >= carried - RESTORED_EPSILON
+
 /** What a result's total says this attempt spent itself. */
 function ownCost(result: SDKResultMessage, spend: Spend, resumed: boolean): number {
   const carried = resumed ? spend.prior + spend.usd : 0
   // A total below what it should have carried in: the restore did not happen.
-  return result.total_cost_usd >= carried ? result.total_cost_usd - carried : result.total_cost_usd
+  return carries(result.total_cost_usd, carried) ? Math.max(result.total_cost_usd - carried, 0) : result.total_cost_usd
 }
 
 /** The final result, with the earlier attempts' turns, and their cost when its total does not already hold it. */
 function withSpent(message: SDKMessage, spend: Spend, resumed: boolean): SDKMessage {
   if (message.type !== 'result' || (spend.usd === 0 && spend.turns === 0)) return message
   const carried = resumed ? spend.prior + spend.usd : 0
-  const total = resumed && message.total_cost_usd >= carried ? message.total_cost_usd : message.total_cost_usd + spend.usd
+  const total = resumed && carries(message.total_cost_usd, carried) ? message.total_cost_usd : message.total_cost_usd + spend.usd
   return { ...message, total_cost_usd: total, num_turns: message.num_turns + spend.turns }
 }
 
@@ -246,12 +305,15 @@ export async function* runWithFallback(
   let sawInit = false
   /** Whether this attempt resumes a session, so its total carries what came before. */
   let resumed = base.resume !== undefined
+  /** Whether this attempt continues an earlier attempt's session with CONTINUE_PROMPT. */
+  let continuing = false
 
   for (let i = 0; i < candidates.length; i++) {
     const current = candidates[i] as PooledCredential
+    if (i > 0) options.onAttempt?.(current)
     const next = candidates[i + 1]
     const controller = linked(base.signal)
-    const { resume: _resume, sessionId: _sessionId, ...rest } = base
+    const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base
     const run: HarnessRun = {
       ...rest,
       ...session,
@@ -280,7 +342,7 @@ export async function* runWithFallback(
     /** The retry this attempt was stopped at. */
     let refused: FailureEvidence | undefined
     let progressed = false
-    let sessionSeen: string | undefined
+    let sessionSeen: string | undefined = options.session
     let model: string | undefined
     let thrown: unknown
     try {
@@ -310,8 +372,11 @@ export async function* runWithFallback(
             refused = evidence
             // Before `break`, whose return() would wait on the process. The
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
-            // (sdk.mjs 0.3.283), so a retry or two may still go out in that
-            // grace; they are refused like the first and cost nothing.
+            // (sdk.mjs 0.3.283 and 0.3.287), so a retry or two may still go
+            // out in that grace; they are refused like the first and cost
+            // nothing. On a warm process (sessions/warmTurn.ts) the abort
+            // lets the live process end on its own first, so the return()
+            // waits up to warm.ts DRAIN_MS before the next attempt.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
           }
@@ -349,7 +414,12 @@ export async function* runWithFallback(
       controller.abort()
     }
 
+    /** What the probe said of this attempt's refused credential, when it was asked. */
+    let probed: ProbeVerdict['verdict'] | undefined
     const release = function* (): Generator<SDKMessage> {
+      // A stopped turn is the caller's, whatever its last request met.
+      const ended = resultHeld && !base.signal?.aborted ? apiFailure(result, synthetic, lastRetry) : undefined
+      if (ended) options.onRefused?.(ended, probed === undefined ? {} : { probe: probed })
       for (const m of held) yield withSpent(m, spend, resumed)
     }
     if (base.signal?.aborted) {
@@ -376,6 +446,7 @@ export async function* runWithFallback(
       // probe's own model, so a refusal of this turn's model or features
       // does not confirm itself.
       const check = await probe(current.credential, undefined, base.signal)
+      probed = check.verdict
       if (base.signal?.aborted) {
         yield* release()
         if (thrown !== undefined) throw thrown
@@ -400,7 +471,8 @@ export async function* runWithFallback(
     }
 
     const own = result ? ownCost(result, spend, resumed) : 0
-    const turns = result?.num_turns ?? 0
+    // The refused request that ended the attempt is not a turn (#1101).
+    const turns = resultHeld ? Math.max((result?.num_turns ?? 0) - 1, 0) : (result?.num_turns ?? 0)
     const exhausted =
       spend.turns + turns >= (base.maxTurns ?? DEFAULT_MAX_TURNS) ||
       spend.usd + own >= (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD)
@@ -445,6 +517,7 @@ export async function* runWithFallback(
       session = { resume: sessionSeen }
       prompt = CONTINUE_PROMPT
       resumed = true
+      continuing = true
     }
   }
   }
@@ -469,8 +542,12 @@ export class CredentialPool implements CredentialSource {
     this.log = options.log ?? ((line) => console.warn(line))
   }
 
-  /** Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none. */
-  async candidates(): Promise<PooledCredential[]> {
+  /**
+   * Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none.
+   * `includeCooling` also lists a rate-limited one (the warm resync looks for the credential a process
+   * runs on, which a cooldown does not end); a disabled one is never listed.
+   */
+  async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
     const kek = this.kek
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
     // One SELECT for every row, its state, epoch and sealed secret together:
@@ -479,7 +556,7 @@ export class CredentialPool implements CredentialSource {
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {
-      if (c.status !== 'active' || !credential) continue
+      if (!credential || (c.status !== 'active' && !(options.includeCooling && c.status === 'cooling_down'))) continue
       out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))

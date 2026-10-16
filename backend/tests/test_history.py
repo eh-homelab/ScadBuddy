@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -29,8 +30,9 @@ from scadbuddy.library.history import (
     subject_line,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
-from scadbuddy.render.jobs import prune_revision_exports
+from scadbuddy.render.jobs import export_revision, prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
 
 pytestmark = pytest.mark.requires_git
 
@@ -208,6 +210,33 @@ def test_last_commits_answers_the_whole_catalogue_in_one_walk(
     assert newest["keychain"] != newest["plate"]
 
 
+def test_last_commits_walks_the_history_once_per_head(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2289: every listing walked the whole history, ~11 s over NFS. Until HEAD moves,
+    the walk is kept; a commit (here or on another replica) moves it."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    walks = 0
+    walk = history._walk_last_commits
+
+    def counted() -> dict[str, str] | None:
+        nonlocal walks
+        walks += 1
+        return walk()
+
+    monkeypatch.setattr(history, "_walk_last_commits", counted)
+    first = history.last_commits()
+    first["keychain"] = "changed by the caller"
+    assert history.last_commits()["keychain"] != "changed by the caller"
+    assert walks == 1
+
+    write_model(models, "plate", "sphere(5);\n")
+    added = history.commit("Add plate", "plate")
+    assert history.last_commits()["plate"] == added
+    assert walks == 2
+
+
 def test_last_commits_keys_a_built_in_by_its_own_id(models: Path, history: ModelHistory) -> None:
     """Not by its first path component, which would fold every built-in into one."""
     write_model(models, "_builtin/keychain", "cube(10);\n")
@@ -239,6 +268,47 @@ def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
     history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
 
     assert history.last_commits() == {}
+
+
+def test_maintain_leaves_a_small_repository_alone(models: Path, history: ModelHistory) -> None:
+    write_model(models, "box", "cube(1);")
+    history.ensure_repo()
+    assert history.maintain() is False
+    assert history.object_counts()["count"] > 0
+
+
+def test_maintain_packs_once_loose_objects_pile_up(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2289: thousands of loose objects on NFS made every listing's history walk 11 s.
+    The threshold is lowered so the test makes a handful of commits, not 256 (#2344)."""
+    threshold = 8
+    monkeypatch.setattr("scadbuddy.library.history.MAINTAIN_LOOSE_OBJECTS", threshold)
+    write_model(models, "box", "cube(1);")
+    head = history.ensure_repo()
+    for n in range(threshold):
+        write_model(models, "box", f"cube({n + 2});")
+        history.commit(f"edit {n}", "box")
+    assert history.object_counts()["count"] >= threshold
+    assert history.maintain() is True
+    counts = history.object_counts()
+    assert counts["count"] == 0
+    assert counts["packs"] == 1
+    assert history.last_commit("box") is not None
+    assert head in {r.commit for r in history.log(limit=threshold + 1)}
+
+
+def test_an_explicit_timeout_of_zero_is_not_the_default(
+    models: Path, history: ModelHistory
+) -> None:
+    """#2343: ``None`` means the default; ``0`` is a timeout of its own."""
+    history.ensure_repo()
+    with pytest.raises(GitTimeoutError, match="after 0s"):
+        history._run("status", timeout=0)
+
+
+def test_maintain_is_a_no_op_without_a_repository(models: Path, history: ModelHistory) -> None:
+    assert history.maintain() is False
 
 
 def test_merge_file_merges_clean_edits_and_counts_conflicts(history: ModelHistory) -> None:
@@ -721,7 +791,7 @@ def catalogue(tmp_path: Path) -> Catalogue:
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> None:
@@ -734,6 +804,47 @@ def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> N
     assert messages == ["Update keychain metadata", "Edit keychain source", "Add keychain"]
 
 
+def _with_ui(catalogue: Catalogue, slug: str, body: str) -> str | None:
+    assert catalogue.history is not None
+    target = catalogue.paths.model_dir(slug) / "ui" / "index.js"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return catalogue.history.commit(f"Edit {slug} ui", slug)
+
+
+def test_ui_version_is_none_without_history(tmp_path: Path) -> None:
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    catalogue = Catalogue(
+        paths, None, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert catalogue.ui_version("keychain") is None
+
+
+def test_ui_version_is_none_when_git_fails(catalogue: Catalogue) -> None:
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert _with_ui(catalogue, "keychain", "// one\n") is not None
+    with patch.object(ModelHistory, "last_commit", side_effect=GitError("boom", "")):
+        assert catalogue.ui_version("keychain") is None
+
+
+def test_ui_version_walks_the_history_once_per_head(catalogue: Catalogue) -> None:
+    """#1469: every record of a UI template asks for it; the walk is made once per
+    commit, not once per request."""
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    one = _with_ui(catalogue, "keychain", "// one\n")
+    with patch.object(
+        ModelHistory, "last_commit", autospec=True, wraps=ModelHistory.last_commit
+    ) as walk:
+        assert catalogue.ui_version("keychain") == one
+        assert catalogue.ui_version("keychain") == one
+        assert walk.call_count == 1
+        two = _with_ui(catalogue, "keychain", "// two\n")
+        assert catalogue.ui_version("keychain") == two
+        assert walk.call_count == 2
+
+
 def test_a_record_carries_the_revision_it_is_at(catalogue: Catalogue) -> None:
     record = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
     assert record.version is not None
@@ -741,6 +852,48 @@ def test_a_record_carries_the_revision_it_is_at(catalogue: Catalogue) -> None:
     edited = catalogue.write_source("keychain", "cube(20);\n")
     assert edited.version is not None
     assert edited.version != record.version
+
+
+def test_a_record_names_the_revision_before_it_in_its_own_history(catalogue: Catalogue) -> None:
+    """#1071: what a session changed can be put back only if each revision names its
+    parent, whichever call made it; another model's commits in between do not count."""
+    first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert first.previous_version is None
+    catalogue.create("plate", "sphere(5);\n", ModelMeta(name="Plate"))
+    edited = catalogue.write_source("keychain", "cube(20);\n")
+    assert edited.previous_version == first.version
+    assert catalogue.record("keychain").previous_version == first.version
+
+
+def test_a_record_pairs_its_revision_with_that_revisions_parent_under_a_concurrent_commit(
+    catalogue: Catalogue,
+) -> None:
+    """#2158: a commit to the model landing between the record's reads must not pair
+    one revision with another's parent. One ``git log`` answers both."""
+    assert catalogue.history is not None
+    first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    second = catalogue.write_source("keychain", "cube(20);\n")
+    real = ModelHistory._run
+    landed: list[str] = []
+
+    def racing(self: ModelHistory, *args: str, **kwargs: Any) -> Any:
+        completed = real(self, *args, **kwargs)
+        if args[0] == "log" and args[-1] == "keychain" and not landed:
+            landed.append("another writer")
+            catalogue.paths.model_source("keychain").write_text("cube(30);\n")
+            self.commit("Edit keychain source elsewhere", "keychain")
+        return completed
+
+    with patch.object(ModelHistory, "_run", autospec=True, side_effect=racing):
+        record = catalogue.record("keychain")
+    assert landed
+    assert (record.version, record.previous_version) == (second.version, first.version)
+
+
+def test_a_listing_leaves_previous_version_out(catalogue: Catalogue) -> None:
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    catalogue.write_source("keychain", "cube(20);\n")
+    assert [record.previous_version for record in catalogue.list_models()] == [None]
 
 
 def test_a_legacy_schema_key_is_retired_from_model_json(catalogue: Catalogue) -> None:
@@ -999,6 +1152,36 @@ def test_revision_exports_are_evicted_by_last_use(tmp_path: Path) -> None:
 
 def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
     assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
+
+
+def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
+    tmp_path: Path,
+) -> None:
+    """Every container runs the API as pid 1 on the shared `/data` volume, so a
+    staging name built from the pid and thread ident alone is the same in two pods.
+    The second export to start then deleted the first one's half-written tree.
+    Here the second export starts from inside the first, on the same pid and
+    thread: the name those two would build is identical."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    stagings: list[Path] = []
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            stagings.append(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+            if len(stagings) == 1:
+                # The other pod, starting while this export is half written.
+                export_revision(cast(ModelHistory, History()), slug, commit, directory)
+                assert (dest / "model.scad").is_file(), "the other export deleted this one"
+            (dest / "model.json").write_text("{}", encoding="utf-8")
+
+    export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(stagings) == 2
+    assert stagings[0] != stagings[1]
+    assert (directory / "model.scad").is_file()
+    assert not [p for p in directory.parent.iterdir() if p != directory]
 
 
 def test_a_built_in_that_cannot_be_replaced_keeps_its_mirror_and_the_rest_sync(

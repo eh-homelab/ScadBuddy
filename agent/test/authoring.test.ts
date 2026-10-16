@@ -3,7 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { AUTHOR_HEADER, AUTHOR_SESSION_HEADER, authorHeaders, principalHeader } from '../src/tools/authorship.js'
+import { AUTHOR_HEADER, AUTHOR_SESSION_HEADER, TOOL_HEADER, authorHeaders, principalHeader } from '../src/tools/authorship.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -125,6 +125,28 @@ describe('update_source', () => {
     await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);', base: 'abc1234' }, ctx(client))
     expect(seen[0]!.body).toEqual({ source: 'cube(3);', message: null, force: false, base: 'abc1234' })
   })
+
+  // #866: the same structured answer apply_patch gives, not a prose error to parse.
+  it('answers a moved base as a conflict naming the current revision', async () => {
+    const current = 'b'.repeat(40)
+    const { client } = backend(() =>
+      Response.json({ status: 409, title: 'Conflict', detail: 'moved on', base: 'abc1234', current }, { status: 409 }),
+    )
+    const result = await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);', base: 'abc1234' }, ctx(client))
+    expect(result.isError).toBe(true)
+    expect(content(result)).toMatchObject({ status: 'conflict', base: 'abc1234', current })
+    expect(String((content(result) as { next: string }).next)).toContain('get_source')
+  })
+
+  it('passes a 409 without a current revision through with the backend reason', async () => {
+    const { client } = backend(() =>
+      Response.json({ status: 409, title: 'Conflict', detail: 'a model with that name exists' }, { status: 409 }),
+    )
+    const result = await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);' }, ctx(client))
+    expect(result.isError).toBe(true)
+    expect(String(firstText(result))).toContain('HTTP 409')
+    expect(String(firstText(result))).toContain('a model with that name exists')
+  })
 })
 
 describe('agent authorship (#252)', () => {
@@ -135,6 +157,12 @@ describe('agent authorship (#252)', () => {
     expect(seen[0]!.headers.get(AUTHOR_SESSION_HEADER)).toBe('sess-1')
   })
 
+  it('names the tool that made the request', async () => {
+    const { client, seen } = backend()
+    await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);' }, ctx(client))
+    expect(seen[0]!.headers.get(TOOL_HEADER)).toBe('update_source')
+  })
+
   it('never sends a session id with a newline (review of #741)', () => {
     // A JS `$` without the m flag matches only at the very end, unlike Python's
     // (core/authorship.py uses \Z); this pins that down.
@@ -143,12 +171,11 @@ describe('agent authorship (#252)', () => {
     expect(authorHeaders(principal, 'sess-1')).toHaveProperty(AUTHOR_SESSION_HEADER, 'sess-1')
   })
 
-  it('leaves out the session outside one, and never sends the headless-browser marker', async () => {
+  it('leaves out the session outside one', async () => {
     const { client, seen } = backend()
     await runTool(tool('get_model'), { slug: 'box' }, ctx(client))
     expect(seen[0]!.headers.get(AUTHOR_HEADER)).toBe('token:t1')
     expect(seen[0]!.headers.has(AUTHOR_SESSION_HEADER)).toBe(false)
-    expect(seen[0]!.headers.has('X-ScadBuddy-Agent-Session')).toBe(false)
   })
 
   it('percent-encodes what the backend would refuse in a principal id', () => {

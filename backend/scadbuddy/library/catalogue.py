@@ -11,19 +11,21 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import psycopg
+from opentelemetry.trace import Span
 from pydantic import (
     BaseModel,
     Field,
     StrictStr,
+    StringConstraints,
     ValidationError,
     field_validator,
     model_validator,
@@ -40,7 +42,9 @@ from scadbuddy.core.paths import (
     DataPaths,
     is_builtin,
     model_path,
+    revalidate_dirs,
 )
+from scadbuddy.core.tracing import span
 from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
@@ -68,6 +72,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
+from scadbuddy.library.pipelines import inputs_version_of
 from scadbuddy.library.presets import (
     PresetStore,
     TemplatePreset,
@@ -88,6 +93,7 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
+from scadbuddy.meshmodel.scene import SceneSource
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -164,6 +170,21 @@ class SidecarNotFoundError(KeyError):
     README, a named sidecar file, or a sibling `.scad` file (`write_file`, #252)."""
 
 
+class UnsafeModelPathError(ValueError):
+    """A file named outside the model's directory."""
+
+
+def _inside(directory: Path, name: str) -> Path:
+    """``name`` under ``directory``, or :class:`UnsafeModelPathError`."""
+    if not name or name.startswith("/") or "\\" in name:
+        raise UnsafeModelPathError(name)
+    root = directory.resolve()
+    path = (directory / name).resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise UnsafeModelPathError(name)
+    return path
+
+
 class TooManySourceFilesError(ValueError):
     """A new ``.scad`` file for a model that already holds the most it may (#252)."""
 
@@ -180,11 +201,6 @@ class MediaOrderError(ValueError):
     """A reorder that is not a permutation of the template's media ids."""
 
 
-class MediaUnavailableError(RuntimeError):
-    """A media write with no database to hold the list (#274): until #401 makes
-    ``SCADBUDDY_DATABASE_URL`` required, a deployment may run without one."""
-
-
 class TooManyMediaError(ValueError):
     """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
 
@@ -195,6 +211,11 @@ class MediaReadOnlyError(ValueError):
 
 class ModelExistsError(ValueError):
     pass
+
+
+class ModelNameTakenError(ValueError):
+    """A rename onto the name another model has (#947); ``args`` is that model's slug
+    and name."""
 
 
 class StaleVersionError(RuntimeError):
@@ -228,6 +249,8 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: A template's own interface: the directory its `ui` module and files live in.
+UI_DIR = "ui"
 #: `ui/` plus a relative path whose segments never start with a dot, ending `.js`
 #: or `.mjs`: no `..`, no hidden file, nothing outside the template's `ui/`.
 UI_MODULE_PATTERN = r"^ui/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.m?js$"
@@ -243,6 +266,18 @@ class UiDeclaration(BaseModel):
     api: int = Field(ge=1)
 
 
+#: `pipeline/` plus a Python module name: no `..`, no subdirectory, nothing outside it.
+PIPELINE_MODULE_PATTERN = r"^pipeline/[A-Za-z0-9_]+\.py$"
+
+
+class PipelineDeclaration(BaseModel):
+    """``model.json``'s ``pipeline`` (spec 2026-09-27 §5.1)."""
+
+    module: str = Field(pattern=PIPELINE_MODULE_PATTERN, max_length=200)
+    #: The pipeline-API major (§8.1). The worker decides whether it can run it.
+    api: int = Field(ge=1)
+
+
 _BOOLEAN = ("0", "1")
 
 #: Bambu's ``print_sequence`` (#907): the one list a template's ``print_settings`` and a
@@ -255,13 +290,16 @@ PrintSequence = Literal["by layer", "by object"]
 #: enums are ``s_keys_map_SupportType``, ``s_keys_map_BrimType`` and
 #: ``s_keys_map_PrintSequence`` (#907) in Bambu Studio's
 #: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
-#: number of millimetres. Only these: a template states how it prints best, not a
-#: whole profile.
+#: number of millimetres, or ``support_threshold_angle``, whole degrees (#1899).
+#: Only these: a template states how it prints best, not a whole profile.
 PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
     "enable_prime_tower": _BOOLEAN,
     "wipe_tower_no_sparse_layers": _BOOLEAN,
     "enable_support": _BOOLEAN,
     "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
+    # #1899: whole degrees from vertical, 0-90.
+    "support_threshold_angle": None,
+    "support_on_build_plate_only": _BOOLEAN,
     "brim_width": None,
     "brim_type": (
         "auto_brim",
@@ -274,11 +312,17 @@ PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
     "print_sequence": get_args(PrintSequence),
 }
 PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
+#: The settings among those that are an angle, not millimetres (#1899).
+_DEGREES = frozenset({"support_threshold_angle"})
 
 
 def _print_setting_problem(key: str, value: str) -> str | None:
     """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
     allowed = PRINT_SETTING_VALUES[key]
+    if key in _DEGREES:
+        if value.isascii() and value.isdigit() and int(value) <= 90:
+            return None
+        return f"{key} is {value!r}; it must be a whole number of degrees from 0 to 90"
     if allowed is not None:
         if value in allowed:
             return None
@@ -295,6 +339,20 @@ def _print_setting_problem(key: str, value: str) -> str | None:
     )
 
 
+#: What a create or an edit may set a model's description and tags to (review #1126 1.4):
+#: they travel inline in the operation's request, so even all-escaped they stay well
+#: under its cap (`api/operations.py` `MAX_REQUEST_BYTES`). A model.json on disk is not
+#: held to them.
+MAX_DESCRIPTION_CHARS = 10_000
+MAX_TAGS = 50
+MAX_TAG_CHARS = 100
+Description = Annotated[str, StringConstraints(max_length=MAX_DESCRIPTION_CHARS)]
+Tags = Annotated[
+    list[Annotated[str, StringConstraints(max_length=MAX_TAG_CHARS)]],
+    Field(max_length=MAX_TAGS),
+]
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -308,6 +366,9 @@ class ModelMeta(BaseModel):
     #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
     #: never clobbers it.
     upstream: Upstream | None = None
+    #: Where a mesh model's meshes came from (#2146): kept after an eject, so the
+    #: origin and licence stay recorded. Not in `ModelPatch`: it records a fact.
+    mesh_source: SceneSource | None = None
     #: The third-party libraries (#93) this model renders with, each pinned for this
     #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
     #: a fetched commit, set by `pin_library`, never typed in.
@@ -321,6 +382,38 @@ class ModelMeta(BaseModel):
     #: Why a ``ui`` on disk could not be read. The template still lists and
     #: customizes with the generated form (§4.2); never written back to model.json.
     ui_error: str | None = Field(default=None, exclude=True)
+    #: The template's own pipeline (#427), or None for the default (§5.3).
+    pipeline: PipelineDeclaration | None = None
+    #: Why a ``pipeline`` on disk could not be read; never written back.
+    pipeline_error: str | None = Field(default=None, exclude=True)
+    #: The unreadable declaration as written: `Catalogue.create` writes it back to
+    #: model.json, so the author fixes it and the host never deletes it.
+    pipeline_raw: Any = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _readable_pipeline(cls, data: Any) -> Any:
+        """A malformed ``pipeline`` costs only the pipeline: the template still lists,
+        and its jobs fail at `load_pipeline` with this error (§5.1)."""
+        if not isinstance(data, dict) or data.get("pipeline") is None:
+            return data
+        try:
+            PipelineDeclaration.model_validate(data["pipeline"])
+        except ValidationError as error:
+            problems = "; ".join(
+                f"pipeline.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                if detail["loc"]
+                else f"pipeline: {detail['msg']}"
+                for detail in error.errors()
+            )
+            return {
+                **data,
+                "pipeline": None,
+                "pipeline_raw": data["pipeline"],
+                "pipeline_error": f"model.json's pipeline is not valid: {problems}",
+            }
+        return data
+
     #: The ``ui`` as written when it could not be read, so a create writes the
     #: author's declaration back as it came rather than dropping it.
     unread_ui: Any = Field(default=None, exclude=True)
@@ -423,8 +516,8 @@ def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
 
 class ModelPatch(BaseModel):
     name: str | None = None
-    description: str | None = None
-    tags: list[str] | None = None
+    description: Description | None = None
+    tags: Tags | None = None
     #: The template's own presets (#326), replacing the list whole. Names unique
     #: ignoring case, explicit ids unique; the route writes every key down.
     presets: list[TemplatePreset] | None = None
@@ -485,6 +578,16 @@ class ModelRecord(ModelMeta):
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
     version: str | None = None
+    #: The last commit that touched the template's ``ui/`` (#846): what its interface
+    #: is keyed on, so a commit to anything else (details, README, media) leaves a
+    #: mounted UI alone. None for a template that declares no ``ui``, in a listing, or
+    #: when history is unavailable.
+    ui_version: str | None = None
+    #: The revision before ``version`` in this template's own history (#1071): what the
+    #: commit that made it started from, so a client can name or restore the state
+    #: before a change. None for its first revision, in a listing, or when history is
+    #: unavailable.
+    previous_version: str | None = None
     # Where a duplicate stands against its upstream (#157); None for a template
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
@@ -492,6 +595,14 @@ class ModelRecord(ModelMeta):
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``. A built-in's is
     #: what it ships (``readonly``) followed by what was added to it (#722).
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+
+    @field_validator("media", mode="before")
+    @classmethod
+    def _readable_media(cls, value: Any) -> Any:
+        """Views, read as given: a record is read back from its JSON as an operation's
+        answer (#1054), and model.json's leniency would turn each into a plain item."""
+        return value
+
     #: A built-in's chosen cover (#722), listed first in ``media``; None while the
     #: shipped order decides it, and always for a template of mine, whose cover is
     #: simply its first item.
@@ -500,6 +611,11 @@ class ModelRecord(ModelMeta):
     #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
     invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
     ui_error: str | None = None
+    pipeline_error: str | None = None
+    #: The pipeline's ``INPUTS_VERSION`` (§8.2), read without running it; 0 without one.
+    #: A factory, not ``= 0``: a literal default makes the generated TypeScript type
+    #: require the field, and every client-built record would have to carry it.
+    inputs_version: int = Field(default_factory=int)
 
 
 class Catalogue:
@@ -512,9 +628,9 @@ class Catalogue:
         outputs: OutputStore | None = None,
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
-        media_store: MediaStore | None = None,
         presets: PresetStore | None = None,
         *,
+        media_store: MediaStore,
         serve_previews: bool = True,
         wrapper_prefix: str,
     ) -> None:
@@ -523,8 +639,7 @@ class Catalogue:
         #: Held while `write_file` counts a model's `.scad` files and adds one, so two
         #: new files cannot both pass the cap, git history or not (PR #752 review).
         self._source_files_lock = threading.Lock()
-        #: Where a template of mine's media list is; None with no database, when
-        #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
+        #: Where a template's media list is (#274), and a built-in's added media.
         self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
@@ -548,6 +663,23 @@ class Catalogue:
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: Each template's `ui_version` and the HEAD it was read at: the walk it takes
+        #: is made once per commit, not on every record of the template (#1469).
+        self._ui_versions: dict[str, tuple[str, str | None]] = {}
+
+    def forget(self, model_ids: list[str] | None = None) -> None:
+        """Drop what is cached about these templates' revisions -- every template's,
+        for None -- because another replica moved them (#2507)."""
+        if model_ids is None:
+            self._ui_versions.clear()
+            return
+        for model_id in model_ids:
+            self._ui_versions.pop(model_id, None)
+
+    def caches_ui_version(self, slug: str) -> bool:
+        """Whether the template's `ui_version` is cached, and so not read again until
+        HEAD moves or :meth:`forget` drops it."""
+        return slug in self._ui_versions
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
@@ -555,7 +687,7 @@ class Catalogue:
         if self.on_change is None:
             return
         for slug in slugs:
-            # The whole `_builtin/` mirror: the boot-time pass covers every built-in.
+            # The whole `_builtin/` mirror: the backfill Schedule covers every built-in.
             if slug == BUILTIN_DIR:
                 continue
             try:
@@ -627,6 +759,39 @@ class Catalogue:
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
 
+    def version_pair(self, slug: str) -> tuple[str | None, str | None]:
+        """``slug``'s revision and the one before it in its own history, read together
+        (#2158), so a commit landing between two reads cannot pair them wrongly."""
+        if self.history is None or not self.history.available:
+            return None, None
+        try:
+            return self.history.last_two_commits(model_path(slug))
+        except (GitError, OSError):
+            logger.exception("could not read the revision", extra={"slug": slug})
+            return None, None
+
+    def ui_version(self, slug: str) -> str | None:
+        """The last commit that touched ``slug``'s ``ui/`` directory (#846); none when
+        that commit deleted it (#1469)."""
+        if self.history is None or not self.history.available:
+            return None
+        ui = f"{model_path(slug)}/{UI_DIR}"
+        try:
+            head = self.history.head()
+            if head is None:
+                return None
+            cached = self._ui_versions.get(slug)
+            if cached is not None and cached[0] == head:
+                return cached[1]
+            commit = self.history.last_commit(ui)
+            if commit is not None and self.history.tree(commit, ui) is None:
+                commit = None
+        except (GitError, OSError):
+            logger.exception("could not read the interface's revision", extra={"slug": slug})
+            return None
+        self._ui_versions[slug] = (head, commit)
+        return commit
+
     def versions(self) -> dict[str, str]:
         """Every model's revision in one git call, for listing the catalogue."""
         if self.history is None or not self.history.available:
@@ -638,7 +803,19 @@ class Catalogue:
             return {}
 
     def exists(self, slug: str) -> bool:
-        return self.paths.model_source(slug).is_file()
+        """Whether the template is there. A miss is looked up again once its
+        directories are revalidated: another replica may have just created it, or
+        replaced its source, and this one's NFS client goes on answering from the
+        entries it cached until they expire -- "no model named" for a minute after a
+        create or a save on another replica (#2384). A hit costs nothing extra."""
+        source = self.paths.model_source(slug)
+        if source.is_file():
+            return True
+        # `models/`, then down to the template's own directory, parents first.
+        models = self.paths.models
+        below = [source.parent, *source.parent.parents]
+        revalidate_dirs(*reversed([path for path in below if path.is_relative_to(models)]))
+        return source.is_file()
 
     def _require(self, slug: str) -> None:
         if not self.exists(slug):
@@ -747,7 +924,24 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
-        return self._record(slug, self.version, self._has_history)
+        # One `git log` for the record's own pair (#2158); an upstream's is its own read.
+        version, previous = self.version_pair(slug)
+        return self._record(
+            slug,
+            lambda asked: version if asked == slug else self.version(asked),
+            self._has_history,
+            ui_version_of=self.ui_version,
+            previous_version_of=lambda _: previous,
+        )
+
+    def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
+        if meta.pipeline is None:
+            return 0
+        path = self.paths.model_dir(slug) / meta.pipeline.module
+        try:
+            return inputs_version_of(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            return 0
 
     def print_settings(self, slug: str) -> dict[str, str]:
         """The template's ``print_settings`` as its model.json has them now (#770);
@@ -762,6 +956,8 @@ class Catalogue:
         history: bool,
         media_of: Callable[[str], list[MediaItem]] | None = None,
         cover_of: Callable[[str], str | None] | None = None,
+        ui_version_of: Callable[[str], str | None] | None = None,
+        previous_version_of: Callable[[str], str | None] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
         walk a listing makes -- and is asked for an upstream's as well as this one's.
@@ -794,6 +990,9 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
+        # A metadata edit writes model.json alone, and is as much a change (#947).
+        with contextlib.suppress(FileNotFoundError):
+            modified = max(modified, self.paths.model_meta(slug).stat().st_mtime)
         media, media_cover = self._media_listing(slug, meta, media_of, cover_of)
         thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
@@ -801,6 +1000,8 @@ class Catalogue:
             media=media,
             media_cover=media_cover,
             ui_error=meta.ui_error,
+            pipeline_error=meta.pipeline_error,
+            inputs_version=self._inputs_version(slug, meta),
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
@@ -810,6 +1011,10 @@ class Catalogue:
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
+            ui_version=ui_version_of(slug)
+            if ui_version_of is not None and meta.ui is not None
+            else None,
+            previous_version=previous_version_of(slug) if previous_version_of is not None else None,
             upstream_state=upstream_state,
             invalid_libraries=invalid_entries(raw.get("libraries")),
         )
@@ -900,22 +1105,27 @@ class Catalogue:
                     break
         return found
 
-    def list_models(self) -> list[ModelRecord]:
+    def list_models(self, slugs: list[str] | None = None) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
-        is a template, so the ``_builtin`` mirror itself is never listed as one."""
-        slugs = self.slugs()
+        is a template, so the ``_builtin`` mirror itself is never listed as one.
+        ``slugs``, a window of :meth:`slugs`, builds only those records (#843)."""
+        with span("catalogue.list_models") as current:
+            return self._list_models(slugs, current)
+
+    def _list_models(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
+        if slugs is None:
+            with span("catalogue.slugs"):
+                slugs = self.slugs()
+        current.set_attribute("scadbuddy.models", len(slugs))
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
         # And ONE media query (#274), for every template on the page: a built-in's
         # rows are what was added to it (#722). One more for the built-ins' covers.
-        rows: dict[str, list[MediaItem]] = {}
-        covers: dict[str, str] = {}
-        if self.media_store is not None:
-            rows = self.media_store.items_for(slugs)
-            builtins = [slug for slug in slugs if is_builtin(slug)]
-            covers = self.media_store.covers_for(builtins) if builtins else {}
+        rows = self.media_store.items_for(slugs)
+        builtins = [slug for slug in slugs if is_builtin(slug)]
+        covers = self.media_store.covers_for(builtins) if builtins else {}
 
         def media_of(slug: str) -> list[MediaItem]:
             return rows.get(slug, [])
@@ -938,30 +1148,54 @@ class Catalogue:
         *,
         thumbnail: bytes | None = None,
         readme: str | None = None,
+        files: Mapping[str, bytes] | None = None,
     ) -> ModelRecord:
+        """Add a model. ``files`` are written beside the source, in the same revision;
+        a name outside the model's directory is :class:`UnsafeModelPathError`, checked
+        before the slug is claimed."""
         if self.exists(slug):
             raise ModelExistsError(slug)
+        extra = {name: _inside(self.paths.model_dir(slug), name) for name in files or {}}
         directory = self._claim(slug)
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            if meta.mesh_source is None:
+                excluded.add("mesh_source")
             raw = meta.model_dump(exclude=excluded)
             if meta.unread_ui is not None:
                 raw["ui"] = meta.unread_ui
+            if meta.pipeline is None and meta.pipeline_raw is not None:
+                raw["pipeline"] = meta.pipeline_raw  # the author's, to fix; never dropped
             self.write_raw_meta(slug, raw, presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
             if readme is not None:
                 self.readme_path(slug).write_text(readme, encoding="utf-8")
+            for name, data in (files or {}).items():
+                path = extra[name]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
         except BaseException:
             # The claim is exclusive, so the directory is this create's alone: a
             # half-written one left behind would hold the slug for good.
             _remove_tree(directory)
             raise
-        self._commit(f"Add {slug}", slug)
+        if self._has_history:
+            assert self.history is not None
+            # Not `_commit`, which logs a failed commit and carries on: a template
+            # with no revision cannot be rendered (409 `snapshot_unavailable`) until it
+            # is saved again, and nothing says so (#2385). Undone and raised instead,
+            # so the create answers as failed and can simply be tried again.
+            try:
+                self.history.commit(f"Add {slug}", slug)
+            except (GitError, OSError):
+                _remove_tree(directory)
+                raise
+        self.notify_change(slug)
         return self.record(slug)
 
     def duplicate(self, upstream_id: str, slug: str, name: str) -> ModelRecord:
@@ -1061,8 +1295,7 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         # After the files, as every media write: a row never names a file not there.
-        if self.media_store is not None:
-            self.media_store.replace(slug, media)
+        self.media_store.replace(slug, media)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # Sweep any staging an earlier duplicate crashed out of, once it is old
         # enough not to be another replica's copy in flight: a single replica that crashed and
@@ -1123,6 +1356,8 @@ class Catalogue:
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
+            if patch.name is not None:
+                self._require_name_free(slug, self._meta(slug, raw).name, patch.name)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw, presets=patch.presets is not None)
             if patch.presets is not None:
@@ -1134,6 +1369,23 @@ class Catalogue:
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
+
+    def _require_name_free(self, slug: str, current: str, name: str) -> None:
+        """:class:`ModelNameTakenError` when ``name`` renames ``slug`` onto another
+        model's name, ignoring case (#947). Keeping its own name is no rename, so a
+        model that already shares one (a seeded copy has its built-in's) still saves."""
+        wanted = name.casefold()
+        if wanted == current.casefold():
+            return
+        for other in self.slugs():
+            if other == slug:
+                continue
+            try:
+                taken = self._meta(other, self.read_raw_meta(other)).name
+            except (InvalidModelMetaError, OSError):
+                continue
+            if taken.casefold() == wanted:
+                raise ModelNameTakenError(other, taken)
 
     def pin_library(
         self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
@@ -1232,6 +1484,15 @@ class Catalogue:
         self._drop_preview(slug)
         return self.record(slug)
 
+    def has_own_thumbnail(self, slug: str) -> bool:
+        """Whether :meth:`delete_thumbnail` has a thumbnail to remove: the model's
+        ``thumbnail.png``, or with media, its first item when that is an image."""
+        self._require(slug)
+        stored = self._stored_media(slug)
+        if not stored:
+            return self.thumbnail_path(slug).is_file()
+        return stored[0].kind == "image"
+
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
         report one: the next item's, or the fallback's when the model has been
@@ -1291,13 +1552,10 @@ class Catalogue:
         media_of: Callable[[str], list[MediaItem]] | None = None,
     ) -> list[MediaItem]:
         """The list as stored: a built-in's bundled model.json ``media``, shipped
-        read-only; a template of mine's `template_media` rows, or none without a
-        database. ``meta`` is the model's and ``media_of`` a listing's rows, when
-        the caller already has them."""
+        read-only; a template of mine's `template_media` rows. ``meta`` is the model's
+        and ``media_of`` a listing's rows, when the caller already has them."""
         if is_builtin(slug):
             return (meta or self._meta(slug, self.read_raw_meta(slug))).media
-        if self.media_store is None:
-            return []
         if media_of is not None:
             return media_of(slug)
         return self.media_store.items(slug)
@@ -1361,11 +1619,8 @@ class Catalogue:
         if not is_builtin(slug):
             return self._views(slug, self._stored_media(slug, meta, media_of)), None
         shipped = self._shipped(slug, meta)
-        rows: list[MediaItem] = []
-        cover: str | None = None
-        if self.media_store is not None:
-            rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
-            cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
+        rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
+        cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
         taken = {view.id for view in shipped}
         added = self._item_views(
             slug,
@@ -1409,19 +1664,13 @@ class Catalogue:
     def _clear_media_rows(self, slug: str) -> None:
         """Rows a deleted model at ``slug`` left behind (its delete removes them
         best-effort), so a new model there does not list its predecessor's media."""
-        if self.media_store is not None:
-            self.media_store.delete(slug)
-
-    def _require_media_store(self) -> MediaStore:
-        if self.media_store is None:
-            raise MediaUnavailableError("template media needs SCADBUDDY_DATABASE_URL")
-        return self.media_store
+        self.media_store.delete(slug)
 
     def _edit_media(self, slug: str) -> _MediaEdit:
         """The stored items, to change and pass to :meth:`_save_media`. A legacy
         ``thumbnail.png`` comes back as an ordinary item with an id of its own,
         which the save moves into ``media/`` -- the first write converts it."""
-        stored = self._require_media_store().items(slug)
+        stored = self.media_store.items(slug)
         if stored:
             return _MediaEdit(list(stored), stored, None)
         if not self.thumbnail_path(slug).is_file():
@@ -1442,7 +1691,7 @@ class Catalogue:
         ``media/``) and a converted legacy thumbnail are in place before the rows
         name them, and are taken back out if the rows cannot be written. Under the
         history's write lock, as every change is."""
-        store = self._require_media_store()
+        store = self.media_store
         before = list(edit.before)
         converted = edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items)
         if edit.legacy is not None:
@@ -1623,7 +1872,6 @@ class Catalogue:
         """Run ``change`` to a built-in's added media under the write lock, with no
         commit: nothing it touches is in the models repository, so the built-in's
         revision never moves."""
-        self._require_media_store()
         with self._overlay_write_lock():
             change()
         self.notify_change(slug)
@@ -1641,7 +1889,7 @@ class Catalogue:
         :class:`MediaReadOnlyError` first when that names a shipped item."""
         if item_id is not None and any(view.id == item_id for view in self._shipped(slug)):
             raise MediaReadOnlyError(item_id)
-        return list(self._require_media_store().items(slug))
+        return list(self.media_store.items(slug))
 
     def _overlay_add(
         self, slug: str, item: MediaItem, upload: StagedMedia, poster: StagedMedia | None
@@ -1673,13 +1921,13 @@ class Catalogue:
         if len(kept) == len(added):
             raise MediaNotFoundError(item_id)
         self._save_overlay(slug, added, kept)
-        store = self._require_media_store()
+        store = self.media_store
         # A cover naming no item is ignored on read; this keeps none behind.
         if store.cover(slug) == item_id:
             store.set_cover(slug, None)
 
     def _overlay_cover(self, slug: str, item_id: str | None) -> None:
-        store = self._require_media_store()
+        store = self.media_store
         if item_id is None:
             store.set_cover(slug, None)
             return
@@ -1705,7 +1953,7 @@ class Catalogue:
         the rows cannot be written."""
         directory = self.paths.builtin_media_dir(slug)
         try:
-            self._require_media_store().replace(slug, after)
+            self.media_store.replace(slug, after)
         except BaseException:
             for moved_name in moved:
                 (directory / moved_name).unlink(missing_ok=True)
@@ -1723,10 +1971,58 @@ class Catalogue:
         except FileNotFoundError:
             raise SidecarNotFoundError(README_NAME) from None
 
-    def write_readme(self, slug: str, text: str) -> ModelRecord:
-        """Set or replace the model's README, as one revision."""
-        self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
-        self._commit(f"Set {slug} README", slug)
+    def write_readme(
+        self,
+        slug: str,
+        text: str,
+        *,
+        message: str | None = None,
+        expected_version: str | None = None,
+    ) -> ModelRecord:
+        """Set or replace the model's README, as one revision.
+
+        ``expected_version`` is as :meth:`write_file`'s (#1067): unless the model is
+        still at it, :class:`StaleVersionError` with nothing written, checked under the
+        history's write lock, and the README is only ever kept with its revision.
+        """
+        message = message or f"Set {slug} README"
+        if expected_version is None:
+            self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+            self._commit(message, slug)
+            return self.record(slug)
+        self._require(slug)
+        history = self.history
+        if history is None or not history.available:
+            raise GitUnavailableError("model history is unavailable, so no base can be checked")
+        path = self.readme_path(slug)
+        written = False
+        # What the write replaced, None when there was no README: what `undo` puts back.
+        previous: bytes | None = None
+
+        def change() -> None:
+            nonlocal written, previous
+            current = history.last_commit(model_path(slug))
+            if current is None or not current.startswith(expected_version):
+                raise StaleVersionError(slug, expected_version, current)
+            previous = path.read_bytes() if path.is_file() else None
+            self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+            written = True
+
+        def undo() -> None:
+            nonlocal written
+            if not written:
+                return
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, previous)
+            written = False
+
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if written:
+                self.notify_change(slug)
         return self.record(slug)
 
     def delete_readme(self, slug: str) -> ModelRecord:
@@ -1903,6 +2199,7 @@ class Catalogue:
         *,
         message: str | None = None,
         max_files: int | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
         as one revision. ``name`` is a bare ``.scad`` file name other than the model's
@@ -1916,6 +2213,13 @@ class Catalogue:
         ``max_files``, counted and written under a lock of the catalogue's own (and
         the history's write lock, when there is one), so two new files at once cannot
         both pass (PR #752 review).
+
+        ``expected_version`` is as :meth:`write_source`'s (#813): unless the model is
+        still at it, :class:`StaleVersionError` with nothing written, checked under the
+        history's write lock. Without a history there is no revision to check, so
+        :class:`GitUnavailableError`. Such a write is also only ever kept WITH its
+        revision, as :meth:`_write_edit`'s: when the commit fails, the file is put back
+        under the same lock and the error raised.
         """
         if name == SOURCE_NAME:
             # The route refuses it with a 409 first; this keeps any other caller off
@@ -1923,8 +2227,22 @@ class Catalogue:
             raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
         self._require(slug)
         path = self.paths.model_dir(slug) / name
+        history = self.history
+
+        if expected_version is not None and (history is None or not history.available):
+            raise GitUnavailableError("model history is unavailable, so no base can be checked")
+        written = False
+        # What a based write replaced, None when the file was new: what `undo` puts back.
+        previous: bytes | None = None
 
         def change() -> None:
+            nonlocal written, previous
+            if expected_version is not None:
+                assert history is not None  # checked above
+                current = history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
+                previous = path.read_bytes() if path.is_file() else None
             if content is None:
                 if not path.is_file():
                     raise SidecarNotFoundError(name)
@@ -1939,10 +2257,95 @@ class Catalogue:
                         write_atomic(path, content.encode())
                     except FileNotFoundError:
                         raise ModelNotFoundError(slug) from None
+            written = True
             self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
+        def undo() -> None:
+            nonlocal written
+            if not written:
+                return
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_atomic(path, previous)
+            written = False
+
         verb = "Remove" if content is None else "Edit"
-        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        message = message or f"{verb} {slug}/{name}"
+        if expected_version is None:
+            self._commit_change(message, change, slug)
+            return self.record(slug)
+        # A base check against a revision that never moved would pass a second write
+        # over this one unseen, so a failed commit is not logged and kept (review of
+        # #741, `_write_edit`; review of #1069 for this one). `change` still counts the
+        # files under `_source_files_lock`, so `max_files` holds on this path too.
+        assert history is not None  # checked above
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if written:
+                self.notify_change(slug)
+        return self.record(slug)
+
+    def update_files(
+        self,
+        slug: str,
+        compute: Callable[[Path], Mapping[str, bytes | None]],
+        *,
+        message: str,
+    ) -> ModelRecord:
+        """A read-modify-write of several of the model's files as one revision (#2146):
+        ``compute`` reads the directory and answers each path (relative to it) to write,
+        or None to remove. Both run under the history's write lock
+        (:meth:`_commit_change`), so no other edit lands between the read and the write.
+        ``compute`` raising, naming a path outside the model
+        (:class:`UnsafeModelPathError`), a write failing part way or a commit failing
+        leaves every file as it was. The cached schema is dropped,
+        as a source edit drops it."""
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+
+        # What each path held before this run touched it (None: absent), for those
+        # already written: what `undo` puts back, as `write_file`'s does.
+        applied: dict[Path, bytes | None] = {}
+
+        def undo() -> None:
+            for path, previous in reversed(list(applied.items())):
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    write_atomic(path, previous)
+            applied.clear()
+
+        def change() -> None:
+            applied.clear()
+            writes = {_inside(directory, name): data for name, data in compute(directory).items()}
+            try:
+                for path, data in writes.items():
+                    previous = path.read_bytes() if path.is_file() else None
+                    if data is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        write_atomic(path, data)
+                    applied[path] = previous
+            except BaseException:
+                undo()
+                raise
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+        history = self.history
+        if history is None or not history.available:
+            change()
+            self.notify_change(slug)
+            return self.record(slug)
+        # A commit that fails undoes the files and raises, as `write_file`'s based
+        # write does, so no half-applied state waits for the next commit to sweep it.
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if applied:
+                self.notify_change(slug)
         return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
@@ -1993,6 +2396,24 @@ class Catalogue:
             ).preview
         return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
 
+    def upstream_state(self, slug: str) -> tuple[str, UpstreamState]:
+        """The upstream's id and where this template stands against it, without the
+        merge preview :meth:`upstream_status` works out (#1054: the upstream checks)."""
+        upstream, _, state = self._upstream_now(slug)
+        return upstream.id, state
+
+    def merge_plan(self, slug: str) -> tuple[MergePlan, UpstreamState] | None:
+        """The merge a ``merge_upstream`` would make now, written nowhere, and the state
+        it was worked out in; None when there is no update to merge (#1054: the merge
+        route answers a conflict from it)."""
+        upstream, revision, state = self._upstream_now(slug)
+        if state not in ("update", "dismissed") or revision is None:
+            return None
+        plan = plan_merge(
+            self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
+        )
+        return plan, state
+
     def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
         """Take the upstream's current revision as one commit, or raise
         :class:`MergeConflictError` having written nothing.
@@ -2014,7 +2435,7 @@ class Catalogue:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
             plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
-                raise MergeConflictError(plan)
+                raise MergeConflictError(plan, state)
             merge = partial(self._write_merge, slug, plan, planned)
             try:
                 self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
@@ -2124,11 +2545,10 @@ class Catalogue:
         self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
-        if self.media_store is not None:
-            try:
-                self.media_store.delete(slug)
-            except Exception:
-                logger.exception("could not remove media rows", extra={"slug": slug})
+        try:
+            self.media_store.delete(slug)
+        except Exception:
+            logger.exception("could not remove media rows", extra={"slug": slug})
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -2435,8 +2855,7 @@ class Catalogue:
                 # Under the lock the overlay's other writes take, so another
                 # replica's write to this built-in cannot interleave with the drop.
                 with self._overlay_write_lock():
-                    if self.media_store is not None:
-                        self.media_store.delete(model_id)
+                    self.media_store.delete(model_id)
                     _remove_tree(stale)
             except Exception:
                 logger.exception(

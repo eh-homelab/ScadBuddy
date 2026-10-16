@@ -25,6 +25,7 @@ describe('the sessions_* tools', () => {
       sessions_resources: 'read',
       sessions_attach: 'read',
       sessions_list_approvals: 'read',
+      sessions_pending_input: 'read',
       sessions_start: 'write',
       sessions_send: 'write',
       sessions_fork: 'write',
@@ -168,6 +169,21 @@ describe('session.* on the bus', () => {
       ['session.message', 20],
       ['session.done', 22],
     ])
+    publisher.close()
+  })
+
+  it('keeps throttling when the wall clock steps forward (#1485)', () => {
+    vi.useFakeTimers()
+    const { sql, payloads } = fakeSql()
+    const publisher = new SessionEventPublisher(sql, { replica: 'r1', throttleMs: 100 })
+    const delta = (n: number) => [event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm', delta: `${n}` })]
+    publisher.onAppend(S, delta(1), 1)
+    // NTP steps the clock an hour on; no time has passed.
+    vi.setSystemTime(Date.now() + 3_600_000)
+    publisher.onAppend(S, delta(2), 2)
+    expect(payloads.map((p) => p.seq)).toEqual([1])
+    vi.advanceTimersByTime(100)
+    expect(payloads.map((p) => p.seq)).toEqual([1, 2])
     publisher.close()
   })
 

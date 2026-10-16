@@ -7,8 +7,9 @@ no template, live in `Shared/Work/`. A project's folder is the user's record: an
 may be written there (`folder="output"` with a `project_id`), nothing there is moved or
 deleted. No dot-named folders: Bambuddy shows them.
 
-Every folder ScadBuddy makes or adopts is recorded in `store_folders`, and a delete is
-refused unless the file sits in one recorded as `work`. What each file is lives in
+Every folder ScadBuddy makes or adopts is recorded in `store_folders`, under the
+Bambuddy instance (its base URL) and inbox it was found on, and a delete is refused
+unless the file sits in one recorded as `work` there (#683). What each file is lives in
 `store_blobs`, so a fetch is by file id, never a folder scan.
 
 Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
@@ -27,20 +28,29 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.commits import (
+    FOLDER_NOT_FOUND,
+    PARENT_FOLDER_NOT_FOUND,
+    refused,
+    upload_into,
+    visible,
+)
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
-from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
+from scadbuddy.store.content_models import BlobData, BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
 from scadbuddy.store.index import Pool
 
@@ -60,6 +70,37 @@ _MEDIA_TYPES = {
 class BambuddyTarget:
     config: BambuddyConfig
     inbox_id: int
+
+    @property
+    def instance(self) -> str:
+        """Which Bambuddy a recorded folder id belongs to: its base URL (#683),
+        normalised (`instance_key`) so a respelling of the same URL keeps its folders."""
+        return instance_key(self.config.base_url)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def instance_key(url: str) -> str:
+    """A Bambuddy base URL as `store_folders` keys it (#1431): scheme and host
+    lowercased, a default port dropped, trailing slashes stripped. `HTTP://Host:80/`
+    and `http://host` are one instance; another host, port or path is another."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal keeps its brackets
+    port = parts.port
+    netloc = host if port is None or port == _DEFAULT_PORTS.get(scheme) else f"{host}:{port}"
+    return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
+
+
+@dataclass(frozen=True)
+class _Inbox:
+    """Where this call's folders are: one inbox on one Bambuddy instance."""
+
+    instance: str
+    id: int
 
 
 def folder_name(title: str) -> str:
@@ -137,9 +178,9 @@ class RenderSettingsSource:
 FOLDER_LOCK_TIMEOUT = "30s"
 
 
-def folder_lock_key(inbox: int, slug: str, role: str) -> int:
+def folder_lock_key(instance: str, inbox: int, slug: str, role: str) -> int:
     """The advisory-lock key for finding one folder, the same in every process."""
-    parts = ("store-folder", inbox, slug, role)
+    parts = ("store-folder", instance, inbox, slug, role)
     return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
 
 
@@ -157,34 +198,37 @@ class BambuddyContentBackend:
         self._pool = pool
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
-        self._folders: dict[tuple[int, str, str], int] = {}
+        self._folders: dict[tuple[str, int, str, str], int] = {}
         #: One per folder being found or made, so this process's other callers for it
         #: wait in the event loop rather than each holding a thread and a connection.
-        self._finding: dict[tuple[int, str, str], asyncio.Lock] = {}
+        self._finding: dict[tuple[str, int, str, str], asyncio.Lock] = {}
 
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[tuple[BambuddyClient, int]]:
+    async def _client(self) -> AsyncIterator[tuple[BambuddyClient, _Inbox]]:
         target = await self._target()
+        inbox = _Inbox(target.instance, target.inbox_id)
         async with BambuddyClient(target.config, http=self._http) as client:
-            yield client, target.inbox_id
+            yield client, inbox
 
     # --- ContentBackend ------------------------------------------------------
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
+    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
         async with self._client() as (client, inbox):
             for attempt in (1, 2):
-                folder_id = await self._folder_for(client, inbox, scope)
                 try:
-                    uploaded = await client.upload_library_file(
-                        name, data, folder_id=folder_id, media_type=media
+                    folder_id = await self._folder_for(client, inbox, scope)
+                    # A folder made moments ago is waited for, not made again (#2263).
+                    uploaded = await upload_into(
+                        client, name, data, folder_id=folder_id, media_type=media
                     )
                 except ApiError as error:
-                    # The folder was deleted in Bambuddy's UI: forget it, make it again.
+                    # The folder (or its template folder) was deleted in Bambuddy's UI,
+                    # or never kept: forget it, make it again.
                     if error.status != 404 or attempt == 2:
                         raise
                     await asyncio.to_thread(self._forget, inbox, scope.slug or "")
@@ -215,13 +259,15 @@ class BambuddyContentBackend:
 
     async def remove(self, backend_id: str) -> None:
         async with self._client() as (client, inbox):
+            # #1272: the file's folder is the last thing read before the DELETE, so a
+            # move in Bambuddy's UI has one round trip to slip through, not two reads.
+            work = await asyncio.to_thread(self._work_folders, inbox)
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
                 if error.status == 404:
                     return
                 raise
-            work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
                     f"library file {backend_id} is in folder {file.folder_id}, not a ScadBuddy"
@@ -233,9 +279,57 @@ class BambuddyContentBackend:
                 if error.status != 404:
                     raise
 
+    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+        """Delete the files in this Bambuddy's recorded `Work/` folders that no
+        `store_blobs` row names and that were added before ``cutoff`` (#701): an upload
+        whose process died before `ContentStore.put` wrote its row. A newer one may be
+        an upload whose row is about to be written, so it stays. Each file's folder is
+        read again right before its DELETE, as `remove` does (#1272): the listing can be
+        many round trips old by then, and a file moved out of `Work/` meanwhile is left
+        alone (#2115). Returns the deleted ids."""
+        removed: list[str] = []
+        async with self._client() as (client, inbox):
+            for folder_id in sorted(await asyncio.to_thread(self._work_folders, inbox)):
+                try:
+                    files = await client.library_listing(folder_id=folder_id)
+                except ApiError as error:
+                    if error.status == 404:  # deleted in Bambuddy's UI; made again on use
+                        continue
+                    raise
+                for file in files:
+                    added = file.created_at
+                    if added is None or added.replace(tzinfo=UTC) > cutoff:
+                        continue
+                    if await asyncio.to_thread(self._recorded_id, str(file.id)):
+                        continue
+                    try:
+                        still = await client.library_file(file.id)
+                    except ApiError as error:
+                        if error.status == 404:
+                            continue
+                        raise
+                    if still.folder_id != folder_id:
+                        continue
+                    try:
+                        await client.delete_library_file(file.id)
+                    except ApiError as error:
+                        if error.status != 404:
+                            raise
+                    removed.append(str(file.id))
+        return removed
+
+    def _recorded_id(self, backend_id: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
+                " AS recorded",
+                (self.backend, backend_id),
+            ).fetchone()
+        return bool(row and row["recorded"])
+
     # --- folders -------------------------------------------------------------
 
-    async def _folder_for(self, client: BambuddyClient, inbox: int, scope: BlobScope) -> int:
+    async def _folder_for(self, client: BambuddyClient, inbox: _Inbox, scope: BlobScope) -> int:
         if scope.folder == "output" and scope.project_id is not None:
             folders = await client.folders_by_project(scope.project_id)
             if not folders:
@@ -245,15 +339,21 @@ class BambuddyContentBackend:
             return folders[0].id
         slug = scope.slug or ""
         title = folder_name(scope.title or scope.slug or SHARED_TITLE)
-        template = await self._ensure(client, inbox, slug, "template", title, inbox)
+        template = await self._ensure(client, inbox, slug, "template", title, inbox.id)
         if scope.folder == "output":
             return template
         return await self._ensure(client, inbox, slug, "work", WORK, template)
 
     async def _ensure(
-        self, client: BambuddyClient, inbox: int, slug: str, role: str, name: str, parent_id: int
+        self,
+        client: BambuddyClient,
+        inbox: _Inbox,
+        slug: str,
+        role: str,
+        name: str,
+        parent_id: int,
     ) -> int:
-        cache_key = (inbox, slug, role)
+        cache_key = (inbox.instance, inbox.id, slug, role)
         found = self._folders.get(cache_key)
         if found is not None:
             return found
@@ -263,7 +363,7 @@ class BambuddyContentBackend:
                 return found
             # Across processes: the lock's own connection, used for the lookup and the
             # record too, so a find takes no pooled connection and no thread.
-            async with self._locked(folder_lock_key(inbox, slug, role)) as conn:
+            async with self._locked(folder_lock_key(inbox.instance, inbox.id, slug, role)) as conn:
                 found = await self._recorded(conn, inbox, slug, role)
                 if found is None:
                     found = await self._adopt_or_create(client, name, parent_id)
@@ -276,7 +376,18 @@ class BambuddyContentBackend:
             for folder in root.walk():
                 if folder.parent_id == parent_id and folder.name == name:
                     return folder.id
-        return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
+        create = FolderCreate(name=name, parent_id=parent_id)
+        try:
+            return (await client.create_folder(create)).id
+        except ApiError as error:
+            # The parent is the template folder this find made a moment ago, and Bambuddy
+            # has not committed it yet (#2263): wait for it rather than failing the upload
+            # into a forget that would make a second one.
+            if not refused(error, PARENT_FOLDER_NOT_FOUND) or not await visible(
+                lambda: client.folder(parent_id), FOLDER_NOT_FOUND
+            ):
+                raise
+        return (await client.create_folder(create)).id
 
     @asynccontextmanager
     async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:
@@ -300,40 +411,45 @@ class BambuddyContentBackend:
 
     @staticmethod
     async def _recorded(
-        conn: AsyncConnection[DictRow], inbox: int, slug: str, role: str
+        conn: AsyncConnection[DictRow], inbox: _Inbox, slug: str, role: str
     ) -> int | None:
         cursor = await conn.execute(
-            "SELECT folder_id FROM store_folders WHERE inbox_id = %s AND slug = %s AND role = %s",
-            (inbox, slug, role),
+            "SELECT folder_id FROM store_folders"
+            " WHERE instance = %s AND inbox_id = %s AND slug = %s AND role = %s",
+            (inbox.instance, inbox.id, slug, role),
         )
         row: dict[str, Any] | None = await cursor.fetchone()
         return int(row["folder_id"]) if row is not None else None
 
     @staticmethod
     async def _record(
-        conn: AsyncConnection[DictRow], inbox: int, slug: str, role: str, folder_id: int
+        conn: AsyncConnection[DictRow], inbox: _Inbox, slug: str, role: str, folder_id: int
     ) -> None:
         await conn.execute(
-            "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
-            " VALUES (%s, %s, %s, %s)"
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, %s, %s, %s)"
             " ON CONFLICT DO NOTHING",
-            (inbox, slug, role, folder_id),
+            (inbox.instance, inbox.id, slug, role, folder_id),
         )
 
-    def _forget(self, inbox: int, slug: str) -> None:
+    def _forget(self, inbox: _Inbox, slug: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "DELETE FROM store_folders WHERE inbox_id = %s AND slug = %s", (inbox, slug)
+                "DELETE FROM store_folders WHERE instance = %s AND inbox_id = %s AND slug = %s",
+                (inbox.instance, inbox.id, slug),
             )
         for role in ("template", "work"):
-            self._folders.pop((inbox, slug, role), None)
+            self._folders.pop((inbox.instance, inbox.id, slug, role), None)
 
-    def _work_folders(self, inbox: int) -> set[int]:
-        """The `Work/` folders recorded under the configured inbox. One recorded under an
-        inbox Settings no longer names is not ScadBuddy's to delete from."""
+    def _work_folders(self, inbox: _Inbox) -> set[int]:
+        """The `Work/` folders recorded under the configured inbox on the configured
+        Bambuddy. One recorded under an inbox Settings no longer names, or on another
+        instance (whose ids mean other folders here, #683), is not ScadBuddy's to
+        delete from."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT folder_id FROM store_folders WHERE role = 'work' AND inbox_id = %s",
-                (inbox,),
+                "SELECT folder_id FROM store_folders"
+                " WHERE role = 'work' AND instance = %s AND inbox_id = %s",
+                (inbox.instance, inbox.id),
             ).fetchall()
         return {int(row["folder_id"]) for row in rows}

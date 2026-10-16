@@ -37,7 +37,7 @@ loop = true;
 // Name inlaid in the upper side, over the chamber (leave empty for none; it shrinks to fit, so about 6 letters stay legible, fewer on the mini)
 name = ""; // 12
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Colors] */

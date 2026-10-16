@@ -1,6 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  ArrangeRequest,
   Asset,
+  BackfillState,
   AssetUsage,
   RenderAccepted,
   StoreUsage,
@@ -13,9 +15,13 @@ import type {
   FontFamily,
   Job,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   CatalogueLibrary,
   InvalidLibraryEntry,
+  ManifestObject,
   MediaView,
+  NeedsBackfillProblem,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -31,7 +37,9 @@ import type {
   Plate,
   PlateFit,
   PrintAgain,
+  PrintAttachment,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
   PrintProgress,
   PrintRunRequest,
@@ -52,6 +60,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { mockRackCheck, mockRackPicks } from './features/rack'
@@ -69,8 +78,13 @@ import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
+import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
+
+/** A 1×1 PNG, for the image routes whose pixels no test looks at. */
+const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -92,6 +106,12 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   )
 }
 
+/** #1864 — both uploads of the bag clip are copies of the first output (Reagan). */
+const INITIAL_LIBRARY_OUTPUTS: [number, string][] = [
+  [89, 'a'.repeat(32)],
+  [91, 'a'.repeat(32)],
+]
+
 const state = {
   models: [...fixtures.models] as ModelSummary[],
   /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
@@ -107,20 +127,29 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: structuredClone(fixtures.settings) as Settings,
-  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
-  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
-  /** #78 — per-model printer and spools, the store's `model_print_choices`. */
+  /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
+  arranged: new Map<string, { sources: string[]; manifest: ManifestObject[] }>(),
+  /** #902 — finished re-renders a read has seen once: the next read attaches them. */
+  backfillsSeen: new Set<string>(),
+  /** The last `POST /outputs/arrange` body, for tests to read back. */
+  lastArrange: null as ArrangeRequest | null,
+  /** #1864 — the output each library file ScadBuddy uploaded is a copy of. */
+  libraryOutputs: new Map(INITIAL_LIBRARY_OUTPUTS),
+  /**
+   * #78 — per-model printer and spools, the store's `model_print_choices`; a library
+   * file's (#313) under `library:<file id>`, as the store keeps them since #1754.
+   */
   modelChoices: {} as Record<string, ModelPrintChoices>,
-  /** #313 — per library-file choices, the store's `library_print_choices`. */
-  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
+  /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
+  modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
@@ -134,10 +163,16 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  /** A template pipeline's outputs on every finished render of a slug; none unless set. */
+  jobOutputs: {} as Record<string, NonNullable<Job['outputs']>>,
+  renderColors: {} as Record<string, string[]>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
   /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
   pulledTimelapses: new Map<number, string>(),
+  /** #309 — the photos and videos added to each print, by archive id. */
+  printAttachments: new Map<number, PrintAttachment[]>(),
+  nextAttachment: 1,
   /** #311 — the queue items "Print again" made, newest last. */
   reprints: [] as { archive_id: number; queue_item_id: number }[],
   /** #722 — each built-in's media overlay, read from its record on its first write. */
@@ -189,9 +224,10 @@ function runJob(jobId: string): void {
         job.status = 'cancelled'
         job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
-        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
-        announce('job.superseded')
+        // Withdrawn with no replacement: `render/projection.py`'s `_settled_kind`
+        // announces `job.cancelled`, keeping `job.superseded` for a job a newer render
+        // replaced (#607).
+        announce('job.cancelled')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
@@ -207,21 +243,47 @@ function runJob(jobId: string): void {
       }
       job.status = 'done'
       job.bbox_mm = bboxOf(job.params ?? {})
-      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.colors = state.renderColors[job.slug] ?? colorsOf(job.slug, job.params ?? {})
       job.plates = state.plates[job.slug] ?? []
+      if (state.jobOutputs[job.slug]) job.outputs = state.jobOutputs[job.slug]
       job.preview_url = `${base}/jobs/${job.id}/preview.glb`
       job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-      job.notes =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
-          ? fixtures.TEMPLATE_NOTES
-          : []
-      job.warnings =
-        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
-          ? fixtures.JOB_WARNINGS
-          : []
+      const name = String(job.params?.['name'] ?? '').toLowerCase()
+      const crowded = name === fixtures.CROWDED_NAME
+      job.notes = name === fixtures.NOTED_NAME || crowded ? fixtures.TEMPLATE_NOTES : []
+      job.warnings = name === fixtures.WARNED_NAME || crowded ? fixtures.JOB_WARNINGS : []
+      job.diagnostics = crowded ? fixtures.CROWDED_DIAGNOSTICS : []
       announce('job.done')
     }, MOCK_JOB_STEP_MS)
   }, MOCK_JOB_STEP_MS)
+}
+
+/** Arrange's refusal of outputs saved before it existed (`api/outputs.py`). */
+const NEEDS_BACKFILL_PROBLEM = 'https://scadbuddy.dev/problems/needs-backfill'
+
+/**
+ * #902 — a read of an output whose re-render has ended: done (from the second read on),
+ * it gains the objects the render recorded and drops the marker; failed or cancelled, the marker says why.
+ */
+function settleBackfill(output: Output): Output {
+  const pending = output.backfill
+  if (!pending || pending.error) return output
+  const job = state.jobs.get(pending.job_id)
+  if (!job) {
+    output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
+  } else if (job.status === 'done' && !state.backfillsSeen.has(job.id)) {
+    // The API attaches on its next reconcile pass, not as the job ends: one read waits,
+    // and the attach is announced (#1970).
+    state.backfillsSeen.add(job.id)
+    const { id, slug } = output
+    setTimeout(() => emitRealtime('output.updated', ['outputs', `model:${slug}`], { output_id: id, slug }), 0)
+  } else if (job.status === 'done') {
+    output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
+    output.backfill = null
+  } else if (job.status === 'failed' || job.status === 'cancelled') {
+    output.backfill = { ...pending, error: job.error ?? `the re-render was ${job.status}` }
+  }
+  return output
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -239,15 +301,18 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = structuredClone(fixtures.settings)
-  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
+  state.arranged.clear()
+  state.backfillsSeen.clear()
+  state.lastArrange = null
+  state.libraryOutputs = new Map(INITIAL_LIBRARY_OUTPUTS)
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
+  state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
   state.sourceAt = initialSourceAt()
@@ -256,8 +321,12 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.jobOutputs = {}
+  state.renderColors = {}
   state.mediaFiles.clear()
   state.pulledTimelapses.clear()
+  state.printAttachments.clear()
+  state.nextAttachment = 1
   state.reprints = []
   state.mediaOverlays.clear()
   state.catalogueOffline = false
@@ -316,6 +385,20 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
   state.plates[slug] = plates
 }
 
+/** Every finished render of `slug` reports these outputs, as a template's pipeline does. */
+export function setMockJobOutputs(slug: string, outputs: NonNullable<Job['outputs']>): void {
+  state.jobOutputs[slug] = outputs
+}
+
+/**
+ * #938 — the colours every finished render of `slug` reports, in extruder order, as a
+ * template whose geometry leaves a colour parameter unused (or hard-codes one) would.
+ * Unset, a render uses every colour parameter, in order.
+ */
+export function setMockRenderColors(slug: string, colors: string[]): void {
+  state.renderColors[slug] = colors
+}
+
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
 /** #274 — the upload limit in effect (#322: Settings can change it too). */
 export function setMockUploadLimit(bytes: number): void {
@@ -327,7 +410,9 @@ export function setMockRemembered(remembered: {
   modelChoices?: Record<string, ModelPrintChoices>
   printerBedTypes?: Record<string, string>
   projectTargets?: Record<string, { printer_id: number; nozzle_diameter?: string }>
+  modelProjects?: Record<string, { project_id: number; preset_name?: string | null }>
 }): void {
+  if (remembered.modelProjects) state.modelProjects = structuredClone(remembered.modelProjects)
   if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
   if (remembered.projectTargets) state.projectTargets = structuredClone(remembered.projectTargets)
@@ -351,6 +436,18 @@ export function mockModels(): readonly ModelSummary[] {
   return state.models
 }
 
+/** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
+export function mockSource(slug: string): string | undefined {
+  return state.sources[slug]
+}
+
+/** #3638 — a model made outside the core routes (a mesh model, `features/meshModels.ts`). */
+export function addMockModel(model: ModelSummary): void {
+  state.models = [model, ...state.models.filter((m) => m.slug !== model.slug)]
+  // A model renders like any other, as `POST /models` gives one a schema.
+  state.schemas[model.slug] ??= fixtures.keychainSchema
+}
+
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
 export function replaceMockModel(model: ModelSummary): ModelSummary {
   state.models = state.models.map((m) => (m.slug === model.slug ? model : m))
@@ -364,6 +461,21 @@ export function mockOutput(id: string): Output | undefined {
 
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/** #1864 — an output of another template, say, for an arrange across templates. */
+export function addMockOutput(output: Output): void {
+  state.outputs.push(output)
+}
+
+/** #1864 — the output a library file is a copy of, or undefined for a file ScadBuddy did not make. */
+export function mockLibraryOutput(fileId: number): string | undefined {
+  return state.libraryOutputs.get(fileId)
+}
+
+/** The body of the last `POST /outputs/arrange`, or null when none was sent. */
+export function lastArrangeRequest(): ArrangeRequest | null {
+  return state.lastArrange
 }
 
 function initialSourceAt(): Record<string, string> {
@@ -672,6 +784,18 @@ export function mockRemembered() {
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
     project_print_targets: structuredClone(state.projectTargets),
+    model_projects: structuredClone(state.modelProjects),
+  }
+}
+
+/** #1660 — `GET /print/models/{slug}/projects` from the store's `model_projects`. */
+function mockModelProjects(slug: string): ModelProjects {
+  return {
+    projects: Object.entries(state.modelProjects).flatMap(([key, project]): NonNullable<ModelProjects['projects']> => {
+      if (key === slug) return [{ preset_id: null, ...project }]
+      if (key.startsWith(`${slug}/`)) return [{ preset_id: key.slice(slug.length + 1), ...project }]
+      return []
+    }),
   }
 }
 
@@ -683,9 +807,9 @@ export function forgetMockProjectTarget(projectId: string): void {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
+  state.modelProjects = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
@@ -697,13 +821,13 @@ export function forgetMockRemembered(): void {
  * all" (`forgetMockRemembered`) drops it too.
  */
 export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
-  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+  return { ...NO_MODEL_CHOICES, ...state.modelChoices[`library:${fileId}`] }
 }
 
 /** Remembers one library file's choices; the empty choice forgets them, as the store does. */
 export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
-  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
-  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  if (isNoModelChoices(choices)) delete state.modelChoices[`library:${fileId}`]
+  else state.modelChoices[`library:${fileId}`] = { ...NO_MODEL_CHOICES, ...choices }
   return mockLibraryChoices(fileId)
 }
 
@@ -1001,13 +1125,16 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (to !== null && day !== null && day > to) return false
   const slug = query.get('slug')
   if (slug !== null && print.slug !== slug) return false
+  const file = query.get('library_file_id')
+  if (file !== null && print.library_file_id !== Number(file)) return false
   const q = query.get('q')?.toLowerCase()
   if (q) {
     const haystack = [
       print.output_name ?? '',
-      print.slug,
+      print.slug ?? '',
+      print.library_file_name ?? '',
       archive?.print_name ?? '',
-      JSON.stringify(print.provenance.params),
+      JSON.stringify(print.provenance?.params ?? {}),
     ]
     if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
   }
@@ -1168,13 +1295,29 @@ function presetRefusal(
   if (own === null && saved.length >= MAX_PRESETS) {
     return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
   }
-  const clash = (state.presets[slug] ?? []).some(
+  const clash = (state.presets[slug] ?? []).find(
     (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
   )
   if (clash) {
-    return problem(409, 'Conflict', `'${slug}' already has a preset named '${name}'`, { name })
+    // #357: names the preset that has the name, as it is spelled.
+    return problem(409, 'Conflict', `A preset named "${clash.name}" already exists.`, {
+      name,
+      existing: clash.name,
+    })
   }
   return undefined
+}
+
+/** `api/presets.py`'s words for a preset that is gone, and for one the template ships (#357). */
+const PRESET_GONE = 'That preset no longer exists; it may have been deleted elsewhere.'
+const PRESET_READ_ONLY =
+  'This preset ships with the template and is read-only; duplicate it to change it.'
+
+/** A write to a `template-*` id: read-only when the template has it, else gone (#357). */
+function templatePresetRefusal(slug: string, id: string) {
+  return (state.presets[slug] ?? []).some((p) => p.id === id)
+    ? problem(403, 'Forbidden', PRESET_READ_ONLY, { preset_id: id })
+    : problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
 }
 
 function slugify(value: string): string {
@@ -1622,6 +1765,17 @@ export const handlers = [
       source: string
       force?: boolean
       message?: string | null
+      base?: string | null
+    }
+    // #1054 — `_require_base`: an edit made against a revision the model has moved past.
+    if (body.base && model.version && !model.version.startsWith(body.base)) {
+      return problem(
+        409,
+        'Conflict',
+        `'${slug}' has moved on: it is at ${model.version.slice(0, 7)}, and this edit was ` +
+          `made against ${body.base.slice(0, 7)}. Read the source again and rebuild the edit`,
+        { base: body.base, current: model.version },
+      )
     }
     // #157 — `merge_base` saves the resolution of a conflicted upstream merge.
     const mergeBase = new URL(request.url).searchParams.get('merge_base')
@@ -1789,6 +1943,24 @@ export const handlers = [
     if (!item?.poster) return problem(404, 'Not Found', `'${slug}' has no poster for '${id}'`)
     return HttpResponse.arrayBuffer(mediaBytes(slug, item.poster, 'image'), {
       headers: { 'Content-Type': 'image/png', 'Cache-Control': IMMUTABLE_CACHE_CONTROL },
+    })
+  }),
+
+  // #624 — the strip's small copy: the image, or a video's poster (404 with none).
+  http.get(`${base}/models/:slug/media/:id/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item || item.missing) return noMediaItem(slug, id)
+    const file = item.kind === 'video' ? item.poster : item.file
+    if (!file) return noMediaItem(slug, id)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, file, 'image'), {
+      headers: {
+        'Content-Type': 'image/webp',
+        'Cache-Control': item.id === 'thumbnail' ? 'no-cache' : IMMUTABLE_CACHE_CONTROL,
+      },
     })
   }),
 
@@ -2264,7 +2436,7 @@ export const handlers = [
     const id = String(params['id'])
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!source) return problem(404, 'Preset not found')
+    if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
@@ -2291,9 +2463,9 @@ export const handlers = [
     const body = (await request.json()) as ParamPresetUpdate
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
-    if (!existing) return problem(404, 'Preset not found')
+    if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const name = body.name?.trim().replace(/\s+/g, ' ')
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
@@ -2325,9 +2497,9 @@ export const handlers = [
   http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const presets = state.presets[slug] ?? []
-    if (!presets.some((p) => p.id === id)) return problem(404, 'Preset not found')
+    if (!presets.some((p) => p.id === id)) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     state.presets[slug] = presets.filter((p) => p.id !== id)
     return new HttpResponse(null, { status: 204 })
   }),
@@ -2364,6 +2536,31 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => foldFamily(font.family)))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      // The template's own options are its business, as on the server.
+      if ((param.options ?? []).some((option) => option.value === value)) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(foldFamily(family)))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
@@ -2374,6 +2571,7 @@ export const handlers = [
       params: renderParams,
       inputs,
       log_tail: [],
+      workflow_id: `render-${jobId}`,
     })
     runJob(jobId)
     // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.
@@ -2446,6 +2644,165 @@ export const handlers = [
     return HttpResponse.arrayBuffer(bytes.buffer, { headers: { 'Content-Type': sample.type } })
   }),
 
+  // spec 2026-09-27 §7 / §10 — Arrange refuses what the API refuses, then finishes at
+  // once. Its plates are what the writer reports: `plates` lists every plate of the
+  // new file and is empty when there is one. The mock's packer: more than four copies
+  // take a second plate.
+  http.post(`${base}/outputs/arrange`, async ({ request }) => {
+    const body = (await request.json()) as ArrangeRequest
+    state.lastArrange = body
+    // #1864 — a library file stands for the output it is a copy of; #1863 — any other is
+    // read from its 3MF, and one that cannot be (the sliced file) is refused, every such
+    // file named at once.
+    const isPlain = (o: ArrangeRequest['objects'][number]) =>
+      o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id)
+    const refused = [
+      ...new Set(
+        body.objects.flatMap((o) =>
+          isPlain(o) && !mockLibraryObjects(o.library_file_id ?? 0) ? [o.library_file_id ?? 0] : [],
+        ),
+      ),
+    ]
+    if (refused.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `${refused.length} library file(s) cannot be arranged: ${refused.map((id) => `file ${id}: ${SLICED_REASON}`).join('; ')}`,
+        { code: 'library_file_not_arrangeable', library_file_ids: refused },
+      )
+    }
+    const library = body.objects.filter(isPlain)
+    const objects = body.objects
+      .filter((o) => !isPlain(o))
+      .map((o) => ({
+        ...o,
+        output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
+      }))
+    // #902 — every output saved before Arrange, named at once, as the API does.
+    const chosen = [...new Set(objects.map((o) => o.output_id))]
+    const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
+    if (missing) return problem(404, 'Not Found', `no output with id '${missing}'`)
+    const unrecorded = chosen.filter(
+      (id) => (state.outputs.find((o) => o.id === id)?.manifest ?? []).length === 0,
+    )
+    if (unrecorded.length > 0) {
+      return HttpResponse.json(
+        {
+          type: NEEDS_BACKFILL_PROBLEM,
+          title: 'Conflict',
+          status: 409,
+          detail: `${unrecorded.length} output(s) were saved before Arrange existed, so nothing records their objects; re-render them (POST /outputs/{id}/backfill) to arrange them`,
+          instance: null,
+          code: 'needs_backfill',
+          output_ids: unrecorded,
+        } satisfies NeedsBackfillProblem,
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
+    const manifest: ManifestObject[] = []
+    const slugs: string[] = []
+    for (const object of objects) {
+      const source = state.outputs.find((o) => o.id === object.output_id)
+      if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
+      if (!slugs.includes(source.slug)) slugs.push(source.slug)
+      let entries =
+        object.part == null
+          ? (source.manifest ?? [])
+          : (source.manifest ?? []).filter((m) => m.part === object.part)
+      if (entries.length === 0) {
+        return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
+      }
+      // #3637 — a part there twice is chosen by its colours, as the API chooses it.
+      if (object.part != null && object.recolour != null) {
+        const wanted = JSON.stringify(object.recolour)
+        const same = entries.filter((m) => JSON.stringify(m.recolour ?? {}) === wanted)
+        entries = (same.length > 0 ? same : entries).slice(0, 1)
+      }
+      for (const entry of entries) {
+        const count = object.count ?? entry.count
+        const recolour = object.recolour ?? entry.recolour ?? {}
+        if (count > 0) manifest.push({ ...entry, count, recolour, source_output: entry.source_output ?? source.id })
+      }
+    }
+    if (slugs.length === 0 && body.slug == null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        'a result of library files alone is filed under a template: name one in slug',
+      )
+    }
+    // #2284 — with a library file in the mix, any template.
+    if (slugs.length > 0 && library.length === 0 && body.slug != null && !slugs.includes(body.slug)) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `the result is filed under one of its objects' templates (${slugs.join(', ')}), not ${body.slug}`,
+      )
+    }
+    const filed = body.slug ?? slugs[0]!
+    for (const object of library) {
+      const fileId = object.library_file_id ?? 0
+      const read = mockLibraryObjects(fileId) ?? []
+      const entries = object.part == null ? read : read.filter((m) => m.part === object.part)
+      if (entries.length === 0) {
+        return problem(422, 'Unprocessable Content', `library file ${fileId} has no object ${object.part}`)
+      }
+      for (const entry of entries) {
+        const count = object.count ?? entry.count
+        const [x, y, z] = entry.size
+        if (count > 0) {
+          manifest.push({
+            part: entry.part,
+            file: entry.name,
+            // #2284 — a library file's objects are no template's, wherever it is filed.
+            slug: '',
+            revision: null,
+            bbox: { min: [0, 0, 0], max: [x, y, z], size: [x, y, z] },
+            footprint: [x, y],
+            colours: entry.colours,
+            count,
+            plates: 1,
+            library_file_id: fileId,
+            recolour: object.recolour ?? {},
+          })
+        }
+      }
+    }
+    if (manifest.length === 0) {
+      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    }
+    const first = state.outputs.find((o) => o.id === objects[0]?.output_id)
+    const bbox = first ? first.bbox_mm : manifest[0]!.bbox
+    if (!bbox) return problem(409, 'Conflict', 'the output has no dimensions')
+    // #3637 — each copy in the colours it prints in: a swapped colour is a slot of its own.
+    const printed = (m: ManifestObject) => m.colours.map((c) => m.recolour?.[c.toUpperCase()] ?? c)
+    const fromFiles = manifest.filter((m) => m.library_file_id != null).flatMap(printed)
+    const swapped = manifest
+      .filter((m) => m.library_file_id == null && Object.keys(m.recolour ?? {}).length > 0)
+      .flatMap(printed)
+    const colors = body.colours ?? [...new Set([...(first?.colors ?? []), ...swapped, ...fromFiles])]
+    const copies = manifest.reduce((sum, m) => sum + m.count, 0)
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: filed,
+      status: 'done',
+      created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      params: {},
+      log_tail: [],
+      bbox_mm: bbox,
+      colors,
+      plates: copies > 4 ? [1, 2].map((index) => ({ index, bbox_mm: bbox, colors })) : [],
+    }
+    state.jobs.set(jobId, job)
+    state.arranged.set(jobId, {
+      sources: [...chosen, ...new Set(library.map((o) => `library:${o.library_file_id}`))],
+      manifest,
+    })
+    return HttpResponse.json(job, { status: 202 })
+  }),
+
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
@@ -2455,10 +2812,30 @@ export const handlers = [
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.BROKEN_PREVIEW_NAME) {
+      return problem(500, 'Internal Server Error')
+    }
     const [x, y, z] = job.bbox_mm.size
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #1289 — the per-colour breakdown: a placeholder image, with the legend in the
+  // route's headers as the backend sends it (a near-square grid, render/thumbnail.py).
+  http.get(`${base}/jobs/:id/colours.png`, ({ params }) => {
+    const job = state.jobs.get(String(params['id']))
+    if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    const colours = (job.colors ?? []).map((colour) => colour.toUpperCase())
+    if (colours.length === 0) return problem(404, 'The preview has no geometry')
+    if (colours.length > 16) return problem(422, `${colours.length} colours is more than a breakdown draws (16)`)
+    return HttpResponse.arrayBuffer(bytesOf(PLACEHOLDER_PNG).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-ScadBuddy-Colours': colours.join(','),
+        'X-ScadBuddy-Colour-Columns': String(Math.ceil(Math.sqrt(colours.length))),
+      },
     })
   }),
 
@@ -2497,19 +2874,65 @@ export const handlers = [
       colors: job.colors ?? [],
       parts: [],
       warnings: [],
+      // An arranged output keeps its objects and where they came from (§7); a render's
+      // output has no manifest in the mock.
+      manifest: state.arranged.get(job.id)?.manifest ?? [],
+      arranged_from: state.arranged.get(job.id)?.sources ?? [],
+      bom: [],
+      files: [],
+      record: null,
+      failed_before_queueing: false,
     }
     state.outputs = [output, ...state.outputs]
     await delay(120)
     return HttpResponse.json(output, { status: 201 })
   }),
 
+  // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
+  // the inputs come back as they are, at the version they carry.
+  http.post(`${base}/models/:slug/inputs/migrate`, async ({ request }) => {
+    const body = (await request.json()) as { inputs: Record<string, unknown> }
+    const v = typeof body.inputs.v === 'number' ? body.inputs.v : 0
+    return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
+  }),
+
   http.get(`${base}/models/:slug/outputs`, ({ params }) =>
-    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug'])),
+    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug']).map(settleBackfill)),
   ),
 
   http.get(`${base}/outputs/:id`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
-    return output ? HttpResponse.json(output) : problem(404, 'Output not found')
+    return output ? HttpResponse.json(settleBackfill(output)) : problem(404, 'Output not found')
+  }),
+
+  // #902 — an ordinary render of the output's own params; the output gains its objects
+  // when a read finds the job done (the API attaches on the job's event), or records why it failed.
+  http.post(`${base}/outputs/:id/backfill`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if ((output.manifest ?? []).length > 0) {
+      return problem(409, 'Conflict', `output ${output.id} already records its objects`, { code: 'already_backfilled' })
+    }
+    if ((output.arranged_from ?? []).length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `output ${output.id} was arranged, not rendered: there is nothing to render again`,
+      )
+    }
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: output.slug,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      params: output.params ?? {},
+      log_tail: [],
+    }
+    state.jobs.set(jobId, job)
+    runJob(jobId)
+    output.backfill = { job_id: jobId, error: null } satisfies BackfillState
+    return HttpResponse.json(job, { status: 202 })
   }),
 
   http.get(`${base}/outputs/:id/edit`, ({ params }) => {
@@ -2523,7 +2946,16 @@ export const handlers = [
       inputs: output.inputs ?? { params: output.params, v: 0 },
       model_version: output.model_version ?? null,
       source: 'record',
+      arranged_from: output.arranged_from ?? [],
     })
+  }),
+
+  http.patch(`${base}/outputs/:id`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const { name } = (await request.json()) as { name?: string | null }
+    output.name = name?.trim() || null
+    return HttpResponse.json(output)
   }),
 
   http.delete(`${base}/outputs/:id`, ({ params }) => {
@@ -2561,6 +2993,9 @@ export const handlers = [
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
       return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
     }
+    if (query.has('slug') && query.has('library_file_id')) {
+      return problem(422, 'Unprocessable Content', "a print is of a template's output or of a library file: filter by one")
+    }
     const matches = fixtures.prints.filter((print) => printMatches(print, query))
     const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
     const items = after.slice(0, limit).map(printSummary)
@@ -2577,15 +3012,22 @@ export const handlers = [
     const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
     const pulled = state.pulledTimelapses.get(print.archive_id)
     const remote = (fixtures.printerFiles[print.archive_id] ?? []).filter((file) => file.name !== pulled)
+    const added = state.printAttachments.get(print.archive_id) ?? []
+    const media = added.length > 0 ? { ...print.media, attachments: [...print.media.attachments, ...added] } : print.media
     return HttpResponse.json({
       ...print,
+      attachment_count: print.attachment_count + added.length,
       has_timelapse: print.has_timelapse || pulled !== undefined,
       media:
         pulled === undefined
-          ? print.media
+          ? media
           : {
-              ...print.media,
-              timelapse: { url: `/api/v1/prints/${print.archive_id}/timelapse`, info: null, poster_frames: [] },
+              ...media,
+              timelapse: {
+                url: `/api/v1/prints/${print.archive_id}/timelapse`,
+                poster_url: `/api/v1/prints/${print.archive_id}/timelapse/frames/0`,
+                frames_url: `/api/v1/prints/${print.archive_id}/timelapse/frames`,
+              },
             },
       printer_media:
         wantsPrinter && print.status !== 'deleted_in_bambuddy'
@@ -2593,6 +3035,83 @@ export const handlers = [
           : null,
     } satisfies PrintDetail)
   }),
+
+  // #309 — a photo or video of the finished print, typed by its name here (the server
+  // reads the bytes).
+  http.post(`${base}/prints/:archiveId/attachments`, async ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    // Read as text, not `formData()`: undici's parser refuses the body jsdom's XHR
+    // sends. The part's type decides; a part sent with no name is named by it.
+    const raw = await request.text()
+    const type = /name="file";[^\r]*\r\nContent-Type: ([^\r]+)/.exec(raw)?.[1]
+    if (type === undefined) return problem(422, 'Unprocessable Content', 'the upload has no `file` part')
+    const extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/webm': 'webm' }[type]
+    if (extension === undefined) {
+      return problem(415, 'Unsupported Media Type', 'the upload is not a PNG, JPEG or WebP photo, or an MP4 or WebM video')
+    }
+    const video = type.startsWith('video/')
+    const sent = /filename="([^"]*)"/.exec(raw)?.[1]
+    const file = {
+      name: sent && sent !== 'blob' ? sent : `${video ? 'video' : 'photo'}-${state.nextAttachment}.${extension}`,
+      size: raw.length,
+    }
+    const id = state.nextAttachment++
+    const caption = /name="caption"\r\n\r\n([^\r]*)\r\n/.exec(raw)?.[1]
+    const added: PrintAttachment = {
+      id,
+      kind: video ? 'video' : 'photo',
+      caption: caption || null,
+      url: `/api/v1/prints/${print.archive_id}/attachments/${id}/file`,
+      filename: file.name,
+      size_bytes: file.size,
+      promoted_to: [],
+      created_at: '2026-10-13T12:00:00Z',
+    }
+    state.printAttachments.set(print.archive_id, [...(state.printAttachments.get(print.archive_id) ?? []), added])
+    return HttpResponse.json(added, { status: 201 })
+  }),
+
+  http.patch(`${base}/prints/:archiveId/attachments/:id`, async ({ params, request }) => {
+    const list = state.printAttachments.get(Number(params['archiveId'])) ?? []
+    const found = list.find((each) => String(each.id) === params['id'])
+    if (!found) return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no attachment ${String(params['id'])}`)
+    const { caption } = (await request.json()) as { caption: string | null }
+    found.caption = caption?.trim() || null
+    return HttpResponse.json(found)
+  }),
+
+  http.delete(`${base}/prints/:archiveId/attachments/:id`, ({ params }) => {
+    const archiveId = Number(params['archiveId'])
+    const list = state.printAttachments.get(archiveId) ?? []
+    if (!list.some((each) => String(each.id) === params['id'])) {
+      return problem(404, 'Not Found', `print ${archiveId} has no attachment ${String(params['id'])}`)
+    }
+    state.printAttachments.set(
+      archiveId,
+      list.filter((each) => String(each.id) !== params['id']),
+    )
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  http.post(`${base}/prints/:archiveId/attachments/:id/promote`, async ({ params, request }) => {
+    const found = (state.printAttachments.get(Number(params['archiveId'])) ?? []).find(
+      (each) => String(each.id) === params['id'],
+    )
+    if (!found) return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no attachment ${String(params['id'])}`)
+    const { slug } = (await request.json()) as { slug: string }
+    const model = state.models.find((each) => each.slug === slug)
+    if (!model) return problem(404, 'Not Found', `there is no template ${slug}`)
+    if (found.promoted_to.includes(slug)) {
+      return problem(409, 'Conflict', `this attachment is in ${slug}'s gallery already`)
+    }
+    found.promoted_to = [...found.promoted_to, slug]
+    return HttpResponse.json(model)
+  }),
+
+  http.get(`${base}/prints/:archiveId/attachments/:id/file`, () =>
+    HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } }),
+  ),
 
   // #311 — "Print again": `POST /queue/` with the archive, on its printer.
   http.post(`${base}/prints/:archiveId/reprint`, ({ params }) => {
@@ -2626,6 +3145,21 @@ export const handlers = [
     }
     state.pulledTimelapses.set(print.archive_id, filename)
     return new HttpResponse(null, { status: 204 })
+  }),
+
+  // #2360 — the timelapse's stills and probe, read after the detail; #2512 — each a JPEG by URL.
+  http.get(`${base}/prints/:archiveId/timelapse/frames`, ({ params }) => {
+    const id = Number(params['archiveId'])
+    const print = fixtures.prints.find((p) => p.archive_id === id)
+    if (!print || (print.media.timelapse === null && !state.pulledTimelapses.has(id))) {
+      return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no timelapse`)
+    }
+    return HttpResponse.json(fixtures.timelapseFrames[id] ?? ({ info: null, frames: [] } satisfies TimelapseFrames))
+  }),
+  http.get(`${base}/prints/:archiveId/timelapse/frames/:index`, ({ params }) => {
+    const frames = fixtures.timelapseFrames[Number(params['archiveId'])]?.frames ?? []
+    if (Number(params['index']) >= frames.length) return problem(404, 'Not Found', 'the timelapse has no such still')
+    return HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } })
   }),
 
   // #307 — the timelapse, with Range as Bambuddy's FileResponse answers it.
@@ -2703,9 +3237,11 @@ export const handlers = [
     }
     await delay(250)
     // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
+    const known = new Set((output.library_files ?? []).map((copy) => copy.id))
     const libraryFileId = copyIn(output, null)
     const result: SendResult = {
       library_file_id: libraryFileId,
+      created: !known.has(libraryFileId),
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
       bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
@@ -2856,15 +3392,8 @@ export const handlers = [
         : o,
     )
     await delay(200)
-    const warnings = body.choices.nozzles.some((nozzle) => nozzle.flow === 'high_flow')
-      ? [
-          {
-            kind: 'hf-unsupported' as const,
-            message:
-              "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
-          },
-        ]
-      : []
+    // High Flow is sliced as High Flow (#484), so a run warns of nothing about it.
+    const warnings: PrintRunResult['warnings'] = []
     const result = {
       route: 'slice_queue',
       library_file_id: libraryFileId,
@@ -2887,6 +3416,7 @@ export const handlers = [
     const now = new Date().toISOString()
     const run: PrintRun = {
       id: `run-${nextNumber()}`,
+      subject: `output:${output.id}`,
       output_id: output.id,
       status: 'succeeded',
       created_at: now,
@@ -2973,6 +3503,20 @@ export const handlers = [
     const body = (await request.json()) as LastProject
     state.lastProjectId = body.project_id ?? null
     return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #1660 — the project each model was last filed into, per preset.
+  http.get(`${base}/print/models/:slug/projects`, ({ params }) =>
+    HttpResponse.json(mockModelProjects(String(params['slug']))),
+  ),
+
+  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as ModelProjectPut
+    const key = body.preset_id ? `${slug}/${body.preset_id}` : slug
+    if (body.project_id === null || body.project_id === undefined) delete state.modelProjects[key]
+    else state.modelProjects[key] = { project_id: body.project_id, preset_name: body.preset_name ?? null }
+    return HttpResponse.json(mockModelProjects(slug))
   }),
 
   // #317 — Generate with a project files the editable 3MF in its folder, once per
@@ -3084,6 +3628,18 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
+  // #1285 — a model whose includes all resolve; tests that need more override this.
+  http.post(`${base}/models/:slug/dependencies`, () =>
+    HttpResponse.json({
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }),
+  ),
+
   // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
   http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -3161,20 +3717,6 @@ export const handlers = [
     return HttpResponse.json(view(updated))
   }),
 
-  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
-  http.get(`${base}/ai/settings/headless-browser`, () =>
-    HttpResponse.json({ enabled: state.headlessBrowser }),
-  ),
-
-  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
-    const body = (await request.json()) as { enabled?: unknown }
-    if (typeof body.enabled !== 'boolean') {
-      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
-    }
-    state.headlessBrowser = body.enabled
-    return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
   http.get(`${base}/plate`, ({ request }) =>
     HttpResponse.json(
@@ -3228,6 +3770,16 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      // #1754: a model's id (`MODEL_ID_PATTERN` in backend/scadbuddy/library/slugs.py, with
+      // its MAX_SLUG_LENGTH of 100; keep the two in step), or a library file's `library:<file id>`;
+      // a forget goes through for any key, as on the server.
+      if (
+        body.scope === 'model' &&
+        !empty &&
+        !/^((builtin:)?[a-z0-9][a-z0-9-]{0,99}|library:[1-9]\d*)$/.test(body.key)
+      ) {
+        return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
+      }
       if (empty) delete map[body.key]
       else map[body.key] = options
     }

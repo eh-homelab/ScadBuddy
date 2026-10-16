@@ -15,7 +15,12 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
+import { isNotDoneSummary } from '../questions/waiting.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
+import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
+import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
+import { type SessionFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -154,6 +159,10 @@ export type ApprovalRecord = {
   consumedAt: string | null
   /** Approved but voided before it was used. */
   revokedAt: string | null
+  /** The parked call's tool span (W3C traceparent), for the decision's link (#988); never shown to clients. */
+  traceparent: string | null
+  /** The decision's `agent.approval` span, the parent of what the turn does next (#988). */
+  decisionTraceparent: string | null
 }
 
 export type ApprovalErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'expired' | 'input_mismatch' | 'invalid'
@@ -172,10 +181,13 @@ export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
   readonly status: 400 | 403 | 404 | 409 | 410
-  constructor(code: ApprovalErrorCode, message: string) {
+  /** For a conflict, how the approval ended, as a clause ("it was already denied"). */
+  readonly reason: string | undefined
+  constructor(code: ApprovalErrorCode, message: string, reason?: string) {
     super(message)
     this.code = code
     this.status = STATUS_OF[code]
+    this.reason = reason
   }
 }
 
@@ -212,6 +224,8 @@ export type ApprovalServiceDeps = {
    * and void is recorded as an `approval` row.
    */
   audit?: AuditSink
+  /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
+  workspace?: SessionFiles
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -231,7 +245,33 @@ export type GateContext = {
   secrets: () => readonly string[]
   /** The turn's own abort signal (interrupt, shutdown). */
   signal: AbortSignal
+  /** The turn's trace (telemetry/turn.ts TurnTrace): told when a call parks and when it is decided. */
+  trace?: GateTrace
+  /**
+   * Resolves once the turn's log has the call's `tool.call`, logging it if the turn
+   * has not (sessions/sdkEvents.ts ShownCalls, #881), so its `approval.required` is
+   * logged after it. Not asked for a subagent's call, which is never shown.
+   */
+  shown?: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
 }
+
+/**
+ * What a parked call tells its turn's trace (spec 2026-10-01 §5.4, "Approvals
+ * end and link"). `traceparent` is the parked tool span's, stored on the row;
+ * `parked` ends that span and the open turn segment once the row exists;
+ * `decided` hands over the decision (its `decisionTraceparent` is the parent
+ * of what the turn does next), and whether the call now runs; `abandoned` says
+ * the row was never written (the gate's throw becomes a deny), so the call no
+ * longer waits on a decision.
+ */
+export type ParkTrace = {
+  traceparent: string | undefined
+  parked(approvalId: string): void
+  decided(approval: Pick<ApprovalRecord, 'id' | 'decision' | 'decisionTraceparent'>, runs: boolean): void
+  abandoned(): void
+}
+
+export type GateTrace = { park(toolUseId: string, toolName: string): ParkTrace }
 
 type Row = {
   id: string
@@ -258,13 +298,15 @@ type Row = {
   resume_turn_id: string | null
   consumed_at: Date | null
   revoked_at: Date | null
+  traceparent: string | null
+  decision_traceparent: string | null
   due: boolean
 }
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
   requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
   decided_by_kind, decided_by_id, decided_by_label, decided_at, reason, usable_until, resume_turn_id,
-  consumed_at, revoked_at, (decision IS NULL AND expires_at <= now()) AS due`
+  consumed_at, revoked_at, traceparent, decision_traceparent, (decision IS NULL AND expires_at <= now()) AS due`
 
 /** An approved row that can still be used. */
 const USABLE = `decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL AND usable_until > now()`
@@ -294,7 +336,18 @@ function record(row: Row): ApprovalRecord {
     resumeTurnId: row.resume_turn_id,
     consumedAt: row.consumed_at?.toISOString() ?? null,
     revokedAt: row.revoked_at?.toISOString() ?? null,
+    traceparent: row.traceparent,
+    decisionTraceparent: row.decision_traceparent,
   }
+}
+
+/** How an approval that can no longer be decided ended, as a clause, from its row's own reason (#1400). */
+export function conflictReason(now: ApprovalRecord | undefined): string {
+  if (now?.decision === 'cancelled') return now.reason ?? 'it was cancelled'
+  if (now?.decision === 'approved' && now.revokedAt !== null) {
+    return `it was approved, then withdrawn${now.reason ? ` (${now.reason})` : ''}`
+  }
+  return `it was already ${now?.decision ?? 'decided'}`
 }
 
 /** JSON with object keys sorted at every depth, so equal inputs hash equally. */
@@ -369,6 +422,10 @@ export type CreateApproval = {
   /** See GateContext.requestedTiers. */
   requestedTiers?: readonly Tier[]
   secrets?: readonly string[]
+  /** The parked tool span's traceparent (ParkTrace.traceparent). */
+  traceparent?: string
+  /** The workspace the call runs in (workspaceOf), for an upload's size; a session's own when omitted. */
+  workspace?: WorkspaceRef
 }
 
 export type DecideOptions = {
@@ -396,6 +453,31 @@ export type RevokeFilter = {
   turnId?: string
   /** Leave the row bound to this resumed turn alone. */
   exceptResumeTurn?: string
+}
+
+/**
+ * The decision's own trace (spec 2026-10-01 §5.4): a principal's decision is a
+ * child of the request that made it; an expiry or a cancellation, which no one
+ * asked for, is a root. Either way it links to the parked call's span.
+ */
+function decisionSpan(approval: ApprovalRecord, by: Owner | undefined): Span {
+  const link = linkTo(approval.traceparent)
+  const waited = approval.decidedAt ? (Date.parse(approval.decidedAt) - Date.parse(approval.createdAt)) / 1000 : 0
+  return tracer().startSpan('agent.approval', {
+    kind: SpanKind.INTERNAL,
+    root: by === undefined,
+    ...(link ? { links: [link] } : {}),
+    attributes: {
+      'scadbuddy.approval_id': approval.id,
+      'scadbuddy.tool': approval.tool,
+      'scadbuddy.tier': approval.tier,
+      'scadbuddy.outcome': approval.decision ?? 'unknown',
+      'scadbuddy.wait_seconds': Math.max(waited, 0),
+      ...(approval.sessionId ? { 'scadbuddy.session_id': approval.sessionId } : {}),
+      ...(approval.turnId ? { 'scadbuddy.turn_id': approval.turnId } : {}),
+      ...(by ? { 'scadbuddy.decided_by_kind': by.kind } : {}),
+    },
+  })
 }
 
 export class ApprovalService {
@@ -460,6 +542,31 @@ export class ApprovalService {
       turnId: row.turn_id,
       turnActive: row.turn_active,
     }
+  }
+
+  /** Whether a non-browser principal holds the per-token approval grant (spec §6). */
+  async holdsGrant(principal: Owner): Promise<boolean> {
+    return this.hasGrant(principal)
+  }
+
+  /**
+   * Every pending approval `principal` may see, oldest first: all of them for the
+   * browser user and grant holders; for anyone else, those of sessions it owns or
+   * started and its own session-less ones (MCP prepares).
+   */
+  async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
+    if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
+    await this.expireDue()
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals a
+       WHERE a.decision IS NULL AND (
+         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
+         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
+                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
+       ORDER BY a.created_at, a.id LIMIT 500`,
+      [principal.kind, principal.id],
+    )
+    return rows.map(record)
   }
 
   private async hasGrant(principal: Owner): Promise<boolean> {
@@ -544,8 +651,9 @@ export class ApprovalService {
     const { requestedBy: by } = request
     const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'))
+                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at,
+                                 traceparent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'), $14)
        RETURNING ${COLUMNS}`,
       [
         randomUUID(),
@@ -561,15 +669,23 @@ export class ApprovalService {
         by.label,
         request.requestedTiers ? [...request.requestedTiers] : null,
         ttl,
+        request.traceparent ?? null,
       ],
     )
     return row
   }
 
+  /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
+  private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
+    const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
+    const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
+    return summariseInput(request.tool, shown, request.secrets ?? [])
+  }
+
   /** Records a pending approval (and, in a session, emits `approval.required`). */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
-    const summary = summariseInput(request.tool, request.input, secrets)
+    const summary = await this.summary(request)
     // The row and its `approval.required` commit together: a decision can only
     // see the row once it has committed, so its `approval.resolved` cannot be
     // logged before the event that asked for it.
@@ -588,6 +704,7 @@ export class ApprovalService {
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
         }),
+        inputRequested(created.sessionId, approvalEntry(created)),
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
@@ -619,43 +736,80 @@ export class ApprovalService {
     by: Owner | undefined,
     reason: string | null,
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+    refresh = true,
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    // The decision and its `approval.resolved` commit together: a parked gate
-    // polling the row must not see the decision (and log the session's
-    // `running`) before the event that reports it is in the log.
+    // The decision, its `approval.resolved` and the session's status commit
+    // together (#3583, as #3256 for questions): a parked gate polling the row
+    // resumes on the decision's commit alone, so a status written in a later
+    // transaction could land after its turn had finished, and `running` was
+    // never logged. A status write that fails rolls the decision back.
+    // `refresh: false`: the caller (a finishing turn) sets the status itself.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
-    const approval = await this.deps.sql.begin(async (tx) => {
-      const [row] = await tx.unsafe<Row[]>(
-        `UPDATE ai_approvals
-         SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-             decided_at = now(), reason = $6,
-             usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-         WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-         RETURNING ${COLUMNS}`,
-        [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-      )
-      if (!row) return undefined
-      const settled = record(row)
-      if (settled.sessionId !== null) {
-        const resolved = event({
-          type: 'approval.resolved',
-          sessionId: settled.sessionId,
-          id,
-          approved: decision === 'approved',
-          ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-        })
-        const events = [scrubForLog(resolved, [])]
-        logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
+    // Started only once the UPDATE has won, so a lost race leaves no span.
+    const traced: { span?: Span; committed?: boolean } = {}
+    try {
+      const approval = await this.deps.sql.begin(async (tx) => {
+        // The session row first (review of #3685): two settles of one session's approvals
+        // that overlapped each saw the other's decision as pending and neither moved the
+        // session back. Locked, the second waits for the first's commit, and its refresh
+        // reads both. Session before approval, as a turn that asks and a question's answer
+        // lock them, so the two orders never meet.
+        if (refresh) await tx`SELECT 1 FROM ai_sessions WHERE id = (SELECT session_id FROM ai_approvals WHERE id = ${id}) FOR UPDATE`
+        const [row] = await tx.unsafe<Row[]>(
+          `UPDATE ai_approvals
+           SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
+               decided_at = now(), reason = $6,
+               usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
+           WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
+           RETURNING ${COLUMNS}`,
+          [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
+        )
+        if (!row) return undefined
+        const settled = record(row)
+        // In the same transaction, so whoever sees the decision sees its span too.
+        traced.span = decisionSpan(settled, by)
+        const traceparent = traceparentOf(traced.span)
+        if (traceparent !== undefined) {
+          await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${id}`
+          settled.decisionTraceparent = traceparent
+        }
+        if (settled.sessionId !== null) {
+          const resolved = event({
+            type: 'approval.resolved',
+            sessionId: settled.sessionId,
+            id,
+            approved: decision === 'approved',
+            decision,
+            ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+            ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
+          })
+          const events = [
+            scrubForLog(resolved, []),
+            inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+            ...(refresh ? await this.statusRefresh(tx, settled.sessionId) : []),
+          ]
+          logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
+        }
+        return settled
+      })
+      traced.committed = true
+      if (!approval) return undefined
+      // Committed: wake followers, and announce it on the bus (#300).
+      if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
+      this.wakeWaiters(id)
+      await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
+      return approval
+    } catch (err) {
+      if (traced.span) {
+        recordFailure(traced.span, err)
+        // The span says the decision; a rollback means nothing was decided.
+        if (!traced.committed) traced.span.setAttribute('scadbuddy.outcome', 'rolled_back')
       }
-      return settled
-    })
-    if (!approval) return undefined
-    // Committed: wake followers, and announce it on the bus (#300).
-    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
-    this.wakeWaiters(id)
-    await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
-    return approval
+      throw err
+    } finally {
+      traced.span?.end()
+    }
   }
 
   /** One `approval` row in the audit log (#258). */
@@ -694,10 +848,16 @@ export class ApprovalService {
    * is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {
-    const [row] = await this.deps.sql<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
+    await this.append(sessionId, await this.statusRefresh(this.deps.sql, sessionId))
+  }
+
+  /** `refreshStatus`'s UPDATE on `db` (the pool, or the transaction that settles an approval); the event to log. */
+  private async statusRefresh(db: Sql | TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+    const [row] = await db<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
       SET status = CASE
-            WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL)
+            WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
+                         AND ${isNotDoneSummary(db)})
               THEN 'waiting_input'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
             ELSE 'idle'
@@ -706,7 +866,7 @@ export class ApprovalService {
       WHERE id = ${sessionId} AND status = 'waiting_approval'
         AND NOT EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
       RETURNING status`
-    if (row) await this.append(sessionId, [event({ type: 'session.status', sessionId, status: row.status })])
+    return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
   }
 
   private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
@@ -758,7 +918,11 @@ export class ApprovalService {
         throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
       }
       if (now?.decision === 'expired') throw new ApprovalError('expired', `approval ${id} expired before it was decided`)
-      throw new ApprovalError('conflict', `approval ${id} was already ${now?.decision ?? 'decided'}`)
+      throw new ApprovalError(
+        'conflict',
+        `approval ${id} was already ${now?.decision ?? 'decided'}`,
+        conflictReason(now),
+      )
     }
     // A parked turn (on any replica) picks the decision up itself. A turn
     // that is finishing as the decision lands looks parked here; it voids
@@ -769,8 +933,12 @@ export class ApprovalService {
       const session = await this.session(settled.sessionId)
       const parked = session?.turnActive === true && session.turnId === settled.turnId && settled.turnId !== null
       if (!parked) {
-        await this.refreshStatus(settled.sessionId)
-        if (approve) await this.resumeOrphan(settled, principal)
+        // The resumed turn is the decision's child (spec 2026-10-01 §5.4).
+        if (approve) {
+          await otelContext.with(contextFrom(settled.decisionTraceparent, otelContext.active()), () =>
+            this.resumeOrphan(settled, principal),
+          )
+        }
       }
     }
     return settled
@@ -788,21 +956,22 @@ export class ApprovalService {
     }
     if (result.resumed) return
     await this.revoke(approval.id, `the session could not resume: ${result.reason}`)
-    await this.refreshStatus(sessionId)
   }
 
   /** The panel's `approval.decision` client message; the seam #266's socket calls. */
-  async decision(principal: Owner, message: ApprovalDecisionMessage): Promise<ApprovalRecord> {
+  async decision(
+    principal: Owner,
+    message: ApprovalDecisionMessage,
+    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+  ): Promise<ApprovalRecord> {
     if (message.v !== PROTOCOL_VERSION || message.type !== 'approval.decision') {
       throw new ApprovalError('invalid', 'not an approval.decision message')
     }
-    return this.decide(principal, message.id, message.approve, { sessionId: message.sessionId })
+    return this.decide(principal, message.id, message.approve, { sessionId: message.sessionId, ...where })
   }
 
   private async expire(id: string): Promise<ApprovalRecord | undefined> {
-    const approval = await this.settle(id, 'expired', undefined, 'no decision before it expired')
-    if (approval?.sessionId) await this.refreshStatus(approval.sessionId)
-    return approval
+    return this.settle(id, 'expired', undefined, 'no decision before it expired')
   }
 
   /** Expires every pending approval past its time; returns how many. */
@@ -810,7 +979,17 @@ export class ApprovalService {
     const due = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_approvals WHERE decision IS NULL AND expires_at <= now() ORDER BY expires_at LIMIT 500`
     let n = 0
-    for (const { id } of due) if (await this.expire(id)) n += 1
+    // One approval that fails to expire never holds back the rest (#2382): the first
+    // failure is thrown once every other one has been tried.
+    let failure: unknown
+    for (const { id } of due) {
+      try {
+        if (await this.expire(id)) n += 1
+      } catch (err) {
+        failure ??= err
+      }
+    }
+    if (failure !== undefined) throw failure
     return n
   }
 
@@ -873,10 +1052,9 @@ export class ApprovalService {
     const pending = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL ORDER BY created_at`
     let n = 0
-    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason)) n += 1
-    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     // `refresh: false`: the caller (a finishing turn) sets the status itself.
-    if (n > 0 && options.refresh !== false) await this.refreshStatus(sessionId)
+    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason, {}, options.refresh !== false)) n += 1
+    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     return n
   }
 
@@ -945,33 +1123,59 @@ export class ApprovalService {
     request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
     bounds: { perPrincipal: number; total: number; evictReason: string },
   ): Promise<ApprovalRecord | undefined> {
-    const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
+    const summary = await this.summary(request)
     const by = request.requestedBy
-    const row = await this.deps.sql.begin(async (tx) => {
-      // One key for every MCP prepare: the per-principal and the global
-      // bound are both read and written under it. Held until commit.
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
-      const own = await tx<{ id: string }[]>`
-        SELECT id FROM ai_approvals
-        WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
-          AND decision IS NULL AND expires_at > now()
-        ORDER BY created_at, id`
-      const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
-      if (evict.length > 0) {
-        await tx`
-          UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = ${bounds.evictReason}
-          WHERE id = ANY(${evict}::uuid[]) AND decision IS NULL`
-      } else {
-        const [n] = await tx<{ n: number }[]>`
-          SELECT count(*)::int AS n FROM ai_approvals
-          WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
-        if ((n?.n ?? 0) >= bounds.total) return undefined
+    // An eviction is a system cancellation: each evicted row gets its root
+    // `agent.approval` span and `decision_traceparent` in this transaction, as
+    // settle() gives one. The spans end once the transaction has settled.
+    const evicted: Span[] = []
+    try {
+      const row = await this.deps.sql.begin(async (tx) => {
+        // One key for every MCP prepare: the per-principal and the global
+        // bound are both read and written under it. Held until commit.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
+        const own = await tx<{ id: string }[]>`
+          SELECT id FROM ai_approvals
+          WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
+            AND decision IS NULL AND expires_at > now()
+          ORDER BY created_at, id`
+        const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
+        if (evict.length > 0) {
+          const cancelled = await tx.unsafe<Row[]>(
+            `UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = $2
+             WHERE id = ANY($1::uuid[]) AND decision IS NULL
+             RETURNING ${COLUMNS}`,
+            [evict, bounds.evictReason],
+          )
+          for (const cancelledRow of cancelled) {
+            const span = decisionSpan(record(cancelledRow), undefined)
+            evicted.push(span)
+            const traceparent = traceparentOf(span)
+            if (traceparent !== undefined) {
+              await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${cancelledRow.id}`
+            }
+          }
+        } else {
+          const [n] = await tx<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM ai_approvals
+            WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+          if ((n?.n ?? 0) >= bounds.total) return undefined
+        }
+        const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
+        if (!inserted) throw new Error('approval vanished after insert')
+        return inserted
+      })
+      return row ? record(row) : undefined
+    } catch (err) {
+      // Only the transaction can throw here, and it rolled the cancellations back.
+      for (const span of evicted) {
+        recordFailure(span, err)
+        span.setAttribute('scadbuddy.outcome', 'rolled_back')
       }
-      const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
-      if (!inserted) throw new Error('approval vanished after insert')
-      return inserted
-    })
-    return row ? record(row) : undefined
+      throw err
+    } finally {
+      for (const span of evicted) span.end()
+    }
   }
 
   /** Expires this one approval if it is pending and past its time. */
@@ -1053,29 +1257,49 @@ export class ApprovalService {
       const resumed = await this.consume(context.sessionId, context.turnId, request.toolName, hash)
       if (resumed) return { approved: true, input, approvalId: resumed.id, decision: 'approved' }
 
-      const approval = await this.create({
-        sessionId: context.sessionId,
-        turnId: context.turnId,
-        toolUseId: request.toolUseId,
-        tool: request.toolName,
-        input,
-        tier: request.tier,
-        requestedBy: context.requestedBy,
-        ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
-        secrets: context.secrets(),
-      })
+      if (context.shown && request.agentId === undefined) {
+        await context.shown(request.toolUseId, request.toolName, request.input)
+      }
+
+      // The turn's trace (#988): the call's span context goes on the row, and
+      // the span and the turn's open segment end as soon as the row exists.
+      const park = context.trace?.park(request.toolUseId, request.toolName)
+      let approval: ApprovalRecord
+      try {
+        approval = await this.create({
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          toolUseId: request.toolUseId,
+          tool: request.toolName,
+          input,
+          tier: request.tier,
+          requestedBy: context.requestedBy,
+          ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
+          secrets: context.secrets(),
+          ...(park?.traceparent ? { traceparent: park.traceparent } : {}),
+        })
+      } catch (err) {
+        park?.abandoned()
+        throw err
+      }
+      park?.parked(approval.id)
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it or, on shutdown, keeps it
       // (sessions/manager.ts finish). The SDK has dropped the request by then.
+      // The status moved back with the decision's own commit (settle).
       const decided = await this.waitFor(approval.id, AbortSignal.any([context.signal, request.signal]))
-      await this.refreshStatus(context.sessionId)
       const source = { approvalId: decided.id, decision: decided.decision ?? undefined }
       if (decided.decision === 'approved') {
-        if (await this.consumeById(decided.id)) return { approved: true, input, ...source }
+        if (await this.consumeById(decided.id)) {
+          park?.decided(decided, true)
+          return { approved: true, input, ...source }
+        }
         // Voided between the decision and now (interrupt, handoff).
+        park?.decided(decided, false)
         const now = await this.row(decided.id)
         return { approved: false, message: refusal(now ?? decided), ...source }
       }
+      park?.decided(decided, false)
       return { approved: false, message: refusal(decided), ...source }
     }
   }
@@ -1089,12 +1313,32 @@ export class ApprovalService {
     options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {},
   ): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
+    // One sweep at a time: a slow one (a pod just started) is not joined by the next tick.
+    let running = false
     const timer = setInterval(() => {
+      if (running) return
+      running = true
       ready()
         .then((ok) => (ok ? this.expireDue() : 0))
         .catch(options.onError ?? (() => {}))
+        .finally(() => {
+          running = false
+        })
     }, intervalMs)
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/**
+ * A sweep's failure as its log line says it (#2382): the message, and for a Postgres
+ * error the statement it came from (whitespace folded, cut to 300 characters), so the
+ * next one names the query. Never the parameters: they can hold an input's summary.
+ */
+export function sweepErrorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  const query = (err as { query?: unknown } | null)?.query
+  if (typeof query !== 'string' || query.trim() === '') return message
+  const folded = query.replace(/\s+/g, ' ').trim()
+  return `${message} (in: ${folded.length > 300 ? `${folded.slice(0, 299)}…` : folded})`
 }

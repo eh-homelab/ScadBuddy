@@ -1,10 +1,12 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
-import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_VERSION } from '../mocks/fixtures'
+import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_UI_VERSION, UI_DEMO_VERSION } from '../mocks/fixtures'
+import { setMockPresets } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
@@ -14,12 +16,14 @@ import { CustomizePage } from './CustomizePage'
 // WebGL does not exist in jsdom: the viewer is a stand-in that renders the page's own
 // buttons, which it lays over the scene (as CustomizePage.test.tsx does).
 // It counts its mounts, so a test can tell a moved viewer from one that stayed put.
+// In a layout effect, which runs in the commit that inserts its node: a passive
+// effect runs later, so a check that waits for the node could see it uncounted (#1311).
 const previews = vi.hoisted(() => ({ mounts: 0 }))
 vi.mock('../components/Preview', async () => {
-  const { useEffect } = await import('react')
+  const { useLayoutEffect } = await import('react')
   return {
     Preview: ({ leading, controls }: { leading?: ReactNode; controls?: ReactNode }) => {
-      useEffect(() => {
+      useLayoutEffect(() => {
         previews.mounts += 1
       }, [])
       return (
@@ -104,7 +108,20 @@ describe('CustomizePage with a template UI', () => {
     expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
   })
 
-  it('loads the module from the revision the record is at', async () => {
+  it("loads the module from the last commit to the record's ui/, not the record's revision (#1469)", async () => {
+    expect(UI_DEMO_UI_VERSION).not.toBe(UI_DEMO_VERSION)
+    const urls: string[] = []
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return { mount: demo }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toContain('custom'))
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${UI_DEMO_UI_VERSION}/ui/index.js`])
+  })
+
+  it("falls back to the record's revision when it has no ui_version", async () => {
+    withRecord(UI_DEMO_SLUG, { ui_version: null })
     const urls: string[] = []
     setUiModuleLoader(async (url) => {
       urls.push(url)
@@ -115,8 +132,42 @@ describe('CustomizePage with a template UI', () => {
     expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${UI_DEMO_VERSION}/ui/index.js`])
   })
 
+  it('keeps the interface mounted across a commit that leaves ui/ alone, and remounts on one that does (#846)', async () => {
+    const model = models.find((m) => m.slug === UI_DEMO_SLUG)!
+    const uiCommit = 'c'.repeat(40)
+    let record = { ...model, version: 'a'.repeat(40), ui_version: uiCommit }
+    server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json(record)))
+    const urls: string[] = []
+    let mounts = 0
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return {
+        mount: (root: ShadowRoot) => {
+          mounts += 1
+          root.textContent = 'custom'
+        },
+      }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toBe('custom'))
+    // An "Edit details": a new record revision, the same interface.
+    record = { ...record, version: 'b'.repeat(40), name: 'Renamed' }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await screen.findByRole('heading', { name: 'Renamed' })
+    // A remount asks for its module in the effect, synchronously: `findByRole` settles
+    // inside act(), which flushes that effect, so a remount would already be in `urls`.
+    expect(mounts).toBe(1)
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${uiCommit}/ui/index.js`])
+    // A commit to ui/ does remount it, from that commit.
+    record = { ...record, version: 'd'.repeat(40), ui_version: 'd'.repeat(40) }
+    emitRealtime('model.updated', [`model:${UI_DEMO_SLUG}`], { slug: UI_DEMO_SLUG })
+    await waitFor(() => expect(mounts).toBe(2))
+    expect(urls.at(-1)).toBe(`/api/v1/models/${UI_DEMO_SLUG}/versions/${'d'.repeat(40)}/ui/index.js`)
+  })
+
   it('loads the live module when the record has no revision', async () => {
-    withRecord(UI_DEMO_SLUG, { version: null })
+    // No history: neither revision is known.
+    withRecord(UI_DEMO_SLUG, { version: null, ui_version: null })
     const urls: string[] = []
     setUiModuleLoader(async (url) => {
       urls.push(url)
@@ -188,6 +239,171 @@ describe('CustomizePage with a template UI', () => {
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
   })
 
+  it('keeps a preset the template UI saved selected in the picker (#1484)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'Saved' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Saved'), { timeout: 5000 })
+    await host!.presets.save('From the UI')
+    await host!.presets.save('Another')
+
+    // Saving remounts the picker, so the select is found again each time.
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'), { timeout: 5000 })
+    const select = preset()
+    // Nothing on screen differs from it, so picking the other one loses nothing.
+    await user.selectOptions(select, 'From the UI')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(select).toHaveDisplayValue('From the UI')
+  })
+
+  it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    const select = preset()
+    await user.selectOptions(select, 'Two')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
+  })
+
+  it('does not bring back a loaded preset after another pick and a remount (#1768 review)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host?.inputs.set({ params: { name: 'One' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('One'), { timeout: 5000 })
+    const one = await host!.presets.save('One')
+    host?.inputs.set({ params: { name: 'Two' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two'), { timeout: 5000 })
+    await host!.presets.save('Two')
+    await host!.presets.load(one.id)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Two')
+
+    // The template UI fails: the picker moves into the generated form's toolbar.
+    host!.openPrint('not-on-screen')
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
+    expect(preset()).not.toHaveDisplayValue('One')
+    expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
+  })
+
+  it('takes the UI state a template UI seeds after a pick as the preset\'s, and an edit since as a change (#1775)', async () => {
+    let host: Host | undefined
+    // Seeds its tab whenever the inputs lack one, from a task of its own, as an effect would.
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const tab = document.createElement('button')
+        tab.textContent = 'Colour tab'
+        root.append(tab)
+        const seed = (inputs: Record<string, unknown>) => {
+          if (inputs['tab'] === undefined) setTimeout(() => given.inputs.set({ tab: 'shape' }), 0)
+        }
+        seed(given.inputs.get())
+        given.inputs.subscribe(seed)
+      },
+    }))
+    // Saved before the UI kept any state: picking it puts no tab on screen.
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'd'.repeat(32), name: 'Plain', origin: 'mine', params: { name: 'Plain' }, inputs: { params: { name: 'Plain' } }, description: '', tags: [] },
+    ])
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText('Changed from Plain')).not.toBeInTheDocument()
+
+    // The user changes the tab: that is a change to the preset.
+    const tab = shadow().querySelector('button')!
+    await user.click(tab)
+    host?.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain')).toBeInTheDocument()
+  })
+
+  /** A UI that seeds its tab after a pick, as in the #1775 test; the host it was given. */
+  async function pickPlainWithSeededTab() {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const tab = document.createElement('button')
+        tab.textContent = 'Colour tab'
+        root.append(tab)
+        const seed = (inputs: Record<string, unknown>) => {
+          if (inputs['tab'] === undefined) setTimeout(() => given.inputs.set({ tab: 'shape' }), 0)
+        }
+        seed(given.inputs.get())
+        given.inputs.subscribe(seed)
+      },
+    }))
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'd'.repeat(32), name: 'Plain', origin: 'mine', params: { name: 'Plain' }, inputs: { params: { name: 'Plain' } }, description: '', tags: [] },
+    ])
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText('Changed from Plain')).not.toBeInTheDocument()
+    return host!
+  }
+
+  it("takes a UI-state write that lands well after a pick as a change, not the preset's (#2132)", async () => {
+    const host = await pickPlainWithSeededTab()
+    // A timer or a fetch in the template UI, long after it answered the pick; no input.
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    host.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain')).toBeInTheDocument()
+  })
+
+  it('takes a UI-state change made with the wheel as a change to the preset (#2132)', async () => {
+    const host = await pickPlainWithSeededTab()
+    shadow()
+      .querySelector('button')!
+      .dispatchEvent(new WheelEvent('wheel', { bubbles: true, composed: true, deltaY: 100 }))
+    host.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain', {}, { timeout: 500 })).toBeInTheDocument()
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({
@@ -209,6 +425,153 @@ describe('CustomizePage with a template UI', () => {
     expect(renders).toBe(1)
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
+
+  it('drops "Saved …" once a UI-state-only change leaves the output behind (#848)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 5000 })
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    host!.inputs.set({ ...host!.inputs.get(), demo: { touched: true } })
+    await waitFor(() => expect(screen.queryByText(/^Saved /)).toBeNull())
+    expect(screen.getByTestId('generate')).toBeEnabled()
+  }, 20_000)
+
+  it('keeps "Saved …" after a write of the same UI state with its keys reordered (#1471)', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    host!.inputs.set({ demo: { a: 1, b: [1, 2] } })
+    await waitFor(() => expect(host!.inputs.get()['demo']).toEqual({ a: 1, b: [1, 2] }))
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 5000 })
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    // A replacement, not a merge: `null` clears the key, then the reordered object lands.
+    host!.inputs.set({ demo: null })
+    host!.inputs.set({ demo: { b: [1, 2], a: 1 } })
+    await act(async () => {})
+    expect(Object.keys(host!.inputs.get()['demo'] as object)).toEqual(['b', 'a'])
+    expect(host!.inputs.get()['demo']).toEqual({ a: 1, b: [1, 2] })
+    expect(screen.getByText(/^Saved /)).toBeInTheDocument()
+  }, 20_000)
+
+  it('host.generate() still resolves when a UI-state write lands while the output saves (#848)', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let posted = false
+    server.use(
+      http.post('/api/v1/models/:slug/outputs', async () => {
+        posted = true
+        await held
+        return undefined // on to the default handler
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const run = host!.generate()
+    await waitFor(() => expect(posted).toBe(true), { timeout: 5000 })
+    host!.inputs.set({ ...host!.inputs.get(), demo: { generating: true } })
+    release()
+    // Saved, but already left behind: said so, so a template does not take it as current (#1471).
+    await expect(run).resolves.toMatchObject({ outputId: expect.any(String), superseded: true })
+    expect(screen.queryByText(/^Saved /)).toBeNull()
+  }, 20_000)
+
+  // #2464 — after a submit that failed (a 503 mid-deploy) the previous job is still on
+  // show; host.generate() waited only for "settled", so it saved that job for new values.
+  it('host.generate() waits for the render of the current values, not a stale one after a failed submit', async () => {
+    let down = false
+    let refused = 0
+    const saved: string[] = []
+    server.use(
+      http.post('/api/v1/models/:slug/render', () => {
+        if (!down) return undefined
+        refused += 1
+        return new HttpResponse('upstream connect error', { status: 503 })
+      }),
+      http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { inputs?: { params?: Record<string, unknown> } }
+        saved.push(String(body.inputs?.params?.['name']))
+        return undefined
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    await host!.generate()
+    expect(saved).toHaveLength(1)
+
+    down = true
+    const params = host!.inputs.get()['params'] as Record<string, unknown>
+    host!.inputs.set({ ...host!.inputs.get(), params: { ...params, name: 'Zed' } })
+    await screen.findByText(/not answering right now/, {}, { timeout: 5000 })
+    const tried = refused
+    const run = host!.generate()
+    // #3342: wait for the page's own retry of "Zed", refused too. A stale save would go
+    // out at once, long before that retry, so by then it would have landed.
+    await waitFor(() => expect(refused).toBeGreaterThan(tried), { timeout: 15_000 })
+    // Nothing saved for the stale job while the render of "Zed" has not happened.
+    expect(saved).toHaveLength(1)
+
+    down = false
+    await run
+    expect(saved).toEqual([saved[0], 'Zed'])
+  }, 30_000)
+
+  // A template UI may show no field called "Text size": the bar says what is wrong instead.
+  it("says why Generate is off in the value's own words, not as a field to fix", async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const params = host!.inputs.get()['params'] as Record<string, unknown>
+    host!.inputs.set({ ...host!.inputs.get(), params: { ...params, text_size: 500 } })
+    const blocked = await screen.findByTestId('generate-blocked', {}, { timeout: 5000 })
+    expect(blocked).toHaveTextContent(/^Text size /)
+    expect(blocked).not.toHaveTextContent(/^Fix /)
+  }, 20_000)
+
+  it('host.generate() does not call a current output superseded', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const result = await host!.generate()
+    expect(result).toEqual({ jobId: expect.any(String), outputId: expect.any(String) })
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+  }, 20_000)
 
   it('a colour bound outside params starts no render and leaves the extruder numbers to params', async () => {
     let host: Host | undefined
@@ -386,6 +749,85 @@ describe('the page slot', () => {
     Reflect.deleteProperty(document, 'fullscreenEnabled')
   })
 
+  it('shows a reopened output\'s inputs read-only when they cannot be migrated (#917)', async () => {
+    const outputId = 'c'.repeat(32)
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    server.use(
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: UI_DEMO_SLUG,
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?from=${outputId}`, path: '/m/:slug' })
+    expect(
+      await screen.findByText(/could not be brought up to this template version: defines no migrate/, undefined, {
+        timeout: 5000,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    expect(within(screen.getByTestId('workspace')).getByRole('alert')).toHaveTextContent('defines no migrate')
+    // The template's page still mounts, on the current (default) values.
+    await waitFor(() => expect(shadowText()).toMatch(/^custom /))
+  })
+
+  it("shows a preset's inputs read-only when they cannot be migrated, until another preset is applied (#1811)", async () => {
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'e'.repeat(32), name: 'Old', origin: 'mine', params: { name: 'Old' }, inputs: { params: { name: 'Old' }, v: 0 }, description: '', tags: [] },
+      { id: 'f'.repeat(32), name: 'Current', origin: 'mine', params: { name: 'Now' }, inputs: { params: { name: 'Now' }, v: 1 }, description: '', tags: [] },
+    ])
+    server.use(
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = open(UI_DEMO_SLUG)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Old' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Old')
+
+    const workspace = screen.getByTestId('workspace')
+    const saved = await within(workspace).findByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
+    // The textarea's own alert, not whichever alert the row holds (a render error may be another).
+    const alert = saved.closest<HTMLElement>('[role="alert"]')
+    expect(alert).toHaveTextContent('could not be brought up to this template version: defines no migrate')
+    expect(saved).toHaveAttribute('readonly')
+    // Its value, what the user sees; textContent is only the initial value React mirrored.
+    expect(saved.value).toContain('"name": "Old"')
+    // Short, so the textarea scrolls rather than the capped row around it too.
+    expect(saved).toHaveAttribute('rows', '4')
+    // #3074: the cap is on the alert, and only its error text scrolls; no scroll
+    // container around the textarea, and no overflow-hidden to clip a long error.
+    expect(alert).toHaveClass('max-h-[30vh]')
+    expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
+    // And the textarea shrinks to fit too, scrolling inside itself, rather than spilling
+    // out of the 30vh box over the template where 30vh is under its 4 rows.
+    expect(saved).toHaveClass('min-h-0')
+    expect(saved).not.toHaveClass('shrink-0')
+    for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
+      expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
+    }
+
+    await user.selectOptions(preset(), 'Current')
+    await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+  })
+
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {
     Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false })
     setUiModuleLoader(async () => ({
@@ -419,26 +861,38 @@ describe('the page slot', () => {
       release = resolve
     })
     let schemaServed = false
+    let recordAsked = false
     server.use(
       http.get('/api/v1/models/:slug/schema', () => {
         schemaServed = true
         return HttpResponse.json(keychainSchema)
       }),
       http.get('/api/v1/models/:slug', async () => {
+        recordAsked = true
         await held
         return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
       }),
     )
+    // The count the viewer had at the moment its node landed: what any check that
+    // waits for the node (as the `waitFor` below does) can see (#1311).
+    let countedAtInsert: number | undefined
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
         root.innerHTML = '<sb-preview></sb-preview>'
+        new MutationObserver(() => {
+          if (countedAtInsert === undefined && root.querySelector('[data-testid="preview"]')) {
+            countedAtInsert = previews.mounts
+          }
+        }).observe(root, { childList: true, subtree: true })
       },
     }))
     // The viewer is lazy: load it first, so "no preview yet" is the page's choice.
     await import('../components/Preview')
     previews.mounts = 0
     open(UI_DEMO_SLUG)
-    await waitFor(() => expect(schemaServed).toBe(true))
+    // #3342: both asked, so the wait below starts once the page has all it gets before
+    // the record lands, not while the schema is still on its way.
+    await waitFor(() => expect(schemaServed && recordAsked).toBe(true))
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(screen.queryByText('Loading the viewer')).toBeNull()
     expect(screen.queryByTestId('preview')).toBeNull()
@@ -446,6 +900,7 @@ describe('the page slot', () => {
     release()
     await waitFor(() => expect(shadow().querySelector('[data-testid="preview"]')).not.toBeNull(), { timeout: 5000 })
     expect(previews.mounts).toBe(1)
+    expect(countedAtInsert).toBe(1)
   })
 
   it("reports the template Generate's error, and takes one click at a time", async () => {

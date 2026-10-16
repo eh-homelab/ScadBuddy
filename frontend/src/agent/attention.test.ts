@@ -1,61 +1,278 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { setPendingApprovals } from '../mocks/features/approvals'
+import { setRunningSessions } from '../mocks/features/assistantSessions'
+import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
-import { ATTENTION_POLL_MS, attentionCount, attentionLabel, fetchPendingApprovals, useAttention, useAttentionTitle } from './attention'
+import {
+  APPROVALS_LIST_MAX,
+  ATTENTION_POLL_MS,
+  attentionCount,
+  attentionDetail,
+  attentionLabel,
+  fetchPendingInput,
+  fetchRunning,
+  RUNNING_PATH,
+  summaryLabel,
+  totalOf,
+  useAttention,
+  useAttentionTitle,
+} from './attention'
 
 afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('fetchPendingApprovals', () => {
-  it('counts the pending approvals the agent lists', async () => {
+describe('fetchPendingInput', () => {
+  it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingApprovals()).toBe(2)
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
+    setPendingAnswers(1, 3)
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false })
+  })
+
+  it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
+    setPendingAnswers(1, 1, 2)
+    const counts = await fetchPendingInput()
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false })
+    expect(totalOf(counts!)).toBe(2)
+    expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
+    expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
+    expect(summaryLabel(counts)).toBe('2 summaries')
+    setPendingAnswers(0, 0, 1)
+    const only = await fetchPendingInput()
+    expect(totalOf(only!)).toBe(0)
+    expect(attentionLabel(totalOf(only!))).toBe('')
+    expect(summaryLabel(only)).toBe('1 summary')
+  })
+
+  it('says when the agent listed only some of the done summaries, and not otherwise', async () => {
+    const done = { kind: 'answer', attention: { reason: 'done', on_timeout: null, summary: 'x' } }
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: true })))
+    const cut = await fetchPendingInput()
+    expect(cut).toEqual({ approvals: 0, questions: 0, attention: 0, summaries: 2, summariesTruncated: true })
+    expect(summaryLabel(cut)).toBe('2+ summaries')
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [done, done], summaries_truncated: false })))
+    expect(summaryLabel(await fetchPendingInput())).toBe('2 summaries')
+    // An older agent does not say: a full page still reads as possibly cut.
+    const page = Array.from({ length: APPROVALS_LIST_MAX }, () => done)
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: page })))
+    expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX}+ summaries`)
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: page, summaries_truncated: false })))
+    expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX} summaries`)
+  })
+
+  it('does not count a durable entry past its timer: it waits on its worker, not on the user (spec §6.6)', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'approval' }, { kind: 'approval', expiring: true }, { kind: 'answer', expiring: true }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
+  })
+
+  it("counts a flow run's call once it is the user's, not while it waits for the starting session (#2482)", async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({
+          entries: [
+            { kind: 'approval', run: { id: 'r1', hop: 'parent', reason: 'print limit reached' } },
+            { kind: 'approval', run: { id: 'r1', hop: 'person', reason: 'print limit reached' } },
+            { kind: 'approval', run: { id: 'r2', hop: null, reason: null } },
+          ],
+        }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({
+      approvals: 2,
+      questions: 0,
+      attention: 0,
+      summaries: 0,
+      runs: [
+        { id: 'r1', name: 'r1', waiting: 1 },
+        { id: 'r2', name: 'r2', waiting: 1 },
+      ],
+    })
+  })
+
+  it('lists the browser-started runs waiting for you from the same read, not one a session started (#2482)', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({
+          entries: [
+            { kind: 'approval', run: { id: 'r1', name: 'swap', hop: null, starter_session: null } },
+            { kind: 'approval', run: { id: 'r1', name: 'swap', hop: 'person', starter_session: null } },
+            // Listed under its session's runs already: the panel would show it twice.
+            { kind: 'approval', run: { id: 'r2', name: 'arrange', hop: 'person', starter_session: 'sess-1' } },
+          ],
+        }),
+      ),
+    )
+    expect((await fetchPendingInput())?.runs).toEqual([{ id: 'r1', name: 'swap', waiting: 2 }])
+  })
+
+  it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'answer', attention: { reason: 'done', on_timeout: 'proceed' } }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 1, summaries: 0 })
   })
 
   it('is unknown (null), not zero, when the agent cannot answer', async () => {
-    server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
-    expect(await fetchPendingApprovals()).toBeNull()
-    server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.text('<html></html>')))
-    expect(await fetchPendingApprovals()).toBeNull()
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
+    expect(await fetchPendingInput()).toBeNull()
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.text('<html></html>')))
+    expect(await fetchPendingInput()).toBeNull()
+    // An older agent, which has no such route, answers with something else.
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ approvals: [] })))
+    expect(await fetchPendingInput()).toBeNull()
+  })
+
+  it('is unknown (null) when an entry is not one the agent lists (#1200)', async () => {
+    for (const entry of [{ kind: 'answer', attention: null }, { kind: 'grant' }, { kind: 'answer', attention: { reason: 1 } }, 'approval']) {
+      server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: [{ kind: 'approval' }, entry] })))
+      expect(await fetchPendingInput(), JSON.stringify(entry)).toBeNull()
+    }
   })
 
   it('gives up on an agent that accepts and never answers', async () => {
-    server.use(http.get('/api/v1/ai/approvals', () => new Promise<never>(() => {})))
-    expect(await fetchPendingApprovals(20)).toBeNull()
+    server.use(http.get('/api/v1/ai/pending-input', () => new Promise<never>(() => {})))
+    expect(await fetchPendingInput(20)).toBeNull()
   })
 
   it('settles by its deadline even if fetch ignores the abort signal', async () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>(() => {}))
     try {
-      expect(await fetchPendingApprovals(20)).toBeNull()
+      expect(await fetchPendingInput(20)).toBeNull()
     } finally {
       spy.mockRestore()
     }
   })
+})
 
-  it('asks only for pending ones', async () => {
-    let url = ''
-    server.use(
-      http.get('/api/v1/ai/approvals', ({ request }) => {
-        url = request.url
-        return HttpResponse.json({ approvals: [] })
-      }),
-    )
-    await fetchPendingApprovals()
-    expect(new URL(url).searchParams.get('pending')).toBe('true')
+describe('fetchRunning (#1125)', () => {
+  it("says whether any of the user's sessions has a turn under way", async () => {
+    expect(await fetchRunning()).toBe(false)
+    setRunningSessions(2)
+    expect(await fetchRunning()).toBe(true)
+  })
+
+  it('asks for one running session, which is enough to say yes', () => {
+    const query = new URL(RUNNING_PATH, 'http://x').searchParams
+    expect(query.get('status')).toBe('running')
+    expect(query.get('limit')).toBe('1')
+  })
+
+  it('is unknown (null), not idle, when the agent cannot answer', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.text('<html></html>')))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ running: true })))
+    expect(await fetchRunning()).toBeNull()
+  })
+
+  it('gives up on an agent that accepts and never answers', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => new Promise<never>(() => {})))
+    expect(await fetchRunning(20)).toBeNull()
   })
 })
 
 describe('useAttention', () => {
+  it('says when a session is running, and keeps that through a failed read (#1125)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.running).toBe(false))
+
+    setRunningSessions(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    await waitFor(() => expect(result.current.running).toBe(true))
+
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    expect(result.current.running).toBe(true)
+  })
+
+  it('reads whether anything is running only while the assistant is on (#1125)', async () => {
+    const seen = vi.fn()
+    server.use(
+      http.get('/api/v1/ai/sessions', () => {
+        seen()
+        return HttpResponse.json({ sessions: [] })
+      }),
+    )
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: false } })
+    await act(async () => {})
+    expect(result.current.running).toBeNull()
+    expect(seen).not.toHaveBeenCalled()
+    rerender({ on: true })
+    await waitFor(() => expect(result.current.running).toBe(false))
+    rerender({ on: false })
+    expect(result.current.running).toBeNull()
+  })
+
+  it('shows the waiting count without waiting for a slow sessions list (#2192)', async () => {
+    let answer: (() => void) | undefined
+    setPendingApprovals(2)
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.waiting).toBe(2))
+    expect(result.current.running).toBeNull()
+    act(() => answer?.())
+    await waitFor(() => expect(result.current.running).toBe(true))
+  })
+
+  it('does not bring "working" back from a read that answers after the assistant is off (#2192)', async () => {
+    let answer: (() => void) | undefined
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    // The late read's body, read: from there to its end is microtasks only, so one
+    // macrotask after it has settled the read, and the guard has run (#2214).
+    const reads: Promise<unknown>[] = []
+    const json = Response.prototype.json
+    const spy = vi.spyOn(Response.prototype, 'json').mockImplementation(function (this: Response) {
+      const read = json.call(this)
+      if (this.url.includes('/api/v1/ai/sessions')) reads.push(read)
+      return read
+    })
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
+    await waitFor(() => expect(answer).toBeDefined())
+    rerender({ on: false })
+    act(() => answer?.())
+    await waitFor(() => expect(reads).toHaveLength(1))
+    await act(async () => {
+      await reads[0]
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    spy.mockRestore()
+    expect(result.current.running).toBeNull()
+  })
+
   it('reads nothing while the assistant is off', async () => {
     const seen = vi.fn()
     server.use(
-      http.get('/api/v1/ai/approvals', () => {
+      http.get('/api/v1/ai/pending-input', () => {
         seen()
-        return HttpResponse.json({ approvals: [] })
+        return HttpResponse.json({ entries: [] })
       }),
     )
     const { result } = renderHook(() => useAttention(false))
@@ -76,7 +293,7 @@ describe('useAttention', () => {
     })
     await waitFor(() => expect(result.current.waiting).toBe(3))
 
-    server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
     await act(async () => {
       await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
     })
@@ -84,7 +301,7 @@ describe('useAttention', () => {
   })
 
   it('is unknown (null), not zero, until a read succeeds', async () => {
-    server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
     const { result } = renderHook(() => useAttention(true))
     expect(result.current.waiting).toBeNull()
     await act(async () => {
@@ -100,12 +317,12 @@ describe('useAttention', () => {
     let calls = 0
     let answer: (() => void) | undefined
     server.use(
-      http.get('/api/v1/ai/approvals', async () => {
+      http.get('/api/v1/ai/pending-input', async () => {
         calls += 1
         await new Promise<void>((resolve) => {
           answer = resolve
         })
-        return HttpResponse.json({ approvals: [{}] })
+        return HttpResponse.json({ entries: [{ kind: 'approval' }] })
       }),
     )
     const { result } = renderHook(() => useAttention(true))
@@ -127,10 +344,10 @@ describe('useAttention', () => {
   it('reads at once after a quick off and on, though the read from before is still open', async () => {
     let calls = 0
     server.use(
-      http.get('/api/v1/ai/approvals', async () => {
+      http.get('/api/v1/ai/pending-input', async () => {
         calls += 1
         if (calls === 1) await new Promise<never>(() => {})
-        return HttpResponse.json({ approvals: [{}, {}] })
+        return HttpResponse.json({ entries: [{ kind: 'approval' }, { kind: 'answer' }] })
       }),
     )
     const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
@@ -159,37 +376,41 @@ describe('useAttention', () => {
 })
 
 describe('labels', () => {
-  it('names the count for the button', () => {
+  it('names the count for the button: things waiting for you, of any kind', () => {
     expect(attentionLabel(null)).toBe('')
     expect(attentionLabel(0)).toBe('')
-    expect(attentionLabel(1)).toBe('1 action waiting for your approval')
-    expect(attentionLabel(4)).toBe('4 actions waiting for your approval')
-    // The agent lists at most 500: a full page means at least that many.
+    expect(attentionLabel(1)).toBe('1 waiting for you')
+    expect(attentionLabel(4)).toBe('4 waiting for you')
+    // The agent lists at most 500 of a kind: a full page means at least that many.
     expect(attentionCount(499)).toBe('499')
     expect(attentionCount(500)).toBe('500+')
-    expect(attentionLabel(500)).toBe('500+ actions waiting for your approval')
+    expect(attentionLabel(500)).toBe('500+ waiting for you')
+  })
+
+  it('lists the counts by kind for the title, leaving out the kinds with none', () => {
+    expect(attentionDetail(null)).toBe('')
+    expect(attentionDetail({ approvals: 2, questions: 1, attention: 0, summaries: 0 })).toBe('2 approvals, 1 question')
+    expect(attentionDetail({ approvals: 0, questions: 0, attention: 1, summaries: 0 })).toBe('1 attention request')
+    expect(attentionDetail({ approvals: 1, questions: 2, attention: 3, summaries: 0 })).toBe('1 approval, 2 questions, 3 attention requests')
   })
 })
 
 describe('useAttentionTitle', () => {
-  it('prefixes the count and restores the title it found, even one that looks prefixed', () => {
-    document.title = '(3) copies'
-    const { rerender, unmount } = renderHook(({ n }) => useAttentionTitle(n, true), { initialProps: { n: 0 } })
-    expect(document.title).toBe('(3) copies')
-    rerender({ n: 2 })
-    expect(document.title).toBe('(2) (3) copies')
-    rerender({ n: 5 })
-    expect(document.title).toBe('(5) (3) copies')
-    rerender({ n: 0 })
-    expect(document.title).toBe('(3) copies')
-    rerender({ n: 1 })
-    unmount()
-    expect(document.title).toBe('(3) copies')
+  it('puts the count in front of the page title, and follows the page (#2454)', () => {
+    const { rerender } = renderHook(({ n, title }) => useAttentionTitle(n, true, title), {
+      initialProps: { n: 0, title: '(3) copies · ScadBuddy' },
+    })
+    expect(document.title).toBe('(3) copies · ScadBuddy')
+    rerender({ n: 2, title: '(3) copies · ScadBuddy' })
+    expect(document.title).toBe('(2) (3) copies · ScadBuddy')
+    rerender({ n: 2, title: 'Library · ScadBuddy' })
+    expect(document.title).toBe('(2) Library · ScadBuddy')
+    rerender({ n: 0, title: 'Library · ScadBuddy' })
+    expect(document.title).toBe('Library · ScadBuddy')
   })
 
-  it('leaves the title alone when off (embedded in Bambuddy)', () => {
-    document.title = 'ScadBuddy'
-    renderHook(() => useAttentionTitle(4, false))
-    expect(document.title).toBe('ScadBuddy')
+  it('never prefixes when off (embedded in Bambuddy)', () => {
+    renderHook(() => useAttentionTitle(4, false, 'Library · ScadBuddy'))
+    expect(document.title).toBe('Library · ScadBuddy')
   })
 })

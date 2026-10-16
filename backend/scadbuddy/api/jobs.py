@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
+from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from temporalio.client import WorkflowUpdateFailedError
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
-    JOB_ID_PATTERN,
+    HEX_ID_PATTERN,
     AssetsDep,
     CatalogueDep,
     ConfigDep,
@@ -20,25 +29,38 @@ from scadbuddy.api.deps import (
     HistoryDep,
     JobIdPath,
     PathsDep,
+    ReadBudgetDep,
     RenderDep,
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.models import require_model, require_model_exists
+from scadbuddy.api.operations import (
+    RETRY_FOLLOWS,
+    TEMPORAL_UNAVAILABLE_PROBLEM,
+    IdempotencyKey,
+    still_accepting,
+)
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
+from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.config import Config
+from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
     RevisionNotFoundError,
 )
 from scadbuddy.render.diagnostics import Diagnostic
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
+    BomEntry,
     Job,
     JobNotFoundError,
     JobState,
@@ -46,15 +68,20 @@ from scadbuddy.render.job_models import (
     PlateInfo,
     QueueFullError,
 )
-from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
     BREAKDOWN_TILE_SIZE,
+    MAX_AZIMUTH,
     MAX_BREAKDOWN_TILE_SIZE,
+    MAX_ELEVATION,
     MAX_VIEW_SIZE,
+    MAX_ZOOM,
     MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
+    Camera,
     ColourBreakdown,
     ViewName,
     render_colour_breakdown,
@@ -62,8 +89,25 @@ from scadbuddy.render.thumbnail import (
 )
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+)
+from scadbuddy.workflows.models import MigrateResult
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["jobs"])
+
+#: A render whose `accepted` Update failed, or whose start Temporal refused, for a
+#: reason a re-send would not change.
+RENDER_UNSTARTABLE_PROBLEM = "https://scadbuddy.dev/problems/render-unstartable"
+#: The `code` of a render's 409 when its revision has no snapshot to render from. The
+#: backfill route answers this one 409 as its own 422 by this code (#1849).
+SNAPSHOT_UNAVAILABLE = "snapshot_unavailable"
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
 PNG_MEDIA_TYPE = "image/png"
@@ -78,6 +122,67 @@ ViewSize = Annotated[
 ]
 
 
+def _target(axis: str) -> Any:
+    return Query(
+        allow_inf_nan=False,
+        description=(
+            f"{axis.upper()} of the point the view centres on, in model mm; the bounding "
+            "box's centre when left out"
+        ),
+    )
+
+
+def view_camera(
+    azimuth: Annotated[
+        float | None,
+        Query(
+            ge=-MAX_AZIMUTH,
+            le=MAX_AZIMUTH,
+            description=(
+                "Degrees around +Z (OpenSCAD's Z-up mm) from the front view: 0 stands at -Y "
+                "looking +Y (`front`), 90 at +X (`right`), 180 at +Y (`back`), -90 or 270 "
+                "at -X (`left`). Counter-clockwise seen from above. Left out, the named "
+                "view's (`iso` is about 28)"
+            ),
+        ),
+    ] = None,
+    elevation: Annotated[
+        float | None,
+        Query(
+            ge=-MAX_ELEVATION,
+            le=MAX_ELEVATION,
+            description=(
+                "Degrees above the XY plane: 90 looks straight down (`top`), -90 straight "
+                "up (`bottom`). Left out, the named view's (`iso` is about 49)"
+            ),
+        ),
+    ] = None,
+    zoom: Annotated[
+        float,
+        Query(
+            ge=1,
+            le=MAX_ZOOM,
+            description=(
+                "Magnification of the fitted frame: 1 holds the whole model around the "
+                "target, 2 half its width. The view is orthographic, so this is the distance"
+            ),
+        ),
+    ] = 1.0,
+    target_x: Annotated[float | None, _target("x")] = None,
+    target_y: Annotated[float | None, _target("y")] = None,
+    target_z: Annotated[float | None, _target("z")] = None,
+) -> Camera | None:
+    """The camera the view routes take besides their named view (#830): the named
+    view's own when nothing is given, so an existing caller draws what it did."""
+    target = (target_x, target_y, target_z)
+    if azimuth is None and elevation is None and zoom == 1.0 and target == (None, None, None):
+        return None
+    return Camera(azimuth=azimuth, elevation=elevation, zoom=zoom, target=target)
+
+
+ViewCamera = Annotated[Camera | None, Depends(view_camera)]
+
+
 class RenderRequest(BaseModel):
     #: Template inputs (spec 2026-09-27 §4.3). Their `params` are what is rendered.
     inputs: dict[str, Any] | None = None
@@ -88,8 +193,13 @@ class RenderRequest(BaseModel):
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
     # The job this render replaces -- the preview's previous submit. Dropped unrendered
     # if no worker has taken it yet, so a slider drag does not queue every stop on
-    # the way. Harmless when it has already started or finished.
-    supersedes: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
+    # the way. Harmless when it has already started or finished. Needs an
+    # `Idempotency-Key`: a re-send without one would release the job again (#1053).
+    supersedes: str | None = Field(
+        default=None,
+        pattern=HEX_ID_PATTERN,
+        description="The job this render replaces; needs an `Idempotency-Key` header (422 without)",
+    )
 
 
 class RenderAccepted(BaseModel):
@@ -98,6 +208,16 @@ class RenderAccepted(BaseModel):
     #: The caller's own inputs, normalised. A submit that joined a waiting job (the
     #: same `params`) shares that job, whose status keeps its creator's inputs.
     inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobOutputSummary(BaseModel):
+    """One `ctx.output` of a pipeline job (spec 2026-09-27 §5.2): what Generate saves by
+    its ``index``."""
+
+    index: int
+    name: str | None
+    bom: list[BomEntry] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
 
 
 class JobStatus(BaseModel):
@@ -115,6 +235,9 @@ class JobStatus(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: Where a pending job waits for a render worker (#1638): 1 is next. None once it
+    #: has started or settled, and on every response but `GET /jobs/{id}`.
+    queue_position: int | None = None
     error: str | None = None
     log_tail: list[str] = Field(default_factory=list)
     preview_url: str | None = None
@@ -134,6 +257,11 @@ class JobStatus(BaseModel):
     #: A factory default, as the lists have, so the generated client reads it as
     #: optional: an older mock or cached response without it still type-checks.
     diagnostics_dropped: int = Field(default_factory=int)
+    #: A pipeline job's outputs, in order; empty for a job that wrote none.
+    outputs: list[JobOutputSummary] = Field(default_factory=list)
+    #: The Temporal workflow running the job, for a link to it in the Temporal UI
+    #: (#1293); None on a row written before renders ran as workflows.
+    workflow_id: str | None = None
 
 
 class ModelDiagnostics(BaseModel):
@@ -174,7 +302,25 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         plates=result.plates if result else None,
         diagnostics=job.diagnostics,
         diagnostics_dropped=job.diagnostics_dropped,
+        outputs=[
+            JobOutputSummary(index=i, name=o.name, bom=o.bom, files=o.files)
+            for i, o in enumerate(job.outputs)
+        ],
+        workflow_id=job.workflow_id,
     )
+
+
+def _declares_pipeline(directory: Path, slug: str) -> bool:
+    """Whether the template's model.json at this revision declares a pipeline (§5.1),
+    read as the catalogue reads it. A malformed declaration counts: the job then reaches
+    the worker, whose `load_pipeline` names what is wrong with it. An unreadable
+    model.json declares none, and the job renders `model.scad`'s parameters."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return False
+    return meta.pipeline is not None or meta.pipeline_raw is not None
 
 
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
@@ -205,12 +351,39 @@ def require_job(render: RenderService, job_id: str) -> Job:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "the Bambuddy blob store has no commit of the template to snapshot for the"
+                " render (`code` `snapshot_unavailable`)"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
-                "limit is set); retry after `Retry-After` seconds"
+                "limit is set); or Temporal, where renders run, is unreachable or could not "
+                "take the start now (`temporal-unavailable`; `may_have_started` is false "
+                "only when nothing reached Temporal, and true means send the same request "
+                "again with the same `Idempotency-Key` to follow a start it may hold); or "
+                "the render is "
+                "still being accepted (`command-still-accepting`: send the same request "
+                "again, with the same `Idempotency-Key`, to follow it as one request; "
+                "without a key, each send is one more claim on the job); or, on the "
+                "Bambuddy blob store, the revision's first snapshot is still uploading "
+                "(problem `code` `snapshot_pending`). Retry after `Retry-After` seconds"
             )
-        }
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": (
+                "The render's execution, or Temporal, refused it (`render-unstartable`: "
+                "a configuration error, see the logs). With `may_have_started` true "
+                "(Temporal refused, after a start it may have persisted), send the same "
+                "request again with the same `Idempotency-Key` to follow it; false, the "
+                "render's first step failed and no job exists"
+            )
+        },
+        status.HTTP_507_INSUFFICIENT_STORAGE: {
+            "description": "the blob store has no room for the template's source snapshot"
+        },
     },
 )
 async def render_model(
@@ -225,7 +398,16 @@ async def render_model(
     assets: AssetsDep,
     fetcher: FetcherDep,
     fonts: FontsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted:
+    if body.supersedes is not None and idempotency_key is None:
+        # A re-send without a key would release the job once more, and with it another
+        # request's claim (review #1066 2.1).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a render that supersedes another needs an Idempotency-Key header",
+        )
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
@@ -242,9 +424,13 @@ async def render_model(
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     params, inputs = normalized.params, normalized.data
-    require_valid_params(schema, params)
-    # A family that is not installed is a 422 here, not a render in the default font.
-    await require_installed_fonts(schema, params, fonts)
+    # A pipeline passes params to the pieces it renders, each of which checks its own
+    # (§5.2); only the built-in pipeline renders `model.scad` with them.
+    pipeline = await asyncio.to_thread(_declares_pipeline, source.scad.parent, slug)
+    if not pipeline:
+        require_valid_params(schema, params)
+        # A family that is not installed is a 422 here, not a render in the default font.
+        await require_installed_fonts(schema, params, fonts)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
@@ -255,20 +441,53 @@ async def render_model(
 
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
-    try:
+    with submit_problems():
         job = await render.submit(
             slug,
             params,
             inputs=inputs,
             model_version=source.version,
             supersedes=body.supersedes,
+            whole_inputs=pipeline,
+            request_id=idempotency_key,
         )
+    await attribute_request(activity.index, f"render:{job.id}")
+    return RenderAccepted(
+        job_id=job.id,
+        status_url=request.url_for("get_job", job_id=job.id).path,
+        inputs=inputs,
+    )
+
+
+@contextmanager
+def submit_problems() -> Iterator[None]:
+    """What a route answers when `RenderService` does not accept its job: a full queue,
+    a start still accepting, Temporal out of reach, or the store or a snapshot
+    unready. The render route and Arrange share it."""
+    try:
+        yield
     except QueueFullError as error:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             str(error),
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
+        ) from None
+    except (CommandStillAcceptingError, CommandClosedError):
+        # The render's first activity has not answered yet, or its execution ended before
+        # it did (review #1061); the same request joins it or starts it again.
+        raise still_accepting() from None
+    except (TemporalUnavailableError, TemporalRefusedError) as error:
+        raise _temporal_problem(error) from None
+    except WorkflowUpdateFailedError as error:
+        # The worker's failure text is for the log, not the client (review #1066 5.1).
+        logger.error("the render could not be started: %s", error.cause, exc_info=True)
+        # The run answered (`RENDER_UNSTARTABLE`, review #1066 (10) 1): no job exists.
+        raise ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "the render could not be started",
+            type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=False,
         ) from None
     except StoreFullError as error:
         # `submit` pins the template's snapshot in the blob store before the job exists.
@@ -278,18 +497,100 @@ async def render_model(
         ) from None
     except SnapshotUnavailableError as error:
         # The bambuddy store renders from a snapshot of a commit, and there is none.
-        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-    return RenderAccepted(
-        job_id=job.id,
-        status_url=request.url_for("get_job", job_id=job.id).path,
-        inputs=inputs,
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), code=SNAPSHOT_UNAVAILABLE) from None
+    except SnapshotPendingError as error:
+        # The revision's first snapshot is still uploading (#686); it carries on.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+            code="snapshot_pending",
+        ) from None
+
+
+def _temporal_problem(
+    error: TemporalUnavailableError | TemporalRefusedError,
+) -> ApiError:
+    """What the route answers when Temporal did not take the render's start, as the
+    print route does: only a failed connect wrote nothing; any other may follow a start
+    Temporal persisted, which the same request sent again follows (review #1066 (8) 2).
+    ``may_have_started`` says which, as #1316's routes do: the browser re-sends the same
+    `Idempotency-Key` when it is true, so a detail tells a client to send again only
+    then (review #1066 (10) 3, 4)."""
+    if isinstance(error, TemporalRefusedError):
+        # A wrong namespace or a denied permission: configuration. Temporal's message
+        # stays in the log. The refusal may still follow a start it persisted.
+        logger.error("Temporal refused to start a render", exc_info=error)
+        return ApiError(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "ScadBuddy could not start this render; its server log says why." + RETRY_FOLLOWS,
+            type_=RENDER_UNSTARTABLE_PROBLEM,
+            may_have_started=True,
+        )
+    logger.warning("could not start a render on Temporal", exc_info=error)
+    started = not isinstance(error.__cause__, RuntimeError)
+    if not started:
+        # The lazy client's first connect failed (`start_command`): nothing was sent.
+        detail = (
+            "ScadBuddy's background service is not answering. Nothing was queued; try"
+            " again shortly."
+        )
+    elif isinstance(error, TemporalBusyError):
+        # Temporal answered, but could not take the start now (`temporal_failure`).
+        detail = "ScadBuddy's background service is busy right now." + RETRY_FOLLOWS
+    else:
+        detail = "ScadBuddy's background service did not answer." + RETRY_FOLLOWS
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail,
+        type_=TEMPORAL_UNAVAILABLE_PROBLEM,
+        headers={"Retry-After": "5"},
+        may_have_started=started,
     )
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus, summary="Render job state")
 def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus:
     job = require_job(render, job_id)
-    return _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
+    view = _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
+    view.queue_position = render.store.queue_position(job)
+    return view
+
+
+#: A done job's plate cut, which never changes: the piece its 3MF is in is keyed by
+#: its content.
+PLATE_GLB_CACHE_CONTROL = "private, max-age=86400, immutable"
+#: The most bytes of plate cuts this process keeps (#2913): the plate picker invites
+#: switching back and forth, and each cut re-reads and re-cuts the whole 3MF.
+PLATE_GLB_CACHE_BYTES = 64 * 1024 * 1024
+
+
+class _PlateCache:
+    """The most recently cut plates, least recently used out first, up to a byte cap."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._items: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+        self._size = 0
+
+    def get(self, key: tuple[str, int]) -> bytes | None:
+        data = self._items.get(key)
+        if data is not None:
+            self._items.move_to_end(key)
+        return data
+
+    def put(self, key: tuple[str, int], data: bytes) -> None:
+        if len(data) > self.max_bytes or key in self._items:
+            return
+        self._items[key] = data
+        self._size += len(data)
+        while self._size > self.max_bytes:
+            _, dropped = self._items.popitem(last=False)
+            self._size -= len(dropped)
+
+
+_PLATE_GLBS = _PlateCache(PLATE_GLB_CACHE_BYTES)
 
 
 @router.get(
@@ -297,16 +598,51 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     response_class=FileResponse,
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
+    description=(
+        "The render's preview mesh, every plate at once; with `plate`, that one plate of "
+        "its 3MF, where the file places it (#2731: the preview's plate picker, as an "
+        "output's `preview.glb?plate=` is). 404 for a plate the render lacks."
+    ),
 )
 async def get_job_preview(
-    job_id: JobIdPath, render: RenderDep, paths: PathsDep, state: StateDep
-) -> FileResponse:
+    job_id: JobIdPath,
+    render: RenderDep,
+    paths: PathsDep,
+    state: StateDep,
+    budget: ReadBudgetDep,
+    plate: Annotated[int | None, Query(ge=1)] = None,
+) -> Response:
     job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
     await materialize_result(state.store.blobs, job.result)
+    if plate is not None:
+        key = (job.result.model_3mf, plate)
+        data = _PLATE_GLBS.get(key)
+        if data is None:
+            model = paths.root / job.result.model_3mf
+            try:
+                payload = await asyncio.to_thread(model.read_bytes)
+            except FileNotFoundError:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"the 3MF of job {job_id!r} is gone"
+                ) from None
+            try:
+                data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+            except NoSuchPlateError as error:
+                raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+            except UnreadableObjectsError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            except ReadOutOfMemoryError as error:
+                # #2767: refused as an output's plate is (outputs.py), not a 500.
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            _PLATE_GLBS.put(key, data)
+        # A done job's result never changes, so the browser keeps the cut too (#2913).
+        return Response(
+            data, media_type=GLB_MEDIA_TYPE, headers={"Cache-Control": PLATE_GLB_CACHE_CONTROL}
+        )
     preview = paths.root / job.result.preview_glb
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
@@ -342,13 +678,19 @@ async def get_model_diagnostics(
     )
 
 
-def _draw_view(glb: Path, view: ViewName, size: int) -> bytes | None:
+def _draw_view(glb: Path, view: ViewName, size: int, camera: Camera | None) -> bytes | None:
     parts = read_glb(glb)
-    return render_view(parts, view, size) if parts else None
+    return render_view(parts, view, size, camera) if parts else None
 
 
 async def preview_view(
-    glb: Path, view: ViewName, size: int, *, config: Config, owner: str
+    glb: Path,
+    view: ViewName,
+    size: int,
+    *,
+    config: Config,
+    owner: str,
+    camera: Camera | None = None,
 ) -> Response:
     """``glb`` drawn from ``view`` as a PNG, with the plate cover's rasteriser.
 
@@ -359,7 +701,8 @@ async def preview_view(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
     try:
         png = await asyncio.wait_for(
-            asyncio.to_thread(_draw_view, glb, view, size), timeout=config.render_timeout
+            asyncio.to_thread(_draw_view, glb, view, size, camera),
+            timeout=config.render_timeout,
         )
     except TimeoutError:
         raise ApiError(
@@ -375,10 +718,13 @@ async def preview_view(
     "/jobs/{job_id}/views/{view}.png",
     response_class=Response,
     responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
-    summary="Render job preview from a named view",
+    summary="Render job preview from a named view or a camera",
     description=(
         "The job's preview mesh drawn from `view` (iso, front, back, left, right, top, "
-        "bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer."
+        "bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer. "
+        "`azimuth`, `elevation`, `zoom` and `target_*` turn and frame it further: an angle "
+        "left out is the named view's, so `front` with `elevation=30` looks down at 30 "
+        "degrees from the front."
     ),
 )
 async def get_job_view(
@@ -388,6 +734,7 @@ async def get_job_view(
     paths: PathsDep,
     config: ConfigDep,
     state: StateDep,
+    camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
     job = await asyncio.to_thread(require_job, render, job_id)
@@ -397,8 +744,54 @@ async def get_job_view(
         )
     await materialize_result(state.store.blobs, job.result)
     return await preview_view(
-        paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
+        paths.root / job.result.preview_glb,
+        view,
+        size,
+        config=config,
+        owner=f"job {job_id!r}",
+        camera=camera,
     )
+
+
+class MigrateInputsRequest(BaseModel):
+    inputs: dict[str, Any]
+    #: The template revision to migrate for, as the render route takes it; the live
+    #: template by default.
+    version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+
+
+@router.post(
+    "/models/{slug}/inputs/migrate",
+    response_model=MigrateResult,
+    summary="Migrate saved inputs",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {"description": "the inputs are too large to carry"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "the render service is unavailable"},
+        status.HTTP_504_GATEWAY_TIMEOUT: {"description": "the migration ran out of time"},
+    },
+)
+async def migrate_inputs(
+    slug: SlugPath,
+    body: MigrateInputsRequest,
+    render: RenderDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+) -> MigrateResult:
+    """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
+    record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
+    v = body.inputs.get("v", 0)
+    if record.pipeline is None and record.pipeline_raw is None:
+        # No pipeline, so no `migrate` to run, at any revision: the inputs are as they are.
+        current = v if isinstance(v, int) else 0
+        return MigrateResult(inputs=body.inputs, from_version=current, to_version=current)
+    if body.version is None and isinstance(v, int) and v == record.inputs_version:
+        # Already current: no worker.
+        return MigrateResult(inputs=body.inputs, from_version=v, to_version=v)
+    version = await _resolve_version(history, slug, body.version)
+    try:
+        return await render.migrate_inputs(slug, body.inputs, version=version)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
 #: The header naming a breakdown's tiles, row by row.
@@ -409,10 +802,17 @@ COLUMNS_HEADER = "X-ScadBuddy-Colour-Columns"
 
 
 def _draw_breakdown(
-    glb: Path, view: ViewName, size: int, order: list[str], deadline: float
+    glb: Path,
+    view: ViewName,
+    size: int,
+    order: list[str],
+    deadline: float,
+    camera: Camera | None,
 ) -> ColourBreakdown | None:
     parts = read_glb(glb)
-    return render_colour_breakdown(parts, view, size, order, deadline=deadline) if parts else None
+    if not parts:
+        return None
+    return render_colour_breakdown(parts, view, size, order, deadline=deadline, camera=camera)
 
 
 @router.get(
@@ -440,7 +840,7 @@ def _draw_breakdown(
         "light grey, so a vision model can check which colour goes where (#252). "
         f"`{COLOURS_HEADER}` names the tiles, row by row, in the job's `colors` "
         f"(extruder) order, and `{COLUMNS_HEADER}` how many are in a row. At "
-        "most 16 colours (422 above)."
+        "most 16 colours (422 above). The camera parameters are the view route's."
     ),
 )
 async def get_job_colours(
@@ -449,13 +849,14 @@ async def get_job_colours(
     paths: PathsDep,
     config: ConfigDep,
     state: StateDep,
+    camera: ViewCamera,
     view: ViewName = "iso",
     size: Annotated[
         int,
         Query(ge=MIN_VIEW_SIZE, le=MAX_BREAKDOWN_TILE_SIZE, description="Edge of each tile"),
     ] = BREAKDOWN_TILE_SIZE,
 ) -> Response:
-    job = require_job(render, job_id)
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
@@ -469,7 +870,9 @@ async def get_job_colours(
     deadline = time.monotonic() + config.render_timeout
     try:
         drawn = await asyncio.wait_for(
-            asyncio.to_thread(_draw_breakdown, glb, view, size, job.result.colors, deadline),
+            asyncio.to_thread(
+                _draw_breakdown, glb, view, size, job.result.colors, deadline, camera
+            ),
             timeout=config.render_timeout,
         )
     except TimeoutError:

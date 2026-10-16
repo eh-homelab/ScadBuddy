@@ -4,8 +4,10 @@ import { type AppDeps, createApp, type Health } from '../src/app.js'
 import type { Credential } from '../src/credentials.js'
 import type { ConnectionTest } from '../src/harness/testConnection.js'
 import { originPolicy } from '../src/http/origins.js'
+import { LEGACY_CREDENTIALS_DEPRECATED } from '../src/routes/credentials.js'
 import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
+import type { SessionManager } from '../src/sessions/manager.js'
 
 const up = () => Promise.resolve(true)
 const down = () => Promise.resolve(false)
@@ -62,7 +64,16 @@ describe('GET /healthz', () => {
       backend: 'ok',
       secret_key: 'not configured',
       credential: 'unknown',
+      temporal: 'not configured',
     })
+  })
+
+  it("reports the agent-tools worker's state, and stays 200 while it cannot reach Temporal (#1055)", async () => {
+    for (const state of ['connecting', 'ok', 'unavailable'] as const) {
+      const { status, body } = await health(createApp(deps({ temporal: () => state })))
+      expect(status).toBe(200)
+      expect(body.temporal).toBe(state)
+    }
   })
 
   it('stays 200 and says why when the database or backend is down', async () => {
@@ -107,8 +118,36 @@ describe('GET /healthz', () => {
 })
 
 describe('/api/v1/ai/credentials', () => {
+  // #2768: the single-credential routes are deprecated; every answer says so, and the
+  // routes that replace them do not.
+  it('marks every single-credential route deprecated, naming /entries, and only those', async () => {
+    const app = createApp(deps())
+    const legacy = [
+      await app.request('/api/v1/ai/credentials', { headers: UI }),
+      await put(app, { kind: 'anthropic_api_key', secret: SECRET }),
+      await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI }),
+      await app.request('/api/v1/ai/credentials', { method: 'DELETE', headers: UI }),
+    ]
+    for (const res of legacy) {
+      expect(res.headers.get('deprecation'), res.url).toBe(LEGACY_CREDENTIALS_DEPRECATED)
+      expect(res.headers.get('link'), res.url).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+    }
+    const current = await app.request('/api/v1/ai/credentials/entries', { headers: UI })
+    expect(current.status).toBe(200)
+    expect(current.headers.get('deprecation')).toBeNull()
+    expect(current.headers.get('link')).toBeNull()
+  })
+
+  // A guard's refusal is an answer from a deprecated route too.
+  it('marks a legacy route deprecated even when a guard refuses it', async () => {
+    const res = await createApp(deps()).request('/api/v1/ai/credentials')
+    expect(res.status).toBe(403)
+    expect(res.headers.get('deprecation')).toBe(LEGACY_CREDENTIALS_DEPRECATED)
+    expect(res.headers.get('link')).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+  })
+
   it('reads as unconfigured, and says whether saving is possible', async () => {
-    const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials')
+    const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       configured: false,
@@ -130,11 +169,20 @@ describe('/api/v1/ai/credentials', () => {
     expect(text).not.toContain(SECRET)
     expect(JSON.parse(text)).toMatchObject({ configured: true, kind: 'anthropic_api_key', last4: '7e1c', usable: true })
 
-    const read = await app.request('/api/v1/ai/credentials')
+    const read = await app.request('/api/v1/ai/credentials', { headers: UI })
     const readText = await read.text()
     expect(readText).not.toContain(SECRET)
     expect(readText).not.toContain('kekId')
     expect(JSON.parse(readText)).toMatchObject({ configured: true, kind: 'anthropic_api_key', base_url: null })
+  })
+
+  it('saves a Claude Code OAuth token, which takes no base URL', async () => {
+    const app = createApp(deps())
+    const saved = await put(app, { kind: 'claude_oauth_token', secret: SECRET })
+    expect(saved.status).toBe(200)
+    expect(await saved.text()).not.toContain(SECRET)
+    const refused = await put(app, { kind: 'claude_oauth_token', base_url: 'https://llm.example', secret: SECRET })
+    expect(refused.status).toBe(400)
   })
 
   it('saves a gateway and normalises its base URL', async () => {
@@ -193,7 +241,7 @@ describe('/api/v1/ai/credentials', () => {
 
   it('answers 503 with the reason when there is no database', async () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
-    const res = await app.request('/api/v1/ai/credentials')
+    const res = await app.request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({
       detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
@@ -312,11 +360,11 @@ describe('/healthz is bounded (review of #354, finding 3)', () => {
   const never = () => new Promise<boolean>(() => {})
 
   it('reports a hung migration step as unavailable instead of hanging', async () => {
-    const started = Date.now()
+    const started = performance.now()
     const { status, body } = await health(createApp(deps({ database: { ping: up, ready: never }, healthTimeoutMs: 50 })))
     expect(status).toBe(200)
     expect(body).toMatchObject({ ai: 'unavailable (database timed out)', credential: 'unknown' })
-    expect(Date.now() - started).toBeLessThan(1500)
+    expect(performance.now() - started).toBeLessThan(1500)
   })
 
   it('reports a hung credential read as unavailable instead of hanging', async () => {
@@ -335,7 +383,7 @@ describe('health and settings name the key problem, not the key file (finding 9)
     expect(missing.detail).toMatch(/some\/where.*ENOENT/)
     const app = createApp(deps({ kek: missing }))
     const healthText = JSON.stringify((await health(app)).body)
-    const getText = await (await app.request('/api/v1/ai/credentials')).text()
+    const getText = await (await app.request('/api/v1/ai/credentials', { headers: UI })).text()
     for (const text of [healthText, getText]) {
       expect(text).toContain('SCADBUDDY_SECRET_KEY_FILE cannot be read')
       expect(text).not.toContain('some/where')
@@ -352,7 +400,7 @@ describe('a credential in #354 format (finding 2, clean break)', () => {
     credentials.row!.envelope.secretSealed[0] = 0x01
     const app = createApp(deps({ credentials }))
     expect((await health(app)).body.ai).toBe('unavailable (stored credential is in an outdated format; save it again)')
-    expect(await (await app.request('/api/v1/ai/credentials')).json()).toMatchObject({ usable: false })
+    expect(await (await app.request('/api/v1/ai/credentials', { headers: UI })).json()).toMatchObject({ usable: false })
     const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ detail: expect.stringMatching(/older format.*save it again/) })
@@ -534,5 +582,26 @@ describe('/api/v1/ai/approvals (#258; the store is covered in test/approvals.pg.
     expect(bare.status).toBe(403)
     expect(await bare.json()).toEqual({ detail: 'approval decisions must come through the HTTPS ingress' })
     expect((await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST', headers: UI })).status).toBe(503)
+  })
+})
+
+describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention.pg.test.ts)', () => {
+  const sessions = {} as SessionManager // never reached: each answer here comes first
+  const respond = { method: 'POST', headers: { ...UI, 'content-type': 'application/json' }, body: '{"kind":"answer","text":"x"}' }
+
+  it('answers 503 without the database (#1228)', async () => {
+    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
+    expect(read.status).toBe(503)
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
+  })
+
+  it('answers 503 before the migrations have applied (#1228)', async () => {
+    const app = createApp(deps({ database: { ping: up, ready: down }, sessions }))
+    const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
+    expect(read.status).toBe(503)
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/migrations have not applied/) })
+    expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
 })

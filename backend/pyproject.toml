@@ -2,6 +2,8 @@
 name = "scadbuddy"
 version = "0.1.0"
 description = "Self-hosted OpenSCAD customizer for Bambuddy"
+# Moving off 3.12 also means re-checking provenance.RAW_COPY_CHECKED: its test
+# test_the_raw_copy_is_checked_on_this_python fails until it is (#2910).
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
@@ -16,11 +18,25 @@ dependencies = [
     "psycopg>=3.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "temporalio>=1.33.0,<1.34",
     "python-multipart>=0.0.20",
-    "temporalio>=1.33.0,<1.34",
     "trimesh>=4.5",
     "uvicorn[standard]>=0.32",
+    "opentelemetry-sdk>=1.45,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45,<2",
+    "opentelemetry-instrumentation-fastapi>=0.66b0,<0.67",
+    "opentelemetry-instrumentation-psycopg>=0.66b0,<0.67",
+    "temporalio[opentelemetry]>=1.33.0,<1.35",
+    "cryptography>=44,<51",
+    # temporal-agent-harness by a full SHA, as phase 5 pins its SDK (plan
+    # 2026-10-09-durable-phase-6-flows.md Ruling 1): main past 0.6.0, for c0f148f9 (#171),
+    # whose stubs keep a parameter's default (#2636). The code-mode extra is exactly
+    # pydantic-monty 1.0.0. A bump is its own PR carrying the diff between the
+    # SHAs, and must pass tests/flows/test_harness_facts.py and the replay fixtures.
+    "temporal-agent-harness[code-mode] @ git+https://github.com/temporal-community/temporal-agent-harness@a1cd66f4ffa0aead976ccf86d0ff84a50deb5383",
+    "jsonschema>=4.23",
+    # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
+    "referencing>=0.28",
+    "regex>=2024.11.6",
 ]
 
 [build-system]
@@ -29,6 +45,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["scadbuddy"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 dev = [
@@ -40,9 +59,13 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.8",
     "respx>=0.22",
     "ruff>=0.7",
     "types-lxml>=2026.2.16",
+    "pytest-split>=0.11",
+    "types-jsonschema>=4.26.0.20261006",
+    "types-regex>=2026.9.29.20261005",
 ]
 
 [tool.ruff]
@@ -58,6 +81,20 @@ strict = true
 files = ["scadbuddy", "tests"]
 untyped_calls_exclude = ["trimesh"]
 
+# temporal-agent-harness ships no py.typed marker (0.6.0): its names are Any here.
+[[tool.mypy.overrides]]
+module = ["temporal_agent_harness", "temporal_agent_harness.*"]
+ignore_missing_imports = true
+
+# Harness tools and agents are declared with its (untyped) decorators.
+[[tool.mypy.overrides]]
+module = [
+    "tests.flows.harness_probe",
+    "scadbuddy.workflows.flow_tools",
+    "scadbuddy.workflows.project",
+]
+disallow_untyped_decorators = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -66,6 +103,7 @@ markers = [
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
-    "rack_injects_errors: the test injects a non-API error into the rack pick on purpose",
+    "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
+    "requires_fixtures: needs the Git LFS files under test-fixtures/ (git lfs pull), or SCADBUDDY_TEST_FIXTURES naming where they are",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
 ]

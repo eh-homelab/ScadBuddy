@@ -1,3 +1,5 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertPluginAllowed, PluginRefusedError, pluginProblems } from '../src/harness/plugins.js'
@@ -7,6 +9,21 @@ import { assertPluginAllowed, PluginRefusedError, pluginProblems } from '../src/
 const fixture = (name: string) => path.join(import.meta.dirname, 'fixtures', 'plugins', name)
 
 describe('plugin vetting (spec §8.6, "command hooks refused")', () => {
+  it('reads a remote server with a null command as no command, as the forwarder does (#2621)', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'null-command-'))
+    try {
+      mkdirSync(path.join(dir, '.claude-plugin'))
+      writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'null-command' }))
+      writeFileSync(
+        path.join(dir, '.mcp.json'),
+        JSON.stringify({ mcpServers: { m: { type: 'http', url: 'https://mcp.example/mcp', command: null } } }),
+      )
+      expect(pluginProblems(dir)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('allows skills, remote MCP servers and non-command hooks', () => {
     expect(pluginProblems(fixture('clean'))).toEqual([])
     expect(() => assertPluginAllowed(fixture('clean'))).not.toThrow()
@@ -25,6 +42,24 @@ describe('plugin vetting (spec §8.6, "command hooks refused")', () => {
   it('refuses a hook without a type in a file the manifest names, and keeps the inline prompt hook', () => {
     expect(pluginProblems(fixture('inline-command-hook'))).toEqual([
       './config/extra-hooks.json: Stop has a command hook',
+    ])
+  })
+
+  it('refuses an event Claude Code does not know, inline in the manifest or in hooks/hooks.json', () => {
+    // #1809: inline manifest hooks take any key as an event, so `loaders` passed.
+    // Event names are case-sensitive; the known Stop and SessionStart pass.
+    expect(pluginProblems(fixture('unknown-hook-event'))).toEqual([
+      'hooks/hooks.json: "preToolUse" is not a Claude Code hook event',
+      'plugin.json hooks: "loaders" is not a Claude Code hook event',
+    ])
+  })
+
+  it('refuses a hooks module, beside hooks or alone, in hooks/hooks.json or a file the manifest names', () => {
+    // Claude Code 2.1.287 runs a hooks file's `modules` (JavaScript with
+    // $.env, $.process and $.http) by default; its prompt hook alone is fine.
+    expect(pluginProblems(fixture('hooks-module'))).toEqual([
+      'hooks/hooks.json: names a hooks module, which runs JavaScript inside Claude Code',
+      './config/more-hooks.json: names a hooks module, which runs JavaScript inside Claude Code',
     ])
   })
 

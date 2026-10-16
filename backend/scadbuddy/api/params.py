@@ -4,6 +4,7 @@ render route, the preset routes and the metadata route that edits a template's p
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable, Mapping
 
 from fastapi import status
@@ -34,6 +35,7 @@ async def schema_of(
     config: Config,
     version: str | None = None,
     fetcher: CheckoutFetcher | None = None,
+    failure_is_fallback: bool = False,
 ) -> tuple[ModelSource, CustomizerSchema]:
     """The source a render of ``slug`` at ``requested`` reads, and its schema.
 
@@ -41,13 +43,18 @@ async def schema_of(
     being rendered, not the one the model is currently at. `resolve_source` also hands
     back which revision that is, so the job can be stamped without asking git again.
     ``version`` is what the client asked for, for the 404's message.
+    ``failure_is_fallback`` is `run_openscad`'s, for a caller that handles an
+    `OpenSCADError` itself.
     """
     try:
         source = await resolve_source(
             slug, requested, paths=paths, history=history, fetcher=fetcher
         )
         schema = await cached_schema(
-            source.scad, source.schema_cache, config=source.configure(config)
+            source.scad,
+            source.schema_cache,
+            config=source.configure(config),
+            failure_is_fallback=failure_is_fallback,
         )
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {version}") from None
@@ -161,6 +168,10 @@ async def require_installed_fonts(
         )
 
 
+#: A colour as the colour picker writes one (#353).
+_PICKED_COLOUR = re.compile(r"#[0-9A-Fa-f]{6}")
+
+
 def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
     """422 unless ``params`` would render as they are *and* every dropdown value is one
     of its options or a value the template retired.
@@ -168,12 +179,24 @@ def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, P
     Stricter than a render, which takes any value of the right type: a preset is kept
     and replayed, so it holds only what the dropdown itself could pick, or picked
     before the option was renamed (`// retired`, #432; `render/runner.py` accepts the
-    same values).
+    same values). Likewise a colour is a `#RRGGBB` the picker could pick (#353), where a
+    render takes any string and only warns that a name it cannot read gets no extruder;
+    the template's own default is its business, however it spells it.
     """
     require_valid_params(schema, params)
     by_name = {parameter.name: parameter for parameter in schema.parameters}
     for name, value in params.items():
         parameter = by_name[name]
+        if (
+            parameter.type == "color"
+            and value != parameter.initial
+            and not (isinstance(value, str) and _PICKED_COLOUR.fullmatch(value))
+        ):
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"colour parameter {name!r} must be a colour written #RRGGBB, got {value!r}",
+                parameters=[name],
+            )
         options = [option.value for option in parameter.options]
         if options and value not in (*options, *parameter.retired):
             raise ApiError(

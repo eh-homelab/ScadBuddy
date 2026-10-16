@@ -1,6 +1,11 @@
 import type { BoundingBox, ParamValue } from '../api/types'
 import { length, type DisplayUnit } from './units'
 
+/** An id as the UI shows one with no name: its first 8 characters. */
+export function shortId(id: string): string {
+  return id.slice(0, 8)
+}
+
 export function formatBbox(bbox: BoundingBox, unit: DisplayUnit = 'mm'): string {
   const [x, y, z] = bbox.size
   return `${length(x, unit)} × ${length(y, unit)} × ${length(z, unit)} ${unit}`
@@ -53,6 +58,17 @@ export function formatDuration(seconds: number): string {
   const minutes = Math.floor(total / 60)
   if (minutes < 60) return `${minutes}m`
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** #1638 — where a waiting render stands: `next`, or how many are ahead of it. */
+export function queuePlace(position: number): string {
+  return position <= 1 ? 'next in line' : `${position - 1} ahead`
+}
+
+/** `0:07`, `4:12`: a render's wait, to the second. */
+export function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
 /** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */

@@ -12,6 +12,7 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { BRIDGE_FRAME_MAX, BRIDGE_PATH } from '../src/routes/bridge.js'
 import { firstText, services } from './helpers/mcp.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { type FrontendBridge, type FrontendTabLink, frontendClientMessages, frontendTabLink } from './support/frontendProtocol.js'
@@ -47,11 +48,11 @@ const TAB_ID = 'e2e-tab-0123456789abcdef'
 const TOKEN = 'gw-bridge-e2e-token-5555666677778888'
 
 async function until<T>(read: () => T | undefined, what: string, timeoutMs = 10_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   for (;;) {
     const value = read()
     if (value !== undefined && value !== false) return value
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await new Promise((r) => setTimeout(r, 20))
   }
 }
@@ -200,10 +201,10 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     expect((await call('browser_get_form')).text).toMatch(/the tab answered get_form with unavailable/)
 
     // A page that does not answer: the call gives up (render's own wait, 0 ms here, plus the margin).
-    const started = Date.now()
+    const started = performance.now()
     const slow = await call('browser_render', { timeout_ms: 0 })
     expect(slow.text).toMatch(/the tab did not answer render within 10 s/)
-    expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(9_000)
 
     // Outward stops at the approval gate and never reaches the tab.
     expect((await call('browser_open_print_dialog')).body).toMatchObject({ status: 'pending_approval' })
@@ -234,6 +235,18 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     await openTab()
     expect(firstText(await client.callTool({ name: 'browser_get_params', arguments: {} }))).toEqual({ width: 20 })
     await client.close()
+  }, 30_000)
+
+  it('keeps its 256 KiB frame cap, though the chat socket takes image frames (#1866)', async () => {
+    await start()
+    const socket = new WebSocket(`${agent!.url.replace(/^http/, 'ws')}${BRIDGE_PATH}`, { headers: { origin: agent!.origin } })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    const closed = new Promise<number>((resolve) => socket.once('close', (code) => resolve(code)))
+    socket.send(JSON.stringify({ type: 'hello', padding: 'x'.repeat(BRIDGE_FRAME_MAX) }))
+    expect(await closed).toBe(1009)
   }, 30_000)
 
   it.skipIf(cliMissing !== undefined)(

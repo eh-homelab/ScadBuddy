@@ -12,8 +12,15 @@ import {
   saveAuditRetention,
 } from '../../agent/audit'
 import { useAiAvailability } from '../../agent/chat/availability'
+import { downloadBlob } from '../../lib/embed'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tip } from './Tip'
 import { Spinner } from '../ui/Spinner'
 
 /**
@@ -29,9 +36,13 @@ export function AiAuditSection() {
 
 export const AUDIT_PAGE = 25
 
+/** The filters' "All": Radix's Select takes no empty value. */
+const ALL = 'all'
+
 const KIND_LABEL: Record<AuditKind, string> = {
   tool_call: 'Tool calls',
-  resource: 'MCP resources',
+  // #2373 — the panel's session actions (fork, rename, archive) share this kind.
+  resource: 'Sessions & resources',
   approval: 'Approvals',
   credential: 'Credentials',
   plugin: 'Plugins',
@@ -39,6 +50,8 @@ const KIND_LABEL: Record<AuditKind, string> = {
   token: 'MCP tokens',
   memory: 'Memory',
   http: 'HTTP requests',
+  question: 'Questions',
+  turn: 'Turns',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
@@ -51,8 +64,15 @@ const OUTCOME_LABEL: Record<AuditOutcome, string> = {
 const SURFACE_LABEL: Record<AuditEntry['surface'], string> = {
   harness: 'assistant',
   mcp: 'MCP',
-  http: 'Settings',
+  // #2373 — every browser route: Settings, and the panel's approvals, answers and sessions.
+  http: 'the app',
   system: 'ScadBuddy',
+}
+
+/** #2373 — a session action recorded as a resource row. */
+const SESSION_ACTION: Record<string, string> = {
+  session_fork: 'Session fork',
+  session_update: 'Session update',
 }
 
 /** `mcp__scadbuddy__print_output` → `print_output`; other names as they are. */
@@ -67,11 +87,15 @@ function describe(entry: AuditEntry): string {
     case 'approval':
       return `Approval ${entry.action}`
     case 'resource':
-      return `Resource ${entry.action}`
+      return SESSION_ACTION[entry.action] ?? `Resource ${entry.action}`
     case 'memory':
       return entry.action === 'recall' ? 'Memory recall' : entry.action === 'retain' ? 'Memory save' : `Memory ${entry.action}`
     case 'http':
       return `HTTP ${entry.action}`
+    case 'question':
+      return `Question ${entry.action}`
+    case 'turn':
+      return `Turn ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }
@@ -107,7 +131,8 @@ function memoryText(entry: AuditEntry): string | null {
 
 /**
  * An http row's summary (#827) in words: the agent stores `{method, scheme, host,
- * status?, size_bytes?, redirect?}` as JSON, never a path, a header or a body.
+ * status?, size_bytes?, redirect?, saved?}` as JSON, never a path, a header or a
+ * body (`saved` is the id of a saved body; see savedBodyUrl).
  */
 function httpText(entry: AuditEntry): string | null {
   let parts: string[] = []
@@ -124,7 +149,45 @@ function httpText(entry: AuditEntry): string | null {
   return parts.length ? parts.join(' · ') : null
 }
 
+const SAVED_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * #1292 — where a saved response body is served, for an http row whose response
+ * was too long (or binary) to return inline: the row names the id it was saved
+ * under, and the agent serves it from the session's directory
+ * (`GET /api/v1/ai/sessions/:id/http/:saved`). Null for any other row.
+ */
+function savedBodyUrl(entry: AuditEntry): string | null {
+  if (entry.kind !== 'http' || !entry.session_id) return null
+  let saved: unknown
+  try {
+    saved = (JSON.parse(entry.input_summary ?? '{}') as Record<string, unknown>).saved
+  } catch {
+    return null
+  }
+  if (typeof saved !== 'string' || !SAVED_ID.test(saved)) return null
+  return `/api/v1/ai/sessions/${encodeURIComponent(entry.session_id)}/http/${saved}`
+}
+
+const usd = (value: number) => `$${value.toFixed(4)}`
+
+/**
+ * A turn row's cost (#1922). A turn Claude Code never priced (no result came back)
+ * is flagged, with ScadBuddy's own estimate when it made one, never shown as a
+ * priced $0.
+ */
+function turnCost(entry: AuditEntry): string | null {
+  if (entry.kind !== 'turn' || entry.cost_usd === null) return null
+  const estimated = entry.cost_estimated_usd ?? 0
+  if (entry.cost_priced === false) {
+    return estimated > 0 ? `not priced by Claude Code · ~${usd(estimated)} estimated` : 'not priced by Claude Code'
+  }
+  return estimated > 0 ? `${usd(entry.cost_usd)} (incl. ~${usd(estimated)} estimated)` : usd(entry.cost_usd)
+}
+
 function AuditRow({ entry }: { entry: AuditEntry }) {
+  const cost = turnCost(entry)
+  const body = savedBodyUrl(entry)
   const text =
     entry.kind === 'memory'
       ? memoryText(entry)
@@ -132,28 +195,74 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         ? httpText(entry)
         : (entry.detail ?? entry.input_summary)
   return (
-    <li className="border-b border-line px-4 py-2 text-[13px] last:border-b-0" data-testid="audit-entry">
+    <li className="border-b border-border px-4 py-2 text-[13px] last:border-b-0" data-testid="audit-entry">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="font-medium">{describe(entry)}</span>
-        {entry.tier && <span className="text-[12px] text-muted">{entry.tier}</span>}
+        {entry.tier && <span className="text-xs text-muted-foreground">{entry.tier}</span>}
         <span className={`text-[12px] font-medium ${outcomeClass(entry.outcome)}`}>
           {OUTCOME_LABEL[entry.outcome]}
         </span>
-        <span className="ml-auto text-[12px] text-muted sb-num">{when(entry.at)}</span>
+        <span className="sb-num ml-auto text-xs text-muted-foreground">{when(entry.at)}</span>
       </div>
-      <div className="mt-0.5 text-[12px] text-muted">
+      <div className="mt-0.5 text-xs text-muted-foreground">
         {entry.actor.label} via {SURFACE_LABEL[entry.surface]}
         {entry.client_ip && <> · <span className="sb-num">{entry.client_ip}</span></>}
         {entry.duration_ms !== null && <> · <span className="sb-num">{entry.duration_ms} ms</span></>}
         {entry.approval_id && <> · approval <span className="sb-num">{entry.approval_id.slice(0, 8)}</span></>}
         {entry.approved_by && <> · approved by {entry.approved_by.label}</>}
+        {cost && <> · <span className="sb-num">{cost}</span></>}
       </div>
       {text && (
-        <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>
-          {text}
-        </p>
+        <Tip content={text}>
+          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{text}</p>
+        </Tip>
       )}
+      {body && <SavedBody url={body} />}
     </li>
+  )
+}
+
+/**
+ * Downloads a saved response body (#1292) through lib/embed's `downloadBlob`: a plain
+ * link would start the download inside Bambuddy's sandboxed frame, which has no
+ * `allow-downloads`, and Chromium drops it without a word (#612).
+ */
+function SavedBody({ url }: { url: string }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function load(): Promise<Blob> {
+    const res = await fetch(url)
+    if (res.status === 404) throw new Error("That body is no longer kept: only the session's 10 newest saved responses are.")
+    if (!res.ok) throw new Error(`The body could not be read (HTTP ${res.status}).`)
+    return res.blob()
+  }
+
+  async function download() {
+    setBusy(true)
+    setError(null)
+    try {
+      await downloadBlob(load, `http-response-${url.slice(url.lastIndexOf('/') + 1, url.lastIndexOf('/') + 9)}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The body could not be downloaded.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-0.5 text-xs">
+      <Tip wrap={busy} content="The body is kept while the session's 10 newest saved responses include it.">
+        <Button variant="link" size="xs" className="h-auto px-0" onClick={() => void download()} disabled={busy}>
+          Download body
+        </Button>
+      </Tip>
+      {error && (
+        <span role="alert" className="ml-2 text-warn">
+          {error}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -224,65 +333,82 @@ function AuditLogView() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="ai-audit-heading">
-      <h2 id="ai-audit-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        AI activity
-      </h2>
-      <div className="space-y-3 p-4">
-        <p className="text-[12px] text-muted">
-          Every tool call the assistant or an MCP client made, every approval decision, and every
-          change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
+    <Card role="region" className="mt-4 gap-0 py-0" aria-labelledby="ai-audit-heading">
+      <CardHeader className="border-b py-3">
+        <h2 id="ai-audit-heading" className="font-heading text-sm font-medium">
+          AI activity
+        </h2>
+      </CardHeader>
+      <CardContent className="space-y-3 py-4">
+        <p className="text-xs text-muted-foreground">
+          Every tool call the assistant or an MCP client made, what each assistant turn cost, every
+          approval decision, and every change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
           secrets are never recorded.
         </p>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="text-[13px]">
-            <span className="block text-muted">Kind</span>
-            <select
-              className="sb-field mt-1"
-              value={kind}
-              onChange={(event) => filter(() => setKind(event.target.value as AuditKind | ''))}
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="audit-kind" className="text-[13px] font-normal text-muted-foreground">
+              Kind
+            </Label>
+            <Select
+              value={kind || ALL}
+              onValueChange={(next) => filter(() => setKind(next === ALL ? '' : (next as AuditKind)))}
             >
-              <option value="">All</option>
-              {AUDIT_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {KIND_LABEL[k]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-[13px]">
-            <span className="block text-muted">Outcome</span>
-            <select
-              className="sb-field mt-1"
-              value={outcome}
-              onChange={(event) => filter(() => setOutcome(event.target.value as AuditOutcome | ''))}
+              <SelectTrigger id="audit-kind" className="min-w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All</SelectItem>
+                {AUDIT_KINDS.map((k) => (
+                  <SelectItem key={k} value={k}>
+                    {KIND_LABEL[k]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="audit-outcome" className="text-[13px] font-normal text-muted-foreground">
+              Outcome
+            </Label>
+            <Select
+              value={outcome || ALL}
+              onValueChange={(next) => filter(() => setOutcome(next === ALL ? '' : (next as AuditOutcome)))}
             >
-              <option value="">All</option>
-              {AUDIT_OUTCOMES.map((o) => (
-                <option key={o} value={o}>
-                  {OUTCOME_LABEL[o]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <Button size="sm" onClick={() => filter(() => first.reload())} disabled={first.loading}>
+              <SelectTrigger id="audit-outcome" className="min-w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All</SelectItem>
+                {AUDIT_OUTCOMES.map((o) => (
+                  <SelectItem key={o} value={o}>
+                    {OUTCOME_LABEL[o]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button variant="outline" onClick={() => filter(() => first.reload())} disabled={first.loading}>
             Refresh
           </Button>
         </div>
-      </div>
+      </CardContent>
 
       {first.error ? (
-        <p role="alert" className="px-4 pb-4 text-[13px] text-warn">
+        <p role="alert" className="px-4 py-4 text-[13px] text-warn">
           Could not read the audit log: {first.error.message}
         </p>
       ) : first.loading && !first.data ? (
-        <p className="flex items-center gap-2 px-4 pb-4 text-[13px] text-muted">
-          <Spinner /> Loading…
-        </p>
+        <div role="status" className="flex flex-col gap-2 px-4 py-4">
+          <span className="sr-only">Loading…</span>
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-3/4" />
+        </div>
       ) : entries.length === 0 ? (
-        <p className="px-4 pb-4 text-[13px] text-muted">Nothing recorded{kind || outcome ? ' for these filters' : ''}.</p>
+        <p className="px-4 py-4 text-[13px] text-muted-foreground">Nothing recorded{kind || outcome ? ' for these filters' : ''}.</p>
       ) : (
-        <ul className="border-t border-line" aria-label="AI activity entries">
+        <ul className="border-t border-border" aria-label="AI activity entries">
           {entries.map((entry) => (
             <AuditRow key={entry.id} entry={entry} />
           ))}
@@ -290,27 +416,27 @@ function AuditLogView() {
       )}
 
       {(next || moreError) && !first.error && (
-        <div className="flex items-center gap-3 border-t border-line px-4 py-2.5">
+        <div className="flex items-center gap-3 border-t border-border px-4 py-2.5">
           {next && (
-            <Button size="sm" onClick={() => void loadOlder()} disabled={loadingMore} aria-busy={loadingMore}>
+            <Button size="sm" variant="outline" onClick={() => void loadOlder()} disabled={loadingMore} aria-busy={loadingMore}>
               {loadingMore && <Spinner />}
               Load older
             </Button>
           )}
           {moreError && (
-            <p role="alert" className="text-[12px] text-warn">
+            <p role="alert" className="text-xs text-warn">
               {moreError}
             </p>
           )}
         </div>
       )}
 
-      <div className="border-t border-line p-4">
-        <label htmlFor="audit-retention" className="block text-[13px]">
+      <div className="border-t border-border p-4">
+        <Label htmlFor="audit-retention" className="text-[13px] font-normal">
           Keep entries for (days)
-        </label>
+        </Label>
         <div className="mt-1.5 flex items-center gap-2">
-          <input
+          <Input
             id="audit-retention"
             type="number"
             inputMode="numeric"
@@ -321,11 +447,10 @@ function AuditLogView() {
               setDraft(event.target.value)
               setSaved(null)
             }}
-            className="sb-field sb-num w-28"
+            className="sb-num w-28"
             {...USER_ONLY}
           />
           <Button
-            size="sm"
             onClick={() => void saveRetention()}
             disabled={saving || retentionText === ''}
             aria-busy={saving}
@@ -335,20 +460,20 @@ function AuditLogView() {
             Save
           </Button>
           {saved && (
-            <span role="status" className="text-[12px] text-ok">
+            <span role="status" className="text-xs text-ok">
               {saved}
             </span>
           )}
         </div>
         {saveError && (
-          <p role="alert" className="mt-1.5 text-[12px] text-warn">
+          <p role="alert" className="mt-1.5 text-xs text-warn">
             {saveError}
           </p>
         )}
-        <p className="mt-1.5 text-[12px] text-muted">
+        <p className="mt-1.5 text-xs text-muted-foreground">
           Older entries are deleted hourly. The log itself can&rsquo;t be edited.
         </p>
       </div>
-    </section>
+    </Card>
   )
 }

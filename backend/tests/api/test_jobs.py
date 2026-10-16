@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -7,16 +10,35 @@ from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
+from temporalio.client import WorkflowUpdateFailedError
+from temporalio.exceptions import ApplicationError
 
+from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy import library_view
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
 from scadbuddy.render.job_models import Job, QueueFullError
+from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
-from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
+from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
+from scadbuddy.workflows.commands import (
+    CommandClosedError,
+    CommandStillAcceptingError,
+    TemporalBusyError,
+    TemporalRefusedError,
+    TemporalUnavailableError,
+)
+from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, job_file, set_fake_env, wait_for_job
+from tests.support.operations import press
+from tests.support.store import local_content, store_pool
 
 
 def test_render_is_accepted_and_the_job_completes(
@@ -44,6 +66,10 @@ def test_render_is_accepted_and_the_job_completes(
     assert job["parts"][0]["extruder"] == 1
     assert job["log_tail"] == logged
     assert job["preview_url"] == f"/api/v1/jobs/{accepted['job_id']}/preview.glb"
+    # #1293: the workflow, for the customizer's link into the Temporal UI.
+    assert job["workflow_id"].startswith("render-")
+    # #1638: a settled job waits in no queue.
+    assert job["queue_position"] is None
 
 
 def test_render_with_no_params_uses_the_model_defaults(client: TestClient, model: str) -> None:
@@ -67,6 +93,27 @@ def test_a_parameter_of_the_wrong_type_is_rejected(client: TestClient, model: st
     response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": "wide"}})
     assert response.status_code == 422
     assert "expects a number" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"params": {"label": "N\x00L"}}, {"inputs": {"params": {"label": "N\x00L"}}}],
+)
+def test_a_nul_in_a_text_parameter_is_rejected_by_name(
+    client: TestClient, model: str, body: dict[str, Any]
+) -> None:
+    """#965: Postgres cannot hold a NUL, so it was a 500 echoing the driver's error."""
+    response = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert response.status_code == 422, response.text
+    assert "'label' contains a NUL byte" in response.json()["detail"]
+
+
+def test_a_nul_in_the_template_ui_state_is_rejected(client: TestClient, model: str) -> None:
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"inputs": {"params": {}, "ui": {"a\x00": 1}}}
+    )
+    assert response.status_code == 422, response.text
+    assert "NUL byte" in response.json()["detail"]
 
 
 def test_a_text_parameter_holding_a_path_is_rejected(client: TestClient, model: str) -> None:
@@ -110,6 +157,103 @@ def test_the_preview_glb_is_served_with_the_gltf_media_type(client: TestClient, 
     assert response.content.startswith(b"glTF")
 
 
+def test_one_plate_of_a_render_is_its_own_preview(client: TestClient, model: str) -> None:
+    """#2731: the preview's plate picker shows one plate, read from the render's 3MF."""
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 1}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    plate = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+
+    assert plate.status_code == 200, plate.text
+    assert plate.headers["content-type"] == "model/gltf-binary"
+    assert plate.content.startswith(b"glTF")
+    whole = client.get(f"/api/v1/jobs/{job_id}/preview.glb")
+    assert plate.content != whole.content, "cut from the 3MF, not the whole preview"
+    assert client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 9}).status_code == 404
+
+
+def test_a_plate_is_cut_once_and_the_browser_may_keep_it(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2913: switching plates back and forth does not re-read and re-cut the 3MF."""
+    cuts: list[int] = []
+    real = library_view.plate_glb
+
+    def counted(payload: bytes, plate: int, budget: object) -> bytes:
+        cuts.append(plate)
+        return real(payload, plate, budget)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jobs_api, "plate_glb", counted)
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 2}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    first = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    again = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+
+    assert first.status_code == again.status_code == 200
+    assert again.content == first.content
+    assert cuts == [1]
+    assert first.headers["cache-control"] == jobs_api.PLATE_GLB_CACHE_CONTROL
+
+
+def test_the_plate_cache_drops_the_least_recently_used_past_its_cap() -> None:
+    cache = jobs_api._PlateCache(10)
+    cache.put(("a", 1), b"12345")
+    cache.put(("b", 1), b"12345")
+    assert cache.get(("a", 1)) == b"12345"
+    cache.put(("c", 1), b"12345")
+    assert cache.get(("b", 1)) is None
+    assert cache.get(("a", 1)) == b"12345"
+    cache.put(("big", 1), b"x" * 11)
+    assert cache.get(("big", 1)) is None
+
+
+def test_a_plate_of_an_unreadable_or_vanished_3mf(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2913: a 3MF that no longer reads is a 422, one that is gone a 404."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+    three_mf = job_file(client, job_id, "model.3mf")
+
+    three_mf.write_bytes(b"not a zip")
+    unreadable = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert unreadable.status_code == 422, unreadable.text
+
+    three_mf.unlink()
+    gone = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert gone.status_code == 404, gone.text
+    assert "is gone" in gone.json()["detail"]
+
+
+def test_a_plate_too_big_to_read_is_refused_as_an_outputs_plate_is(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3554: out of memory cutting a job's plate is the output route's 422, not a 500."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 4}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    def oom(*_: object) -> object:
+        raise MemoryError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(library_view, "read_plate_parts", oom)
+        refused = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == str(ReadOutOfMemoryError())
+
+
 def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:
     job_id = client.post(
         f"/api/v1/models/{model}/render", json={"params": {"width": FAIL_WIDTH}}
@@ -128,11 +272,26 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
     second = client.post(
         f"/api/v1/models/{model}/render",
         json={"params": {"width": 12}, "supersedes": first.json()["job_id"]},
+        headers={"Idempotency-Key": "b" * 32},
     )
     assert second.status_code == 202
     # The first is cancelled unless its render finished first; the newer one renders.
     assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
     assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
+
+
+def test_a_supersede_without_an_idempotency_key_is_refused(client: TestClient, model: str) -> None:
+    """Without a key a re-send would release the job a second time, and with it another
+    claimant's: refused before anything starts (review #1066 2.1)."""
+    submit = mock.AsyncMock()
+    with mock.patch.object(RenderService, "submit", submit):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}, "supersedes": "0" * 32},
+        )
+    assert response.status_code == 422
+    assert "Idempotency-Key" in response.json()["detail"]
+    submit.assert_not_awaited()
 
 
 def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:
@@ -155,6 +314,132 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     assert "queue is full" in body["detail"]
 
 
+def test_no_snapshot_is_a_409_with_its_code(client: TestClient, model: str) -> None:
+    """#1849: the code is what the backfill route's 409-to-422 relabel keys on."""
+    unavailable = mock.AsyncMock(side_effect=SnapshotUnavailableError("no snapshot of x@abc"))
+    with mock.patch.object(RenderService, "submit", unavailable):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 409
+    assert response.json()["code"] == SNAPSHOT_UNAVAILABLE == "snapshot_unavailable"
+
+
+def _unreachable() -> TemporalUnavailableError:
+    """What `start_command` raises when a lazy client's first connect fails."""
+    try:
+        raise TemporalUnavailableError("render-x") from RuntimeError("Failed client connect: x")
+    except TemporalUnavailableError as error:
+        return error
+
+
+@pytest.mark.parametrize(
+    ("error", "says", "may_have_started"),
+    [
+        # Only a failed connect wrote nothing (review #1066 (8) 2).
+        (_unreachable(), "Nothing was queued", False),
+        # The rest may follow a start Temporal persisted: the same request follows it,
+        # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
+        (TemporalUnavailableError("render-x"), "a retry picks this request up", True),
+        # Temporal answered, but could not take the start now: not "cannot reach".
+        (TemporalBusyError("render-x"), "busy right now", True),
+    ],
+)
+def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
+    client: TestClient, model: str, error: Exception, says: str, may_have_started: bool
+) -> None:
+    down = mock.AsyncMock(side_effect=error)
+    with mock.patch.object(RenderService, "submit", down):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert says in response.json()["detail"]
+    assert response.json()["may_have_started"] is may_have_started
+    assert response.headers["retry-after"] == "5"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        # What `start_command` raises for a refusal since #1316 (review #1066 of c144c02);
+        # no raw `RPCError` reaches the route (#1670).
+        TemporalRefusedError("render-nope"),
+    ],
+)
+def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
+    client: TestClient, model: str, refusal: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong namespace or a denied permission is configuration, never "cannot reach
+    Temporal, try again shortly"; Temporal's message stays in the log (review #1066 (8)
+    2)."""
+    refused = mock.AsyncMock(side_effect=refusal)
+    with mock.patch.object(RenderService, "submit", refused):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 500
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    assert "nope" not in response.json()["detail"]
+    assert "retry-after" not in response.headers
+    # The start may have been persisted before Temporal refused: the detail's "send the
+    # same request again" is what the clients do on `may_have_started` (review #1066
+    # (10) 3).
+    assert response.json()["may_have_started"] is True
+    assert "a retry picks this request up" in response.json()["detail"]
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
+
+
+def test_a_render_whose_accepted_update_failed_is_a_problem(client: TestClient, model: str) -> None:
+    """An Update failure other than an execution that closed first (review #1066 3.1)."""
+    failed = mock.AsyncMock(
+        side_effect=WorkflowUpdateFailedError(ApplicationError("boom at /srv/internal"))
+    )
+    with mock.patch.object(RenderService, "submit", failed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["type"] == RENDER_UNSTARTABLE_PROBLEM
+    # The worker's failure text stays in the log (review #1066 5.1).
+    assert "/srv/internal" not in response.json()["detail"]
+    # The run answered: no job was made, and nothing tells a client to send it again.
+    assert response.json()["may_have_started"] is False
+    assert "again" not in response.json()["detail"]
+
+
+def test_a_render_still_being_accepted_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert response.headers["retry-after"] == "2"
+
+
+def test_a_render_passes_its_idempotency_key_as_the_request_id(
+    client: TestClient, model: str
+) -> None:
+    """Review #1066 2.1: a re-send keeps its key, so it is the same claim on the job."""
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "a" * 32},
+        )
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == "a" * 32
+
+
+def test_a_render_whose_execution_ended_before_it_answered_is_a_503_to_send_again(
+    client: TestClient, model: str
+) -> None:
+    """Review #1061 1c: an execution that ended before its Update answered recorded
+    nothing; the same request starts it again, never a bare 500."""
+    closed = mock.AsyncMock(side_effect=CommandClosedError("render-x"))
+    with mock.patch.object(RenderService, "submit", closed):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+
+
 def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
     client: TestClient, model: str
 ) -> None:
@@ -165,6 +450,79 @@ def test_a_render_whose_source_the_blob_store_has_no_room_for_is_a_507(
     assert response.status_code == 507
     assert response.headers["content-type"] == "application/problem+json"
     assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
+
+
+def test_a_render_whose_snapshot_is_still_uploading_is_a_coded_503(
+    client: TestClient, model: str
+) -> None:
+    """#686: past `pin`'s wait, a 503 with Retry-After and a `code` that tells it apart
+    from a full queue."""
+    pending = mock.AsyncMock(side_effect=SnapshotPendingError("still uploading", retry_after=30))
+    with mock.patch.object(RenderService, "submit", pending):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "30"
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["retry_after"] == 30
+    assert body["code"] == "snapshot_pending"
+
+
+class _LastCommit:
+    """A history whose template is at ``revision``: all `SnapshotStore.pin` reads."""
+
+    available = True
+
+    def __init__(self, revision: str) -> None:
+        self.revision = revision
+
+    def last_commit(self, path: str) -> str:
+        return self.revision
+
+
+@pytest.mark.requires_postgres
+def test_a_render_pinned_through_a_real_snapshot_store_is_a_coded_503(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1430: the route's 503 end to end, `submit` → `pin` → a store still uploading,
+    rather than with `submit` patched to raise."""
+    revision = "5" * 40
+    export = paths.model_revision_dir(model, revision)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(5);")
+    with store_pool(pg_conninfo) as pool:
+        content = local_content(tmp_path / "remote", pool)
+        put = content.put
+        gate = asyncio.Event()
+
+        async def uploading(*args: object, **kwargs: object) -> object:
+            await gate.wait()
+            return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+        content.put = uploading  # type: ignore[method-assign,assignment]
+        history: Any = _LastCommit(revision)
+        snapshots = SnapshotStore(content, paths, history=history, pin_timeout=0.1)
+        render = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+        monkeypatch.setattr(render, "snapshots", snapshots)
+
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+
+        assert response.status_code == 503, response.text
+        assert int(response.headers["retry-after"]) >= 1
+        assert response.json()["code"] == "snapshot_pending"
+
+        async def finish() -> None:
+            # The store the route left behind runs on the app's loop: let it end there.
+            gate.set()
+            await asyncio.gather(*list(snapshots._storing))
+
+        client.portal.call(finish)  # type: ignore[union-attr]
+        assert content.index.get(snapshot_key(model, revision)) is not None
 
 
 class _NoCommit:
@@ -222,21 +580,36 @@ def test_a_value_outside_the_customizer_is_rejected_by_name(
     assert response.headers["content-type"] == "application/problem+json"
 
 
+def _render_followed(client: TestClient, slug: str, body: dict[str, Any]) -> Response:
+    """POST a render as the browser and the agent do: with an `Idempotency-Key`, sent
+    again with it while the answer is `command-still-accepting` (a render whose first
+    activity outlives the submit's deadline, as on a loaded machine). Any other answer
+    is returned as it is."""
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    for _ in range(10):
+        response: Response = client.post(
+            f"/api/v1/models/{slug}/render", json=body, headers=headers
+        )
+        if response.status_code != 503 or response.json()["type"] != STILL_ACCEPTING_PROBLEM:
+            return response
+    return response
+
+
 def test_the_customizer_bounds_and_a_retired_option_are_accepted(
     client: TestClient, ranged: str
 ) -> None:
     for params in ({"width": 1}, {"width": 100}, {"shape": "square"}, {"shape": "circle"}):
-        response = client.post(f"/api/v1/models/{ranged}/render", json={"params": params})
+        response = _render_followed(client, ranged, {"params": params})
         assert response.status_code == 202, (params, response.text)
 
 
 def test_a_preset_outside_the_customizer_is_rejected(client: TestClient, ranged: str) -> None:
     url = f"/api/v1/models/{ranged}/presets"
-    refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}})
+    refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}}, headers=press())
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["width"]
     # A preset saved before an option was renamed can be saved again.
-    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
+    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}}, headers=press())
     assert kept.status_code == 201, kept.text
 
 

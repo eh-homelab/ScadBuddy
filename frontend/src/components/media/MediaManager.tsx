@@ -9,7 +9,21 @@ import {
   takesText,
   useUploadLimit,
 } from '../../lib/mediaFiles'
-import { Button } from '../ui/Button'
+import { ArrowDownIcon, ArrowUpIcon, ImagePlusIcon, StarIcon, Trash2Icon, UploadIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 
 interface Props {
   model: ModelSummary
@@ -23,8 +37,21 @@ interface Upload {
   fraction: number
 }
 
-const FIELD =
-  'w-full rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[13px] text-ink outline-none focus:border-accent'
+/** What Move up/down and dragging reorder: everything of mine's; on a built-in what
+ * was added to it, less its chosen cover, which is listed first whatever its place. */
+function movableOf(model: ModelSummary) {
+  const cover = model.origin === 'builtin' ? (model.media_cover ?? null) : null
+  return (model.media ?? []).filter((item) => !item.readonly && item.id !== cover)
+}
+
+/** A row action that was pressed: the item's id and the button's name. */
+interface Pressed {
+  id: string
+  action: string
+}
+
+/** The row actions focus may land on after a move, in order of preference. */
+const ROW_ACTIONS = ['Move up', 'Move down', 'Make cover', 'Delete']
 
 /** Mounted managers, oldest first: a paste aimed at none of them goes to the newest. */
 const pasteTargets: object[] = []
@@ -53,7 +80,6 @@ export function MediaManager({ model: initial, onChanged }: Props) {
     setGiven(initial)
     setModel(initial)
   }
-  const [busy, setBusy] = useState(false)
   const [errors, setErrors] = useState<string[]>([])
   const [uploads, setUploads] = useState<Upload[]>([])
   const [confirming, setConfirming] = useState<string | null>(null)
@@ -65,51 +91,91 @@ export function MediaManager({ model: initial, onChanged }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const sectionRef = useRef<HTMLElement>(null)
   const hovered = useRef(false)
+  // The newest record, for a queued write to act on when its turn comes.
+  const latest = useRef(model)
+  useEffect(() => {
+    latest.current = model
+  }, [model])
+  // #1321 — the row and action a move that just landed came from, so focus can follow it.
+  const refocus = useRef<Pressed | null>(null)
   const uploadLimit = useUploadLimit()
 
   const slug = model.slug
   const media = model.media ?? []
   const builtin = model.origin === 'builtin'
   const chosenCover = builtin ? (model.media_cover ?? null) : null
-  // What Move up/down and dragging reorder: everything of mine's; on a built-in what
-  // was added to it, less its chosen cover, which is listed first whatever its place.
-  const movable = media.filter((item) => !item.readonly && item.id !== chosenCover)
+  const movable = movableOf(model)
   // Reordering while an upload is in flight could land an order without the new item.
-  const locked = busy || uploads.length > 0
+  // A write in flight does not lock anything (#1321): the next one waits its turn.
+  const locked = uploads.length > 0
 
   function landed(next: ModelSummary) {
+    latest.current = next
     setModel(next)
     onChanged?.(next)
   }
 
-  async function write(action: () => Promise<ModelSummary>) {
-    setBusy(true)
+  /**
+   * Runs a write after the ones before it (#1321): a caption saved on blur and the
+   * click that blurred it both happen, in that order, instead of the click being
+   * dropped on a disabled button. `action` gets the newest record when its turn
+   * comes and answers null to do nothing; `pressed` is the row action it came from.
+   */
+  function write(action: (current: ModelSummary) => Promise<ModelSummary> | null, pressed?: Pressed) {
     setErrors([])
-    try {
-      landed(await action())
-    } catch (caught) {
-      setErrors([failure(caught)])
-    } finally {
-      setBusy(false)
-    }
+    queue.current = queue.current.then(async () => {
+      try {
+        const pending = action(latest.current)
+        if (!pending) return
+        const next = await pending
+        if (pressed) refocus.current = pressed
+        landed(next)
+      } catch (caught) {
+        setErrors([failure(caught)])
+      }
+    })
   }
 
-  /** Moves the movable item at `from` to `to`, both places among the movable items. */
-  function move(from: number, to: number) {
-    if (from === to || to < 0 || to >= movable.length) return
-    const ids = movable.map((item) => item.id)
-    const [id] = ids.splice(from, 1)
-    ids.splice(to, 0, id!)
-    // A built-in's order names every added item; its shipped ones keep their place.
-    const cover = media.find((item) => item.id === chosenCover && !item.readonly)
-    const order = cover ? [cover.id, ...ids] : ids
-    void write(() => api.reorderMedia(slug, order))
+  /** Moves the item `id` to `to` among the movable items, as they are when its turn comes. */
+  function move(id: string, to: number | ((from: number) => number), pressed?: Pressed) {
+    write((current) => {
+      const ids = movableOf(current).map((item) => item.id)
+      const from = ids.indexOf(id)
+      const place = typeof to === 'number' ? to : to(from)
+      if (from < 0 || from === place || place < 0 || place >= ids.length) return null
+      ids.splice(from, 1)
+      ids.splice(place, 0, id)
+      // A built-in's order names every added item; its shipped ones keep their place.
+      const cover =
+        current.origin === 'builtin'
+          ? (current.media ?? []).find((item) => item.id === current.media_cover && !item.readonly)
+          : undefined
+      return api.reorderMedia(slug, cover ? [cover.id, ...ids] : ids)
+    }, pressed)
   }
 
   function makeCover(item: MediaView) {
-    if (builtin) void write(() => api.setMediaCover(slug, item.id))
-    else move(movable.indexOf(item), 0)
+    const pressed = { id: item.id, action: 'Make cover' }
+    if (builtin) write(() => api.setMediaCover(slug, item.id), pressed)
+    else move(item.id, 0, pressed)
   }
+
+  // #1321 — after a move the pressed button may be disabled (at an end) or gone (Make
+  // cover), which drops focus to <body>; put it back on the row's nearest action.
+  useEffect(() => {
+    const target = refocus.current
+    if (!target) return
+    refocus.current = null
+    const active = document.activeElement
+    if (active && active !== document.body && !(active as HTMLButtonElement).disabled) return
+    const row = sectionRef.current?.querySelector(`li[data-media-id="${target.id}"]`)
+    if (!row) return
+    const buttons = Array.from(row.querySelectorAll('button')).filter((button) => !button.disabled)
+    const named = (name: string) => buttons.find((button) => button.textContent === name)
+    const next =
+      named(target.action) ?? ROW_ACTIONS.map(named).find(Boolean) ?? buttons[0]
+    next?.focus()
+  }, [model])
 
   async function add(files: File[]) {
     if (files.length === 0) return
@@ -198,7 +264,8 @@ export function MediaManager({ model: initial, onChanged }: Props) {
         const from = dragged.current
         dragged.current = null
         setDropTarget(null)
-        if (from !== null) move(from, index)
+        const id = from !== null ? movable[from]?.id : undefined
+        if (id) move(id, index)
       },
       onDragEnd: () => {
         dragged.current = null
@@ -207,23 +274,25 @@ export function MediaManager({ model: initial, onChanged }: Props) {
     }
   }
 
+  const doomed = media.find((item) => item.id === confirming && !item.readonly)
+
   return (
     <section
       ref={sectionRef}
       aria-label="Media"
-      className="flex flex-col gap-3 text-[13px]"
+      className="flex flex-col gap-3 text-sm"
       onPointerEnter={() => (hovered.current = true)}
       onPointerLeave={() => (hovered.current = false)}
     >
       {builtin && (
-        <p className="rounded-[6px] border border-line bg-surface-2 px-3 py-2 text-[12px] text-muted">
+        <p className="rounded-lg border bg-ui-muted/40 px-3 py-2 text-xs text-muted-foreground">
           What this built-in template ships is read-only. Images and videos you add come after
           it, and can be captioned, reordered, removed or made the cover.
         </p>
       )}
 
       {media.length === 0 ? (
-        <p className="text-muted">No images or videos yet.</p>
+        <p className="text-muted-foreground">No images or videos yet.</p>
       ) : (
         <ol aria-label="Media items" className="flex flex-col gap-2">
           {media.map((item, index) => {
@@ -234,108 +303,89 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                 key={item.id}
                 data-media-id={item.id}
                 {...rowDrag(item)}
-                className={`flex items-start gap-3 rounded-[6px] border bg-surface-2 p-2 ${
-                  place >= 0 && dropTarget === place ? 'border-accent' : 'border-line'
-                } ${place >= 0 ? 'cursor-grab' : ''}`}
+                // #1037 — wraps below `sm`, so the buttons drop under the caption instead of
+                // squeezing it to a sliver beside them.
+                className={cn(
+                  'flex flex-wrap items-start gap-3 rounded-xl border bg-card p-2 sm:flex-nowrap',
+                  place >= 0 && dropTarget === place && 'border-primary ring-2 ring-primary/30',
+                  place >= 0 && 'cursor-grab',
+                )}
               >
                 <Thumb slug={slug} item={item} index={index} />
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                  <div className="flex items-center gap-2 text-[12px] text-faint">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span>{item.kind === 'video' ? 'Video' : 'Image'}</span>
-                    {index === 0 && (
-                      <span className="rounded-[6px] bg-accent/12 px-1.5 py-0.5 text-[11px] text-accent">
-                        Cover
-                      </span>
-                    )}
+                    {index === 0 && <Badge>Cover</Badge>}
                     {item.readonly && (
-                      <span
-                        className="rounded-[6px] bg-surface-3 px-1.5 py-0.5 text-[11px] text-muted"
-                        title="Shipped with the template; it cannot be changed"
-                      >
-                        Shipped
-                      </span>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge variant="secondary" tabIndex={0}>
+                            Shipped
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent>Shipped with the template; it cannot be changed</TooltipContent>
+                      </Tooltip>
                     )}
                   </div>
                   {item.missing ? (
-                    <div className="flex items-center gap-2 text-warn">
+                    <div className="flex items-center gap-2 text-destructive">
                       <span>File missing{editable ? ' —' : ''}</span>
                       {editable && (
                         <Button
                           size="sm"
-                          variant="danger"
+                          variant="destructive"
                           disabled={locked}
-                          onClick={() => void write(() => api.deleteMedia(slug, item.id))}
+                          onClick={() => write(() => api.deleteMedia(slug, item.id))}
                         >
                           Remove
                         </Button>
                       )}
                     </div>
                   ) : !editable ? (
-                    item.caption && <p className="text-ink">{item.caption}</p>
+                    item.caption && <p className="text-foreground">{item.caption}</p>
                   ) : (
-                    <input
+                    <Input
                       // Remounted when the saved caption changes, so it shows what was saved.
                       key={item.caption}
                       aria-label="Caption"
                       placeholder="Caption"
-                      className={FIELD}
+                      className="h-8"
                       defaultValue={item.caption}
                       onBlur={(event) => {
                         const caption = event.target.value
                         if (caption !== item.caption) {
-                          void write(() => api.patchMedia(slug, item.id, caption))
+                          write(() => api.patchMedia(slug, item.id, caption))
                         }
                       }}
                     />
                   )}
-                  {editable && confirming === item.id && (
-                    <div className="flex flex-wrap items-center gap-2 text-[12px]">
-                      <span className="text-warn">
-                        Delete this {item.kind}? It cannot be undone.
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={locked}
-                        onClick={() => {
-                          setConfirming(null)
-                          void write(() => api.deleteMedia(slug, item.id))
-                        }}
-                      >
-                        Yes, delete
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                        Cancel
-                      </Button>
-                    </div>
-                  )}
                 </div>
                 {!item.missing && (editable || builtin) && (
-                  <div className="flex shrink-0 flex-col items-end gap-1">
+                  <div className="flex basis-full flex-wrap gap-1 sm:basis-auto sm:shrink-0 sm:flex-col sm:flex-nowrap sm:items-end">
                     {place >= 0 && (
                       <div className="flex gap-1">
                         <Button
                           size="sm"
                           variant="ghost"
                           disabled={locked || place === 0}
-                          onClick={() => move(place, place - 1)}
+                          onClick={() => move(item.id, (from) => from - 1, { id: item.id, action: 'Move up' })}
                         >
-                          Move up
+                          <ArrowUpIcon /> Move up
                         </Button>
                         <Button
                           size="sm"
                           variant="ghost"
                           disabled={locked || place === movable.length - 1}
-                          onClick={() => move(place, place + 1)}
+                          onClick={() => move(item.id, (from) => from + 1, { id: item.id, action: 'Move down' })}
                         >
-                          Move down
+                          <ArrowDownIcon /> Move down
                         </Button>
                       </div>
                     )}
                     <div className="flex gap-1">
                       {index > 0 && (
-                        <Button size="sm" disabled={locked} onClick={() => makeCover(item)}>
-                          Make cover
+                        <Button size="sm" variant="outline" disabled={locked} onClick={() => makeCover(item)}>
+                          <StarIcon /> Make cover
                         </Button>
                       )}
                       {index === 0 && chosenCover !== null && (
@@ -343,7 +393,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                           size="sm"
                           variant="ghost"
                           disabled={locked}
-                          onClick={() => void write(() => api.setMediaCover(slug, null))}
+                          onClick={() => write(() => api.setMediaCover(slug, null))}
                         >
                           Use the shipped cover
                         </Button>
@@ -351,11 +401,11 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                       {editable && (
                         <Button
                           size="sm"
-                          variant="danger"
+                          variant="destructive"
                           disabled={locked}
                           onClick={() => setConfirming(item.id)}
                         >
-                          Delete
+                          <Trash2Icon /> Delete
                         </Button>
                       )}
                     </div>
@@ -370,7 +420,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
       {uploads.length > 0 && (
         <ul aria-label="Uploads" className="flex flex-col gap-1.5">
           {uploads.map((upload) => (
-            <li key={upload.key} className="flex items-center gap-2 text-[12px]">
+            <li key={upload.key} className="flex items-center gap-2 text-xs">
               <span className="sb-num min-w-0 flex-1 truncate">{upload.name}</span>
               <div
                 role="progressbar"
@@ -378,10 +428,10 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={Math.round(upload.fraction * 100)}
-                className="h-1.5 w-32 overflow-hidden rounded-full bg-surface-3"
+                className="h-1.5 w-32 overflow-hidden rounded-full bg-ui-muted"
               >
                 <div
-                  className="h-full bg-accent"
+                  className="h-full bg-primary"
                   style={{ width: `${Math.round(upload.fraction * 100)}%` }}
                 />
               </div>
@@ -400,18 +450,20 @@ export function MediaManager({ model: initial, onChanged }: Props) {
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDropFiles}
-        className={`flex flex-col items-center gap-2 rounded-[6px] border border-dashed px-4 py-5 text-center transition-colors ${
-          dragging ? 'border-accent bg-accent/8' : 'border-line-strong bg-surface-2'
-        }`}
+        className={cn(
+          'flex flex-col items-center gap-2 rounded-xl border-2 border-dashed px-4 py-5 text-center transition-colors',
+          dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+        )}
       >
-        <p className="text-muted">Drop images or videos here</p>
-        <p className="text-[12px] text-faint" data-testid="media-paste-hint">
+        <ImagePlusIcon aria-hidden className="size-5 text-muted-foreground" />
+        <p className="text-muted-foreground">Drop images or videos here</p>
+        <p className="text-xs text-muted-foreground" data-testid="media-paste-hint">
           or paste an image or video
         </p>
-        <Button size="sm" onClick={() => inputRef.current?.click()}>
-          Choose files
+        <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
+          <UploadIcon /> Choose files
         </Button>
-        <p className="text-[12px] text-faint">PNG, JPEG or WebP images; MP4 or WebM videos</p>
+        <p className="text-xs text-muted-foreground">PNG, JPEG or WebP images; MP4 or WebM videos</p>
         <input
           ref={inputRef}
           type="file"
@@ -427,12 +479,36 @@ export function MediaManager({ model: initial, onChanged }: Props) {
       </div>
 
       {errors.length > 0 && (
-        <div role="alert" className="flex flex-col gap-1 text-[13px] text-warn">
+        <div role="alert" className="flex flex-col gap-1 text-sm text-destructive">
           {errors.map((message, index) => (
             <p key={index}>{message}</p>
           ))}
         </div>
       )}
+      <AlertDialog open={doomed !== undefined} onOpenChange={(open) => !open && setConfirming(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this {doomed?.kind ?? 'item'}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {doomed?.caption ? `“${doomed.caption}” is` : 'It is'} removed from the template&apos;s media. It cannot be
+              undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={locked}
+              onClick={() => {
+                setConfirming(null)
+                if (doomed) write(() => api.deleteMedia(slug, doomed.id))
+              }}
+            >
+              Yes, delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   )
 }
@@ -440,7 +516,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
 /** A small preview of one item: the image, a video's poster, or a plain tile. */
 function Thumb({ slug, item, index }: { slug: string; item: MediaView; index: number }) {
   const tile =
-    'flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-[4px] bg-surface-3 text-[11px] text-faint'
+    'flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-ui-muted text-xs text-muted-foreground'
   if (item.missing) return <div className={tile}>Missing</div>
   const src = item.kind === 'image' ? api.mediaUrl(slug, item) : api.mediaPosterUrl(slug, item)
   if (!src) return <div className={tile}>Video</div>

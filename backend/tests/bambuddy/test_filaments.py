@@ -13,10 +13,16 @@ answers. What is tested here is that ScadBuddy sends it what it needs to answer 
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+from collections.abc import Callable
+from typing import ClassVar, Self, cast
+
 import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy import filaments
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import (
     COLOUR_MATCH_DISTANCE,
@@ -27,18 +33,23 @@ from scadbuddy.bambuddy.filaments import (
     build_options,
     check,
     colour_distance,
+    colours_match,
     gather_options,
     gather_plate_options,
     normalise_colour,
     queue_filaments,
+    seed_plan,
 )
 from scadbuddy.bambuddy.models import (
     Printer,
+    PrinterStatus,
     SlotChoice,
     SlotMaterial,
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.bambuddy.print_run import filament_options
+from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -188,14 +199,16 @@ def test_a_spool_in_another_printers_tray_takes_none_of_this_printers_state() ->
 
 def test_the_keychain_pre_selects_the_closest_blue_and_pink() -> None:
     """#87's acceptance case: two colours, no clicks. The blue is an exact match and
-    the pink is within the threshold; the far-off Hot Pink is not offered."""
+    the pink is the nearer of Magenta and Hot Pink."""
     built = options()
     chosen = {choice.slot_id: choice.spool_id for choice in built.suggested}
     assert chosen == {1: 5, 2: 3}
 
 
-def test_one_spool_is_never_pre_selected_for_two_slots() -> None:
-    """A two-colour plate opening with the same spool in both slots reads as a bug."""
+def test_one_spool_is_not_pre_selected_for_two_slots_with_a_free_one() -> None:
+    """A two-colour plate opening with the same spool in both slots reads as a bug. An
+    undeclared slot may still share a loaded spool rather than take another material:
+    test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu (#2461)."""
     built = options(
         requirements=[SlotNeed(slot_id=1, colour="#0047BB"), SlotNeed(slot_id=2, colour="#0047BB")]
     )
@@ -244,6 +257,54 @@ def test_unknown_grams_never_produce_a_low_filament_warning() -> None:
     assert all(slot.used_grams is None for slot in built.slots)
     warnings = check(built, FilamentPlan(slots=list(built.suggested)), copies=1000)
     assert not any(warning.kind == "low-filament" for warning in warnings)
+
+
+def test_a_spool_two_slots_share_must_cover_both() -> None:
+    """#2851: two 20 g slots on one spool with 30 g left need 40 g between them; each
+    slot fits on its own, so a per-slot check said nothing."""
+    built = options(
+        requirements=[
+            SlotNeed(slot_id=1, colour="#0047BB", used_grams=20.0),
+            SlotNeed(slot_id=2, colour="#0047BB", used_grams=20.0),
+        ]
+    )
+    spool = built.spools[0]
+    built = built.model_copy(update={"spools": [spool.model_copy(update={"remaining_g": 30.0})]})
+    plan = FilamentPlan(
+        slots=[
+            SlotChoice(slot_id=1, spool_id=spool.spool_id),
+            SlotChoice(slot_id=2, spool_id=spool.spool_id),
+        ]
+    )
+
+    low = [warning for warning in check(built, plan) if warning.kind == "low-filament"]
+
+    assert [warning.slot_id for warning in low] == [1, 2]
+    assert all("slots 1 and 2 need 40 g of it between them" in w.message for w in low)
+    # Enough for both: no warning.
+    plenty = built.model_copy(update={"spools": [spool.model_copy(update={"remaining_g": 45.0})]})
+    assert not [w for w in check(plenty, plan) if w.kind == "low-filament"]
+
+
+def test_three_slots_on_one_spool_are_named_and_an_unknown_one_is_left_out() -> None:
+    built = options(
+        requirements=[
+            SlotNeed(slot_id=1, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=2, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=3, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=4, colour="#0047BB", used_grams=None),
+        ]
+    )
+    spool = built.spools[0]
+    built = built.model_copy(update={"spools": [spool.model_copy(update={"remaining_g": 25.0})]})
+    plan = FilamentPlan(
+        slots=[SlotChoice(slot_id=i, spool_id=spool.spool_id) for i in (1, 2, 3, 4)]
+    )
+
+    low = [warning for warning in check(built, plan) if warning.kind == "low-filament"]
+
+    assert [warning.slot_id for warning in low] == [1, 2, 3]
+    assert all("slots 1, 2 and 3 need 30 g of it between them" in w.message for w in low)
 
 
 def test_known_grams_are_multiplied_by_the_copies() -> None:
@@ -395,16 +456,16 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     assert (printer.call_count, remain.call_count) == (1, 1)
 
 
-# --- the failure path (#525): shared reads sequential, plates concurrent -----
+# --- the failure path (#525): shared reads first, then the plates and the printer ---
 
 
 @respx.mock
 async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The shared reads run sequentially and before the plates: a failing ``spools()``
-    raises immediately, and neither the rest of the shared reads nor any plate's
-    requirements are ever asked for."""
+    """The shared reads run before the plates: a failing ``spools()`` raises, and no
+    plate's requirements nor the printer are ever asked for. The assignments are read
+    beside the spools (#2354), so the spools' error is the one raised."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(500, json={"detail": "spools-boom"})
     )
@@ -425,7 +486,7 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
     assert "spools-boom" in excinfo.value.detail
 
-    assert not assignments.called
+    assert assignments.called
     assert not requirements.called
     assert not printer.called
     assert not remain.called
@@ -435,7 +496,8 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
 async def test_a_printer_failure_is_raised_after_the_plates_are_read(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The printer is read after the plates, as the single-plate path always has."""
+    """The printer's failure is raised after the plates', as the single-plate path
+    always has, though both are read together now (#2354)."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
@@ -457,7 +519,7 @@ async def test_a_printer_failure_is_raised_after_the_plates_are_read(
     assert "printer-boom" in excinfo.value.detail
 
     assert requirements.call_count == 3
-    assert not remain.called
+    assert remain.called
 
 
 @respx.mock
@@ -484,7 +546,7 @@ async def test_a_plate_failure_beats_a_printer_failure(
     assert "plate-boom" in excinfo.value.detail
 
     assert requirements.called
-    assert not printer.called
+    assert printer.called
 
 
 @respx.mock
@@ -594,19 +656,12 @@ async def test_the_requirements_read_turns_that_zero_into_none(bambuddy: Bambudd
 def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     """``COLOUR_MATCH_DISTANCE`` is a real cut-off, not a number nothing reads: a
     colour just inside it is pre-selected and one just outside is not."""
-    near = f"#{int(COLOUR_MATCH_DISTANCE) - 1:02X}0000"
-    far = f"#{int(COLOUR_MATCH_DISTANCE) + 1:02X}0000"
-    black = [
-        Spool.model_validate(
-            {
-                "id": 1,
-                "material": "PLA",
-                "rgba": "000000FF",
-                "label_weight": 1000,
-                "weight_used": 0.0,
-            }
-        )
-    ]
+    near, far = "#230000", "#240000"
+    near_distance = colour_distance(near, "#000000")
+    far_distance = colour_distance(far, "#000000")
+    assert near_distance is not None and far_distance is not None
+    assert near_distance < COLOUR_MATCH_DISTANCE < far_distance
+    black = [_spool(1, "000000FF")]
     inside = build_options(
         library_file_id=1,
         spools=black,
@@ -621,3 +676,368 @@ def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     )
     assert [choice.spool_id for choice in inside.suggested] == [1]
     assert outside.suggested == []
+
+
+def _spool(spool_id: int, rgba: str | None, material: str = "PLA") -> Spool:
+    return Spool.model_validate(
+        {
+            "id": spool_id,
+            "material": material,
+            "rgba": rgba,
+            "label_weight": 1000,
+            "weight_used": 0.0,
+        }
+    )
+
+
+# CIEDE2000 test pairs from Sharma, Wu and Dalal (2005), Table 1.
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485), 2.0425),
+        ((50.0, -1.3802, -84.2814), (50.0, 0.0, -82.7485), 1.0000),
+        ((50.0, 2.5, 0.0), (73.0, 25.0, -18.0), 27.1492),
+        ((60.2574, -34.0099, 36.2677), (60.4626, -34.1751, 39.4387), 1.2644),
+        ((2.0776, 0.0795, -1.1350), (0.9033, -0.0636, -0.5514), 0.9082),
+    ],
+)
+def test_colour_distance_is_ciede2000(
+    first: tuple[float, float, float], second: tuple[float, float, float], expected: float
+) -> None:
+    assert filaments.ciede2000(first, second) == pytest.approx(expected, abs=1e-4)
+
+
+def test_a_pure_css_red_pre_selects_the_nearest_real_red_not_a_colourless_spool() -> None:
+    """#943: `#FF0000` is about 50 RGB units from every real red filament, so all of
+    them were excluded and a spool with no colour won the slot."""
+    shelf = [
+        _spool(30, None),  # Inland PLA Glow, Fluorescent Rainbow: no colour
+        _spool(4, "C12E1FFF"),  # PLA Basic Red
+        _spool(6, "D6001CFF", "PETG"),  # PETG Basic Red
+        _spool(11, "B50011FF"),  # PLA Translucent Red, 16 away
+    ]
+
+    def pick(material: str | None) -> list[int]:
+        built = build_options(
+            library_file_id=1,
+            spools=shelf,
+            assignments=[],
+            requirements=[SlotNeed(slot_id=1, colour="#FF0000", material=material)],
+        )
+        return [choice.spool_id for choice in built.suggested]
+
+    assert pick(None) == [6]
+    assert pick("PLA") == [4]
+
+
+def test_a_coloured_slot_with_only_a_colourless_spool_is_left_unchosen() -> None:
+    built = build_options(
+        library_file_id=1,
+        spools=[_spool(30, None)],
+        assignments=[],
+        requirements=[SlotNeed(slot_id=1, colour="#FF0000")],
+    )
+    assert built.suggested == []
+
+
+def test_a_loaded_cobalt_beats_a_closer_cyan_on_the_shelf() -> None:
+    """#943's second case: the loaded `#0056B8` was over the RGB cut-off, so the shelf
+    cyan was suggested and the dialog asked for a reload."""
+    loaded = SpoolAssignment.model_validate(
+        {**recording("inventory-assignments.json")[0], "spool_id": 40, "spool": None}
+    )
+    built = build_options(
+        library_file_id=1,
+        spools=[_spool(24, "0086D6FF"), _spool(40, "0056B8FF")],
+        assignments=[loaded],
+        requirements=[SlotNeed(slot_id=1, colour="#0D71E3")],
+        printer=printer(),
+    )
+    assert [choice.spool_id for choice in built.suggested] == [40]
+
+
+def _loaded(spool_id: int, tray_id: int) -> SpoolAssignment:
+    return SpoolAssignment.model_validate(
+        {
+            **recording("inventory-assignments.json")[0],
+            "id": 100 + spool_id,
+            "spool_id": spool_id,
+            "tray_id": tray_id,
+            "spool": None,
+        }
+    )
+
+
+def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoice]:
+    """#2461: pixel-art-mosaic's opening plan, two near-blacks and a green, with no
+    declared material (a generated template's slots declare none)."""
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=loaded,
+        requirements=[
+            SlotNeed(slot_id=1, colour="#263238"),
+            SlotNeed(slot_id=2, colour="#1A1A1A"),
+            SlotNeed(slot_id=3, colour="#3F8E43"),
+        ],
+        printer=printer(),
+    )
+    return built.suggested
+
+
+def _undeclared(shelf: list[Spool], loaded: list[SpoolAssignment], *colours: str) -> dict[int, int]:
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=loaded,
+        requirements=[SlotNeed(slot_id=n, colour=c) for n, c in enumerate(colours, start=1)],
+        printer=printer(),
+    )
+    return {choice.slot_id: choice.spool_id for choice in built.suggested}
+
+
+def test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu() -> None:
+    """#2461: slot 2 fell through to an unloaded TPU 95A in an all-PLA print, because the
+    loaded PLA Black was taken by slot 1 and an undeclared slot took any material."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # Inland PLA Basic Black, loaded
+        _spool(2, "101010FF", "TPU 95A"),  # Insignia TPU 95A Black, on the shelf
+        _spool(3, "3F8E43FF"),  # PLA Basic Mistletoe Green, loaded
+    ]
+    chosen = {
+        choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [_loaded(1, 0), _loaded(3, 1)])
+    }
+    assert chosen == {1: 1, 2: 1, 3: 3}
+
+
+def test_a_free_spool_of_the_plates_material_is_still_preferred_to_sharing() -> None:
+    shelf = [
+        _spool(1, "1A1A1AFF"),
+        _spool(2, "101010FF", "TPU 95A"),
+        _spool(3, "3F8E43FF"),
+        _spool(4, "111111FF"),  # a second PLA black, on the shelf
+    ]
+    chosen = {
+        choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [_loaded(1, 0), _loaded(3, 1)])
+    }
+    assert chosen == {1: 1, 2: 4, 3: 3}
+
+
+def test_an_undeclared_slot_with_only_another_material_is_left_for_the_user() -> None:
+    """Nothing loaded to share, and only a TPU of the colour: the slot opens empty
+    rather than mixing a material in."""
+    shelf = [_spool(1, "1A1A1AFF"), _spool(2, "101010FF", "TPU 95A"), _spool(3, "3F8E43FF")]
+    chosen = {choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [])}
+    assert chosen == {1: 1, 3: 3}
+
+
+def _seed(slot: SlotNeed, shelf: list[Spool], remembered: int) -> list[SlotChoice]:
+    built = build_options(library_file_id=1, spools=shelf, assignments=[], requirements=[slot])
+    return seed_plan(built, [SlotChoice(slot_id=slot.slot_id, spool_id=remembered)]).slots
+
+
+def test_a_remembered_spool_that_no_longer_fits_the_slot_gives_way_to_the_suggestion() -> None:
+    """#1653: the model was recoloured from black to red since the choice was remembered."""
+    shelf = [_spool(1, "000000FF"), _spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=1) == [
+        SlotChoice(slot_id=1, spool_id=4)
+    ]
+
+
+def test_a_remembered_spool_is_kept_for_a_slot_with_no_colour() -> None:
+    """#1653: with nothing to compare against, the remembered spool beats the suggestion."""
+    shelf = [_spool(1, "000000FF"), _spool(4, "C12E1FFF")]
+    built = build_options(
+        library_file_id=1, spools=shelf, assignments=[], requirements=[SlotNeed(slot_id=1)]
+    )
+    remembered = next(s.id for s in shelf if s.id != built.suggested[0].spool_id)
+    assert _seed(SlotNeed(slot_id=1), shelf, remembered=remembered) == [
+        SlotChoice(slot_id=1, spool_id=remembered)
+    ]
+
+
+def test_a_remembered_spool_that_has_left_the_inventory_gives_way_to_the_suggestion() -> None:
+    shelf = [_spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=99) == [
+        SlotChoice(slot_id=1, spool_id=4)
+    ]
+
+
+def test_a_colourless_spool_fits_every_coloured_slot() -> None:
+    """#1654: a spool with no ``rgba`` cannot be told apart from any colour, so a
+    remembered colourless spool survives every recolour. Deliberate (#933): the
+    auto-match never picks one for a coloured slot, but a person who chose it did."""
+    assert colours_match("#FF0000", None)
+    assert colours_match(None, "#FF0000")
+    assert colours_match(None, None)
+    shelf = [_spool(30, None), _spool(4, "C12E1FFF")]
+    assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=30) == [
+        SlotChoice(slot_id=1, spool_id=30)
+    ]
+
+
+class _ReadSource:
+    """Just what `filament_options` reads of a source: library file 62, one plate."""
+
+    colours: ClassVar[list[str]] = ["#FF0000"]
+
+    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        return ReadFile(62)
+
+    async def plate_ids(self, client: BambuddyClient) -> list[int]:
+        return [1]
+
+
+class _WatchedRead(asyncio.Future[PrinterStatus | None]):
+    """A status read that says when someone starts waiting on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited_on = asyncio.Event()
+        self.callbacks = 0
+
+    def add_done_callback(
+        self,
+        fn: Callable[[Self], object],
+        *,
+        context: contextvars.Context | None = None,
+    ) -> None:
+        # The premise (#2813): the `finally`'s `asyncio.wait` is the only caller that
+        # attaches a callback to the read, so the first one is the step waiting on it.
+        # Another caller would set this early and the test would pass for the wrong
+        # reason, so the count is checked too.
+        self.callbacks += 1
+        self.waited_on.set()
+        super().add_done_callback(fn, context=context)
+
+
+@respx.mock
+async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2509 review: ``choices_for`` shares one status read with the rack, so the
+    filament step waiting on it must not cancel it when the step itself is cancelled."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+    reading = _WatchedRead()
+    step = asyncio.ensure_future(
+        filament_options(bambuddy, cast(PrintSource, _ReadSource()), printer_id=1, status=reading)
+    )
+    # The step waits on the read only once every other read is done (#2630): no sleep
+    # can say when that is under load, so the read itself says.
+    async with asyncio.timeout(5):
+        await reading.waited_on.wait()
+    step.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await step
+
+    assert reading.callbacks == 1  # only the step's own wait attached one
+    assert not reading.done()
+    reading.set_result(None)
+    assert await reading is None
+
+
+def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> None:
+    """#2850: the family came from the single best match, so a PETG loaded beside the
+    PLA and closest to one slot left every other undeclared slot empty."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(3, "C02E20FF"),  # PLA red, loaded
+        _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded, an exact match
+    ]
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(3, 1), _loaded(5, 2)],
+        requirements=[
+            SlotNeed(slot_id=1, colour="#3F8E43"),
+            SlotNeed(slot_id=2, colour="#263238"),
+            SlotNeed(slot_id=3, colour="#C12E1F"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {2: 1, 3: 3}
+
+
+def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
+    """Regression cover for the declared path beside #2850's fix: with a slot declaring
+    PLA, an undeclared one is suggested a PLA, not the PETG that matches its colour
+    exactly. The anchor never runs here, so this passed before the fix too."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(3, "3F8E43FF"),  # PLA green, on the shelf
+        _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded
+    ]
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(5, 1)],
+        requirements=[
+            SlotNeed(slot_id=1, material="PLA", colour="#1A1A1A"),
+            SlotNeed(slot_id=2, colour="#3F8E43"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 1, 2: 3}
+
+
+@respx.mock
+async def test_a_shared_status_read_without_its_printer_is_refused(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2814: a contract, not an assert, so `python -O` keeps it. Refused before
+    anything is read: no request reaches Bambuddy (review #3007)."""
+    anything = respx.route(url__startswith=API).mock(return_value=httpx.Response(200, json=[]))
+    reading: asyncio.Future[PrinterStatus | None] = asyncio.get_running_loop().create_future()
+    with pytest.raises(ValueError, match="printer_id"):
+        await filament_options(bambuddy, cast(PrintSource, _ReadSource()), status=reading)
+    reading.cancel()
+    assert not anything.called
+
+
+def test_the_anchor_family_is_first_the_one_matching_most_slots_with_a_loaded_spool() -> None:
+    """#3028 review: one loaded PLA fitting one slot outweighs shelf PETGs fitting all
+    three."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # PLA black, loaded
+        _spool(2, "1A1A1AFF", "PETG"),
+        _spool(3, "C02E20FF", "PETG"),
+        _spool(4, "3F8E43FF", "PETG"),
+    ]
+    assert _undeclared(shelf, [_loaded(1, 0)], "#1A1A1A", "#C12E1F", "#3F8E43") == {1: 1}
+
+
+def test_with_no_loaded_spools_the_anchor_family_matches_the_most_slots() -> None:
+    """#3028 review: on a loaded-count tie, two PLAs fitting two slots beat a PETG that
+    is the closest match for the third."""
+    shelf = [
+        _spool(1, "C02E20FF"),  # PLA red
+        _spool(2, "3F8E43FF"),  # PLA green
+        _spool(3, "1A1A1AFF", "PETG"),  # PETG black, an exact match
+    ]
+    assert _undeclared(shelf, [], "#1A1A1A", "#C12E1F", "#3F8E43") == {2: 1, 3: 2}
+
+
+def test_on_a_slot_count_tie_the_anchor_family_has_the_best_single_match() -> None:
+    """#3028 review: equal loaded and matched slots, so the exact PETG black beats the
+    near PLA black. Both shelf orders (#3497 review): `min` keeps the first family it
+    met on a full tie, so one order alone passes without the best-match level."""
+    shelf = [
+        _spool(1, "101010FF"),  # PLA near-black
+        _spool(2, "1A1A1AFF", "PETG"),  # PETG black, an exact match
+    ]
+    assert _undeclared(shelf, [], "#1A1A1A") == {1: 2}
+    assert _undeclared(shelf[::-1], [], "#1A1A1A") == {1: 2}

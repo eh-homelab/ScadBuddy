@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import shutil
 import signal
 import tempfile
 import time
@@ -16,7 +18,9 @@ from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
-from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
+from scadbuddy.core.tracing import failure_class, span
+from scadbuddy.render.confinement import escaping_includes, sandboxed
+from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector, parse_diagnostics
 from scadbuddy.render.schema import (
     CustomizerSchema,
     Parameter,
@@ -42,8 +46,17 @@ _MISSING_FILE = re.compile(
     r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
 )
 
+#: An export OpenSCAD could not write (#952). It logs the line, leaves an empty file
+#: and still exits 0: a lone `rotate_extrude` touching the axis gives lib3mf
+#: degenerate triangles ("Can't add triangle to 3MF model."). Measured on 2026.10.05.
+_EXPORT_ERROR = re.compile(r"^EXPORT-ERROR: (?P<message>.*)$")
+
 #: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
 _PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+#: A template's object count, as `echo(objects = N)` logs it (#956).
+_OBJECTS = re.compile(r"^ECHO: objects = (?P<count>\d+)$")
+
+logger = logging.getLogger(__name__)
 
 
 #: A message a template echoes for the person customizing it (#285): `NOTE:` by
@@ -116,11 +129,19 @@ class ProcessOutput:
     #: Also read off the whole log: an echo at the top of a long model is not in
     #: the tail.
     plates: int | None = None
+    #: The last `echo(objects = N)` the run logged (#956), read as `plates` is.
+    objects: int | None = None
 
 
 def plate_count(line: str) -> int | None:
     """The plate count ``line`` states, if it is a template's `echo(plates = N)`."""
     match = _PLATES.match(line)
+    return int(match["count"]) if match else None
+
+
+def object_count(line: str) -> int | None:
+    """The object count ``line`` states, if it is a template's `echo(objects = N)`."""
+    match = _OBJECTS.match(line)
     return int(match["count"]) if match else None
 
 
@@ -169,6 +190,17 @@ def _require_in_range(parameter: Parameter, value: int | float) -> None:
         )
         raise ParameterValueError(
             parameter.name, f"parameter {parameter.name!r} must be {bounds}, got {value:g}"
+        )
+
+
+def _require_max_length(parameter: Parameter, value: str) -> None:
+    """The customizer's ``// N`` on a string (#1330), in code points: what OpenSCAD's
+    ``len()`` and the customizer's counter count (#920)."""
+    limit = parameter.max_length
+    if limit is not None and len(value) > limit:
+        raise ParameterValueError(
+            parameter.name,
+            f"parameter {parameter.name!r} must be at most {limit} characters, got {len(value)}",
         )
 
 
@@ -228,6 +260,9 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
 
 
 def _format_checked(parameter: Parameter, value: ParamValue) -> str:
+    if isinstance(value, str) and "\x00" in value:
+        # Neither execve nor Postgres takes one (#965).
+        raise ValueError(f"parameter {parameter.name!r} contains a NUL byte")
     if parameter.type == "boolean":
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
@@ -247,6 +282,7 @@ def _format_checked(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
         _refuse_path_like(parameter, value)
+        _require_max_length(parameter, value)
         return quote_string(value)
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
@@ -280,6 +316,19 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
     return defines
 
 
+def params_problem(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> str | None:
+    """What is wrong with ``params`` for ``schema``, or None (#432): the message half of
+    the API's `require_valid_params`, for the worker, which must not import the API."""
+    unknown = sorted(set(params) - {p.name for p in schema.parameters})
+    if unknown:
+        return f"unknown parameters: {', '.join(unknown)}"
+    try:
+        build_defines(schema, params)
+    except ValueError as error:  # UnknownParameterError, ParameterValueError, a wrong type
+        return str(error)
+    return None
+
+
 async def _drain(
     stream: asyncio.StreamReader,
     tail: deque[str],
@@ -287,6 +336,8 @@ async def _drain(
     notes: list[str],
     diagnostics: DiagnosticCollector,
     plates: list[int],
+    export_errors: list[str],
+    objects: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -301,6 +352,12 @@ async def _drain(
         count = plate_count(line)
         if count is not None:
             plates.append(count)
+        declared = object_count(line)
+        if declared is not None:
+            objects.append(declared)
+        export_error = _EXPORT_ERROR.match(line)
+        if export_error is not None:
+            export_errors.append(export_error["message"])
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
@@ -310,7 +367,32 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
 
-async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+#: `openscad --version`'s own budget.
+VERSION_TIMEOUT = 10.0
+
+
+async def probe_openscad_version(config: Config) -> str | None:
+    """``openscad --version`` writes to stderr, so both streams are merged."""
+    if shutil.which(config.openscad) is None:
+        return None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            config.openscad,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=VERSION_TIMEOUT)
+    except (OSError, TimeoutError):
+        logger.exception("could not read the openscad version")
+        return None
+    if process.returncode != 0:
+        return None
+    first = stdout.decode("utf-8", "replace").strip().splitlines()
+    return first[0].strip() if first else None
+
+
+async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
@@ -322,9 +404,18 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     # here the same way it would on a fresh install, instead of working by accident.
     if config.library_path:
         env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
+    # #994: a target outside the model and its libraries is refused before the run,
+    # and the run itself is confined to them; see render/confinement.py.
+    escaping = await asyncio.to_thread(escaping_includes, cwd, args[-1]) if args else []
+    if escaping:
+        log = [include.log_line() for include in escaping]
+        raise OpenSCADError(
+            "the model includes a file outside its directory and libraries",
+            log,
+            diagnostics=parse_diagnostics(log),
+        )
     process = await asyncio.create_subprocess_exec(
-        config.openscad,
-        *args,
+        *sandboxed(config.openscad, args, cwd=cwd, config=config, env=env),
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -335,9 +426,13 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     missing: list[str] = []
     notes: list[str] = []
     plates: list[int] = []
+    objects: list[int] = []
+    export_errors: list[str] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector, plates))
+    drain = asyncio.create_task(
+        _drain(process.stdout, tail, missing, notes, collector, plates, export_errors, objects)
+    )
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -360,9 +455,11 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         raise
     await drain
     duration = time.monotonic() - started
-    if returncode != 0:
+    if returncode != 0 or export_errors:
         raise OpenSCADError(
-            f"openscad exited with {returncode}",
+            f"openscad exited with {returncode}"
+            if returncode != 0
+            else f"openscad could not export: {export_errors[0]}",
             tail,
             returncode,
             collector.diagnostics,
@@ -378,13 +475,58 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         diagnostics_dropped=collector.dropped,
         notes=tuple(notes),
         plates=plates[-1] if plates else None,
+        objects=objects[-1] if objects else None,
     )
 
 
-async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
+def _export_attributes(args: Sequence[str]) -> dict[str, str]:
+    """What the call renders, never its defines: those carry parameter values."""
+    attributes: dict[str, str] = {}
+    if "-o" in args:
+        index = args.index("-o")
+        if index + 1 < len(args):
+            attributes["scadbuddy.openscad.format"] = Path(args[index + 1]).suffix.lstrip(".")
+    for arg in args:
+        if arg.startswith("--backend="):
+            attributes["scadbuddy.openscad.backend"] = arg.removeprefix("--backend=")
+    return attributes
+
+
+async def run_openscad(
+    args: Sequence[str], *, cwd: Path, config: Config, failure_is_fallback: bool = False
+) -> ProcessOutput:
+    """``failure_is_fallback``: the caller handles an `OpenSCADError` as a fallback, not
+    a failure (a colour's solid, spec 09-22 §6.3), so the span records the exit code and
+    the failure's class and ends without ERROR: a trace's spans are ERROR exactly when
+    its job fails (spec 2026-10-01 §6)."""
+    fallback: OpenSCADError | None = None
+    with span("openscad.export", attributes=_export_attributes(args)) as current:
+        try:
+            output = await _run_openscad(args, cwd=cwd, config=config)
+        except OpenSCADError as error:
+            if error.returncode is not None:
+                current.set_attribute("scadbuddy.openscad.exit_code", error.returncode)
+            if not failure_is_fallback:
+                raise
+            current.set_attribute("scadbuddy.failure_class", failure_class(error))
+            fallback = error
+        else:
+            current.set_attribute("scadbuddy.openscad.exit_code", output.returncode)
+            return output
+    raise fallback
+
+
+async def export_param_json(
+    scad_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="scadbuddy-param-") as tmp:
         target = Path(tmp) / "model.param"
-        await run_openscad(["-o", str(target), scad_path.name], cwd=scad_path.parent, config=config)
+        await run_openscad(
+            ["-o", str(target), scad_path.name],
+            cwd=scad_path.parent,
+            config=config,
+            failure_is_fallback=failure_is_fallback,
+        )
         try:
             data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -396,7 +538,9 @@ async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any
     return data
 
 
-async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
+async def export_schema(
+    scad_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> CustomizerSchema:
     """Every caller of this gets a schema or an OpenSCADError, never a raw KeyError.
 
     `build_schema` subscripts the export's dicts directly, so an entry without a `name`
@@ -405,19 +549,23 @@ async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
     reach on purpose (a `force`d save of source whose export is unusable).
     """
     source = scad_path.read_text(encoding="utf-8")
-    data = await export_param_json(scad_path, config=config)
+    data = await export_param_json(
+        scad_path, config=config, failure_is_fallback=failure_is_fallback
+    )
     try:
         return build_schema(data, source)
     except (ValueError, KeyError, TypeError) as error:
         raise OpenSCADError(f"the customizer schema could not be derived: {error}", []) from error
 
 
-async def cached_schema(scad_path: Path, cache_path: Path, *, config: Config) -> CustomizerSchema:
+async def cached_schema(
+    scad_path: Path, cache_path: Path, *, config: Config, failure_is_fallback: bool = False
+) -> CustomizerSchema:
     source = scad_path.read_text(encoding="utf-8")
     cached = load_cached_schema(cache_path, source_sha256(source), library_path=config.library_path)
     if cached is not None:
         return cached
-    schema = await export_schema(scad_path, config=config)
+    schema = await export_schema(scad_path, config=config, failure_is_fallback=failure_is_fallback)
     store_cached_schema(cache_path, schema, library_path=config.library_path)
     return schema
 
@@ -430,6 +578,7 @@ async def render_3mf(
     *,
     config: Config,
     extra_defines: Sequence[str] = (),
+    failure_is_fallback: bool = False,
 ) -> ProcessOutput:
     args = [
         "--backend=Manifold",
@@ -441,4 +590,6 @@ async def render_3mf(
         str(out_path.resolve()),
         scad_path.name,
     ]
-    return await run_openscad(args, cwd=scad_path.parent, config=config)
+    return await run_openscad(
+        args, cwd=scad_path.parent, config=config, failure_is_fallback=failure_is_fallback
+    )

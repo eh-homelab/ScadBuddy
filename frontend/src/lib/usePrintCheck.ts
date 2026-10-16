@@ -17,6 +17,8 @@ export interface PrintCheckState {
   verdict: PrintCheck | null
   /** Whether `verdict` answers the request as it stands now, not an earlier one. */
   current: boolean
+  /** The request as it stands now, serialised once: a key for what was asked, or `null`. */
+  request: string | null
   error: Error | undefined
   /** Read the verdict again, as after a failed read. */
   reload: () => void
@@ -52,6 +54,7 @@ export function usePrintCheck(
   return {
     verdict: state.error ? null : (answer?.verdict ?? null),
     current: !state.error && answer?.request === wanted,
+    request: wanted,
     error: state.error,
     reload: state.reload,
   }

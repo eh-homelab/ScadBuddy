@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import psycopg
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from google.protobuf.duration_pb2 import Duration
 from psycopg.types.json import Jsonb
+from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api import settings as settings_api
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.operations.component import OPERATIONS
+from scadbuddy.workflows.client import connect, connect_lazily
+from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
@@ -24,6 +37,11 @@ DEFAULTS: dict[str, object] = {
     "printer_id": None,
     "default_plate": None,
     "display_unit": "mm",
+    "print_run_retention_seconds": None,
+    "operation_retention_seconds": None,
+    "activity_ttl_seconds": None,
+    "activity_repair_window_seconds": None,
+    "activity_follow": None,
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
     "temporal_ui_url": None,
@@ -57,8 +75,8 @@ def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> No
     assert "bambuddy_api_key" not in body
     assert "s3cret" not in response.text
 
-    # Stored as given, in plain text, as the old 0600 file held it: the backend has no
-    # secret store, so it is in every backup of the database.
+    # Stored as given, in plain text: this app has no SCADBUDDY_SECRET_KEY_FILE. With
+    # one it is sealed (#602, tests/test_settings_secrets.py).
     stored = read_stored(settings.database_url)
     assert stored["bambuddy_api_key"] == "s3cret"
 
@@ -154,6 +172,101 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
     )
 
 
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
+def test_a_retention_is_stored_and_a_clear_keeps_every_row(
+    client: TestClient, settings: Settings, field: str
+) -> None:
+    """#1052/#1053, spec 2026-10-01 §4.2, §5.4: empty keeps every row; a number prunes
+    older ones."""
+    saved = client.put("/api/v1/settings", json={field: 604800})
+    assert saved.json()[field] == 604800
+    assert read_stored(settings.database_url)[field] == 604800
+    cleared = client.put("/api/v1/settings", json={field: None})
+    assert cleared.json()[field] is None
+
+
+@pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
+@pytest.mark.parametrize("value", [0, -1, 86, 86399])
+def test_a_retention_under_a_day_is_refused(client: TestClient, field: str, value: int) -> None:
+    """Review #1061 2a: under the repeat window, a pruned row turns a retry of a print
+    that succeeded into a second print."""
+    response = client.put("/api/v1/settings", json={field: value})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field", ["print_run_retention_seconds", "operation_retention_seconds", "activity_ttl_seconds"]
+)
+def test_a_retention_over_ten_years_is_refused(
+    client: TestClient, settings: Settings, field: str
+) -> None:
+    """A deployment stored 656868686867 s: every prune's ``now() - retention`` was out of
+    Postgres's timestamp range, so the activity sweep failed on every run."""
+    response = client.put("/api/v1/settings", json={field: 656868686867})
+    assert response.status_code == 422
+    assert field not in read_stored(settings.database_url)
+
+
+@pytest.fixture
+def three_day_namespace(app: FastAPI, temporal_address: str) -> Iterator[None]:
+    """The operations client on a namespace that keeps a closed execution 3 days."""
+    namespace = f"retention-{uuid.uuid4().hex[:12]}"
+
+    async def register() -> None:
+        temporal = await connect(temporal_address, "default")
+        await temporal.workflow_service.register_namespace(
+            RegisterNamespaceRequest(
+                namespace=namespace,
+                workflow_execution_retention_period=Duration(seconds=3 * 86400),
+            )
+        )
+
+    asyncio.run(register())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily(temporal_address, namespace))
+    )
+    yield
+    state.components.override(OPERATIONS, ops)
+
+
+@pytest.mark.usefixtures("three_day_namespace")
+def test_an_operation_retention_below_temporals_is_refused_beside_the_field(
+    client: TestClient, settings: Settings
+) -> None:
+    """Review #1063 r6 2: a record pruned before Temporal forgets the execution turns a
+    keyed retry of a recorded outcome into "may have been done"."""
+    refused = client.put("/api/v1/settings", json={"operation_retention_seconds": 2 * 86400})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == ["body", "operation_retention_seconds"]
+    assert "3 days" in refused.json()["errors"][0]["msg"]
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    saved = client.put("/api/v1/settings", json={"operation_retention_seconds": 3 * 86400})
+    assert saved.status_code == 200, saved.text
+
+
+def test_an_operation_retention_is_refused_while_temporal_cannot_say(
+    client: TestClient, app: FastAPI, settings: Settings
+) -> None:
+    """Unchecked, it could be below Temporal's: refused, as a command is, until it answers."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    ops = state.components.get(OPERATIONS)
+    state.components.override(
+        OPERATIONS, dataclasses.replace(ops, client=connect_lazily("127.0.0.1:1", "default"))
+    )
+    try:
+        response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+        # A field that does not depend on Temporal still saves.
+        other = client.put("/api/v1/settings", json={"printer_id": 3})
+    finally:
+        state.components.override(OPERATIONS, ops)
+    assert response.status_code == 503
+    assert response.json()["type"].endswith("/temporal-unavailable")
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+    assert other.status_code == 200
+
+
 def test_an_unknown_display_unit_is_refused(client: TestClient) -> None:
     assert client.put("/api/v1/settings", json={"display_unit": "cm"}).status_code == 422
 
@@ -211,6 +324,7 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is True
+    assert body["upstream"] is None
     assert "3DP-31B-598" in body["detail"]
     assert body["printers"] == [
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
@@ -247,6 +361,73 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
     assert "ConnectError" in body["detail"]
+    # What went wrong, in ScadBuddy's words (#1542).
+    assert body["upstream"] == {
+        "status": None,
+        "retry_after": None,
+        "detail": None,
+        "error": "ConnectError: could not connect",
+    }
+
+
+@respx.mock
+def test_a_test_never_passes_on_what_a_non_http_peer_sent(client: TestClient) -> None:
+    """#2021 review: pointed at another TCP service, h11 quotes that service's first
+    line in its error. The URL is a setting, so that text must not come back."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        side_effect=httpx.RemoteProtocolError("illegal status line: bytearray(b'-ERR secret')")
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert "secret" not in json.dumps(body)
+    assert body["upstream"]["error"] == "RemoteProtocolError: the server did not answer in HTTP"
+
+
+@respx.mock
+def test_a_rate_limit_until_a_date_reads_as_one(client: TestClient) -> None:
+    """#2037: a Retry-After HTTP-date is said as "until", never as "<date> s"."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    when = "Thu, 09 Oct 2026 07:28:00 GMT"
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(429, headers={"Retry-After": when}))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert f"wait until {when}" in body["detail"]
+    assert f"{when} s" not in body["detail"]
+    assert body["upstream"]["retry_after"] == when
+
+
+@respx.mock
+def test_a_rate_limited_test_shows_what_bambuddy_said(client: TestClient) -> None:
+    """#1542: a 429's own words and its Retry-After, not only ScadBuddy's sentence."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(
+        return_value=httpx.Response(
+            429, headers={"Retry-After": "30"}, json={"detail": "Too many requests"}
+        )
+    )
+
+    body = client.post("/api/v1/settings/test").json()
+    assert body["ok"] is False
+    assert "limiting requests" in body["detail"]
+    assert "wait 30 s" in body["detail"]
+    assert body["upstream"] == {
+        "status": 429,
+        "retry_after": "30",
+        "detail": "Too many requests",
+        "error": None,
+    }
+
+
+@respx.mock
+def test_a_failed_test_never_passes_the_body_through(client: TestClient) -> None:
+    """The URL is a setting: a body passed through would read any reachable address."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get(PRINTERS_URL).mock(return_value=httpx.Response(500, text="internal secret page"))
+
+    body = client.post("/api/v1/settings/test").json()
+    assert body["upstream"] == {"status": 500, "retry_after": None, "detail": None, "error": None}
+    assert "internal secret page" not in json.dumps(body)
 
 
 def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> None:
@@ -342,3 +523,60 @@ def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
     assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
     assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
     assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200
+
+
+def test_an_operation_retention_temporal_refuses_to_check_is_a_500(
+    client: TestClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1316 (12) 1: the check reads a failed `DescribeNamespace` as the routes and
+    the reconcilers do (`temporal_failure`): a refusal is a misconfiguration, never "try
+    again shortly"."""
+
+    async def refused(client: object) -> None:
+        raise TemporalRefusedError("default")
+
+    monkeypatch.setattr(settings_api, "namespace_retention", refused)
+    response = client.put("/api/v1/settings", json={"operation_retention_seconds": 604800})
+    assert response.status_code == 500, response.text
+    assert response.json()["type"] == operations_api.TEMPORAL_REFUSED_PROBLEM
+    # A describe starts nothing: no `may_have_started` to act on.
+    assert "may_have_started" not in response.json()
+    assert "try again shortly" not in response.text
+    assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+
+
+def test_the_activity_settings_round_trip(client: TestClient, settings: Settings) -> None:
+    """Spec 2026-10-09 §6: the three stored settings are saved, read back and cleared."""
+    body = client.get("/api/v1/settings").json()
+    assert (
+        body["activity_ttl_seconds"],
+        body["activity_repair_window_seconds"],
+        body["activity_follow"],
+    ) == (None, None, None)
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "activity_ttl_seconds": 7 * 86400,
+            "activity_repair_window_seconds": 3600,
+            "activity_follow": ["browser", "token:t1"],
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["activity_ttl_seconds"] == 7 * 86400
+    assert saved.json()["activity_repair_window_seconds"] == 3600
+    assert saved.json()["activity_follow"] == ["browser", "token:t1"]
+    assert read_stored(settings.database_url)["activity_follow"] == ["browser", "token:t1"]
+    assert client.get("/api/v1/settings").json()["activity_follow"] == ["browser", "token:t1"]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"activity_ttl_seconds": 3600},
+        {"activity_repair_window_seconds": 60},
+        {"activity_repair_window_seconds": 8 * 86400},
+        {"activity_follow": ["x" * 257]},
+    ],
+)
+def test_a_bad_activity_setting_is_refused(client: TestClient, patch: dict[str, object]) -> None:
+    assert client.put("/api/v1/settings", json=patch).status_code == 422

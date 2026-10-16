@@ -22,6 +22,7 @@ from scadbuddy.render.runner import (
     export_schema,
     format_scad_value,
     missing_file,
+    object_count,
     plate_count,
     quote_string,
     render_3mf,
@@ -350,6 +351,29 @@ async def test_a_failed_run_names_the_files_it_could_not_open(tmp_path: Path) ->
     assert raised.value.missing_files == ("pic.svg", "mask.png")
 
 
+#: #952, measured on 2026.09.28: a lone rotate_extrude that touches the axis exports
+#: degenerate triangles lib3mf refuses. OpenSCAD logs it, writes an empty 3MF and
+#: still exits 0.
+EXPORT_ERROR_OPENSCAD = """#!/bin/sh
+echo "EXPORT-ERROR: Can't add triangle to 3MF model."
+echo "Top level object is a 3D object (PolySet):"
+"""
+
+
+async def test_an_export_error_fails_the_run_though_openscad_exits_0(tmp_path: Path) -> None:
+    binary = tmp_path / "export-error-openscad"
+    binary.write_text(EXPORT_ERROR_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert str(raised.value) == "openscad could not export: Can't add triangle to 3MF model."
+    assert raised.value.returncode == 0
+    assert any("EXPORT-ERROR" in line for line in raised.value.log_tail)
+
+
 # ── #281: free-text values that would steer import()/surface() off the model ──
 
 TEXT_PARAMETER = Parameter(name="label", type="string", initial="/default/is/the/templates")
@@ -553,6 +577,29 @@ def test_a_value_outside_the_range_is_refused_by_name(
     assert refused.value.parameter == "n"
 
 
+def _text(**changes: object) -> Parameter:
+    return Parameter(name="label", type="string", max_length=5).model_copy(update=changes)
+
+
+@pytest.mark.parametrize("value", ["", "abcde", "ab😀de"])
+def test_a_string_within_its_max_length_is_taken(value: str) -> None:
+    """Code points, as OpenSCAD's len() and the customizer's counter count (#920)."""
+    format_scad_value(_text(), value)
+
+
+def test_a_string_past_its_max_length_is_refused_by_name() -> None:
+    """#1330: `// 5` was only the browser's to enforce."""
+    with pytest.raises(
+        ParameterValueError, match="'label' must be at most 5 characters, got 6"
+    ) as refused:
+        format_scad_value(_text(), "abcdef")
+    assert refused.value.parameter == "label"
+
+
+def test_a_string_without_a_max_length_takes_any_length() -> None:
+    format_scad_value(_text(max_length=None), "x" * 500)
+
+
 def test_the_step_is_not_enforced() -> None:
     # plant-label ships `thickness = 2.5; // [1.6:0.2:5]`, off its own grid.
     assert format_scad_value(_slider(min=1.6, max=5, step=0.2), 2.5) == "2.5"
@@ -614,3 +661,27 @@ async def test_a_run_that_echoes_no_plate_count_reports_none(tmp_path: Path) -> 
     config = Config(openscad=str(binary), data_dir=tmp_path / "data")
 
     assert (await run_openscad([], cwd=tmp_path, config=config)).plates is None
+
+
+# ── #956: a template states its object count with `echo(objects = N)` ────────
+
+
+def test_object_count_reads_only_the_objects_echo() -> None:
+    assert object_count("ECHO: objects = 3") == 3
+    assert object_count('ECHO: "objects = 2"') is None
+    assert object_count("ECHO: objects = 2, lid = true") is None
+    assert object_count("ECHO: plates = 2") is None
+
+
+async def test_a_run_reports_the_last_object_count_beside_its_plates(tmp_path: Path) -> None:
+    binary = tmp_path / "objects-openscad"
+    binary.write_text(
+        '#!/bin/sh\necho "ECHO: objects = 2"\necho "ECHO: plates = 2"\necho "ECHO: objects = 4"\n',
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert (output.plates, output.objects) == (2, 4)

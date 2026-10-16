@@ -1,16 +1,14 @@
 import { useState } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Spinner } from './ui/Spinner'
+import { SettingBody, SettingCard, SwitchField } from './settings/form'
 
 /**
  * #827 — lets the AI assistant make HTTP requests (its `http_request` tool, "curl") to
  * the internet and the local network. Stored by the agent service
  * (`/api/v1/ai/settings/http-request`), on by default.
  *
- * Hidden when the agent service or its database is not there, like the headless
- * browser switch. Only the user may flip it: it is a settings write, and an agent must
+ * Hidden when the agent service or its database is not there. Only the user may flip it: it is a settings write, and an agent must
  * not grant itself network reach (AI design spec §8.1).
  */
 export function HttpRequestSetting() {
@@ -34,33 +32,27 @@ export function HttpRequestSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">AI HTTP requests</h2>
-      <div className="p-4">
-        <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={saving}
-            aria-busy={saving}
-            onChange={(event) => void toggle(event.target.checked)}
-            className="mt-0.5"
-            aria-describedby="http-request-help"
-          />
-          Let the assistant make HTTP requests
-          {saving && <Spinner />}
-        </label>
-        <p id="http-request-help" className="mt-1.5 text-[12px] text-muted">
+    <SettingCard title="AI HTTP requests">
+      <SettingBody className="space-y-1.5">
+        <SwitchField
+          label="Let the assistant make HTTP requests"
+          checked={enabled}
+          disabled={saving}
+          busy={saving}
+          onCheckedChange={(next) => void toggle(next)}
+          describedBy="http-request-help"
+        />
+        <p id="http-request-help" className="text-xs text-muted-foreground">
           Like curl: any http or https address, on the internet or your local network. Reading
           (GET, HEAD) happens at once; sending, changing or deleting anything (POST, PUT, PATCH,
           DELETE) waits for your approval. Every request is listed in AI activity.
         </p>
         {error && (
-          <p role="alert" className="mt-1.5 text-[12px] text-warn">
+          <p role="alert" className="text-xs text-warn">
             {error}
           </p>
         )}
-      </div>
-    </section>
+      </SettingBody>
+    </SettingCard>
   )
 }

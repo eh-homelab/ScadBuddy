@@ -8,9 +8,11 @@ import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { projectViews } from '../mocks/fixtures'
+import { setMockRemembered } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
+import { chooseProject, pickerValue } from '../test/projectPicker'
 
 // As in CustomizePage.test.tsx: jsdom has no WebGL.
 vi.mock('../components/Preview', () => ({
@@ -43,7 +45,9 @@ async function open(route = '/m/name-keychain') {
     </Shell>,
     { route, path: '/m/:slug' },
   )
-  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+  // The first render goes through the whole mocked pipeline; on a loaded host it took
+  // over 4 s to show (#1485).
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
   return view
 }
 
@@ -126,6 +130,8 @@ describe('customizer tools', () => {
     expect(!tooLong.ok && tooLong.error).toMatchObject({ code: 'invalid_args', message: '"name" is at most 20 characters.' })
     const outOfRange = await call('set_param', { name: 'text_size', value: 99 })
     expect(!outOfRange.ok && outOfRange.error.message).toBe('"text_size" is at most 28.')
+    const outOfRangeText = await call('set_param', { name: 'text_size', value: '99' })
+    expect(!outOfRangeText.ok && outOfRangeText.error.message).toBe('"text_size" is at most 28.')
     const unknown = await call('set_param', { name: 'nope', value: 1 })
     expect(!unknown.ok && unknown.error.code).toBe('invalid_args')
 
@@ -133,6 +139,12 @@ describe('customizer tools', () => {
     const mixed = await call('set_params', { values: { name: 'Ok', text_size: 'big' } })
     expect(!mixed.ok && mixed.error.code).toBe('invalid_args')
     expect(field).toHaveValue('Reagan')
+  })
+
+  it('takes a number sent as a numeric string, as the model sometimes sends it (#948)', async () => {
+    await open()
+    const outcome = await call('set_param', { name: 'text_size', value: '20' })
+    expect(outcome).toMatchObject({ ok: true, result: { name: 'text_size', value: 20 } })
   })
 
   it('shows the tab of the parameter it changed, and resets it', async () => {
@@ -161,7 +173,7 @@ describe('customizer tools', () => {
     expect(!early.ok && early.error.message).toMatch(/generate first/)
 
     const generated = await call('generate', { timeout_ms: 5000 })
-    expect(generated).toMatchObject({ ok: true, result: { output: { id: expect.any(String) } } })
+    expect(generated).toMatchObject({ ok: true, result: { output: { id: expect.any(String), slug: expect.any(String) }, filed: null } })
 
     expect(await call('open_print_dialog', { kind: 'send' })).toMatchObject({ ok: true })
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
@@ -194,15 +206,20 @@ describe('customizer tools', () => {
         HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
       ),
     )
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 1 } } })
     await open()
-    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    // Filed in the remembered project too, which the answer says (#931: the agent records it).
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({
+      ok: true,
+      result: { filed: { project_id: 1, library_file_id: expect.any(Number), created: expect.any(Boolean) } },
+    })
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     expect(await call('open_print_dialog', { kind: 'print' })).toMatchObject({ ok: true })
     const dialog = await screen.findByRole('dialog')
     // The dialog's project picker is an Advanced step.
     fireEvent.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
-    expect(dialogPicker).toHaveValue('1')
+    expect(pickerValue(dialogPicker)).toBe('1')
     expect(dialogPicker).toBeEnabled()
 
     // The dialog is open when the agent generates again: its picker shares the project.
@@ -217,11 +234,62 @@ describe('customizer tools', () => {
     await waitFor(() => expect(within(again).getByTestId('project-select')).toBeEnabled())
   })
 
+  it('refuses to file away from the remembered project until the agent names one (#1660)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
+      ),
+    )
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const { user } = await open()
+    const picker = screen.getByTestId('customize-project-select')
+    await waitFor(() => expect(pickerValue(picker)).toBe('2'))
+    await chooseProject(user, picker, 1)
+
+    const refused = await call('generate', { timeout_ms: 5000 })
+    expect(!refused.ok && refused.error.message).toMatch(
+      /last filed in project 2 \(Gridfinity Bins\).*picker has project 1 \(Reagan Keychain\)/,
+    )
+    // Named, it files there and the picker follows.
+    expect(await call('generate', { timeout_ms: 5000, project_id: 2 })).toMatchObject({
+      ok: true,
+      result: { filed: { project_id: 2 } },
+    })
+    expect(pickerValue(picker)).toBe('2')
+  })
+
+  it('files nothing with project_id null, past the remembered-project check (#1660)', async () => {
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    await open()
+    const picker = screen.getByTestId('customize-project-select')
+    await waitFor(() => expect(pickerValue(picker)).toBe('2'))
+
+    const generated = await call('generate', { timeout_ms: 5000, project_id: null })
+    expect(generated).toMatchObject({ ok: true, result: { filed: null } })
+    expect(pickerValue(picker)).toBe('')
+  })
+
+  it('refuses a project_id Bambuddy does not list, saving nothing (#1660)', async () => {
+    const saved = vi.fn()
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/outputs')) saved()
+    })
+    await open()
+    // The picker shows once the project list has loaded.
+    const picker = await screen.findByTestId('customize-project-select')
+
+    const refused = await call('generate', { timeout_ms: 5000, project_id: 999 })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'invalid_args' } })
+    expect(!refused.ok && refused.error.message).toMatch(/no project 999/)
+    expect(saved).not.toHaveBeenCalled()
+    expect(pickerValue(picker)).toBe('')
+  })
+
   it('holds Generate while a project is being created (#665)', async () => {
     const { user } = await open()
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('customize-project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('post', '/api/v1/print/projects')
@@ -232,7 +300,7 @@ describe('customizer tools', () => {
     expect(!refused.ok && refused.error.message).toMatch(/still being created/)
 
     release()
-    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(picker).toHaveTextContent(/Workshop Bins/))
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
   })
 
@@ -240,8 +308,8 @@ describe('customizer tools', () => {
     const { user } = await open()
     expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
-    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
-    await user.selectOptions(picker, 'new')
+    const picker = screen.getByTestId('customize-project-select')
+    await chooseProject(user, picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
     const release = hold('post', '/api/v1/print/projects')
@@ -252,7 +320,7 @@ describe('customizer tools', () => {
     expect(!refused.ok && refused.error.message).toMatch(/still being created/)
 
     release()
-    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(picker).toHaveTextContent(/Workshop Bins/))
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 

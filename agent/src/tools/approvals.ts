@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { hasTier } from '../auth/principal.js'
-import { defineTool, errorResult, json, type Tool } from './registry.js'
+import { defineTool, effectiveTool, errorResult, json, type Tool } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
 // The `confirm` half of spec §8.2's prepare/confirm flow for external MCP
@@ -65,8 +65,11 @@ export const approvalTools: Tool[] = [
       const action = await pending.find(pending_action_id, principal)
       if (!action) return refused(`no pending action ${pending_action_id} for this caller (it may have expired)`)
       const tool = ctx.lookup?.(action.tool)
-      if (!tool?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
-      if (!hasTier(principal, tool.risk)) return refused(`${tool.name} needs the "${tool.risk}" tier`)
+      // As it runs now (#1953): raised to outward since the prepare still runs here; disabled since, never.
+      const effective = tool ? await effectiveTool(tool, ctx) : undefined
+      if (!tool || !effective?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
+      if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Plugins; nothing was sent`)
+      if (!hasTier(principal, effective.risk)) return refused(`${tool.name} needs the "${effective.risk}" tier`)
       // Parsed as the prepare parsed them, so the hash compares like with like.
       // The tool's own schema, as the prepare parsed it (runTool: `tool.parse`),
       // so the hash compares like with like and no top-level refinement is lost.

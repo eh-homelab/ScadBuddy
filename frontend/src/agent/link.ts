@@ -1,6 +1,7 @@
 import { socketUrl } from '../lib/lsp'
 import { parseAgentFrame, tabFrame, type PairingEntry, type TabFrame } from './linkProtocol'
 import { TAB_ID } from './tabId'
+import type { CallResult } from './types'
 
 /**
  * This tab's socket to the agent service (#254): the transport that lets a server-side
@@ -28,9 +29,9 @@ import { TAB_ID } from './tabId'
 export const BRIDGE_SOCKET_PATH = '/api/v1/ai/bridge'
 /**
  * The largest `result` frame sent, in UTF-8 bytes (not string length: non-ASCII text takes
- * up to 3 bytes per UTF-16 unit). The agent's sockets take frames up to 256 KiB (agent
- * `src/main.ts`), and a larger one would close this socket; a result over this is answered
- * as a `failed` error instead, so the agent can ask for less.
+ * up to 3 bytes per UTF-16 unit). The agent takes a tab's frames up to 256 KiB (agent
+ * `src/routes/bridge.ts` `BRIDGE_FRAME_MAX`), and a larger one would close this socket; a
+ * result over this is answered as a `failed` error instead, so the agent can ask for less.
  */
 export const MAX_RESULT_BYTES = 200_000
 
@@ -69,9 +70,14 @@ export interface TabLinkOptions {
   tabId?: string
   url?: string
   WebSocketImpl?: typeof WebSocket
-  /** Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`. */
+  /**
+   * Reconnect back-off: `baseMs · 2^attempt`, capped at `maxMs`, then scaled by a random
+   * half to all of it, so tabs an agent restart dropped together do not return in lockstep (#747).
+   */
   baseMs?: number
   maxMs?: number
+  /** The jitter's source, in [0, 1); tests fix it. */
+  random?: () => number
 }
 
 export function createTabLink({
@@ -81,6 +87,7 @@ export function createTabLink({
   WebSocketImpl = WebSocket,
   baseMs = 500,
   maxMs = 15_000,
+  random = Math.random,
 }: TabLinkOptions): TabLink {
   let socket: WebSocket | undefined
   let closed = false
@@ -113,7 +120,14 @@ export function createTabLink({
   }
 
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
-    const outcome = await bridge.call(tool, args)
+    // #747 — a call that throws (a stale catalogue chunk) still gets its answer, or the
+    // agent waits out its timeout for it.
+    const outcome = await bridge.call(tool, args).catch(
+      (error: unknown): CallResult => ({
+        ok: false,
+        error: { code: 'failed', message: `"${tool}" failed in the tab: ${String(error)}` },
+      }),
+    )
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
     const bytes = new TextEncoder().encode(frame).byteLength
     if (bytes > MAX_RESULT_BYTES) {
@@ -179,7 +193,7 @@ export function createTabLink({
       socket = undefined
       // What was pending may have been answered elsewhere; the next connection says again.
       setState({ connected: false, pending: [], paired: [] })
-      const delay = Math.min(maxMs, baseMs * 2 ** attempt)
+      const delay = Math.min(maxMs, baseMs * 2 ** attempt) * (0.5 + random() / 2)
       attempt += 1
       timer = setTimeout(open, delay)
     }

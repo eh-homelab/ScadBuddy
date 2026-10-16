@@ -58,8 +58,8 @@ token are placeholders, filled in from the plugin's
 - In Claude Code, the tools appear as `mcp__plugin_scadbuddy_scadbuddy__<tool>`
   ([MCP servers in plugins](https://code.claude.com/docs/en/plugins/components)).
 
-The `/mcp` endpoint and its tools are built in issues #251 and #261. Until they
-ship, the skills and agents load, but the server has nothing to connect to.
+The `/mcp` endpoint and its tools are ScadBuddy's agent sidecar (#251, #261). Mint
+the token in ScadBuddy Settings → Assistant → **MCP access tokens**.
 
 ## Inside ScadBuddy
 
@@ -72,10 +72,14 @@ here (#896). The agent serves the tools in-process as the `scadbuddy` server, so
 they are named `mcp__scadbuddy__<tool>` there (AI spec §3.1 and §5.1). `.mcp.json`
 is only for external installs (issue #299).
 
-The subagents' `tools` allow both server names, `mcp__scadbuddy` and
-`mcp__plugin_scadbuddy_scadbuddy`, so the same file works in both places and
-nothing else is reachable
-([Subagents](https://code.claude.com/docs/en/sub-agents)).
+The subagents list no `tools`, so they inherit the session's tools: the `scadbuddy`
+server under either name, and whatever else the session has (its plugins, the HTTP
+request tool, the headless browser) (#2320;
+[Subagents](https://code.claude.com/docs/en/sub-agents): a subagent with no `tools`
+inherits the main thread's). Each call goes through the same checks as the session's own.
+Each lists `disallowedTools`: Claude Code's shell, file and web built-ins, and for
+`print-analyst` the send and print tools (#2562). In a durable ScadBuddy session they get
+ScadBuddy's own tools only (`docs/ai/claude-plugin.md`).
 
 ## Versioning
 

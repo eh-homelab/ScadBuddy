@@ -16,7 +16,9 @@ import {
 import { PROBE_FALLBACK_MODEL } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
-import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { createMemoryHooks, HindsightClient, type MemoryActivity } from '../src/memory/hindsight.js'
+import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 
 // #1093 end to end: runWithFallback over the real SDK and its bundled Claude
 // Code binary, against one fake Anthropic endpoint that answers each
@@ -32,6 +34,8 @@ try {
 
 const TOKEN_A = 'gw-fallback-first-token-aaaa'
 const TOKEN_B = 'gw-fallback-second-token-bbbb'
+/** A wall-clock step tolerated between two Date.now() reads (#1485). */
+const WALL_CLOCK_SLACK_MS = 60_000
 
 describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake endpoint${cliMissing ? ` (skipped: ${cliMissing})` : ''}`, () => {
   let fake: FakeAnthropic
@@ -105,6 +109,42 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(JSON.stringify(messages)).not.toMatch(/Not logged in|API Error/)
   }, 60_000)
 
+  it('recalls memory once for the user’s message when the turn falls back and resumes (#1896)', async () => {
+    const hindsight = await startFakeHindsight()
+    try {
+      hindsight.memories = ['The user prints boxes in PETG.']
+      const activity: MemoryActivity[] = []
+      const memory = createMemoryHooks({
+        client: new HindsightClient({ apiBase: `http://hindsight.invalid:${hindsight.port}`, bankId: 'b', address: '127.0.0.1' }),
+        secrets: [TOKEN_A, TOKEN_B],
+        log: () => {},
+        // As the session manager sets it: the user's words, whatever the attempt's prompt.
+        hookConfig: { autoRetain: false, recallQuery: 'Make a box' },
+        onActivity: (a) => {
+          activity.push(a)
+        },
+      })
+      forA = () => ({ error: { status: 401, type: 'authentication_error', message: 'invalid token' } })
+      forB = () => ({ text: 'Box made.' })
+      const { result, reports } = await turn({ memoryHooks: memory.hooks })
+      await memory.settled()
+      expect(result).toMatchObject({ subtype: 'success', is_error: false, result: 'Box made.' })
+      expect(reports.map((r) => [r.id, r.outcome.class])).toEqual([
+        ['a', 'permanent'],
+        ['b', 'ok'],
+      ])
+      // One recall for the one user message: the resumed attempt's continuation is not a new message.
+      expect(hindsight.recalls()).toHaveLength(1)
+      expect(activity.filter((a) => a.action === 'recall')).toHaveLength(1)
+      // The resumed request carries the memories once, from the first attempt's transcript.
+      const sent = JSON.stringify(callsWith(TOKEN_B).at(-1)?.body?.messages)
+      expect(sent).toContain(CONTINUE_PROMPT)
+      expect(sent.split('The user prints boxes in PETG.').length - 1).toBe(1)
+    } finally {
+      await hindsight.close()
+    }
+  }, 60_000)
+
   it('cools a rate-limited key down until the time the endpoint names', async () => {
     // A long retry-after: Claude Code does not retry and reports no time, so the
     // time comes from asking the endpoint again (credentialErrors.ts probeCredential).
@@ -129,8 +169,11 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const cooled = reports.find((r) => r.id === 'a' && 'replacing' in r.outcome)?.outcome
     expect(cooled).toMatchObject({ class: 'rate_limited' })
     const until = cooled && 'until' in cooled ? cooled.until.getTime() : 0
-    expect(until).toBeGreaterThanOrEqual(started + 600_000)
-    expect(until).toBeLessThan(Date.now() + 601_000)
+    // `until` is a stored wall-clock time, read against the wall clock here at other
+    // moments; the slack absorbs a clock step between them (WSL steps ~11 s, #1485)
+    // and still tells the endpoint's 600 s from the 60 s default.
+    expect(until).toBeGreaterThanOrEqual(started + 600_000 - WALL_CLOCK_SLACK_MS)
+    expect(until).toBeLessThan(Date.now() + 601_000 + WALL_CLOCK_SLACK_MS)
     // The probe was one more request with that key, for one token.
     expect(callsWith(TOKEN_A).at(-1)?.body).toMatchObject({ max_tokens: 1, model: 'claude-sonnet-4-5' })
   }, 60_000)
@@ -148,11 +191,15 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
   it('does not fall back on a bad request: the next key would fail the same way', async () => {
     forA = () => ({ error: { status: 400, type: 'invalid_request_error', message: 'messages: bad' } })
     forB = () => ({ text: 'never' })
-    const { result, error, reports } = await turn()
-    expect(result).toMatchObject({ is_error: true, api_error_status: 400 })
+    const { result, error, reports, messages } = await turn()
+    expect(result).toMatchObject({ is_error: true, api_error_status: 400, num_turns: 1, total_cost_usd: 0 })
     expect(error).toBeInstanceOf(Error)
     expect(callsWith(TOKEN_B)).toHaveLength(0)
     expect(reports.map((r) => r.outcome.class)).toEqual(['ok'])
+    // Claude Code 2.1.287 sent it once more without the display beta, on the
+    // same credential, and its messages do not show it: no `api_retry`.
+    expect(callsWith(TOKEN_A).map(displayUpdates)).toEqual([true, false])
+    expect(messages.filter((m) => m.type === 'system' && m.subtype === 'api_retry')).toEqual([])
   }, 60_000)
 
   it('disables nothing when every key is refused the turn’s model but the probe is answered', async () => {
@@ -181,6 +228,9 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const { result, reports } = await turn()
     expect(result).toMatchObject({ subtype: 'success', is_error: false })
     expect(reports[0]).toMatchObject({ id: 'a', outcome: { class: 'permanent' }, next: 'b' })
+    // Claude Code knows a billing refusal is the account's and does not send it
+    // again without the display beta; A's only other request is the probe.
+    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map(displayUpdates)).toEqual([true])
   }, 60_000)
 
   it('resumes a turn that is rate limited after a tool ran, without running the tool again', async () => {
@@ -219,6 +269,7 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     const one = reference.result?.type === 'result' ? reference.result.total_cost_usd : NaN
     expect(one).toBeGreaterThan(0)
     expect(result?.type === 'result' ? result.total_cost_usd : NaN).toBeCloseTo(2 * one, 12)
-    expect(result).toMatchObject({ num_turns: 3 })
+    // A's tool call and B's reply; A's refused request is not a turn (#1101).
+    expect(result).toMatchObject({ num_turns: 2 })
   }, 60_000)
 })

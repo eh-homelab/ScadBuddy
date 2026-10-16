@@ -122,7 +122,11 @@ export function isDisabled(element: Element): boolean {
 export function activeDialog(root: ParentNode = document): Element | null {
   const dialogs = [...root.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open]')]
   const modal = dialogs.filter(
-    (dialog) => isVisible(dialog) && (dialog.getAttribute('aria-modal') === 'true' || dialog.tagName === 'DIALOG'),
+    (dialog) =>
+      isVisible(dialog) &&
+      // `data-modal`: ui/Dialog, which drops aria-modal beside the assistant (#798) and
+      // is no less modal to the agent for it.
+      (dialog.getAttribute('aria-modal') === 'true' || dialog.hasAttribute('data-modal') || dialog.tagName === 'DIALOG'),
   )
   return modal.at(-1) ?? null
 }
@@ -159,12 +163,65 @@ function normalise(text: string): string {
 /**
  * Marks a control only the user may press: the confirmation of an outward action
  * (send, print, delete, settings or credential writes — AI design spec §8.1/§8.2).
- * The fallback `click` and `fill` refuse anything inside one.
+ * The fallback `click` and `fill` refuse anything inside one, and `snapshot` hides
+ * what it holds.
+ *
+ * "Inside" survives a portal (#3653): a dialog, menu, popover or listbox renders under
+ * <body>, away from where it was opened, so its DOM ancestors never include a mark on a
+ * wrapper around it or on its trigger. `isUserOnly` therefore also counts as an
+ * ancestor
+ *   - every element the React tree renders it inside (React's own ancestry, which a
+ *     portal keeps: `createPortal`, the legacy `ui/Dialog` and every Radix Portal), and
+ *   - every element whose `aria-controls` names it or one of those ancestors (Radix's
+ *     link from a Dialog, AlertDialog, Sheet, DropdownMenu, Popover or Select trigger
+ *     to its content).
+ * So put the mark on a wrapper around the whole component, or on a trigger that
+ * controls the content; a ContextMenu or HoverCard trigger controls nothing, so mark
+ * around its root or on the content. `userOnly.test.tsx` is the guard.
  */
 export const USER_ONLY = { 'data-agent-user-only': '' } as const
 
+const USER_ONLY_ATTRIBUTE = 'data-agent-user-only'
+
+interface Fiber {
+  return: Fiber | null
+  stateNode: unknown
+}
+
+/** React's fiber for a DOM node it rendered: the `__reactFiber$<random>` expando. */
+function fiberOf(node: Element): Fiber | undefined {
+  const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'))
+  return key ? ((node as unknown as Record<string, Fiber>)[key] ?? undefined) : undefined
+}
+
+/** The element's DOM ancestors, itself first, then the host elements React rendered it inside. */
+function ancestors(element: Element): Element[] {
+  const found: Element[] = []
+  for (let node: Element | null = element; node; node = node.parentElement) found.push(node)
+  for (let fiber = fiberOf(element)?.return; fiber; fiber = fiber.return) {
+    if (fiber.stateNode instanceof Element) found.push(fiber.stateNode)
+  }
+  return found
+}
+
 export function isUserOnly(element: Element): boolean {
-  return element.closest('[data-agent-user-only]') !== null
+  const controllers = new Map<string, Element[]>()
+  for (const controller of element.ownerDocument.querySelectorAll('[aria-controls]')) {
+    for (const id of (controller.getAttribute('aria-controls') ?? '').split(/\s+/)) {
+      if (id) controllers.set(id, [...(controllers.get(id) ?? []), controller])
+    }
+  }
+  const seen = new Set<Element>()
+  const check = (start: Element): boolean => {
+    for (const node of ancestors(start)) {
+      if (seen.has(node)) continue
+      seen.add(node)
+      if (node.hasAttribute(USER_ONLY_ATTRIBUTE)) return true
+      if (node.id && (controllers.get(node.id) ?? []).some(check)) return true
+    }
+    return false
+  }
+  return check(element)
 }
 
 /**

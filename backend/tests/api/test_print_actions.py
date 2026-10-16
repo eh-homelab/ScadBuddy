@@ -6,16 +6,24 @@ printed, like every other prints route."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print_history import link, mock_archive
+from scadbuddy.bambuddy import operations
+from scadbuddy.bambuddy.archive_cache import ArchiveCache
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
+from scadbuddy.operations.kinds import OperationKind
+from tests.api.test_print_history import link, link_library, mock_archive
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -39,7 +47,7 @@ def test_print_again_queues_the_archive_on_its_printer_and_plate(
     mock_archive(35, printer_id=3, plate_id=2)
     queue = mock_enqueue(51)
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 201
     assert response.json() == {
@@ -55,6 +63,99 @@ def test_print_again_queues_the_archive_on_its_printer_and_plate(
 
 
 @respx.mock
+def test_print_again_queues_with_the_remembered_print_options(
+    client: TestClient, model: str
+) -> None:
+    """#1329: global, then the printer's, then the model's, as a print from the dialog."""
+    configure(client)
+    output_id = make_output(client, model)
+    slug = client.get(f"/api/v1/outputs/{output_id}").json()["slug"]
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    queue = mock_enqueue()
+    options = "/api/v1/settings/print-options"
+    remember = [
+        {"scope": "global", "options": {"use_ams": False, "layer_inspect": True}},
+        {"scope": "printer", "key": "3", "options": {"manual_start": True, "timelapse": True}},
+        {"scope": "printer", "key": "4", "options": {"auto_off_after": True}},
+        # A copy count and a project are the dialog's own controls, not a reprint's.
+        {
+            "scope": "model",
+            "key": slug,
+            "options": {"layer_inspect": False, "quantity": 3, "project_id": 7},
+        },
+    ]
+    for body in remember:
+        assert client.put(options, json=body).status_code == 200
+
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
+
+    sent = json.loads(queue.calls.last.request.content)
+    assert sent["manual_start"] is True
+    assert sent["timelapse"] is True
+    assert sent["use_ams"] is False
+    assert sent["layer_inspect"] is False
+    assert sent["auto_off_after"] is False
+    assert sent.get("quantity", 1) == 1
+    assert sent.get("project_id") is None
+
+
+@respx.mock
+def test_print_again_of_a_library_file_queues_with_that_files_options(
+    client: TestClient,
+) -> None:
+    """H6 (#1754): a library file's print is printed again with the options remembered
+    for that file, as an output's is with its model's."""
+    configure(client)
+    link_library(client, 89, 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    queue = mock_enqueue()
+    options = "/api/v1/settings/print-options"
+    for body in (
+        {"scope": "printer", "key": "3", "options": {"timelapse": True, "use_ams": False}},
+        {"scope": "model", "key": "library:89", "options": {"timelapse": False}},
+        {"scope": "model", "key": "library:90", "options": {"use_ams": True}},
+    ):
+        assert client.put(options, json=body).status_code == 200
+
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
+
+    sent = json.loads(queue.calls.last.request.content)
+    assert sent["timelapse"] is False
+    assert sent["use_ams"] is False
+
+
+@respx.mock
+def test_a_reprint_checked_before_1754_still_applies_its_models_options(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operation checked by an older image carries ``slug``, not ``options_scope``;
+    its run (after the upgrade) still applies that model's options."""
+    kinds: dict[str, OperationKind] = {}
+    over = operations.bambuddy_kinds_over
+
+    def capture(**deps: Any) -> list[OperationKind]:
+        built = over(**deps)
+        kinds.update({kind.name: kind for kind in built})
+        return built
+
+    monkeypatch.setattr(operations, "bambuddy_kinds_over", capture)
+    with TestClient(create_app(settings)) as client:
+        configure(client)
+        body = {"scope": "model", "key": model, "options": {"timelapse": True}}
+        assert client.put("/api/v1/settings/print-options", json=body).status_code == 200
+        queue = mock_enqueue()
+
+        asyncio.run(
+            kinds["reprint"].run(
+                {"archive_id": 35}, {"printer_id": 3, "plate_id": 2, "slug": model}
+            )
+        )
+
+    assert json.loads(queue.calls.last.request.content)["timelapse"] is True
+
+
+@respx.mock
 def test_print_again_falls_back_to_the_links_printer_and_plate(
     client: TestClient, model: str
 ) -> None:
@@ -64,7 +165,7 @@ def test_print_again_falls_back_to_the_links_printer_and_plate(
     mock_archive(35, printer_id=None, plate_id=None)
     queue = mock_enqueue()
 
-    assert client.post("/api/v1/prints/35/reprint").status_code == 201
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
 
     sent = json.loads(queue.calls.last.request.content)
     assert sent["printer_id"] == 4
@@ -79,7 +180,7 @@ def test_print_again_without_a_printer_is_refused(client: TestClient, model: str
     mock_archive(35, printer_id=None)
     queue = mock_enqueue()
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert "printer" in response.json()["detail"]
@@ -96,7 +197,7 @@ def test_a_print_deleted_in_bambuddy_cannot_be_printed_again(
     respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
     queue = mock_enqueue()
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert "deleted" in response.json()["detail"]
@@ -111,7 +212,7 @@ def test_a_refused_queue_names_the_scope(client: TestClient, model: str) -> None
     mock_archive(35)
     respx.post(f"{API}/queue/").mock(return_value=httpx.Response(403))
 
-    response = client.post("/api/v1/prints/35/reprint")
+    response = client.post("/api/v1/prints/35/reprint", headers=press())
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Manage Queue"
@@ -124,7 +225,7 @@ def test_an_archive_no_output_printed_cannot_be_printed_again(client: TestClient
     archive = mock_archive(36)
     queue = mock_enqueue()
 
-    assert client.post("/api/v1/prints/36/reprint").status_code == 404
+    assert client.post("/api/v1/prints/36/reprint", headers=press()).status_code == 404
     assert not archive.called and not queue.called
 
 
@@ -143,7 +244,9 @@ def test_pull_timelapse_attaches_the_named_file(client: TestClient, model: str) 
         return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 204
     assert select.calls.last.request.url.params["filename"] == TIMELAPSE
@@ -163,10 +266,49 @@ def test_pull_timelapse_drops_the_cached_archive(client: TestClient, model: str)
         return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
     )
 
-    client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press())
     client.get("/api/v1/prints/35")
 
     assert before.call_count == 2, "the detail after a pull reads the archive again"
+
+
+@respx.mock
+def test_the_api_drops_its_cached_archive_when_the_print_worker_changed_it(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1060: on the print worker the kinds keep their own `ArchiveCache`, so the API
+    drops its entry itself once a pull or a reprint ran."""
+    over = operations.bambuddy_kinds_over
+    monkeypatch.setattr(
+        operations,
+        "bambuddy_kinds_over",
+        lambda **deps: over(**{**deps, "archive_cache": ArchiveCache()}),
+    )
+    with TestClient(create_app(settings)) as client:
+        configure(client)
+        output_id = make_output(client, model)
+        link(client, output_id, 35, printer_id=1)
+        before = mock_archive(35, timelapse_path=None)
+        respx.get(f"{API}/archives/35/runs").mock(
+            return_value=httpx.Response(200, json={"items": [], "total": 0})
+        )
+        respx.post(f"{API}/archives/35/timelapse/select").mock(
+            return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
+        )
+        mock_enqueue()
+        client.get("/api/v1/prints/35")
+        reads = before.call_count
+
+        pulled = client.post(
+            "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+        )
+        assert pulled.status_code == 204, pulled.text
+        client.get("/api/v1/prints/35")
+        assert before.call_count == reads + 2, "the detail after a pull reads the archive again"
+
+        assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
+        client.get("/api/v1/prints/35")
+        assert before.call_count == reads + 4, "the detail after a reprint reads it again"
 
 
 @respx.mock
@@ -181,7 +323,9 @@ def test_a_print_deleted_in_bambuddy_cannot_pull_a_timelapse(
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert "deleted" in response.json()["detail"]
@@ -196,7 +340,9 @@ def test_pull_timelapse_takes_a_bare_file_name(
     output_id = make_output(client, model)
     link(client, output_id, 35)
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": filename})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": filename}, headers=press()
+    )
 
     assert response.status_code == 422
 
@@ -211,7 +357,9 @@ def test_a_timelapse_not_on_the_printer_is_bambuddys_404(client: TestClient, mod
         return_value=httpx.Response(404, json={"detail": "Timelapse 'x.mp4' not found on printer"})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": "x.mp4"})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": "x.mp4"}, headers=press()
+    )
 
     assert response.status_code == 404
 
@@ -223,7 +371,9 @@ def test_an_archive_no_output_printed_cannot_pull_a_timelapse(client: TestClient
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/36/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/36/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 404
     assert not select.called
@@ -244,7 +394,9 @@ def test_a_pull_refused_at_the_archive_read_names_read_status(
         return_value=httpx.Response(200, json={})
     )
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Read Status"
@@ -259,7 +411,9 @@ def test_a_pull_refused_at_the_attach_names_manage_archives(client: TestClient, 
     mock_archive(35)
     respx.post(f"{API}/archives/35/timelapse/select").mock(return_value=httpx.Response(403))
 
-    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+    response = client.post(
+        "/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE}, headers=press()
+    )
 
     assert response.status_code == 409
     assert response.json()["required_scope"] == "Manage Archives"

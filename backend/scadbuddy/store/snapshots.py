@@ -13,16 +13,24 @@ than on the API's volume.
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 import re
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from scadbuddy.bambuddy.client import DEFAULT_UPLOAD_TIMEOUT
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.render.jobs import (
+    SnapshotPendingError as SnapshotPendingError,
+)
 from scadbuddy.render.jobs import (
     SnapshotUnavailableError as SnapshotUnavailableError,  # defined beside resolve_source
 )
 from scadbuddy.render.jobs import export_revision, touch_export
-from scadbuddy.store.archive import pack_dir, unpack_dir
+from scadbuddy.store.archive import staged_pack, unpack_dir
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobMissingError,
@@ -31,6 +39,26 @@ from scadbuddy.store.content import (
     template_title,
 )
 from scadbuddy.store.locks import KeyLocks
+
+logger = logging.getLogger(__name__)
+
+#: How long a submit or preview waits for a revision's snapshot to be stored (#686).
+#: Only a revision's first pin exports and uploads; past this the caller gets a 503
+#: with Retry-After rather than hanging on the upload's own 180 s, and the store
+#: carries on behind it.
+PIN_TIMEOUT = 30.0
+#: How long shutdown lets a store `pin` stopped waiting for finish before cancelling it.
+SHUTDOWN_GRACE = 10.0
+#: How many snapshots are exported and uploaded at once for the renders someone waits
+#: for. A pin that stops waiting leaves its store running, so without a bound the preview
+#: pass could have every template uploading to Bambuddy together (#1436).
+MAX_CONCURRENT_STORES = 2
+#: The same for the background's pins (the preview pass), on their own bound: stalled
+#: ones never hold the slots a render someone waits for needs (#1773).
+MAX_CONCURRENT_BACKGROUND_STORES = 1
+
+#: `pin`'s bounded wait: `asyncio.wait_for`'s shape.
+Wait = Callable[[Awaitable[str], float], Awaitable[str]]
 
 
 def snapshot_key(slug: str, revision: str) -> str:
@@ -45,26 +73,118 @@ class SnapshotStore:
         history: ModelHistory | None,
         *,
         locks: KeyLocks | None = None,
+        pin_timeout: float = PIN_TIMEOUT,
+        max_stores: int = MAX_CONCURRENT_STORES,
+        max_background_stores: int = MAX_CONCURRENT_BACKGROUND_STORES,
+        wait: Wait = asyncio.wait_for,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.content = content
         self.paths = paths
         self.history = history
         #: Shared with the worker's `FontMirror` (Task 8 passes one `KeyLocks`).
         self.locks = locks or KeyLocks()
+        self.pin_timeout = pin_timeout
+        self._wait = wait
+        self._clock = clock
+        #: Bounds the exports and uploads running at once, across keys: the requests'
+        #: and the background's, each on its own.
+        self._stores = asyncio.Semaphore(max_stores)
+        self._background_stores = asyncio.Semaphore(max_background_stores)
+        #: The store running for each snapshot key, and when it started: a pin while
+        #: one runs joins it rather than queueing another on the key's lock (#1435).
+        self._pins: dict[str, tuple[asyncio.Task[str], float]] = {}
+        #: The stores `pin` stopped waiting for, held so they run to the end.
+        self._storing: set[asyncio.Task[str]] = set()
+        #: Set for a key once an interactive pin joins its background store (#2140): a
+        #: store still queued for the background slot then takes an interactive one, so
+        #: a stalled preview upload does not hold up the render someone waits for.
+        self._promoted: dict[str, asyncio.Event] = {}
 
-    async def pin(self, slug: str, revision: str | None) -> str | None:
+    async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
-        renders the template's last commit; None when there is no history at all."""
+        renders the template's last commit; None when there is no history at all.
+        A ``background`` pin (the preview pass) stores on the background's bound."""
         if revision is None:
             if self.history is None or not self.history.available:
                 return None
             revision = await asyncio.to_thread(self.history.last_commit, model_path(slug))
             if revision is None:
                 return None
-        await self.ensure(slug, revision)
+        # Shielded: a caller that stops waiting (the timeout, or a client gone) leaves
+        # the store running, so the retry finds it done or joins it.
+        storing, started = self._store(slug, revision, background=background)
+        try:
+            await self._wait(asyncio.shield(storing), self.pin_timeout)
+        except TimeoutError:
+            if storing.done():
+                # It finished as the wait ran out: its own outcome, not "pending".
+                storing.result()
+                return revision
+            self._behind(storing)
+            # A store that has run this long is likely to need about as long again
+            # (#1436), and no upload outlasts its own timeout.
+            elapsed = min(max(self.pin_timeout, self._clock() - started), DEFAULT_UPLOAD_TIMEOUT)
+            retry_after = max(1, math.ceil(elapsed))
+            raise SnapshotPendingError(
+                f"the snapshot of {slug}@{revision[:12]} is still being stored; try again"
+                f" in {retry_after} s",
+                retry_after=retry_after,
+            ) from None
+        except asyncio.CancelledError:
+            if storing.done() and not storing.cancelled() and storing.exception() is not None:
+                logger.warning(
+                    "storing a snapshot failed as its caller went", exc_info=storing.exception()
+                )
+            self._behind(storing)
+            raise
         return revision
 
-    async def ensure(self, slug: str, revision: str) -> str:
+    async def aclose(self, *, grace: float = SHUTDOWN_GRACE) -> None:
+        """At shutdown: let the stores no request waits for any more finish within
+        ``grace``, then cancel the rest, so none is left pending on a closed loop."""
+        if not self._storing:
+            return
+        _, pending = await asyncio.wait(set(self._storing), timeout=grace)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    def _store(
+        self, slug: str, revision: str, *, background: bool
+    ) -> tuple[asyncio.Task[str], float]:
+        """The store running for this revision, started now when none is."""
+        key = snapshot_key(slug, revision)
+        running = self._pins.get(key)
+        if running is not None and not running[0].done():
+            if not background:
+                self._promoted.setdefault(key, asyncio.Event()).set()
+            return running
+        storing = asyncio.create_task(self.ensure(slug, revision, background=background))
+        self._pins[key] = (storing, self._clock())
+
+        def ended(task: asyncio.Task[str]) -> None:
+            if self._pins.get(key, (None,))[0] is task:
+                del self._pins[key]
+                self._promoted.pop(key, None)
+
+        storing.add_done_callback(ended)
+        return self._pins[key]
+
+    def _behind(self, storing: asyncio.Task[str]) -> None:
+        """Keep a store no caller waits for any more, and log how it ends."""
+        if storing.done():
+            return
+        self._storing.add(storing)
+
+        def settled(task: asyncio.Task[str]) -> None:
+            self._storing.discard(task)
+            if not task.cancelled() and (error := task.exception()) is not None:
+                logger.warning("storing a snapshot no request waited for failed", exc_info=error)
+
+        storing.add_done_callback(settled)
+
+    async def ensure(self, slug: str, revision: str, *, background: bool = False) -> str:
         key = snapshot_key(slug, revision)
         if await self._stored(key):
             return key
@@ -73,17 +193,53 @@ class SnapshotStore:
         async with self.locks.hold(key):
             if await self._stored(key):
                 return key
-            directory = self.paths.model_revision_dir(slug, revision)
-            # Marked used before it is packed, so the prune (whose TTL an old revision's
-            # export is past) does not take it mid-pack; one it already took is exported
-            # again.
-            if not (directory.is_dir() and await _used(directory)):
-                if self.history is None:
-                    raise SnapshotUnavailableError(
-                        f"no snapshot of {slug}@{revision} and no history"
-                    )
-                await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
-            data = await asyncio.to_thread(pack_dir, directory)
+            slot = await self._slot(key, background=background)
+            try:
+                await self._export_and_put(slug, revision, key)
+            finally:
+                slot.release()
+        return key
+
+    async def _slot(self, key: str, *, background: bool) -> asyncio.Semaphore:
+        """The slot this store runs in, acquired: an interactive one, or a background
+        one until an interactive pin joins the store while it still waits (#2140). One
+        that already holds the background slot keeps it: its upload is under way, and
+        the joining pin is bounded by `pin_timeout` as any is."""
+        if not background:
+            await self._stores.acquire()
+            return self._stores
+        promoted = self._promoted.setdefault(key, asyncio.Event())
+        queued = asyncio.ensure_future(self._background_stores.acquire())
+        joined = asyncio.ensure_future(promoted.wait())
+        try:
+            await asyncio.wait({queued, joined}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            joined.cancel()
+            queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
+            if not queued.cancelled():
+                self._background_stores.release()
+            raise
+        joined.cancel()
+        if not queued.done():
+            queued.cancel()
+        # A cancel that lost the race to the acquire leaves the slot held: keep it.
+        await asyncio.gather(queued, return_exceptions=True)
+        if not queued.cancelled():
+            return self._background_stores
+        await self._stores.acquire()
+        return self._stores
+
+    async def _export_and_put(self, slug: str, revision: str, key: str) -> None:
+        directory = self.paths.model_revision_dir(slug, revision)
+        # Marked used before it is packed, so the prune (whose TTL an old revision's
+        # export is past) does not take it mid-pack; one it already took is exported
+        # again.
+        if not (directory.is_dir() and await _used(directory)):
+            if self.history is None:
+                raise SnapshotUnavailableError(f"no snapshot of {slug}@{revision} and no history")
+            await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
+        async with staged_pack(directory) as data:
             await self.content.put(
                 "snapshot",
                 data,
@@ -91,7 +247,6 @@ class SnapshotStore:
                 scope=BlobScope(slug=slug, title=template_title(directory, slug)),
                 key=key,
             )
-        return key
 
     async def _stored(self, key: str) -> bool:
         """Whether the index holds ``key``; a hit is touched, as a use."""

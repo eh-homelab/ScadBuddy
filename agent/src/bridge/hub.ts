@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { Principal } from '../auth/principal.js'
 import { type PairingRequest, PairingError, type PairingStore, type PairingView } from './pairings.js'
 import { agentFrame, type AgentFrame, type CallOutcome, type PairingEntry, parseTabFrame, type TabFrame } from './protocol.js'
+import type { RelayAnswer, RelayRequest, TabRelay } from './relay.js'
+import type { SessionTabStore } from './sessionTabs.js'
 
 // The agent's side of the browser bridge (#254, spec §5.2): the tabs connected
 // to this process over `GET /api/v1/ai/bridge` (routes/bridge.ts), and the
@@ -19,10 +21,14 @@ import { agentFrame, type AgentFrame, type CallOutcome, type PairingEntry, parse
 //   - an MCP principal (over /mcp, or a session it owns): the tab the user
 //     paired it with by typing its code (bridge/pairings.ts).
 //
-// The tabs are held in this process. A turn runs on the replica whose chat
-// socket started it, which is the replica the tab's own sockets reach when
-// the ingress keeps a browser on one replica; a call for a tab connected to
-// another replica answers "not connected" (docs/ai/browser-bridge.md,
+// The tabs are held in this process. A classic turn runs on the replica whose
+// chat socket started it, a durable session's tool call on whichever replica's
+// `agent-tools` worker took the activity (so the session's tab is also kept in
+// Postgres, bridge/sessionTabs.ts, #2086), and an MCP call on the replica that
+// holds its session; so the
+// tab a call is for may be connected to another replica: then the call goes to
+// that replica through Postgres (bridge/relay.ts, #1916), and it answers "not
+// connected" only when no replica holds the tab (docs/ai/browser-bridge.md,
 // "Replicas"). Pairing requests reach every tab whatever the replica: each
 // replica re-reads them from Postgres every PAIRINGS_POLL_MS.
 
@@ -53,7 +59,8 @@ export interface BrowserTabs {
     args: Record<string, unknown>,
     options: { signal: AbortSignal; timeoutMs?: number },
   ): Promise<CallOutcome>
-  status(target: BrowserTarget): Promise<BrowserStatus>
+  /** `signal` cancels the lookup (a pairing read that waits on the pool or a lock). */
+  status(target: BrowserTarget, options?: { signal?: AbortSignal }): Promise<BrowserStatus>
   pair(principal: Principal): Promise<PairingRequest>
   /** The same tabs, with every call's target naming `sessionId` (tools/harness.ts binds each turn's). */
   forSession(sessionId: string): BrowserTabs
@@ -74,13 +81,21 @@ const NO_PAIRING =
 const NO_STORE =
   'no browser attached: pairing an agent with a tab needs the database (SCADBUDDY_DATABASE_URL, spec §9)'
 const NOT_CONNECTED =
-  'no browser attached: the paired ScadBuddy tab is not connected (it was closed or reloaded, lost its connection, ' +
-  'or is connected to another agent replica). Ask the user to open ScadBuddy again; an agent that paired by code ' +
-  'must then pair again with browser_pair.'
+  'no browser attached: the paired ScadBuddy tab is not connected (it was closed or reloaded, or lost its ' +
+  'connection). Ask the user to open ScadBuddy again; an agent that paired by code must then pair again with ' +
+  'browser_pair.'
 
 export type TabHubOptions = {
   /** Undefined without a database: only chat sessions can reach a tab then. */
   pairings?: PairingStore | undefined
+  /** Undefined without a database: only tabs connected to this process can be reached then. */
+  relay?: TabRelay | undefined
+  /**
+   * Chat sessions' tabs, for a call that runs on a replica the session's
+   * messages never reached (a durable session's tool activity, #2086).
+   * Undefined without a database: a session's tab is known only where it paired.
+   */
+  sessionTabs?: SessionTabStore | undefined
   callTimeoutMs?: number
   pollMs?: number
   log?: (message: string) => void
@@ -181,14 +196,32 @@ export class TabHub implements BrowserTabs {
   /** sessionId → tabId, least recently paired first (Map keeps insertion order). */
   readonly #sessionTabs = new Map<string, string>()
   readonly #pairings: PairingStore | undefined
+  readonly #relay: TabRelay | undefined
+  readonly #sessionTabStore: SessionTabStore | undefined
+  #sessionTabWrites: Promise<void> = Promise.resolve()
+  /**
+   * Sessions whose latest pairing here failed to reach the store: the row still
+   * names an older tab, so this replica's map answers for them until a later
+   * write succeeds (#2211).
+   */
+  readonly #sessionTabsUnstored = new Set<string>()
   readonly #callTimeoutMs: number
   readonly #pollMs: number
   readonly #log: (message: string) => void
   #poll: NodeJS.Timeout | undefined
   #refreshing: Promise<void> | undefined
+  /**
+   * #815 §2: told each time a session gets a connected tab again: its tab
+   * reconnected, or the user opened it from another tab (`pairSession`). main.ts
+   * resolves the session's `tab_disconnected` attention requests with it.
+   */
+  onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined
 
   constructor(options: TabHubOptions = {}) {
     this.#pairings = options.pairings
+    this.#relay = options.relay
+    this.#sessionTabStore = options.sessionTabs
+    this.#relay?.serve({ holds: (tabId) => this.#tabs.has(tabId), run: (tabId, request) => this.#runHere(tabId, request) })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -213,6 +246,7 @@ export class TabHub implements BrowserTabs {
     const before = this.#tabs.get(tabId)
     this.#tabs.set(tabId, connection)
     if (before && before !== connection) before.replaced()
+    for (const [sessionId, paired] of this.#sessionTabs) if (paired === tabId) this.#sessionTabBack(sessionId)
     if (!this.#poll && this.#pairings) {
       this.#poll = setInterval(() => void this.refresh(), this.#pollMs)
       this.#poll.unref()
@@ -232,24 +266,123 @@ export class TabHub implements BrowserTabs {
 
   /** The browser user sent a message to `sessionId` from tab `tabId` (routes/chat.ts). */
   pairSession(sessionId: string, tabId: string): void {
+    // Written on every message, not only when this replica's map changes: the
+    // row is the session's tab for every replica (#2086), and another may have
+    // moved it to a tab this one never saw since this one last paired it.
+    if (this.#sessionTabStore) {
+      const store = this.#sessionTabStore
+      // One write at a time, in pairing order: two in flight could commit out of
+      // order and leave the earlier tab stored.
+      this.#sessionTabWrites = this.#sessionTabWrites.then(() =>
+        store.set(sessionId, tabId).then(
+          () => void this.#sessionTabsUnstored.delete(sessionId),
+          (err: unknown) => {
+            this.#sessionTabsUnstored.add(sessionId)
+            this.logError(err)
+          },
+        ),
+      )
+    }
+    this.#pairHere(sessionId, tabId)
+  }
+
+  /** This replica's map, and the tab's listener: a pairing's local half. */
+  #pairHere(sessionId: string, tabId: string): void {
     this.#sessionTabs.delete(sessionId)
     this.#sessionTabs.set(sessionId, tabId)
     while (this.#sessionTabs.size > MAX_SESSION_TABS) {
       const oldest = this.#sessionTabs.keys().next().value as string
       this.#sessionTabs.delete(oldest)
+      this.#sessionTabsUnstored.delete(oldest)
     }
+    if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
   }
 
-  /** Whether `sessionId` has a tab that is connected here now. */
-  sessionHasTab(sessionId: string): boolean {
-    const tabId = this.#sessionTabs.get(sessionId)
-    return tabId !== undefined && this.#tabs.has(tabId)
+  #sessionTabBack(sessionId: string): void {
+    const listener = this.onSessionTab
+    if (!listener) return
+    void listener(sessionId).catch((err: unknown) => this.logError(err))
+  }
+
+  /**
+   * `sessionId`'s tab, and whether it is connected to any replica now. The tab is
+   * the store's row when there is one, as for a call (`#resolve`): this replica's
+   * map goes stale as soon as another replica pairs the session elsewhere.
+   * `pairSessionIfStill` takes the tab back, so a pairing decided on this answer
+   * cannot overwrite a newer one (#2271).
+   */
+  async sessionTab(sessionId: string): Promise<{ tabId: string | undefined; connected: boolean }> {
+    const tabId = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
+    return { tabId, connected: tabId !== undefined && (await this.#tabConnected(tabId)) }
+  }
+
+  /**
+   * Pairs `sessionId` with `tabId` only if its tab is still `seen`, the tab a
+   * `sessionTab` answer named. Another socket may have paired the session while
+   * that answer was on its way (#2271): the newer pairing wins. Whether it paired.
+   */
+  async pairSessionIfStill(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean> {
+    const store = this.#sessionTabStore
+    if (store?.setIf && !this.#sessionTabsUnstored.has(sessionId)) {
+      // Compared and written in one statement, queued behind this replica's own
+      // writes: no pairing, here or on another replica, lands between the two.
+      const setIf = store.setIf.bind(store)
+      const written = this.#sessionTabWrites.then(() => setIf(sessionId, tabId, seen))
+      this.#sessionTabWrites = written.then(
+        () => {},
+        () => {},
+      )
+      try {
+        if (!(await written)) return false
+      } catch (err) {
+        // As pairSession's own failed write: paired here only, and marked unstored
+        // so this replica prefers its map. No unconditional write is queued, which
+        // could overwrite a newer pairing once the store answers again (#3478 review).
+        this.logError(err)
+        if (this.#sessionTabs.get(sessionId) !== seen) return false
+        this.#sessionTabsUnstored.add(sessionId)
+        this.#pairHere(sessionId, tabId)
+        return true
+      }
+      this.#pairHere(sessionId, tabId)
+      return true
+    }
+    if (store) {
+      const now = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
+      if (now !== seen) return false
+      this.pairSession(sessionId, tabId)
+      return true
+    }
+    return this.#pairIfStillHere(sessionId, tabId, seen)
+  }
+
+  /** With nothing shared to ask: this replica's map, compared and paired with no await between. */
+  #pairIfStillHere(sessionId: string, tabId: string, seen: string | undefined): boolean {
+    if (this.#sessionTabs.get(sessionId) !== seen) return false
+    this.pairSession(sessionId, tabId)
+    return true
+  }
+
+  async #tabConnected(tabId: string): Promise<boolean> {
+    if (this.#tabs.has(tabId)) return true
+    if (!this.#relay) return false
+    try {
+      const answer = await this.#relay.forward(tabId, { op: 'status' }, {
+        signal: new AbortController().signal,
+        timeoutMs: this.#callTimeoutMs,
+      })
+      return answer?.op === 'status'
+    } catch (err) {
+      // As for a call: a relay that cannot be asked is a tab not connected.
+      this.logError(err)
+      return false
+    }
   }
 
   forSession(sessionId: string): BrowserTabs {
     return {
       call: (target, tool, args, options) => this.call({ ...target, sessionId }, tool, args, options),
-      status: (target) => this.status({ ...target, sessionId }),
+      status: (target, options) => this.status({ ...target, sessionId }, options),
       pair: (principal) => this.pair(principal),
       forSession: (other) => this.forSession(other),
     }
@@ -257,20 +390,56 @@ export class TabHub implements BrowserTabs {
 
   async #resolve(
     target: BrowserTarget,
-  ): Promise<{ tab: TabConnection; via: 'session' | 'pairing'; pairing?: PairingView } | { problem: string }> {
+    signal?: AbortSignal,
+  ): Promise<Resolved | { problem: string }> {
     if (target.sessionId !== undefined) {
-      const tabId = this.#sessionTabs.get(target.sessionId)
-      if (tabId !== undefined) {
-        const tab = this.#tabs.get(tabId)
-        return tab ? { tab, via: 'session' } : { problem: NOT_CONNECTED }
-      }
+      // With a store, its row is the session's tab: another replica may have
+      // paired the session since this one last did (#2086), and this one's map
+      // would still name the older tab. The map answers when there is no row.
+      const tabId = (await this.#storedSessionTab(target.sessionId, signal)) ?? this.#sessionTabs.get(target.sessionId)
+      if (tabId !== undefined) return this.#reach(tabId, { via: 'session' })
     }
     if (target.principal.kind === 'browser') return { problem: NO_SESSION_TAB }
     if (!this.#pairings) return { problem: NO_STORE }
-    const paired = await this.#pairings.pairedTab(target.principal)
+    const paired = await this.#pairings.pairedTab(target.principal, signal)
     if (!paired) return { problem: NO_PAIRING }
-    const tab = this.#tabs.get(paired.tabId)
-    return tab ? { tab, via: 'pairing', pairing: paired } : { problem: NOT_CONNECTED }
+    return this.#reach(paired.tabId, { via: 'pairing', pairing: paired })
+  }
+
+  /**
+   * The tab `sessionId` was last paired with on any replica; undefined when there
+   * is no row, it cannot be read, or this replica's own latest pairing of it
+   * failed to reach the store (the row would name the older tab).
+   */
+  async #storedSessionTab(sessionId: string, signal?: AbortSignal): Promise<string | undefined> {
+    if (!this.#sessionTabStore) return undefined
+    try {
+      // This replica's own latest pairing first, so the row read is not older than it.
+      await this.#sessionTabWrites
+      if (this.#sessionTabsUnstored.has(sessionId)) return undefined
+      return await this.#sessionTabStore.get(sessionId, signal)
+    } catch (err) {
+      if (signal?.aborted) throw err
+      this.logError(err)
+      return undefined
+    }
+  }
+
+  /** The tab here, or its id for the relay to find; not connected when neither. */
+  #reach(tabId: string, how: Omit<Resolved, 'tab' | 'tabId'>): Resolved | { problem: string } {
+    const tab = this.#tabs.get(tabId)
+    if (tab) return { ...how, tab, tabId }
+    return this.#relay ? { ...how, tabId } : { problem: NOT_CONNECTED }
+  }
+
+  /** A request forwarded from another replica (bridge/relay.ts) for a tab held here. */
+  async #runHere(tabId: string, request: RelayRequest): Promise<RelayAnswer> {
+    const tab = this.#tabs.get(tabId)
+    if (!tab) return { op: 'gone' }
+    if (request.op === 'status') return { op: 'status', route: tab.route, live: tab.live }
+    // The caller stops waiting on its own replica; the tab is not told, as for a local call.
+    const outcome = await this.#callTab(tab, request.tool, request.args, new AbortController().signal, request.timeoutMs)
+    return { op: 'call', outcome }
   }
 
   async call(
@@ -279,9 +448,22 @@ export class TabHub implements BrowserTabs {
     args: Record<string, unknown>,
     { signal, timeoutMs = this.#callTimeoutMs }: { signal: AbortSignal; timeoutMs?: number },
   ): Promise<CallOutcome> {
-    const resolved = await this.#resolve(target)
+    // The pairing lookup stops with the call (#1410): a hung read is not waited out.
+    const resolved = await this.#resolve(target, signal).catch(rethrowAborted(signal))
     if ('problem' in resolved) return failure('no_browser', resolved.problem)
     const { tab } = resolved
+    if (tab) return this.#callTab(tab, tool, args, signal, timeoutMs)
+    const answer = await this.#relay!.forward(resolved.tabId, { op: 'call', tool, args, timeoutMs }, { signal, timeoutMs })
+    return answer?.op === 'call' ? answer.outcome : failure('no_browser', NOT_CONNECTED)
+  }
+
+  async #callTab(
+    tab: TabConnection,
+    tool: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<CallOutcome> {
     if (tab.calls.size >= MAX_CALLS_PER_TAB) {
       return failure('busy', `the tab already has ${MAX_CALLS_PER_TAB} calls running; wait for them to finish`)
     }
@@ -313,14 +495,24 @@ export class TabHub implements BrowserTabs {
     })
   }
 
-  async status(target: BrowserTarget): Promise<BrowserStatus> {
-    const resolved = await this.#resolve(target)
+  async status(target: BrowserTarget, { signal }: { signal?: AbortSignal } = {}): Promise<BrowserStatus> {
+    // An abort rejects as call()'s does (#1814), not with the signal's raw reason.
+    const resolved = await this.#resolve(target, signal).catch(rethrowAborted(signal))
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
+    let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
+    if (!resolved.tab) {
+      const answer = await this.#relay!.forward(resolved.tabId, { op: 'status' }, {
+        signal: signal ?? new AbortController().signal,
+        timeoutMs: this.#callTimeoutMs,
+      })
+      if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
+      state = answer
+    }
     return {
       attached: true,
       via: resolved.via,
-      route: resolved.tab.route,
-      live: resolved.tab.live,
+      route: state.route,
+      live: state.live,
       ...(resolved.pairing ? { pairing: resolved.pairing } : {}),
     }
   }
@@ -400,6 +592,16 @@ export class TabHub implements BrowserTabs {
     for (const tab of [...this.#tabs.values()]) tab.close('the agent service is shutting down')
     clearInterval(this.#poll)
     this.#poll = undefined
+  }
+}
+
+/** Where a call goes: the tab here, or (`tab` undefined) one the relay finds on another replica. */
+type Resolved = { tabId: string; tab?: TabConnection; via: 'session' | 'pairing'; pairing?: PairingView }
+
+/** A lookup's failure as `call()` and `status()` both reject: an abort as `abortError()`, not the signal's raw reason. */
+function rethrowAborted(signal: AbortSignal | undefined): (err: unknown) => never {
+  return (err) => {
+    throw signal?.aborted ? abortError() : err
   }
 }
 

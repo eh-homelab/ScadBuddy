@@ -1,12 +1,27 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { McpAuthMode, McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
+import { McpConnectSnippet } from './McpConnectSnippet'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ChoiceSelect, LoadingLines, SettingBody, SettingCard, Tip } from './settings/form'
 import { Spinner } from './ui/Spinner'
 
 // #251 — Settings → "MCP access tokens": mint, list and revoke the bearer tokens an
@@ -33,6 +48,12 @@ const TIER_HELP: Record<McpTokenTier, string> = {
     'Outward: can also ask to send, print, delete or change settings; each of those waits for a person to approve it in ScadBuddy.',
 }
 
+// #804: the approval grant is instance-wide, not a small per-token extra. A holder can
+// decide every pending outward approval, in every session (ApprovalService.visible() and
+// authorize(); docs/ai/agent-sessions.md §3), so the label states that scope itself.
+const GRANT_LABEL = "This token can approve or deny any agent's outward action, in any session"
+const GRANT_BADGE = 'Approves for any session'
+
 const DAY = 24 * 60 * 60
 
 const EXPIRY: { value: string; label: string; seconds: number | undefined }[] = [
@@ -50,38 +71,53 @@ function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
 
+/** A date, with its full timestamp on hover and focus. */
+function When({ iso, children }: { iso: string | null | undefined; children: ReactNode }) {
+  if (!iso) return <span>{children}</span>
+  return (
+    <Tip content={iso}>
+      <span tabIndex={0} className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+        {children}
+      </span>
+    </Tip>
+  )
+}
+
 function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpToken) => void }) {
   const inactive = token.status !== 'active'
   return (
     <li className="flex items-start justify-between gap-3 py-2.5" data-testid="mcp-token">
       <div className="min-w-0">
-        <p className={`truncate text-[13px] font-medium ${inactive ? 'text-muted line-through' : ''}`}>
+        <p className={`truncate text-sm font-medium ${inactive ? 'text-muted-foreground line-through' : ''}`}>
           {token.name}
         </p>
-        <p className="mt-0.5 text-[12px] text-muted">
-          <span className="rounded-[4px] border border-line px-1 py-px">{TIER_LABEL[token.tier]}</span>
+        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <Badge variant="outline">{TIER_LABEL[token.tier]}</Badge>
+          {token.approval_grant && (
+            <Tip content={`${GRANT_LABEL}.`}>
+              <Badge variant="destructive" tabIndex={0} data-testid="mcp-token-grant">
+                {GRANT_BADGE}
+              </Badge>
+            </Tip>
+          )}
           {token.status === 'revoked' && token.revoked_at && (
-            <span className="ml-2 text-warn">Revoked {day(token.revoked_at)}</span>
+            <span className="text-warn">Revoked {day(token.revoked_at)}</span>
           )}
           {token.status === 'expired' && token.expires_at && (
-            <span className="ml-2 text-warn">Expired {day(token.expires_at)}</span>
+            <span className="text-warn">Expired {day(token.expires_at)}</span>
           )}
-          <span className="ml-2" title={token.created_at}>
-            Created {day(token.created_at)}
-          </span>
+          <When iso={token.created_at}>Created {day(token.created_at)}</When>
           {token.status === 'active' && (
-            <span className="ml-2" title={token.expires_at ?? undefined}>
-              {token.expires_at ? `Expires ${day(token.expires_at)}` : 'Never expires'}
-            </span>
+            <When iso={token.expires_at}>{token.expires_at ? `Expires ${day(token.expires_at)}` : 'Never expires'}</When>
           )}
-          <span className="ml-2" title={token.last_used_at ?? undefined}>
+          <When iso={token.last_used_at}>
             {token.last_used_at ? `Last used ${timeAgo(token.last_used_at)}` : 'Never used'}
-          </span>
+          </When>
         </p>
       </div>
       {token.status !== 'revoked' && (
         <Button
-          variant="danger"
+          variant="destructive"
           size="sm"
           onClick={() => onRevoke(token)}
           aria-label={`Revoke ${token.name}`}
@@ -100,13 +136,16 @@ interface Props {
    * the one this list was loaded with.
    */
   authMode?: McpAuthMode | undefined
+  /** SCADBUDDY_PUBLIC_URL as Settings has it, for the connect snippet (#1910); this page's origin when unset. */
+  publicUrl?: string | null | undefined
 }
 
-export function McpTokensSection({ authMode: savedMode }: Props = {}) {
+export function McpTokensSection({ authMode: savedMode, publicUrl }: Props = {}) {
   const listState = useAsync(() => api.listMcpTokens(), [])
   const [name, setName] = useState('')
   const [tier, setTier] = useState<McpTokenTier>('read')
   const [expiry, setExpiry] = useState('90')
+  const [grant, setGrant] = useState(false)
   const [creating, setCreating] = useState(false)
   const [minted, setMinted] = useState<MintedMcpToken | null>(null)
   const [copied, setCopied] = useState<'copied' | 'manual' | null>(null)
@@ -129,10 +168,12 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
         name: name.trim(),
         tier,
         ...(seconds === undefined ? {} : { expires_in: seconds }),
+        ...(grant && tier === 'outward' ? { approval_grant: true } : {}),
       })
       setMinted(result)
       setCopied(null)
       setName('')
+      setGrant(false)
       listState.reload()
     } catch (cause) {
       setError(describeError(cause, 'Could not create the token.'))
@@ -175,15 +216,9 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
   }
 
   return (
-    <section
-      className="mt-4 rounded-[6px] border border-line bg-surface"
-      aria-labelledby="mcp-tokens-heading"
-    >
-      <h2 id="mcp-tokens-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        MCP access tokens
-      </h2>
-      <div className="space-y-4 p-4">
-        <p className="text-[13px] text-muted">
+    <SettingCard title="MCP access tokens" headingId="mcp-tokens-heading">
+      <SettingBody>
+        <p className="text-sm text-muted-foreground">
           An outside MCP client, such as Claude Desktop or Claude Code, calls ScadBuddy&rsquo;s
           tools at <code className="sb-num">/mcp</code> with one of these as its bearer token.
           ScadBuddy keeps only a hash of each token, so a new one is shown once, here, when it is
@@ -191,71 +226,81 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
         </p>
 
         {authMode === 'disabled' && (
-          <p className="rounded-[6px] border border-warn/50 bg-warn/10 px-3 py-2 text-[12px] text-warn" data-testid="mcp-auth-note">
+          <p
+            className="rounded-lg bg-warn/10 px-3 py-2 text-xs text-warn ring-1 ring-warn/50"
+            data-testid="mcp-auth-note"
+          >
             MCP authentication is turned off: <code>/mcp</code> accepts calls without a token, as
             an anonymous caller. Tokens made here are kept, and are checked again once
             authentication is back on.
           </p>
         )}
         {authMode === 'oidc' && (
-          <p className="text-[12px] text-muted" data-testid="mcp-auth-note">
+          <p className="text-xs text-muted-foreground" data-testid="mcp-auth-note">
             MCP sign-in is through your identity provider; these bearer tokens keep working
             alongside it.
           </p>
         )}
 
         {minted && (
-          <div
-            className="rounded-[6px] border border-warn/50 bg-warn/10 p-3"
+          <Card
+            size="sm"
+            className="bg-warn/10 ring-warn/50"
             data-testid="minted-token"
             aria-labelledby="minted-token-heading"
             role="group"
           >
-            <p id="minted-token-heading" className="text-[13px] font-medium">
-              New token: {minted.record.name}
-            </p>
-            <p className="mt-1 text-[12px] text-warn">
-              Copy it now. This is the only time it is shown: ScadBuddy stores a hash, not the
-              token. Anyone who has it can use ScadBuddy at its tier. If it is lost, revoke it and
-              create another.
-            </p>
-            <code
-              ref={tokenRef}
-              className="sb-num mt-2 block cursor-text select-all break-all rounded-[4px] border border-line bg-surface-2 px-2 py-1.5 text-[12px]"
-              data-testid="minted-token-value"
-              onClick={(event) => selectContents(event.currentTarget)}
-              {...USER_ONLY}
-            >
-              {minted.token}
-            </code>
-            <div className="mt-2 flex items-center gap-2">
-              <Button size="sm" onClick={() => void copy()} {...USER_ONLY}>
-                Copy token
-              </Button>
-              <Button size="sm" variant="ghost" onClick={done}>
-                Done
-              </Button>
-              {copied === 'copied' && (
-                <span role="status" className="text-[12px] text-ok">
-                  Copied to the clipboard.
-                </span>
-              )}
-              {copied === 'manual' && (
-                <span role="status" className="text-[12px] text-warn">
-                  This page may not use the clipboard here. The token is selected: press Ctrl+C
-                  (⌘C on a Mac).
-                </span>
-              )}
-            </div>
-          </div>
+            <CardHeader>
+              <p id="minted-token-heading" className="text-sm font-medium">
+                New token: {minted.record.name}
+              </p>
+              <p className="text-xs text-warn">
+                Copy it now. This is the only time it is shown: ScadBuddy stores a hash, not the
+                token. Anyone who has it can use ScadBuddy at its tier. If it is lost, revoke it and
+                create another.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <code
+                ref={tokenRef}
+                className="sb-num block cursor-text rounded-md bg-background px-2.5 py-2 text-xs break-all select-all ring-1 ring-foreground/10"
+                data-testid="minted-token-value"
+                onClick={(event) => selectContents(event.currentTarget)}
+                {...USER_ONLY}
+              >
+                {minted.token}
+              </code>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={() => void copy()} {...USER_ONLY}>
+                  Copy token
+                </Button>
+                <Button size="sm" variant="ghost" onClick={done}>
+                  Done
+                </Button>
+                {copied === 'copied' && (
+                  <span role="status" className="text-xs text-ok">
+                    Copied to the clipboard.
+                  </span>
+                )}
+                {copied === 'manual' && (
+                  <span role="status" className="text-xs text-warn">
+                    This page may not use the clipboard here. The token is selected: press Ctrl+C
+                    (⌘C on a Mac).
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
+        <McpConnectSnippet publicUrl={publicUrl} authMode={authMode} token={minted?.token} />
+
         <form className="grid gap-3 sm:grid-cols-[1fr_auto_auto_auto] sm:items-end" onSubmit={(event) => void create(event)}>
-          <div>
-            <label htmlFor="mcp-token-name" className="block text-[13px]">
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-token-name" className="font-normal">
               Token name
-            </label>
-            <input
+            </Label>
+            <Input
               id="mcp-token-name"
               type="text"
               value={name}
@@ -264,78 +309,88 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
               autoComplete="off"
               onChange={(event) => setName(event.target.value)}
               placeholder="Claude Desktop on my laptop"
-              className="sb-field mt-1.5"
             />
           </div>
-          <div>
-            <label htmlFor="mcp-token-tier" className="block text-[13px]">
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-token-tier" className="font-normal">
               Access
-            </label>
-            <select
+            </Label>
+            <ChoiceSelect
               id="mcp-token-tier"
               value={tier}
-              onChange={(event) => setTier(event.target.value as McpTokenTier)}
-              className="sb-field mt-1.5 cursor-pointer"
+              onValueChange={(raw) => {
+                const next = raw as McpTokenTier
+                setTier(next)
+                if (next !== 'outward') setGrant(false)
+              }}
+              choices={(Object.keys(TIER_LABEL) as McpTokenTier[]).map((value) => ({ value, label: TIER_LABEL[value] }))}
+              className="sm:w-32"
               aria-describedby="mcp-token-tier-help"
-            >
-              {(Object.keys(TIER_LABEL) as McpTokenTier[]).map((value) => (
-                <option key={value} value={value}>
-                  {TIER_LABEL[value]}
-                </option>
-              ))}
-            </select>
+            />
           </div>
-          <div>
-            <label htmlFor="mcp-token-expiry" className="block text-[13px]">
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-token-expiry" className="font-normal">
               Expires after
-            </label>
-            <select
+            </Label>
+            <ChoiceSelect
               id="mcp-token-expiry"
               value={expiry}
-              onChange={(event) => setExpiry(event.target.value)}
-              className="sb-field mt-1.5 cursor-pointer"
-            >
-              {EXPIRY.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              onValueChange={setExpiry}
+              choices={EXPIRY.map((option) => ({ value: option.value, label: option.label }))}
+              className="sm:w-32"
+            />
           </div>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={creating || name.trim() === ''}
-            aria-busy={creating}
-            {...USER_ONLY}
-          >
+          <Button type="submit" disabled={creating || name.trim() === ''} aria-busy={creating} {...USER_ONLY}>
             {creating && <Spinner />}
             Create token
           </Button>
         </form>
-        <p id="mcp-token-tier-help" className="-mt-2 text-[12px] text-muted">
+        <p id="mcp-token-tier-help" className="-mt-2 text-xs text-muted-foreground">
           {TIER_HELP[tier]}
         </p>
+        {tier === 'outward' && (
+          <div className="flex items-start gap-2.5">
+            <Checkbox
+              id="mcp-token-grant"
+              checked={grant}
+              onCheckedChange={(next) => setGrant(next === true)}
+              className="mt-0.5"
+              aria-describedby="mcp-token-grant-help"
+              {...USER_ONLY}
+            />
+            <div>
+              <Label htmlFor="mcp-token-grant" className="leading-snug font-normal">
+                {GRANT_LABEL}
+              </Label>
+              <p id="mcp-token-grant-help" className="mt-1 text-xs text-muted-foreground">
+                System-wide: whoever holds this token sees every pending send, print, delete or
+                settings change any agent asks for, in every session on this ScadBuddy, not only
+                sessions this token started, and can decide it in place of a person, though never
+                its own: not the actions it asked for, nor those in sessions it started or owns.
+                Leave this off unless that client is meant to review other agents. It cannot be
+                changed later; revoke the token to withdraw it.
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-warn">
             {error}
           </p>
         )}
 
         {listState.loading && !list ? (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading tokens
-          </p>
+          <LoadingLines label="Loading tokens" lines={['w-1/2', 'w-1/3', 'w-1/2', 'w-1/3']} />
         ) : listState.error ? (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-warn">
             The tokens could not be loaded: {describeError(listState.error, listState.error.message)}
           </p>
         ) : list && list.tokens.length === 0 ? (
-          <p className="text-[13px] text-muted">No tokens yet.</p>
+          <p className="text-sm text-muted-foreground">No tokens yet.</p>
         ) : (
           list && (
-            <ul className="divide-y divide-line" aria-label="Tokens">
+            <ul className="divide-y" aria-label="Tokens">
               {list.tokens.map((token) => (
                 <TokenRow
                   key={token.id}
@@ -349,34 +404,31 @@ export function McpTokensSection({ authMode: savedMode }: Props = {}) {
             </ul>
           )
         )}
-      </div>
+      </SettingBody>
 
-      <Dialog
-        open={confirming !== null}
-        title={`Revoke ${confirming?.name ?? 'token'}?`}
-        onClose={closeConfirm}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeConfirm} disabled={revoking}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void revoke()} disabled={revoking} {...USER_ONLY}>
+      <AlertDialog open={confirming !== null} onOpenChange={(open) => !open && closeConfirm()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Revoke ${confirming?.name ?? 'token'}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Any MCP client using <span className="font-medium text-foreground">{confirming?.name}</span> is
+              refused from its next request. This cannot be undone; the client needs a new token.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {revokeError && (
+            <p role="alert" className="text-sm text-warn">
+              {revokeError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revoking}>Cancel</AlertDialogCancel>
+            {/* Not an AlertDialogAction: the dialog stays open until the revoke answers. */}
+            <Button variant="destructive" onClick={() => void revoke()} disabled={revoking} {...USER_ONLY}>
               {revoking ? <Spinner /> : 'Revoke token'}
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">
-          Any MCP client using{' '}
-          <span className="font-medium text-ink">{confirming?.name}</span> is refused from its next
-          request. This cannot be undone; the client needs a new token.
-        </p>
-        {revokeError && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {revokeError}
-          </p>
-        )}
-      </Dialog>
-    </section>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SettingCard>
   )
 }

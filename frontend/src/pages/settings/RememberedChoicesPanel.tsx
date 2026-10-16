@@ -1,16 +1,39 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
+import type {
+  BambuddyTargets,
+  ModelPrintChoices,
+  PrintOptions,
+  ProjectChoices,
+  RememberedChoices,
+} from '../../api/types'
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
-import { Button } from '../../components/ui/Button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { LoadingLines } from '../../components/settings/form'
 import { Spinner } from '../../components/ui/Spinner'
+import { libraryFileOfScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 
 type Row = {
   key: string
   kind: string
   subject: string
+  /** Where the subject is opened: a library file's place in the Library (#2349). */
+  href?: string
   value: string
   forget: () => Promise<unknown>
 }
@@ -35,6 +58,29 @@ function describeOptions(options: PrintOptions): string {
   )
 }
 
+/**
+ * A model's id as it is, a library file's scope as the file (#2349): its name, linked to
+ * it in the Library, or "deleted file N" once Bambuddy no longer has it. Until the names
+ * have answered, or when they cannot be read, the file's id.
+ */
+function scopeName(scope: string, names: ReadonlyMap<number, string | null> | undefined): { subject: string; href?: string } {
+  const fileId = libraryFileOfScope(scope)
+  if (fileId === null) return { subject: scope }
+  const name = names?.get(fileId)
+  if (name === undefined) return { subject: `Library file ${fileId}` }
+  if (name === null) return { subject: `deleted file ${fileId}` }
+  return { subject: name, href: `/library?file=${fileId}` }
+}
+
+/** The most ids `GET /print/library/names` takes at once (the route's `NAMES_MAX`). */
+export const LIBRARY_NAMES_PER_REQUEST = 100
+
+/** The library files the remembered choices and options are kept for, each once, in order. */
+function libraryFilesOf(remembered: RememberedChoices | undefined): number[] {
+  const scopes = [...Object.keys(remembered?.model_print_choices ?? {}), ...Object.keys(remembered?.model_print_options ?? {})]
+  return [...new Set(scopes.map(libraryFileOfScope).filter((id): id is number => id !== null))]
+}
+
 function isEmptyOptions(options: PrintOptions | undefined): boolean {
   return !options || Object.values(options).every((value) => value === null || value === undefined)
 }
@@ -51,8 +97,25 @@ export function RememberedChoicesPanel({
   projects?: ProjectChoices | null
 }) {
   const state = useAsync(() => api.getRemembered(), [], ['settings'])
+  const fileIds = libraryFilesOf(state.data)
+  // One lookup for every library-file row's name (#2349), in requests of at most the
+  // route's 100 ids; none when there are no such rows.
+  const names = useAsync(async () => {
+    const batches: number[][] = []
+    for (let at = 0; at < fileIds.length; at += LIBRARY_NAMES_PER_REQUEST) {
+      batches.push(fileIds.slice(at, at + LIBRARY_NAMES_PER_REQUEST))
+    }
+    return (await Promise.all(batches.map((batch) => api.libraryFileNames(batch)))).flat()
+  }, [fileIds.join(',')])
+  // A Forget changes the ids, and so asks again: the rows keep the last names meanwhile,
+  // rather than every one blinking back to its id.
+  const [lastNames, setLastNames] = useState(names.data)
+  if (names.data !== undefined && names.data !== lastNames) setLastNames(names.data)
+  const shownNames = names.error ? undefined : (names.data ?? lastNames)
+  const fileNames: ReadonlyMap<number, string | null> | undefined = shownNames
+    ? new Map(shownNames.map((file) => [file.id, file.name ?? null]))
+    : undefined
   const [busy, setBusy] = useState<string | null>(null)
-  const [confirmAll, setConfirmAll] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const printerName = (id: number | string) =>
@@ -64,13 +127,15 @@ export function RememberedChoicesPanel({
   const remembered: RememberedChoices | undefined = state.data
   const rows: Row[] = []
   if (remembered) {
-    for (const [slug, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+    for (const [scope, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+      // #1754: a library file's are in the same map, under `library:<file id>`.
+      const fileId = libraryFileOfScope(scope)
       rows.push({
-        key: `choices:${slug}`,
+        key: `choices:${scope}`,
         kind: 'Printer and spools',
-        subject: slug,
+        ...scopeName(scope, fileNames),
         value: describeChoices(choices, printerName),
-        forget: () => api.putModelChoices(slug, {}),
+        forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
     }
     for (const [printerId, bed] of Object.entries(remembered.printer_bed_types ?? {})) {
@@ -102,6 +167,24 @@ export function RememberedChoicesPanel({
         forget: () => api.forgetRememberedProject(projectId),
       })
     }
+    for (const [scope, entry] of Object.entries(remembered.model_projects ?? {})) {
+      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one. The
+      // server names a preset by its name now (one read for every model, not one
+      // `listPresets` each), and drops an entry for a preset its model no longer lists.
+      const slash = scope.indexOf('/')
+      const modelId = slash < 0 ? scope : scope.slice(0, slash)
+      const presetId = slash < 0 ? null : scope.slice(slash + 1)
+      rows.push({
+        key: `model-project:${scope}`,
+        kind: 'Project',
+        subject:
+          presetId === null
+            ? modelId
+            : `${modelId} · ${entry.preset_name ?? presetId}`,
+        value: projectName(String(entry.project_id)),
+        forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
+      })
+    }
     if (!isEmptyOptions(remembered.print_options)) {
       rows.push({
         key: 'options:global',
@@ -120,13 +203,13 @@ export function RememberedChoicesPanel({
         forget: () => api.putPrintOptions({ scope: 'printer', key: printerId, options: {} }),
       })
     }
-    for (const [slug, options] of Object.entries(remembered.model_print_options ?? {})) {
+    for (const [scope, options] of Object.entries(remembered.model_print_options ?? {})) {
       rows.push({
-        key: `options:model:${slug}`,
+        key: `options:model:${scope}`,
         kind: 'Print options',
-        subject: slug,
+        ...scopeName(scope, fileNames),
         value: describeOptions(options),
-        forget: () => api.putPrintOptions({ scope: 'model', key: slug, options: {} }),
+        forget: () => api.putPrintOptions({ scope: 'model', key: scope, options: {} }),
       })
     }
   }
@@ -145,15 +228,11 @@ export function RememberedChoicesPanel({
   }
 
   if (state.loading) {
-    return (
-      <p className="flex items-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading
-      </p>
-    )
+    return <LoadingLines label="Loading" lines={['w-full', 'w-full', 'w-2/3']} />
   }
   if (state.error) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-sm text-warn">
         {state.error instanceof ApiError ? state.error.detail : 'Could not read the remembered choices.'}
       </p>
     )
@@ -162,75 +241,85 @@ export function RememberedChoicesPanel({
   return (
     <div className="space-y-3">
       {rows.length === 0 ? (
-        <p className="text-[13px] text-muted">Nothing is remembered yet.</p>
+        <p className="text-sm text-muted-foreground">Nothing is remembered yet.</p>
       ) : (
-        <table className="w-full text-left text-[13px]" aria-label="Remembered choices">
-          <thead className="text-[12px] text-muted">
-            <tr>
-              <th className="py-1 pr-3 font-normal">What</th>
-              <th className="py-1 pr-3 font-normal">For</th>
-              <th className="py-1 pr-3 font-normal">Remembered</th>
-              <th className="py-1 font-normal">
-                <span className="sr-only">Forget</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.key} className="border-t border-line align-top">
-                <td className="py-1.5 pr-3 text-muted">{row.kind}</td>
-                <td className="sb-num py-1.5 pr-3">{row.subject}</td>
-                <td className="py-1.5 pr-3">{row.value}</td>
-                <td className="py-1.5 text-right">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => void run(row.key, row.forget)}
-                    disabled={busy !== null}
-                    aria-label={`Forget ${row.kind.toLowerCase()} for ${row.subject}`}
-                    {...USER_ONLY}
-                  >
-                    {busy === row.key && <Spinner />}
-                    Forget
-                  </Button>
-                </td>
+        <Card size="sm" className="overflow-x-auto py-0">
+          <table className="w-full text-left text-sm" aria-label="Remembered choices">
+            <thead className="border-b text-xs text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 font-medium">What</th>
+                <th className="px-3 py-2 font-medium">For</th>
+                <th className="px-3 py-2 font-medium">Remembered</th>
+                <th className="px-3 py-2 font-medium">
+                  <span className="sr-only">Forget</span>
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y">
+              {rows.map((row) => (
+                <tr key={row.key} className="align-top transition-colors hover:bg-ui-muted/50">
+                  <td className="px-3 py-2 text-muted-foreground">{row.kind}</td>
+                  <td className="sb-num px-3 py-2">
+                    {row.href ? (
+                      <Link to={row.href} className="underline decoration-border underline-offset-2 hover:text-primary">
+                        {row.subject}
+                      </Link>
+                    ) : (
+                      row.subject
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{row.value}</td>
+                  <td className="px-3 py-1.5 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void run(row.key, row.forget)}
+                      disabled={busy !== null}
+                      aria-label={`Forget ${row.kind.toLowerCase()} for ${row.subject}`}
+                      {...USER_ONLY}
+                    >
+                      {busy === row.key && <Spinner />}
+                      Forget
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
       )}
       {error && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-xs text-warn">
           {error}
         </p>
       )}
       {rows.length > 0 && (
-        <div className="flex items-center gap-2">
-          {confirmAll ? (
-            <>
-              <span className="text-[12px] text-muted">Forget all {rows.length}?</span>
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => {
-                  setConfirmAll(false)
-                  void run('all', () => api.forgetAllRemembered())
-                }}
-                {...USER_ONLY}
-              >
-                Yes, forget all
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmAll(false)}>
-                Keep them
-              </Button>
-            </>
-          ) : (
-            <Button size="sm" variant="danger" onClick={() => setConfirmAll(true)} disabled={busy !== null} {...USER_ONLY}>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button size="sm" variant="destructive" disabled={busy !== null} aria-busy={busy === 'all'} {...USER_ONLY}>
               {busy === 'all' && <Spinner />}
               Forget all
             </Button>
-          )}
-        </div>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Forget all {rows.length}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                The print dialog then opens on its own defaults for every model and printer.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep them</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => void run('all', () => api.forgetAllRemembered())}
+                {...USER_ONLY}
+              >
+                Yes, forget all
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       )}
     </div>
   )

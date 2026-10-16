@@ -1,0 +1,353 @@
+import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
+import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
+import { shortId } from './format'
+import type { Within } from './traceAction'
+import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
+
+/** No action to join: the call runs as it is. */
+const untraced: Within = (call) => call()
+
+export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
+
+/**
+ * #1864 — what one arrange is built from, in any mix: a saved output of any template, or
+ * a Bambuddy library file. A file ScadBuddy uploaded arranges through its `output_id`;
+ * any other is not arrangeable until #1863 reads objects from the 3MF itself.
+ */
+export type ArrangeSource = { kind: 'output'; output: Output } | { kind: 'library'; file: LibraryEntry }
+
+export function fromOutputs(outputs: Output[]): ArrangeSource[] {
+  return outputs.map((output) => ({ kind: 'output', output }))
+}
+
+export function fromFiles(files: LibraryEntry[]): ArrangeSource[] {
+  return files.map((file) => ({ kind: 'library', file }))
+}
+
+/** One key per source, so the same output or file added twice is listed once. */
+export function sourceKey(source: ArrangeSource): string {
+  return source.kind === 'output' ? `output:${source.output.id}` : `library:${source.file.id}`
+}
+
+export const GOAL_LABELS: Record<ArrangeGoal, string> = {
+  fewest_plates: 'Fewest plates',
+  fewest_swaps: 'Fewest filament swaps',
+  by_colour: 'One colour per plate (no prime tower)',
+  keep_together: 'Keep groups together',
+}
+
+/** A saved arrange, and how many plates its file has. */
+export interface Arranged {
+  output: Output
+  plates: number
+  /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
+  skipped?: string
+  /**
+   * #2284 — the name of the model whose History the result is filed in. Absent when the
+   * model list could not be read: then no name is known, and a slug is not one (#2541).
+   */
+  filedUnder?: string
+}
+
+/**
+ * #2284 — where an arrange's result went: "Saved as X in Lemon's history." Without the
+ * model's name it never falls back to the slug (#2541): it is "this model's" on `here`,
+ * the History page of the model it was filed under, and "its model's" anywhere else,
+ * where an "Open in History" link beside it names the place.
+ */
+export function savedNote(arranged: Arranged, here?: string): string {
+  const owner = arranged.filedUnder
+    ? `${arranged.filedUnder}'s`
+    : arranged.output.slug === here
+      ? "this model's"
+      : "its model's"
+  const model = `${owner} history`
+  return arranged.output.name ? `Saved as ${arranged.output.name} in ${model}.` : `Saved in ${model}.`
+}
+
+/** #2284 — an arranged output's `arranged_from` counted, files too: "3 outputs and 1 library file". */
+export function arrangedSources(sources: string[]): string {
+  const files = sources.filter((source) => source.startsWith('library:')).length
+  const outputs = sources.length - files
+  const counted = [
+    ...(outputs > 0 ? [`${outputs} ${outputs === 1 ? 'output' : 'outputs'}`] : []),
+    ...(files > 0 ? [`${files} ${files === 1 ? 'library file' : 'library files'}`] : []),
+  ]
+  return counted.join(' and ')
+}
+
+const ARRANGED = ' (arranged)'
+
+/** A re-arranged output's name: one "(arranged)", however often it is arranged again. */
+export function arrangedName(name: string | null | undefined): string | null {
+  if (!name) return null
+  return name.endsWith(ARRANGED) ? name : `${name}${ARRANGED}`
+}
+
+export function arrangedNote(plates: number): string {
+  return `Arranged onto ${plates} ${plates === 1 ? 'plate' : 'plates'}.`
+}
+
+/** #2283 — what `runArrange` says at each stage, in order. */
+export const ARRANGE_STAGES = {
+  starting: 'Starting the arrange…',
+  waiting: 'Waiting for a worker…',
+  laying: 'Laying out the objects…',
+  saving: 'Saving the arranged output…',
+} as const
+
+/** #2283 — the re-render stage's line; each output's own progress is listed under it. */
+export function rerenderStage(count: number): string {
+  return `Re-rendering ${count} ${count === 1 ? 'output' : 'outputs'} first…`
+}
+
+/**
+ * spec 2026-09-27 §7 — lay objects out again, wait for the job, save its output. The
+ * plate count is the job's: `plates` lists every plate of the new file and is empty
+ * when there is only one. A failed or cancelled job rejects with the job's own error.
+ * The job is followed over the realtime socket (#1909); `pollMs` is the read interval
+ * only while the socket is unavailable. An aborted `signal` stops the wait and rejects
+ * with its reason: nothing is saved after the caller has gone (a closed dialog), so a
+ * job is saved once. `within` makes the arrange's start and its save children of the
+ * caller's action (#2292); the job's follow is a poll, and stays out of it.
+ */
+export async function runArrange(
+  slug: string,
+  body: ArrangeRequest,
+  opts: {
+    pollMs?: number
+    onProgress?: (message: string) => void
+    signal?: AbortSignal
+    /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
+    saveKey?: string
+    /**
+     * The arrange start's key, likewise (#3526): a "Try again" after a start whose answer
+     * was lost joins the job the server did start, not a second one.
+     */
+    arrangeKey?: string
+    /**
+     * A job this arrange already finished: a "Try again" after only its save failed
+     * saves that job again, under the same key, rather than arranging anew (a new job
+     * is a new save, which the key could not tell from the first).
+     */
+    arranged?: ArrangedJob
+    /** Called once the arrange's job is done, before it is saved. */
+    onArranged?: (job: ArrangedJob) => void
+    within?: Within
+  } = {},
+): Promise<Arranged> {
+  const { signal } = opts
+  const within = opts.within ?? untraced
+  let done = opts.arranged
+  if (!done) {
+    // #2283 — every stage says itself, so the last message never stands for the next one.
+    opts.onProgress?.(ARRANGE_STAGES.starting)
+    const started = await within(() => api.arrangeOutputs(body, signal, opts.arrangeKey))
+    signal?.throwIfAborted()
+    const job = await waitForJob(started.id, {
+      pollMs: opts.pollMs ?? 1000,
+      signal,
+      onJob: (read) => opts.onProgress?.(read.status === 'running' ? ARRANGE_STAGES.laying : ARRANGE_STAGES.waiting),
+    })
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw new Error(job.error ?? `The arrange was ${job.status}.`)
+    }
+    done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
+    opts.onArranged?.(done)
+  }
+  opts.onProgress?.(ARRANGE_STAGES.saving)
+  const jobId = done.jobId
+  const output = await within(() =>
+    api.createOutput(slug, jobId, body.name ?? undefined, undefined, undefined, opts.saveKey),
+  )
+  return { output, plates: done.plates }
+}
+
+/** An arrange's finished job, as its save needs it. */
+export interface ArrangedJob {
+  jobId: string
+  plates: number
+}
+
+/** An output as a caller may know it: its id, and its name when it has one. */
+export type OutputRef = Pick<Output, 'id'> & Partial<Pick<Output, 'name'>>
+
+/** Has no recorded objects, so Arrange refuses it until it is re-rendered (#902). */
+export function needsBackfill(output: Partial<Pick<Output, 'manifest'>>): boolean {
+  return (output.manifest ?? []).length === 0
+}
+
+/** The outputs Arrange's `needs_backfill` refusal names, or null for any other failure. */
+export function backfillIds(cause: unknown): string[] | null {
+  if (!(cause instanceof ApiError)) return null
+  const problem = cause.problem as Partial<NeedsBackfillProblem>
+  if (problem.code !== NEEDS_BACKFILL) return null
+  const ids = Array.isArray(problem.output_ids) ? problem.output_ids.map(String) : []
+  // A refusal naming no output has nothing to offer a re-render of: show its detail.
+  return ids.length > 0 ? ids : null
+}
+
+/** "A", "A and B", "A, B and C". */
+export function listNames(outputs: OutputRef[]): string {
+  // #2285 — an unnamed one by its id's head, as History shows it.
+  const names = outputs.map((o) => o.name ?? shortId(o.id))
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+/** Why Arrange cannot use them yet, in one sentence. */
+export function backfillNote(outputs: OutputRef[]): string {
+  const one = outputs.length === 1
+  return `${listNames(outputs)} ${one ? 'was' : 'were'} saved before Arrange existed; re-render to get ${one ? 'its' : 'their'} layout.`
+}
+
+export interface Backfilled {
+  /** Re-rendered, read back with their objects. */
+  ready: Output[]
+  /** Not re-rendered, each with why. */
+  /** Not re-rendered, each with why; `running` when it was still going at the wait's limit. */
+  failed: { output: OutputRef; error: string; running?: boolean }[]
+}
+
+/** The most of a server's reason a failure sentence quotes; the rest is cut (#1007). */
+export const MAX_REASON_CHARS = 200
+
+function shortReason(error: string): string {
+  const reason = error.trim().replace(/\.$/, '')
+  return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1).trimEnd()}…` : reason
+}
+
+/**
+ * "A could not be re-rendered: why." One sentence per reason (#2286): outputs that failed
+ * for the same reason are named together, so three failures of one cause read as one.
+ * `retry` is the button that tries again where this is shown: Arrange in its dialog,
+ * Re-arrange in Print.
+ */
+export function backfillFailures(failed: Backfilled['failed'], retry = 'Arrange'): string {
+  const running = failed.filter((f) => f.running).map((f) => f.output)
+  const byReason = new Map<string, OutputRef[]>()
+  for (const { output, error, running: still } of failed) {
+    if (still) continue
+    const reason = shortReason(error)
+    byReason.set(reason, [...(byReason.get(reason) ?? []), output])
+  }
+  return [
+    ...(running.length > 0
+      ? [`${listNames(running)} ${running.length === 1 ? 'is' : 'are'} still re-rendering; try ${retry} again later.`]
+      : []),
+    ...[...byReason].map(([reason, outputs]) => `${listNames(outputs)} could not be re-rendered: ${reason}.`),
+  ].join(' ')
+}
+
+/** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
+const ALREADY_BACKFILLED = 'already_backfilled'
+
+const BACKFILL_POLL_MS = 500
+/**
+ * How long one call waits for all its re-renders together, not for each: they run at
+ * once, under one deadline. The server keeps going after it gives up.
+ */
+export const BACKFILL_WAIT_MS = 5 * 60_000
+
+/**
+ * #902 — re-render each output saved before Arrange, all at once: queue it, follow its
+ * job until it ends (over the socket, #1909), then follow the output (`output.updated`, #1970) until the server has attached what the
+ * render recorded (`backfill` gone) or says why not (`backfill.error`). An aborted
+ * `signal` stops every wait and rejects; the server still finishes the re-renders.
+ * `within` makes each re-render's start a child of the caller's action (#2292).
+ */
+export async function backfillOutputs(
+  outputs: OutputRef[],
+  opts: {
+    pollMs?: number
+    waitMs?: number
+    onProgress?: (output: OutputRef, message: string) => void
+    signal?: AbortSignal
+    within?: Within
+  } = {},
+): Promise<Backfilled> {
+  const { signal } = opts
+  const within = opts.within ?? untraced
+  const pollMs = opts.pollMs ?? BACKFILL_POLL_MS
+  const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS)
+  const one = async (output: OutputRef): Promise<Output> => {
+    const say = (message: string) => opts.onProgress?.(output, message)
+    say('Queuing a re-render…')
+    let job
+    try {
+      job = await within(() => api.backfillOutput(output.id, signal))
+    } catch (cause) {
+      // Re-rendered since the list was read (a closed dialog's backfill finished). By its
+      // code, not the status alone: another 409 is no sign the objects are there (#1007).
+      if (cause instanceof ApiError && cause.status === 409 && cause.problem['code'] === ALREADY_BACKFILLED) {
+        return await api.getOutput(output.id)
+      }
+      throw cause
+    }
+    signal?.throwIfAborted()
+    if (job.status !== 'done' && job.status !== 'failed' && job.status !== 'cancelled') {
+      say(job.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…')
+      // #1909 — over the socket; `pollMs` only while it is unavailable.
+      job = await waitForJob(job.id, {
+        pollMs,
+        waitMs: Math.max(0, deadline - Date.now()),
+        signal,
+        onJob: (read) => say(read.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…'),
+      })
+    }
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw new Error(job.error ?? `the re-render was ${job.status}`)
+    }
+    say('Recording its layout…')
+    // #1970 — the server announces the attach (or why not) as `output.updated`.
+    const read = await followUntil('outputs', {
+      read: () => api.getOutput(output.id),
+      done: (o) => !o.backfill || !!o.backfill.error,
+      relevant: (event) => event.data['output_id'] === output.id,
+      stillRunning: () => new JobStillRunning(job.id),
+      pollMs,
+      waitMs: Math.max(0, deadline - Date.now()),
+      signal,
+    })
+    if (read.backfill?.error) throw new Error(read.backfill.error)
+    if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
+    return read
+  }
+  const settled = await Promise.allSettled(outputs.map(one))
+  signal?.throwIfAborted()
+  const result: Backfilled = { ready: [], failed: [] }
+  settled.forEach((outcome, index) => {
+    const output = outputs[index]!
+    if (outcome.status === 'fulfilled') result.ready.push(outcome.value)
+    else {
+      const cause = outcome.reason as unknown
+      const error = cause instanceof ApiError ? cause.detail : (cause as Error).message
+      result.failed.push(cause instanceof JobStillRunning ? { output, error, running: true } : { output, error })
+    }
+  })
+  return result
+}
+
+/**
+ * #2285 — each object of `output` by name: its BOM piece, else the model it was rendered
+ * from (never the template's file, "model.scad" for nearly every one). Two objects that
+ * would read the same are numbered, so the rows can be told apart.
+ */
+export function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
+  // #3637 — one part in two colourings is two entries but one object: named once.
+  const objects = [...new Map((output.manifest ?? []).map((object) => [object.part, object])).values()]
+  const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
+  // Counted once, not per object: a manifest runs to thousands of parts.
+  const uses = new Map<string, number>()
+  for (const name of base) uses.set(name, (uses.get(name) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  return new Map(
+    objects.map((object, index) => {
+      const name = base[index]!
+      if ((uses.get(name) ?? 0) < 2) return [object.part, name]
+      const n = (seen.get(name) ?? 0) + 1
+      seen.set(name, n)
+      return [object.part, `${name} ${n}`]
+    }),
+  )
+}

@@ -24,8 +24,9 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import QueueFilaments
-from scadbuddy.bambuddy.models import PresetRef, QueueItemCreate, SliceRequest
+from scadbuddy.bambuddy.models import PresetRef, ProcessValue, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.usage import PickedHotend
@@ -36,7 +37,8 @@ logger = logging.getLogger(__name__)
 class QueueOutcome(BaseModel):
     """What the slice-and-queue route produced, in the shape the run route reports."""
 
-    slice_job_id: int
+    #: ``None`` for a plate queued with no slice (a sliced file, #2671).
+    slice_job_id: int | None = None
     sliced_library_file_id: int
     #: :attr:`SliceRequest.preset_key` of the slice, recorded with the sliced file (#316).
     preset_key: str | None = None
@@ -67,7 +69,14 @@ class SlicePlan(BaseModel):
     #: The template's ``print_settings`` (#770), written over the process preset.
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
-    process_overrides: dict[str, str] = Field(default_factory=dict)
+    process_overrides: dict[str, ProcessValue] = Field(default_factory=dict)
+    #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
+    #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
+    #: any slot it thinks that plate leaves unused, and it cannot see colour painted
+    #: inline on a mesh, so queue 268's two-colour file sliced in one colour. The
+    #: queue item still names the plate. Defaults off, so a plan in a workflow's
+    #: history from before it reads as before.
+    whole_file: bool = False
 
 
 async def slice_and_queue(
@@ -105,40 +114,185 @@ async def slice_and_queue(
     awaited bare, like ``before_enqueue``: the callback is what never raises (spec
     2026-10-01 §5), so a ``try`` here would hide a broken one.
     """
-    request = SliceRequest(
+    started = await start_slice(
+        client, library_file_id=library_file_id, plan=plan, plate_id=plate_id
+    )
+    sliced = await wait_slice(client, started.job_id)
+    rack = await choose_rack(sliced) if choose_rack is not None else None
+    if before_enqueue is not None:
+        await before_enqueue()
+    item = await enqueue_plate(
+        client,
+        sliced=sliced,
+        printer_id=printer_id,
+        filaments=filaments,
+        plate_id=plate_id,
+        copies=copies,
+        project_id=project_id,
+        options=options,
+        nozzle_rack_choice=rack.nozzle_rack_choice if rack is not None else None,
+    )
+    return QueueOutcome(
+        slice_job_id=started.job_id,
+        sliced_library_file_id=sliced,
+        preset_key=started.preset_key,
+        queue_item_ids=[item],
+        printer_id=printer_id,
+        rack_picks=list(rack.picks) if rack is not None else [],
+    )
+
+
+#: How Bambuddy words a slice job its slicer sidecar never answered: its
+#: ``SlicerApiUnavailableError``, raised on a transport error to the sidecar (a sidecar
+#: OOM-killed, evicted or mid-rollout), reported on the job as ``error_status`` 502.
+SIDECAR_UNREACHABLE = "Slicer sidecar"
+
+
+class SliceLostError(ApiError):
+    """A slice that left nothing behind, so it may be started again (#2081): the
+    sidecar died under it, Bambuddy forgot it (a restart: its jobs live in memory), or
+    Bambuddy could not be reached to start it. A second slice of the same plate costs
+    only slicer time; what must happen once is the enqueue, which a run does once
+    whatever its slices did."""
+
+    @classmethod
+    def of(cls, error: ApiError) -> SliceLostError:
+        lost = cls(
+            error.status, error.detail, title=error.title, type_=error.type, **error.extensions
+        )
+        lost.upstream = error.upstream
+        return lost
+
+
+def _start_lost(error: ApiError) -> bool:
+    """A start Bambuddy never answered, or answered with a server error: a later
+    attempt may meet a Bambuddy (and a sidecar) that is up. Any other 4xx is the
+    request's, and would be refused again."""
+    answered = error.extensions.get("bambuddy_status")
+    return error.type == UNAVAILABLE_PROBLEM and (
+        answered is None
+        or answered >= status.HTTP_500_INTERNAL_SERVER_ERROR
+        or answered == status.HTTP_429_TOO_MANY_REQUESTS
+    )
+
+
+class SliceStarted(BaseModel):
+    """A slice Bambuddy accepted: its job, and the key the sliced file is recorded by."""
+
+    job_id: int
+    preset_key: str | None = None
+
+
+#: A finished slice of this copy with these presets, if one may be queued as it is:
+#: called with the copy's id and :attr:`SliceRequest.preset_key` (#2169).
+ReuseSlice = Callable[[int, str], Awaitable[int | None]]
+
+
+async def start_slice(
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    plan: SlicePlan,
+    plate_id: int = 1,
+    reuse: ReuseSlice | None = None,
+) -> SliceStarted:
+    """``POST /library/files/{id}/slice``. Every call starts a **new** job, so the
+    workflow runs this once (spec 2026-10-01 §5.3, ``maximum_attempts = 1``).
+
+    ``reuse`` names a finished job of the same copy and presets, which the print
+    dialog's preview sliced (#2169): its job is answered instead, and nothing is
+    sliced again, so the slice the dialog showed is the one that prints."""
+    request = slice_request(plan, plate_id)
+    if reuse is not None:
+        job_id = await reuse(library_file_id, request.preset_key)
+        if job_id is not None:
+            return SliceStarted(job_id=job_id, preset_key=request.preset_key)
+    try:
+        accepted = await client.slice(library_file_id, request)
+    except ApiError as error:
+        if _start_lost(error):
+            raise SliceLostError.of(error) from None
+        raise
+    return SliceStarted(job_id=accepted.job_id, preset_key=request.preset_key)
+
+
+def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
+    """What :func:`start_slice` posts for ``plan`` and ``plate_id``."""
+    return SliceRequest(
         printer_preset=plan.printer_preset,
         process_preset=plan.process_preset,
         filament_presets=plan.filament_presets,
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
-        plate=plate_id,
+        plate=0 if plan.whole_file else plate_id,
         process_overrides=plan.process_overrides or None,
     )
-    accepted = await client.slice(library_file_id, request)
-    job = await client.await_slice(accepted.job_id)
+
+
+async def wait_slice(client: BambuddyClient, job_id: int) -> int:
+    """Wait for slice job ``job_id``; the sliced file's id. Reading a job again is
+    safe, so this may be retried. A job the sidecar died under, or one Bambuddy no
+    longer has, is :class:`SliceLostError` (#2081). A job still running at the deadline
+    is not: it may yet finish, and a second slice would wait behind it."""
+    try:
+        job = await client.await_slice(job_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            raise SliceLostError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy no longer has slice job {job_id}; it restarted while slicing",
+                type_=UNAVAILABLE_PROBLEM,
+                slice_job_id=job_id,
+            ) from None
+        raise
     failure = job.failure
+    if (
+        failure is not None
+        and job.error_status == status.HTTP_502_BAD_GATEWAY
+        and (failure.startswith(SIDECAR_UNREACHABLE))
+    ):
+        raise SliceLostError(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Bambuddy failed to slice the plate: {failure}",
+            type_=UNAVAILABLE_PROBLEM,
+            slice_job_id=job_id,
+        )
     if failure is not None:
         # Bambuddy's own words, not a paraphrase: the slicer's message is what tells the
         # user whether to change the mapping, the plate or the model.
         raise ApiError(
             status.HTTP_502_BAD_GATEWAY,
             f"Bambuddy failed to slice the plate: {failure}",
-            slice_job_id=accepted.job_id,
+            slice_job_id=job_id,
         )
     sliced = job.result.library_file_id if job.result else None
     if sliced is None:
         raise ApiError(
             status.HTTP_502_BAD_GATEWAY,
-            f"Bambuddy slice job {accepted.job_id} completed without a sliced file",
-            slice_job_id=accepted.job_id,
+            f"Bambuddy slice job {job_id} completed without a sliced file",
+            slice_job_id=job_id,
         )
+    return sliced
 
+
+async def enqueue_plate(
+    client: BambuddyClient,
+    *,
+    sliced: int,
+    printer_id: int,
+    plate_id: int,
+    copies: int,
+    project_id: int | None,
+    options: PrintOptions | None,
+    filaments: QueueFilaments | None = None,
+    nozzle_rack_choice: dict[str, int] | None = None,
+) -> int:
+    """``POST /queue/`` for one sliced plate, once; the item's id. Past this call the
+    print may be on the queue whatever it raised (#470), so it is never retried.
+    ``nozzle_rack_choice`` is the rack pick (#836), by stringified filament group id."""
     remembered = options.queue_fields() if options is not None else {}
     remembered.pop("quantity", None)
     remembered.pop("project_id", None)
-    rack = await choose_rack(sliced) if choose_rack is not None else None
-    if before_enqueue is not None:
-        await before_enqueue()
     item = await client.enqueue(
         QueueItemCreate(
             **remembered,
@@ -151,14 +305,7 @@ async def slice_and_queue(
             # On this route the project can ride on the item itself, so there is no
             # window in which the entry exists unfiled (#79).
             project_id=project_id,
-            nozzle_rack_choice=rack.nozzle_rack_choice if rack is not None else None,
+            nozzle_rack_choice=nozzle_rack_choice,
         )
     )
-    return QueueOutcome(
-        slice_job_id=accepted.job_id,
-        sliced_library_file_id=sliced,
-        preset_key=request.preset_key,
-        queue_item_ids=[item.id],
-        printer_id=printer_id,
-        rack_picks=list(rack.picks) if rack is not None else [],
-    )
+    return item.id

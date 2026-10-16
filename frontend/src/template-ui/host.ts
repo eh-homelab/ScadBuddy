@@ -2,7 +2,7 @@ import { api } from '../api/client'
 import type { CustomizerSchema } from '../api/types'
 import { isJsonObject, mergePatch, type JsonObject } from '../lib/inputs'
 import { allParams } from '../lib/params'
-import { UI_API_CURRENT, type Host } from './types'
+import { UI_API_CURRENT, type GenerateResult, type Host } from './types'
 
 /** A write a template UI made that the page refuses; the message names the key. */
 export class HostInputError extends Error {
@@ -23,7 +23,7 @@ export interface HostDeps {
   getSchema(): CustomizerSchema
   getInputs(): JsonObject
   setInputs(next: JsonObject): void
-  generate(): Promise<{ jobId: string; outputId: string }>
+  generate(): Promise<GenerateResult>
   openPrint(outputId: string): void
   presets: Host['presets']
   onDescribe(fn: (() => string) | null): void

@@ -8,9 +8,12 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.render import solids as solids_module
@@ -86,6 +89,28 @@ async def test_a_colour_the_model_never_uses_is_reported_not_raised(tmp_path: Pa
 
 
 @pytest.mark.requires_openscad
+async def test_a_colour_openscad_cannot_export_falls_back_to_its_split_mesh(
+    tmp_path: Path,
+) -> None:
+    """#952: spinning-top's stem, alone in its colour, is a PolySet OpenSCAD cannot
+    write as a 3MF. It exits 0 with an empty file: a fallback, not a BadZipFile."""
+    model = tmp_path / "lone_lathe.scad"
+    shutil.copy(FIXTURES / "lone_lathe.scad", model)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    solids = await render_solids(
+        model, CustomizerSchema(), {}, ["#E53935", "#1E88E5"], work, config=load_config()
+    )
+
+    assert sorted(solids.meshes) == ["#1E88E5"]
+    assert solids.warnings == [
+        "#E53935: no closed solid (openscad could not export: Can't add triangle to 3MF"
+        f" model.); {SPLIT_FALLBACK}"
+    ]
+
+
+@pytest.mark.requires_openscad
 async def test_the_wrapper_is_removed_from_the_model_directory(tmp_path: Path) -> None:
     model = tmp_path / "named_colours.scad"
     shutil.copy(FIXTURES / "named_colours.scad", model)
@@ -126,6 +151,10 @@ class FakeRenders:
         self.peak = 0
         self.started: list[str] = []
         self.cancelled: list[str] = []
+        #: When set, each render waits here instead of sleeping, until this many have
+        #: started; the last to start wakes them all in one go.
+        self.together = 0
+        self._all_started = asyncio.Event()
 
     async def render_3mf(
         self,
@@ -136,7 +165,9 @@ class FakeRenders:
         *,
         config: Config,
         extra_defines: Sequence[str] = (),
+        failure_is_fallback: bool = False,
     ) -> ProcessOutput:
+        assert failure_is_fallback
         colour = _colour_of(extra_defines)
         assert scad_path.name.startswith(WRAPPER_PREFIX)
         assert scad_path.is_file()
@@ -144,7 +175,12 @@ class FakeRenders:
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:
-            await asyncio.sleep(self.delays.get(colour, self.delay))
+            if self.together:
+                if len(self.started) == self.together:
+                    self._all_started.set()
+                await self._all_started.wait()
+            else:
+                await asyncio.sleep(self.delays.get(colour, self.delay))
             if colour in self.fail:
                 raise self.fail[colour]
         except asyncio.CancelledError:
@@ -240,6 +276,10 @@ async def test_a_second_colour_failing_at_once_is_logged_not_lost(
     model, work = _model(tmp_path)
     colours = MANY_COLOURS[:2]
     fake.fail = {colours[0]: RuntimeError("first broke"), colours[1]: RuntimeError("second broke")}
+    # Both raise in the same turn of the event loop, before the TaskGroup can cancel
+    # either. Two equal sleeps did that only while their timers fired together; under
+    # load the first failure cancelled the second before it raised (#1617).
+    fake.together = len(colours)
 
     with pytest.raises(RuntimeError, match="broke") as raised:
         await render_solids(
@@ -320,8 +360,65 @@ async def test_a_colour_waiting_for_a_slot_is_not_charged_against_its_timeout(
     assert list(result.meshes) == colours
 
 
+async def test_each_colour_is_a_solid_span_with_its_export_beneath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    monkeypatch.setattr(solids_module, "split_by_material", lambda p: _box(_solid_index(p)))
+    model, work = _model(tmp_path)
+    config = Config(openscad=_fake_openscad(tmp_path, "exit 0"), data_dir=tmp_path / "data")
+
+    await render_solids(model, CustomizerSchema(), {}, MANY_COLOURS[:2], work, config=config)
+
+    finished = spans.get_finished_spans()
+    solid_spans = [s for s in finished if s.name == "render.solid"]
+    assert sorted(
+        cast(int, (s.attributes or {})["scadbuddy.colour_index"]) for s in solid_spans
+    ) == [1, 2]
+    exports = [s for s in finished if s.name == "openscad.export"]
+    assert len(exports) == 2
+    for solid_span in solid_spans:
+        assert solid_span.context is not None
+        assert [
+            e
+            for e in exports
+            if e.parent is not None and e.parent.span_id == solid_span.context.span_id
+        ]
+
+
+class _ParseError(Exception):
+    pass
+
+
+async def test_a_colours_mesh_parse_is_inside_its_solid_span_and_fails_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    # Review 5 of #1064: the parse is the colour's work, so its time and its failure
+    # (a real job failure, not a fallback) belong to that colour's span.
+    def split(path: Path) -> list[ColourPart]:
+        if _solid_index(path) == 2:
+            raise _ParseError
+        return _box(_solid_index(path))
+
+    monkeypatch.setattr(solids_module, "split_by_material", split)
+    model, work = _model(tmp_path)
+    config = Config(openscad=_fake_openscad(tmp_path, "exit 0"), data_dir=tmp_path / "data")
+
+    with pytest.raises(_ParseError):
+        await render_solids(model, CustomizerSchema(), {}, MANY_COLOURS[:2], work, config=config)
+
+    by_index = {
+        (s.attributes or {})["scadbuddy.colour_index"]: s
+        for s in spans.get_finished_spans()
+        if s.name == "render.solid"
+    }
+    failed = by_index[2]
+    assert failed.status.status_code is StatusCode.ERROR
+    assert (failed.attributes or {})["scadbuddy.failure_class"] == "_ParseError"
+    assert "scadbuddy.openscad.exit_code" not in (failed.attributes or {})
+
+
 async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, spans: InMemorySpanExporter
 ) -> None:
     monkeypatch.setattr(solids_module, "split_by_material", lambda p: _box(_solid_index(p)))
     model, work = _model(tmp_path)
@@ -339,6 +436,15 @@ async def test_a_colour_that_times_out_falls_back_without_failing_its_siblings(
     assert result.warnings == [
         f"{colours[1]}: no closed solid (openscad timed out after 0.5s); {SPLIT_FALLBACK}"
     ]
+    # #1134: the export says why the colour fell back, and still ends UNSET.
+    exports = [s for s in spans.get_finished_spans() if s.name == "openscad.export"]
+    timed_out = [
+        s
+        for s in exports
+        if (s.attributes or {}).get("scadbuddy.failure_class") == "RenderTimeoutError"
+    ]
+    assert len(timed_out) == 1
+    assert {s.status.status_code for s in exports} == {StatusCode.UNSET}
 
 
 async def test_cancelled_siblings_leave_no_openscad_running(

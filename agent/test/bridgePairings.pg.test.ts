@@ -1,3 +1,4 @@
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Principal } from '../src/auth/principal.js'
 import { PostgresTokenStore, principalFor } from '../src/auth/tokens.js'
@@ -22,17 +23,41 @@ const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
 const OTHER_TAB = 'tab-bbbbbbbbbbbbbbbbbbbbbb'
 const anonymous: Principal = { id: 'anonymous:session-1', kind: 'anonymous', tiers: ['read', 'write'], clientIp: '10.1.2.3' }
 
+// #1405 review: a CancelRequest names the backend, not the query, so cancelling a
+// lookup that already finished would kill whatever statement the pool ran next on
+// that connection. An abort must never reach the server.
+describe('pairedTab abort', () => {
+  it('rejects with the abort reason and never cancels the query on the server', async () => {
+    let cancels = 0
+    let finish!: (rows: unknown[]) => void
+    const query = Object.assign(new Promise<unknown[]>((resolve) => (finish = resolve)), {
+      cancel: () => {
+        cancels++
+      },
+    })
+    const sql = (() => query) as unknown as ConstructorParameters<typeof PostgresPairingStore>[0]
+    const stop = new AbortController()
+    const lookup = new PostgresPairingStore(sql).pairedTab(anonymous, stop.signal)
+    stop.abort(new Error('the wait ended'))
+    await expect(lookup).rejects.toThrow('the wait ended')
+    finish([])
+    await query
+    expect(cancels).toBe(0)
+  })
+})
+
 describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
+  let schema: string
+  let url: string
   let drop: () => Promise<void>
   let store: PostgresPairingStore
   let agent: Principal
 
-  // One schema for the file, emptied before each test: migrating is serialised
-  // across the whole database (db/migrations.ts MIGRATION_LOCK), so a schema per
-  // test would hold up every other file's migrations.
+  // One database for the file, emptied before each test: the tests below share a
+  // pool and an admin connection, and copying a database per test buys nothing here.
   beforeAll(async () => {
-    ;({ db, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     store = new PostgresPairingStore(db.sql)
   })
@@ -56,6 +81,76 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
     expect(JSON.stringify(await db.sql`SELECT * FROM ai_browser_pairings`)).not.toContain(request.code)
     expect(await store.pending()).toEqual([{ id: request.id, label: 'MCP token “laptop”', expiresAt: request.expiresAt }])
     expect(await store.pairedTab(agent)).toBeUndefined()
+  })
+
+  // #1394: an abandoned tab check stops waiting for its lookup at once.
+  it('stops waiting for a pairedTab lookup whose signal aborts', async () => {
+    await expect(store.pairedTab(agent, AbortSignal.abort(new Error('already over')))).rejects.toThrow('already over')
+    const stop = new AbortController()
+    const lookup = store.pairedTab(agent, stop.signal)
+    stop.abort(new Error('the wait ended'))
+    await expect(lookup).rejects.toThrow('the wait ended')
+    expect(await store.pairedTab(agent)).toBeUndefined()
+  })
+
+  // #1410: a lookup actually blocked on the server (#1352), not one aborted before postgres.js sent it.
+  it('stops waiting for a pairedTab lookup blocked on the server, and the pool still serves afterwards', async () => {
+    const admin = postgres(url, { max: 2, onnotice: () => {} })
+    let unlock!: () => void
+    const unlocked = new Promise<void>((resolve) => (unlock = resolve))
+    const locked = admin.begin(async (tx) => {
+      await tx.unsafe(`LOCK TABLE "${schema}".ai_browser_pairings IN ACCESS EXCLUSIVE MODE`)
+      await unlocked
+    })
+    try {
+      await expect
+        .poll(async () => (await admin`
+          SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = ${schema} AND c.relname = 'ai_browser_pairings' AND l.mode = 'AccessExclusiveLock' AND l.granted
+             -- Every copy of the template has the same relation OIDs: only this database's lock counts.
+             AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())`).length)
+        .toBe(1)
+      const stop = new AbortController()
+      // #1814: the query itself, so its own outcome shows it was never cancelled (a
+      // cancelled one rejects with 57014); "no lock waiter left" alone cannot tell.
+      const sent: PromiseLike<unknown>[] = []
+      // Only the tagged-template call is recorded. A Proxy is `db.sql` itself for everything
+      // else, so its helpers (`sql.begin`, `sql.unsafe`, ...) work however they are defined.
+      const watched = new Proxy(db.sql, {
+        apply(target, self, args: Parameters<typeof db.sql>) {
+          const query: PromiseLike<unknown> = Reflect.apply(target, self, args)
+          sent.push(query)
+          return query
+        },
+      })
+      const lookup = new PostgresPairingStore(watched).pairedTab(agent, stop.signal)
+      // This database's backends other than the admin's own: another test's lock wait cannot count.
+      const waiting = async () =>
+        (await admin`
+          SELECT 1 FROM pg_stat_activity
+           WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+             AND query LIKE '%FROM ai_browser_pairings%' AND query LIKE '%tab_id%'`).length
+      await expect.poll(waiting).toBe(1)
+      stop.abort(new Error('the wait ended'))
+      // Rejects while the lock is still held: the wait ended, the read did not.
+      await expect(lookup).rejects.toThrow('the wait ended')
+      expect(await waiting()).toBe(1)
+      unlock()
+      await locked
+      // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
+      expect(sent).toHaveLength(1)
+      await expect(sent[0]).resolves.toEqual([])
+      await expect.poll(async () => (await admin`
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+           AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
+      expect(await store.pairedTab(agent)).toBeUndefined()
+    } finally {
+      unlock()
+      await locked.catch(() => undefined)
+      // Closed on every path: a failed assertion must not leave this pool holding the file's teardown.
+      await admin.end({ timeout: 5 })
+    }
   })
 
   it('pairs the principal with the tab the code was typed into, once', async () => {

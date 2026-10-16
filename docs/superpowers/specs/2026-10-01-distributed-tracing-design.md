@@ -46,7 +46,10 @@ cluster does not run and which covers neither the browser nor Temporal context.
   is a deliberate exception to "settings live in Postgres": the exporter is
   configured before the database is reachable, and it is infrastructure, like
   `SCADBUDDY_DATABASE_URL`.
-- **No endpoint, no export.** With `OTEL_EXPORTER_OTLP_ENDPOINT` unset, each
+- **No endpoint, no export.** With neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` nor
+  `OTEL_EXPORTER_OTLP_ENDPOINT` set (or `OTEL_TRACES_EXPORTER` naming anything
+  but `otlp`: `none`, or an exporter the services do not ship, which also logs
+  a warning), each
   service installs a provider with no exporter: spans are created (so context
   still propagates) and dropped. Tests, CI and a local `docker run` need nothing.
 - **`OTEL_SDK_DISABLED=true`** is the kill switch, for a suspected SDK
@@ -57,8 +60,10 @@ cluster does not run and which covers neither the browser nor Temporal context.
   well, not only the backend's own. Leaving the
   endpoint unset is the normal way to run without tracing. Clusters never
   sets this variable unless it is ruling the SDK out of an incident.
-- **Resource.** Each process sets `service.name`: `scadbuddy-api`,
-  `scadbuddy-worker`, `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
+- **Resource.** Each process sets `service.name`: `scadbuddy-api`, each worker
+  its Deployment's name (`scadbuddy-render`, `scadbuddy-print`,
+  `scadbuddy-projects`, by `--queue`; one shared `scadbuddy-worker` until #2292),
+  `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
   the build's version, and `service.instance.id` the process's host name
   (Python `socket.gethostname()`, Node `os.hostname()`), with the build's
   `SCADBUDDY_REVISION` as `scadbuddy.revision`. The in-process worker
@@ -81,8 +86,10 @@ needs it, and its values travel as plain text to whatever is called next.
 process-wide (no `HTTPXClientInstrumentor().instrument()`).
 `HTTPXClientInstrumentor.instrument_client` is applied only to clients that
 call ScadBuddy's own services. The Bambuddy client (`bambuddy/client.py`)
-instead gets a manual client span per call (`bambuddy.<operation>`, with the
-status code and the client's `Scope`) and **injects no headers**. A test
+instead gets a manual client span per call (`bambuddy.<operation>`, the
+operation one of a closed set the client names, such as `printers.list` or
+`library.download`, never an id or free text; with the method, the status
+code and the client's `Scope`) and **injects no headers**. A test
 asserts that a Bambuddy request carries no `traceparent`. The relay's
 forwarder to the collector is not instrumented at all (§6).
 
@@ -108,7 +115,8 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   from the returned job and adds a **span link** to it on its own submit span,
   not a parent. The reconciler starts a stale row's workflow under that same
   `traceparent`, so a render started late still lands in its first caller's
-  trace. The column is written whenever the submit span's context is valid
+  trace, under a `render.reconcile` span that shows the reconciler started it
+  (a row with no valid `traceparent` gets that span as a root). The column is written whenever the submit span's context is valid
   and sampled. That includes a process with no exporter, which still creates
   and propagates spans (§3); persisting a context nobody exports is harmless.
   A row gets no `traceparent`, and a coalesced request no link, only when:
@@ -161,8 +169,13 @@ forwarder (§5.2) is not one, since it must stay untraced.
 The render stages in `render/jobs.py` get child spans named after the
 `RenderStage` set: `render.source`, `render.render`, `render.split`,
 `render.solids`, `render.thumbnail`, `render.write`. Each `openscad` invocation
-(`render/runner.py`) is an `openscad.export` span with format, backend, exit
-code and, for `solids`, the colour index.
+(`render/runner.py`) is an `openscad.export` span with format, backend and exit
+code. Under `render.solids`, each colour is a `render.solid` span carrying
+`scadbuddy.colour_index` (1-based, in the template's colour order): the parent
+of that colour's `openscad.export` and of its mesh parse, so the index lives
+there rather than on the export. A colour whose `openscad` fails falls back to
+the split mesh (`scadbuddy.solid.fallback`) without failing the span; a failed
+mesh parse fails the job, and the span with it.
 
 ### 5.2 Browser relay route
 
@@ -212,8 +225,9 @@ path except `/api/v1/ai/*` to the backend.
   `POST /telemetry/v1/traces` beside the media upload's in `main.py`, so an
   oversized body is refused on its headers, or as it streams when it has no
   `Content-Length`, before the handler runs. Without one the
-  `application/json` default (8 MiB) would apply. The 512-span cap is checked
-  after parsing; over it is also 413.
+  `application/json` default (8 MiB) would apply. The 512-span cap, and the
+  caps of 16 `resourceSpans` and 64 `scopeSpans`, are checked after parsing;
+  over any of them is also 413, its detail naming the cap.
 - **Rate limits**, in memory with `RateLimit` (`api/realtime.py`'s token
   bucket). Over a limit is 429; the client drops the batch and does not retry.
   - A **per-process** bucket caps the relay's total rate whatever the
@@ -255,7 +269,7 @@ path except `/api/v1/ai/*` to the backend.
     the entry and its reason.
 - Browser spans are untrusted. The relay parses the payload and rewrites the
   resource: `service.name` forced to `scadbuddy-web`; every other resource
-  attribute dropped except `service.version` and `user_agent.original`. Then
+  attribute dropped except `service.version` (no user agent: §6). Then
   per-span caps; beyond them the excess is dropped (truncated, for strings) and
   the span counts it in `otel.dropped_attributes_count` (OTel's own field):
   - 64 attributes;
@@ -267,12 +281,28 @@ path except `/api/v1/ai/*` to the backend.
 
   These match the SDK limits `RelayExporter`'s provider is configured with
   (`spanLimits`), so a well-behaved page never hits them.
+- A page span's URL (`url.full`, `http.url`, `http.target`, `url.path`, on the
+  span, its events and its links) is reduced to the backend route template its
+  path matches, after the `scheme://host` of an absolute URL, or else to that
+  origin alone; a relative URL on no route is dropped. Only a relative URL, or
+  one on ScadBuddy's own origins (the public URL, `SCADBUDDY_ALLOWED_ORIGINS`
+  or loopback, as the `Origin` check takes them), is matched against the
+  routes: any other host has none of them, so its URL keeps only its origin.
+  The SPA's routes are the browser's own, so a page's URL keeps only its origin.
 - **Forwarding** happens in the background, so the browser never waits on the
   collector. It must not lose spans silently:
   - An accepted batch goes on a bounded in-memory queue: 64 batches,
-    16 MiB at most, given the 256 KiB cap.
+    16 MiB at most. What is queued is the rewritten batch, which can be
+    several times the body it came from (every default field filled in,
+    non-ASCII escaped), so the rewrite is capped at 256 KiB too and a batch
+    past it is a 413 (#1137).
   - One forwarding task, started and stopped in the app's lifespan, posts
-    the queue to the endpoint with httpx, with a 5 s timeout.
+    the queue to the endpoint with httpx, with a 5 s timeout (or
+    `OTEL_EXPORTER_OTLP_(TRACES_)TIMEOUT`), and the CA and client certificate
+    the SDK's exporter reads (`OTEL_EXPORTER_OTLP_(TRACES_)CERTIFICATE`,
+    `…CLIENT_CERTIFICATE`, `…CLIENT_KEY`, #1160).
+  - If that task dies, it is logged at once, and the route answers 503 and
+    counts each batch `failed` until the process restarts (#1176).
   - **No retries in the app.** A failed post (unreachable, timeout, any
     non-2xx) drops its batch. Retrying and buffering are alloy's job, and
     the browser is already gone.
@@ -285,13 +315,17 @@ path except `/api/v1/ai/*` to the backend.
       budget, not a fresh 5 s.
     - The first post that fails or times out ends the drain at once: an
       unreachable collector would fail every later post the same way.
-    - The rest is dropped and counted as `shutdown`.
+    - The rest is dropped and counted as `shutdown`, as is everything still
+      queued when the drain's own wait is cancelled (#1151).
     - This is an accepted trade-off. When the collector is down at shutdown,
       the queued browser batches are lost either way. The only choice is
       whether the pod waits out its grace period first, and it should not.
   - **Visibility:** every outcome is counted in
     `scadbuddy_trace_relay_batches_total{outcome}`, with the outcomes
-    `forwarded`, `failed`, `queue_full` and `shutdown`. The counter goes in
+    `forwarded`, `failed`, `queue_full` and `shutdown`, and for a batch the
+    route refused `rate_limited` (429) and `rejected` (400, 413, 415; a
+    request from another origin is not the page's and is not counted;
+    #1161). Every outcome but `forwarded` is a lost batch. The counter goes in
     `core/metrics.py` beside the others and is pre-created at zero, so its
     first increase alerts. Failures also log one warning a minute at most,
     naming the status or the error class. This one counter is the only
@@ -303,9 +337,10 @@ path except `/api/v1/ai/*` to the backend.
   else's render or turn in Tempo. This is accepted:
   - the harm is to what the trace view shows, never to data;
   - the relay never reads anything back;
-  - the forged spans are always `service.name=scadbuddy-web` and carry the
-    relay's client address, so they can be told apart from the backend's
-    own;
+  - the forged spans are always `service.name=scadbuddy-web`, so they can be
+    told apart from the backend's own, and the relay's per-client rate limit
+    bounds how many one client can post. They do not carry the client's
+    address: an IP in traces is personal data;
   - an attacker who can already run script on the origin can call the API
     directly, which is far worse.
 
@@ -320,7 +355,8 @@ path except `/api/v1/ai/*` to the backend.
   - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
   - A refusal's `detail` names the rule ("Origin not allowed", "the relay
     accepts application/json only"), never the request's own values.
-- **Tracing off** (no endpoint, or `OTEL_SDK_DISABLED=true`): `204` with
+- **Tracing off** (no endpoint, `OTEL_TRACES_EXPORTER` naming anything but
+  `otlp`, or `OTEL_SDK_DISABLED=true`: the backend's own export rule, §3): `204` with
   `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
@@ -339,15 +375,17 @@ its caller, so it cannot see the relay's off signal.
   - the provider batches at most 64 spans (`maxExportBatchSize`);
   - `RelayExporter` splits any serialised batch over 48 KiB into several
     requests;
-  - it sends one request at a time, so in-flight `keepalive` bytes stay
-    under the cap;
+  - a batch's requests go one after another, and another batch's start
+    beside them only while the bodies in flight stay within 64 KiB, so the
+    small batch flushed on page hide is not stuck behind one in flight;
   - a single span over 48 KiB after the SDK limits (§5.2) is dropped and
-    counted.
+    counted, and the count goes out as `scadbuddy.dropped_spans` on the
+    first span of the next batch.
 
   The relay's 256 KiB ceiling only bounds non-browser callers; the browser
   never comes near it. A `fetch` that rejects (offline, the page torn down
-  mid-send) drops its batch. Unit tests cover the split and the one-at-a-time
-  send.
+  mid-send) drops its batch. Unit tests cover the split and the in-flight
+  byte budget.
 - On `X-ScadBuddy-Tracing: off` it switches itself off and returns success for
   every later batch without sending.
 - On 413 or 429 it drops the batch. Unit tests cover all three cases.
@@ -432,7 +470,9 @@ the whole wait. That is the failure §4 rejects session-long traces for. So:
 - When the call goes ahead, the rest of the turn is traced as
   `agent.turn.resume`, a child of the decision span: the tool's execution, its
   backend calls, and the turn's remaining tool calls. An expired approval
-  records `agent.approval` with `outcome=expired` and the same link.
+  records `agent.approval` with `outcome=expired` and the same link. A decision
+  whose transaction rolls back ends its span with `outcome=rolled_back` and an
+  error status, never the decision it did not commit (#1266).
 - **A turn can park any number of times.** Each park ends the segment that is
   open (`agent.turn` the first time, the current `agent.turn.resume` after
   that), together with its tool span, with `outcome=parked`. Each decision is
@@ -458,7 +498,10 @@ in Tempo as soon as it parks.
 
 **Attributes** (`scadbuddy.*`): model `slug`, `job_id`, `render_key`,
 `piece_key`, `output_id`; 3MF colour count, triangle count, size in bytes;
-piece cache hit; printer and plate IDs on send and print; for the agent, tool
+piece cache hit; printer and plate IDs on send and print, and on a print
+whether it prints every plate (`all_plates`) and what kind of source it is
+(`print_source`: `output` or `library`; ScadBuddy's own words, never a
+library file's id or name, which are Bambuddy's, #1231); for the agent, tool
 name, tier, outcome, token counts and cost. High cardinality is fine here.
 These are span attributes and never become metric labels.
 
@@ -471,15 +514,29 @@ not copied from that module, which has no such list:
 - OpenSCAD source and its stderr (only the exit code and a failure class);
 - prompts, model output, tool inputs and results;
 - request or response headers, cookies, and query strings (no header capture
-  is configured; URLs are recorded without the query);
+  is configured; URLs are recorded without the query). That includes the
+  `Host` header: `http.host`, `http.server_name` and `server.address` are
+  dropped, and a server span exports no `http.url` or `url.full`, whose host is
+  that header's (the server's own port, `net.host.port`/`server.port`, stays);
+- the client's address: `net.peer.ip`/`net.peer.port`, `client.address`/
+  `client.port`, `net.sock.peer.*` and `network.peer.*`;
+- the request path: a segment is data (a file path a user chose, a photo
+  filename Bambuddy returned, whatever the SPA fallback was asked for), so the
+  route's template stands in for it (`http.target`, `url.path`, and, on any
+  span but a server span, after the `scheme://host` of `http.url` and
+  `url.full`), and a request with no route records no path at all; a page
+  span's URLs are reduced by the relay to the backend route template or to the
+  origin (§5.2);
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
 **Not traced:**
 - `/healthz`, `/metrics` and `/telemetry/v1/traces`, through
-  `FastAPIInstrumentor.instrument_app(app,
-  excluded_urls="/healthz,/metrics,/telemetry/v1/traces")`. This is set in
-  code, not by `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`, so a deployment cannot
+  `FastAPIInstrumentor.instrument_app(app, excluded_urls=…)` with each path
+  anchored (`^[a-z]+://[^/]+/healthz$` and so on: the instrumentation searches the
+  URL, so an unanchored `/metrics` would also exclude `/api/v1/models/metrics-box`),
+  and `exclude_spans=["receive", "send"]` (no span per body chunk or WebSocket
+  message). This is set in code, not by `OTEL_PYTHON_FASTAPI_EXCLUDED_URLS`, so a deployment cannot
   lose it. The worker's own `/healthz` and `/metrics` on 9090 are served by
   its health server, which is never instrumented.
 - The relay's httpx forwarder, whose client is never passed to
@@ -497,8 +554,15 @@ loops (the reconciler's poll every 5 s, the event bus, the pool's checks)
 have no parent span. Without the rule each query would be a trace of its
 own, and Tempo would fill with them. A query made while handling a request
 or running an activity has a parent and is kept. `OTEL_TRACES_SAMPLER`, when
-set, replaces this default entirely. The backend and agent honour the
-browser's decision.
+set, replaces this default entirely. The browser's provider narrows the
+rule to its polls (#2187): a `fetch` outside any user action is kept, so a
+page's or dialog's loads are traced without each needing an action. Only a
+poll's (the attention badge's `ai/pending-input` and running-session check,
+`ai/status`, a print's `…/progress`, and the client's 1 s follows of a print
+run, an operation and a render job, listed in `frontend/src/lib/tracing.ts`
+`isPoll`) or another origin's is dropped, and a poll's goes with an unsampled
+`traceparent` (`-00`). A new poll is added to that list. The backend and agent
+honour the browser's decision.
 
 **Errors:** `ERROR` status, with the exception's type and where it was raised,
 **never its message**. Our own spans add `scadbuddy.failure_class`:
@@ -508,7 +572,11 @@ browser's decision.
   `RenderTimeoutError`).
 
 A render's spans end in `ERROR` exactly when its job settles `failed`, so a
-trace and its `render_jobs` row agree.
+trace and its `render_jobs` row agree. Our spans inside an activity carry
+`scadbuddy.attempt`; an attempt that Temporal retries names its
+`scadbuddy.failure_class` and ends `UNSET` (#1183). The `RunActivity:*` span is
+Temporal's own `TracingInterceptor`'s, which marks every failed attempt `ERROR`,
+retried or not.
 
 Exception messages carry exactly what the list above forbids:
 - `ParameterValueError` and the other checks in `render/runner.py` interpolate
@@ -528,12 +596,23 @@ before it leaves the process. It:
 - replaces `exception.stacktrace` with its frame lines only (Python: the
   `File "…", line N, in f` lines; Node: the `at …` lines). A formatted
   traceback otherwise ends with, and for chained exceptions repeats, the
-  messages;
+  messages. A message can hold frame-shaped text, so a Python frame is kept only
+  when its file exists, its line is in that file, and its function name is
+  `<module>`, a lambda or comprehension, or a `def`/`class` name in that file's
+  source (a `<frozen …>`, `<string>` or `<stdin>` frame keeps only path and line);
 - keeps `exception.type`;
+- drops every captured header (`http.request.header.*`,
+  `http.response.header.*`), whatever the instrumentation's capture variables say;
 - replaces a non-empty status description with the exception type, or with
   `error` when there is none.
 
-The relay applies the same scrub to browser spans before forwarding. Our own
+The relay applies the same scrub to browser spans before forwarding, and since a
+page's input is not the SDK's, applies it wherever the page put a value:
+`exception.message` is dropped from the span, every event and every link, not
+only from an `exception` event, and no user agent (`user_agent.original`,
+`http.user_agent`) is kept anywhere, the rebuilt resource included. A page
+span loses the same host and client-address attributes as a backend span
+(§6's list above). Our own
 spans set `scadbuddy.failure_class` (the problem `type_` for an `ApiError`,
 plus the client's `Scope` for a Bambuddy call) as the readable cause. Where
 the message is needed, it is already in the job row or the response the user
@@ -552,7 +631,7 @@ hard-coded uids.
 
 - *Renders:* the existing Prometheus series (queue depth, wait, stage seconds,
   outcomes, SLOs), with a trace-search panel beside them:
-  `{resource.service.name="scadbuddy-worker" && name="render.render"}`, slowest
+  `{resource.service.name="scadbuddy-render" && name="render.render"}`, slowest
   and failed first.
 - *HTTP:* request rate and duration by route template (existing metrics), and
   a Tempo table of the slowest API traces.
@@ -560,7 +639,21 @@ hard-coded uids.
 - *Browser:* recent `scadbuddy-web` traces by action.
 
 Panels that need Tempo's metrics-generator (TraceQL metrics, service graph)
-are left out until clusters#1596 decides on it.
+are left out until clusters#1596 decides on it, with one exception: the "trace
+coverage" panels (`{resource.service.name="…"} | rate()`, one series per service),
+which stay empty, meaning not configured, until it does.
+
+**Per-area dashboards** (#2289), beside the overview and through the same
+generator, one ConfigMap `<uid>-dashboard` each: `scadbuddy-api` (latency,
+throughput and errors per route, the slowest routes, the slow list endpoints and
+Tempo searches per route), `scadbuddy-web` (page loads, fetches, user actions),
+`scadbuddy-renders` (queue, Arrange/backfill/save, Temporal activities),
+`scadbuddy-printing` (print routes, Bambuddy calls by scope, blob store, cache,
+uploads) and `scadbuddy-agent` (turns with cost, tool calls, approvals). Spans
+whose names are built at run time (FastAPI server spans, `bambuddy.<operation>`,
+`agent.tool/<name>`, Temporal's interceptor spans) are matched by attribute
+(`span.http.route`, `span.scadbuddy.bambuddy.scope`, `span.scadbuddy.tool_use_id`,
+`span.temporalActivityID`), which the lint does not check.
 
 **Pinned at the deployed revision.** Clusters' `clusters/prod/scadbuddy`
 overlay references it as a remote kustomize resource:
@@ -586,8 +679,9 @@ has to handle:
 
 - **Not configured:** the anchored pattern matches 0 lines and the file
   does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
-  unanchored, fixed-string, case-insensitive `grep -iF`, so a near-miss in
-  casing still counts as a mention). Post a `::notice::` that clusters has
+  unanchored, case-insensitive `grep -iE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana'`,
+  so a near-miss in casing still counts as a mention, and so does the `.git`
+  form of the URL, `eh-homelab/ScadBuddy.git//deploy/grafana`, or extra slashes). Post a `::notice::` that clusters has
   no dashboard pin yet, and pin the images only. This keeps deploys working
   until clusters#1596 Phase 5 adds the line.
 - **Malformed:** the anchored pattern matches 0 lines but the path does
@@ -595,7 +689,9 @@ has to handle:
   different spacing or casing). `::error::` and stop. A near miss must never
   be read as "not configured", or a stale dashboard would stay pinned
   silently.
-- **1 match:** rewrite it with the same anchored `sed`, then `expect_one` the
+- **1 match:** the case-insensitive mention count must also be 1; a second
+  mention (a `.git` form, a commented-out line) is an `::error::` too, since it
+  would leave an unpinned copy of the resource. Then rewrite it with the same anchored `sed`, then `expect_one` the
   rewritten line (`ref=` followed by exactly `REVISION`), as the image line is
   round-tripped.
 - **More than 1:** `::error::` and stop, as for any other pinned line.

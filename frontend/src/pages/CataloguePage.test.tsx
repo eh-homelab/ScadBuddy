@@ -69,7 +69,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
     expect(names()).toEqual(['Crème Coaster'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 7')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 8')
   })
 
   it('adds a card tag to the filter from the URL-encoded chip', async () => {
@@ -95,7 +95,7 @@ describe('CataloguePage filters (#276)', () => {
     renderCatalogue('/?tag=keychain&origin=builtin')
     expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
     expect(names()).toEqual(['Keychain Template'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 7')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 8')
   })
 
   it('sorts by name', async () => {
@@ -103,11 +103,13 @@ describe('CataloguePage filters (#276)', () => {
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     expect(names()[0]).toBe('Name Keychain')
 
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
+    await user.click(screen.getByRole('combobox', { name: 'Sort' }))
+    await user.click(await screen.findByRole('option', { name: 'Name' }))
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(names()).toEqual([
       'Ball Maze',
       'Crème Coaster',
+      'Dollhouse Kit',
       'Gridfinity Bin',
       'Keychain Template',
       'Name Keychain',
@@ -124,15 +126,16 @@ describe('CataloguePage filters (#276)', () => {
     await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(screen.getByRole('searchbox')).toHaveValue('')
-    expect(names()).toHaveLength(7)
+    expect(names()).toHaveLength(8)
   })
 
   it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
     const { user } = renderCatalogue()
-    const tags = within(await screen.findByRole('group', { name: 'Tags' }))
+    await user.click(await screen.findByRole('button', { name: /^Tags/ }))
+    const tags = within(screen.getByRole('group', { name: 'Tags' }))
     expect(tags.getByRole('button', { name: 'template 1' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Mine' }))
+    await user.click(screen.getByRole('radio', { name: 'Mine' }))
     expect(tags.queryByRole('button', { name: /^template/ })).not.toBeInTheDocument()
 
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'coaster')
@@ -487,10 +490,18 @@ describe('CataloguePage cards (#277)', () => {
 
   /** The coaster's card, scrolled near enough to have mounted its carousel. */
   async function coasterCard() {
-    const card = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
-      'li',
-    ) as HTMLElement
-    intersect(card)
+    // The carousel mounts once its card nears the viewport (#593). The list can render
+    // the card again after the first sight of its heading, so the card is found again
+    // and brought into view until its carousel is there.
+    let card!: HTMLElement
+    await waitFor(
+      () => {
+        card = screen.getByRole('heading', { name: 'Crème Coaster' }).closest('li') as HTMLElement
+        intersect(card)
+        within(card).getByRole('region', { name: 'Crème Coaster' })
+      },
+      { timeout: 5000 },
+    )
     return card
   }
 
@@ -523,6 +534,26 @@ describe('CataloguePage cards (#277)', () => {
 
     expect(await screen.findByText('Customizer')).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('shows a card-sized copy on the card and the original in the lightbox (#1034)', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    expect(within(card).getByRole('img', { name: 'Printed in blue and orange' })).toHaveAttribute(
+      'src',
+      `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6/thumbnail?v=1&size=card`,
+    )
+    await user.click(
+      within(card).getByRole('button', { name: 'View Printed in blue and orange full size' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6`,
+      ),
+    )
   })
 
   it('opens the lightbox at the slide shown from its expand button', async () => {
@@ -672,13 +703,13 @@ describe('CataloguePage list mode (#278)', () => {
   it('shows cards for a URL with no view, and writes the view into it', async () => {
     const { user } = renderCatalogue('/?tag=keychain')
     await screen.findByRole('heading', { name: 'Name Keychain' })
-    const view = screen.getByRole('group', { name: 'View' })
-    expect(within(view).getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    const view = screen.getByRole('radiogroup', { name: 'View' })
+    expect(within(view).getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
     expect(rows()).toHaveLength(0)
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
 
     // Replaced, not pushed: List then Back returns to the normalized entry.
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=list$/)
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
@@ -696,11 +727,11 @@ describe('CataloguePage list mode (#278)', () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(7)
+    expect(rows()).toHaveLength(8)
 
-    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    await user.click(screen.getByRole('radio', { name: 'Cards' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(rows()).toHaveLength(0)
   })
@@ -708,8 +739,8 @@ describe('CataloguePage list mode (#278)', () => {
   it('shows what the URL says on in-app navigation to the catalogue', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(7)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(8)
 
     // The agent's `navigate` and the Models tab name no view, so they show Cards.
     await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
@@ -718,10 +749,10 @@ describe('CataloguePage list mode (#278)', () => {
     )
     expect(rows()).toHaveLength(0)
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     await user.click(screen.getByRole('link', { name: 'Models' }))
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/))
-    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
   })
 
   it('keeps List on Back from a model', async () => {
@@ -752,37 +783,37 @@ describe('CataloguePage list mode (#278)', () => {
       { route: '/?view=list' },
     ).user
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(7)
+    expect(rows()).toHaveLength(8)
 
     await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
     await screen.findByText('Customizer')
     await user.click(screen.getByRole('button', { name: 'Back' }))
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(7)
+    expect(rows()).toHaveLength(8)
   })
 
   it('undoes and redoes a view toggle with back and forward', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(7)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(8)
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(rows()).toHaveLength(0)
-    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Forward' }))
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
-    expect(rows()).toHaveLength(7)
+    expect(rows()).toHaveLength(8)
   })
 
   it('keeps the filters and sort when the view changes', async () => {
     const { user } = renderCatalogue('/?tag=keychain&sort=name')
     await screen.findByRole('heading', { name: 'Keychain Template' })
-    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('radio', { name: 'List' }))
     expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&sort=name&view=list')
     expect(names()).toEqual(['Keychain Template', 'Name Keychain'])
   })
@@ -861,6 +892,11 @@ describe('CataloguePage list mode (#278)', () => {
 
     const thumbnail = within(coaster).getByRole('button', { name: 'View media of Crème Coaster (4)' })
     expect(within(thumbnail).getByTestId('media-count')).toHaveTextContent('4')
+    // The strip-sized copy for the row's tile, never the original (#1034).
+    expect(thumbnail.querySelector('img')).toHaveAttribute(
+      'src',
+      `/api/v1/models/${GALLERY_SLUG}/media/a1b2c3d4e5f6/thumbnail?v=1`,
+    )
     await user.click(thumbnail)
 
     const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
@@ -975,11 +1011,11 @@ describe('CataloguePage list mode (#278)', () => {
   it('names the models list the same in both views', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(7)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(8)
 
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(7)
-    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(7)
+    await user.click(screen.getByRole('radio', { name: 'List' }))
+    expect(rows()).toHaveLength(8)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(8)
   })
 
   it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
+import { isRuntimeKey, notifyRuntimeSettings } from './sessions/runtimeSettings.js'
+import { evictsWarmOnWrite, notifyWarmEvict } from './sessions/warmEvict.js'
 import {
   type Envelope,
   type Kek,
@@ -15,8 +17,8 @@ import {
 } from './secrets.js'
 
 // The Claude credentials (issue #255, spec D2 and §9; several since #1093):
-// each an Anthropic API key, or a gateway base URL plus the gateway's
-// credential. Stored sealed in `ai_credentials` (db/migrations/), one row
+// each an Anthropic API key, a Claude Code OAuth token (`claude setup-token`),
+// or a gateway base URL plus the gateway's credential. Stored sealed in `ai_credentials` (db/migrations/), one row
 // each, in priority order: a query uses the first one that is usable and
 // falls back to the next (harness/fallback.ts). Only `kind`, `base_url`, the
 // last four characters and the row's health are ever read back out through a
@@ -30,7 +32,7 @@ import {
 // UPDATE, so pods that race each keep the strongest verdict: `disabled` is
 // never downgraded by a rate limit, and of two cooldowns the later wins.
 
-export const CREDENTIAL_KINDS = ['anthropic_api_key', 'gateway'] as const
+export const CREDENTIAL_KINDS = ['anthropic_api_key', 'claude_oauth_token', 'gateway'] as const
 export type CredentialKind = (typeof CREDENTIAL_KINDS)[number]
 
 export const CREDENTIAL_STATUSES = ['active', 'cooling_down', 'disabled'] as const
@@ -38,7 +40,7 @@ export type CredentialStatus = (typeof CREDENTIAL_STATUSES)[number]
 
 /** A usable credential, decrypted. Lives only for the length of one query's set-up. */
 export type Credential =
-  | { kind: 'anthropic_api_key'; secret: string }
+  | { kind: 'anthropic_api_key' | 'claude_oauth_token'; secret: string }
   | { kind: 'gateway'; baseUrl: string; secret: string }
 
 /** What routes may return. */
@@ -303,12 +305,13 @@ export function openCredential(
     if (row.base_url === null) throw new SealError('gateway credential has no base_url')
     return { kind: 'gateway', baseUrl: row.base_url, secret }
   }
-  return { kind: 'anthropic_api_key', secret }
+  return { kind: row.kind, secret }
 }
 
 /** For logs and audit: which credential, never its secret. */
 export function credentialLabel(c: Pick<StoredCredential, 'priority' | 'kind' | 'base_url' | 'last4'>): string {
-  const what = c.kind === 'gateway' ? `gateway ${c.base_url ?? ''}` : 'API key'
+  const what =
+    c.kind === 'gateway' ? `gateway ${c.base_url ?? ''}` : c.kind === 'claude_oauth_token' ? 'OAuth token' : 'API key'
   return `credential ${c.priority + 1} (${what}${c.last4 ? ` …${c.last4}` : ''})`
 }
 
@@ -444,6 +447,9 @@ export class CredentialStore implements CredentialRepo {
           kek_id = ${envelope.kekId}, last4 = ${tail}, updated_at = now(),
           status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL, epoch = epoch + 1
         WHERE id = ${current.id}`
+      // Every warm Claude Code holds a credential in its env (spec 2026-10-13 §6.7): the
+      // caches are told on commit (sessions/warmEvict.ts), as by every write below.
+      await notifyWarmEvict(tx, '*')
       return await this.one(tx, current.id)
     })
   }
@@ -468,6 +474,7 @@ export class CredentialStore implements CredentialRepo {
       INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
       VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${baseUrl},
               ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail})`
+    await notifyWarmEvict(tx, '*')
     return await this.one(tx, id)
   }
 
@@ -488,6 +495,7 @@ export class CredentialStore implements CredentialRepo {
         UPDATE ai_credentials c SET priority = n.rn - 1
         FROM (SELECT id, row_number() OVER (ORDER BY priority) AS rn FROM ai_credentials) n
         WHERE c.id = n.id AND c.priority <> n.rn - 1`
+      await notifyWarmEvict(tx, '*')
       return true
     })
   }
@@ -504,6 +512,7 @@ export class CredentialStore implements CredentialRepo {
         UPDATE ai_credentials c SET priority = v.ord - 1
         FROM unnest(${tx.array([...ids])}::text[]) WITH ORDINALITY AS v(id, ord)
         WHERE c.id = v.id`
+      await notifyWarmEvict(tx, '*')
       return await this.rows(tx)
     })
   }
@@ -513,7 +522,9 @@ export class CredentialStore implements CredentialRepo {
       UPDATE ai_credentials SET status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL,
         epoch = epoch + 1
       WHERE id = ${id}`
-    return updated.count === 0 ? undefined : await this.get(id)
+    if (updated.count === 0) return undefined
+    await notifyWarmEvict(this.sql, '*')
+    return await this.get(id)
   }
 
   async record(id: string, epoch: number, event: CredentialEvent): Promise<CredentialTransition | undefined> {
@@ -633,9 +644,15 @@ export class SettingsStore {
     const startedAt = new Date()
     let failure: unknown
     try {
-      await this.sql`
-        INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+      await this.sql.begin(async (tx) => {
+        await tx`
+          INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+        // A key a warm Claude Code was spawned by tells every cache (spec 2026-10-13 §5.3, sessions/warmEvict.ts).
+        if (evictsWarmOnWrite(key)) await notifyWarmEvict(tx, '*')
+        // The warm cache's size and idle time are re-read, as setMany tells them (#3598).
+        if (isRuntimeKey(key)) await notifyRuntimeSettings(tx)
+      })
     } catch (err) {
       failure = err
     }
@@ -721,6 +738,9 @@ export class SettingsStore {
           INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
       }
+      if (Object.keys(values).some(evictsWarmOnWrite)) await notifyWarmEvict(tx, '*')
+      // The warm cache's size and idle time are re-read, not evicted for (sessions/runtimeSettings.ts).
+      if (Object.keys(values).some(isRuntimeKey)) await notifyRuntimeSettings(tx)
       return true
     })
   }

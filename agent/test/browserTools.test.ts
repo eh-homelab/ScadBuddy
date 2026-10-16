@@ -1,14 +1,17 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
 import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
+import type { TabRelay } from '../src/bridge/relay.js'
+import type { SessionTabStore } from '../src/bridge/sessionTabs.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { browserTools } from '../src/tools/browser.js'
+import { browserTools, tabBackNotRun } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -266,6 +269,32 @@ describe('the harness projection', () => {
   })
 })
 
+describe('the harness projection waits for the tab (#815)', () => {
+  it("hands the turn's waitForTab the call's tool_use id from Claude Code's _meta", async () => {
+    const hub = new TabHub()
+    const seen: (string | undefined)[] = []
+    const servers = harnessTools(services({ browser: hub })).mcpServers(
+      { id: 's1', owner: { kind: 'browser', id: 'browser', label: 'You' } },
+      undefined,
+      {
+        waitForTab: ({ toolUseId }) => {
+          seen.push(toolUseId)
+          return Promise.resolve({ back: false, message: 'nobody came back.' })
+        },
+      },
+    )
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await servers.scadbuddy!.instance.connect(serverSide)
+    const client = new Client({ name: 'harness-test', version: '0' })
+    await client.connect(clientSide)
+    const result = await client.callTool({ name: 'browser_snapshot', arguments: {}, _meta: { 'claudecode/toolUseId': 'toolu_meta1' } })
+    await client.close()
+    expect(result.isError).toBe(true)
+    expect(text(result as { content: unknown[] })).toMatch(/nobody came back\.$/)
+    expect(seen).toEqual(['toolu_meta1'])
+  })
+})
+
 describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   function fakeSessions() {
     const sends: string[] = []
@@ -293,7 +322,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(hub.sessionHasTab('s-new')).toBe(true)
+    expect((await hub.sessionTab('s-new')).connected).toBe(true)
     expect((await hub.status({ principal: browser, sessionId: 's-new' })).attached).toBe(true)
 
     // Another tab's panel attaching to it does not steal it; sending from there does.
@@ -309,13 +338,320 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     elsewhere.close()
   })
 
+  it("asks the shared row, not this replica's map, whether an attached session has a tab", async () => {
+    // Two replicas sharing ai_session_tabs (#2086). `here` paired s-new with TAB,
+    // which is connected to it; the user then sent to s-new from OTHER_TAB, through
+    // `there`, and closed that tab. `here`'s map still says TAB, so attaching from
+    // TAB took the session for paired and left the row on a tab nobody holds.
+    const rows = new Map<string, string>()
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    here.pairSession('s-new', TAB)
+    there.pairSession('s-new', OTHER_TAB)
+    await new Promise((r) => setTimeout(r, 0))
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
+
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs: here })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(rows.get('s-new')).toBe(TAB)
+    chat.close()
+  })
+
+  /** Two replicas' view of one ai_session_tabs: `rows` is the table. */
+  function sharedRows() {
+    const rows = new Map<string, string>()
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+    }
+    return { rows, store }
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+
+  it("prefers this replica's pairing while its write to the shared row has failed (#2211)", async () => {
+    const { rows } = sharedRows()
+    let failing = true
+    const logged: string[] = []
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        if (failing) throw new Error('session tab write failed')
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+    }
+    const here = new TabHub({ sessionTabs: store, log: (m) => logged.push(m) })
+    await tab(here, TAB)
+    rows.set('s-new', OTHER_TAB) // an older pairing, on a tab nobody holds now
+    here.pairSession('s-new', TAB)
+    expect((await here.sessionTab('s-new')).connected).toBe(true)
+    expect(await here.status({ principal: browser, sessionId: 's-new' })).toMatchObject({ attached: true, via: 'session' })
+    expect(logged.join('\n')).toMatch(/session tab write failed/)
+
+    // A later write that lands hands the answer back to the row.
+    failing = false
+    here.pairSession('s-new', TAB)
+    await tick()
+    rows.set('s-new', OTHER_TAB) // another replica paired it since
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
+  })
+
+  it("leaves a session alone when attached from another tab while another replica holds the session's tab", async () => {
+    const { rows, store } = sharedRows()
+    const relay: TabRelay = { serve: () => {}, forward: async () => ({ op: 'status', route: '/', live: [] }) }
+    const here = new TabHub({ sessionTabs: store, relay })
+    await tab(here, TAB)
+    rows.set('s-new', OTHER_TAB) // paired on the replica that holds OTHER_TAB
+    expect((await here.sessionTab('s-new')).connected).toBe(true)
+
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs: here })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    chat.close()
+  })
+
+  it('pairs the attaching tab when the relay fails, and logs the failure', async () => {
+    const { rows, store } = sharedRows()
+    const logged: string[] = []
+    const relay: TabRelay = {
+      serve: () => {},
+      forward: async () => {
+        throw new Error('bridge insert failed')
+      },
+    }
+    const here = new TabHub({ sessionTabs: store, relay, log: (m) => logged.push(m) })
+    await tab(here, TAB)
+    rows.set('s-new', OTHER_TAB)
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
+    expect(logged.join('\n')).toMatch(/bridge insert failed/)
+
+    const events: string[] = []
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, (e) => events.push(JSON.stringify(e)), { tabs: here })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    expect(rows.get('s-new')).toBe(TAB)
+    expect(events.filter((e) => e.includes('"error"'))).toEqual([])
+    chat.close()
+  })
+
+  it("does not hold the socket's next message while it asks whether an attached session has a tab", async () => {
+    const pairs: string[] = []
+    const tabs = {
+      pairSession: (sessionId: string, tabId: string) => void pairs.push(`${sessionId}:${tabId}`),
+      sessionTab: () => new Promise<{ tabId: string | undefined; connected: boolean }>(() => {}), // a relay that never answers
+      pairSessionIfStill: async () => false,
+    }
+    const { sessions, sends } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    const handled = (async () => {
+      await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's1' }))
+      await chat.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's1', text: 'hi', context }))
+      return 'handled'
+    })()
+    const waited = new Promise((r) => setTimeout(() => r('held'), 1_000))
+    expect(await Promise.race([handled, waited])).toBe('handled')
+    expect(sends).toEqual(['s1'])
+    expect(pairs).toEqual([`s1:${TAB}`])
+    chat.close()
+  })
+
+  it("does not overwrite a pairing another socket made while the attach's check was out (#2271)", async () => {
+    const { rows } = sharedRows()
+    let release!: (tabId: string | undefined) => void
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's read is held; every later one reads the table.
+      get: async (sessionId) =>
+        ++reads === 1 ? new Promise<string | undefined>((resolve) => (release = resolve)) : rows.get(sessionId),
+    }
+    // Two replicas sharing ai_session_tabs: A's socket on `here`, B's on `there`.
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    release(undefined) // A's check: no tab, as it was when A asked
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    a.close()
+    b.close()
+  })
+
+  it('compares and pairs in one write where the store can, so no pairing lands between (#2271 review)', async () => {
+    const { rows } = sharedRows()
+    const held: ((tabId: string | undefined) => void)[] = []
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's reads are held: the first is its check; a second would be a
+      // re-read before writing, the gap a compare-and-set closes.
+      get: async (sessionId) =>
+        ++reads <= 2 ? new Promise<string | undefined>((resolve) => held.push(resolve)) : rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    held.shift()!(undefined) // A's check: no tab yet
+    await tick()
+    // B pairs while A is between its check and its write.
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    held.shift()?.(undefined) // a stale re-read, if A made one
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    a.close()
+    b.close()
+  })
+
+  it("pairs neither the row nor its own map when the store declines the compare-and-set (#3478 review)", async () => {
+    const { rows } = sharedRows()
+    let release!: (tabId: string | undefined) => void
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's check is held; every later read reads the table.
+      get: async (sessionId) =>
+        ++reads === 1 ? new Promise<string | undefined>((resolve) => (release = resolve)) : rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    // B pairs while A's check is out, so A's answer is stale when it comes.
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    release(undefined)
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    expect(reads).toBe(1) // no re-read: the store compared
+    // With the row gone, A's answer is its own map's: A never paired it.
+    rows.delete('s-new')
+    expect((await here.sessionTab('s-new')).tabId).toBeUndefined()
+    a.close()
+    b.close()
+  })
+
+  it('pairs only here when the compare-and-set fails, and queues no write that could land later (#3478 review)', async () => {
+    const { rows } = sharedRows()
+    const sets: string[] = []
+    const logged: string[] = []
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        sets.push(`${sessionId}:${tabId}`)
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async () => {
+        throw new Error('session tab write failed')
+      },
+    }
+    const here = new TabHub({ sessionTabs: store, log: (m) => logged.push(m) })
+    await tab(here, TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    await tick()
+    expect(logged.join('\n')).toMatch(/session tab write failed/)
+    expect(sets).toEqual([])
+    expect(rows.has('s-new')).toBe(false)
+    expect(await here.sessionTab('s-new')).toEqual({ tabId: TAB, connected: true })
+    a.close()
+  })
+
+  it('pairs nothing when the socket closes while the check is out (#2271)', async () => {
+    let answer!: (value: { tabId: string | undefined; connected: boolean }) => void
+    const paired: string[] = []
+    const tabs = {
+      pairSession: (sessionId: string, tabId: string) => void paired.push(`${sessionId}:${tabId}`),
+      sessionTab: () => new Promise<{ tabId: string | undefined; connected: boolean }>((resolve) => (answer = resolve)),
+      pairSessionIfStill: async (sessionId: string, tabId: string) => {
+        paired.push(`${sessionId}:${tabId}`)
+        return true
+      },
+    }
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's1' }))
+    chat.close()
+    answer({ tabId: undefined, connected: false })
+    await tick()
+    expect(paired).toEqual([])
+  })
+
   it('pairs nothing before the panel names its tab', async () => {
     const hub = new TabHub()
     await tab(hub, TAB)
     const { sessions } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(hub.sessionHasTab('s-new')).toBe(false)
+    expect((await hub.sessionTab('s-new')).connected).toBe(false)
     chat.close()
   })
 })
@@ -399,5 +735,267 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_pair')).text).toMatch(/needs the "write" tier/)
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
+  })
+
+  it('lets a read-tier token point at a control: browser_highlight reaches the tab ungated (#1919)', async () => {
+    const { t, pairings, principal, callTool } = await setup('read')
+    const request = await pairings.request(principal)
+    await pairings.accept(request.id, request.code, TAB)
+    const result = await callTool('browser_highlight', { role: 'button', name: 'Render' })
+    expect(result.isError).toBe(false)
+    expect(result.body).toEqual({ tool: 'highlight' })
+    expect(t.calls()).toMatchObject([{ type: 'call', tool: 'highlight', args: { role: 'button', name: 'Render' } }])
+  })
+})
+
+// #815 §2: a call that finds no tab, in a session the user owns, waits for the
+// tab as an attention request (sessions/manager.ts `waitForTab`) and runs once
+// more when it is back. The Postgres side is test/attention.pg.test.ts.
+describe('waiting for the tab (#815)', () => {
+  it('tells the hub listener when a session has a connected tab again: a reconnect, or a pairing to a live tab', async () => {
+    const hub = new TabHub()
+    const back: string[] = []
+    hub.onSessionTab = (sessionId) => {
+      back.push(sessionId)
+      return Promise.resolve()
+    }
+    hub.pairSession('s1', TAB)
+    expect(back).toEqual([])
+    const first = await tab(hub)
+    expect(back).toEqual(['s1'])
+    first.conn.close()
+    await tab(hub, OTHER_TAB)
+    hub.pairSession('s2', OTHER_TAB)
+    expect(back).toEqual(['s1', 's2'])
+  })
+
+  it('logs a listener that fails, and pairs anyway', async () => {
+    const logged: string[] = []
+    const hub = new TabHub({ log: (m) => logged.push(m) })
+    hub.onSessionTab = () => Promise.reject(new Error('db down'))
+    await tab(hub)
+    hub.pairSession('s1', TAB)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(logged.join('\n')).toMatch(/db down/)
+    expect((await hub.sessionTab('s1')).connected).toBe(true)
+  })
+
+  it('waits on no tab, then runs a read call once the tab is back', async () => {
+    expect(tool('browser_snapshot').risk).toBe('read')
+    const hub = new TabHub()
+    const waits: { tool: string; toolUseId: string | undefined }[] = []
+    const c: ToolContext = {
+      ...ctx(hub.forSession('s1'), browser),
+      toolUseId: 'toolu_b1',
+      waitForTab: async ({ tool, toolUseId }) => {
+        waits.push({ tool, toolUseId })
+        await tab(hub, TAB, () => ({ ok: true, result: { snapped: true } }))
+        hub.pairSession('s1', TAB)
+        return { back: true, why: 'reconnected' as const }
+      },
+    }
+    const result = await runTool(tool('browser_snapshot'), {}, c)
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ snapped: true })
+    expect(waits).toEqual([{ tool: 'browser_snapshot', toolUseId: 'toolu_b1' }])
+  })
+
+  // A write or outward call is never re-run on a page that may have reloaded; the model re-checks and calls again.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call is not re-run when the tab is back: it says so and does nothing', async (tier, name, args) => {
+    expect(tool(name).risk).toBe(tier)
+    const hub = new TabHub()
+    let back: Awaited<ReturnType<typeof tab>> | undefined
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: async () => {
+        back = await tab(hub)
+        hub.pairSession('s1', TAB)
+        return { back: true, why: 'reconnected' as const }
+      },
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
+    expect(back!.calls()).toEqual([])
+  })
+
+  // #1393: reconnected() runs on whichever replica saw the tab, so a write call is not told to try again when
+  // this replica still has none: that retry could only open a wait that never ends reconnected here.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call whose wait ended reconnected on another replica says the tab is not here, not "call again"', async (_tier, name, args) => {
+    const hub = new TabHub()
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toMatch(
+      /^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but it cannot be reached now: it may have dropped again\.$/s,
+    )
+    expect(text(result)).not.toContain(`call ${name} again`)
+  })
+
+  // #1410: words the reason the hub gives, not a cross-replica cause it cannot know.
+  it('a write call whose wait ended reconnected names the reason no tab is here', async () => {
+    const hub = new TabHub()
+    // The session's tab is known but not connected here: it dropped again, or is on another replica.
+    hub.pairSession('s1', TAB)
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(text(result)).toMatch(/^no browser attached: the paired ScadBuddy tab is not connected .*it cannot be reached now/s)
+  })
+
+  // #1410: a re-check that fails keeps the not-run guidance instead of an unexpected error.
+  it.each([
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+    ['outward', 'browser_open_print_dialog', {}],
+  ] as const)('a %s call whose re-check fails still says it was not run', async (_tier, name, args) => {
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warned.mockRestore())
+    const pairings: PairingStore = new InMemoryPairingStore()
+    let lookups = 0
+    const failure = new Error('connect ECONNREFUSED postgres://user:secret@db')
+    failure.name = 'PoolError'
+    pairings.pairedTab = () => (++lookups === 1 ? Promise.resolve(undefined) : Promise.reject(failure))
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), agent),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(lookups).toBe(2)
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
+    // #1814: logged, by the error's name only, never its message.
+    expect(warned).toHaveBeenCalledWith('browser tools: re-checking the tab after its wait failed (PoolError)')
+    expect(warned.mock.calls.flat().join(' ')).not.toMatch(/secret/)
+  })
+
+  // #1814: status() rejects an aborted lookup as call() does, not with the signal's raw reason.
+  it('rejects a status check whose lookup is aborted with the call-cancelled error', async () => {
+    const { pairings } = hangingLookups()
+    pairings.pairedTab = (_principal, signal) =>
+      new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const stop = new AbortController()
+    const status = hub.status({ principal: agent }, { signal: stop.signal })
+    stop.abort(new Error('the raw reason'))
+    await expect(status).rejects.toMatchObject({ name: 'AbortError', message: 'the call was cancelled' })
+  })
+
+  /** A pairing lookup that answers the first call and then hangs until its signal aborts. */
+  function hangingLookups(): { pairings: PairingStore; seen: (AbortSignal | undefined)[] } {
+    const seen: (AbortSignal | undefined)[] = []
+    const pairings: PairingStore = new InMemoryPairingStore()
+    pairings.pairedTab = (_principal, signal) => {
+      seen.push(signal)
+      if (seen.length === 1) return Promise.resolve(undefined)
+      return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+    }
+    return { pairings, seen }
+  }
+
+  // #1394, #1410: the tab check's signal reaches the pairing lookup, and its abort ends a hung one.
+  it("hands the tab check's signal to the pairing lookup, so a hung lookup is cancelled", async () => {
+    const { pairings, seen } = hangingLookups()
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const parked = new AbortController()
+    let check: Promise<boolean> | undefined
+    await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), agent),
+      waitForTab: ({ isBack }) => {
+        check = isBack(parked.signal)
+        return Promise.resolve({ back: false, message: 'x' })
+      },
+    })
+    expect(seen[1]).toBe(parked.signal)
+    parked.abort(new Error('the wait ended'))
+    // Without the signal the lookup would never settle and this would time out. It
+    // rejects as an aborted call does (#1814), whatever the signal's reason.
+    await expect(check).rejects.toThrow('the call was cancelled')
+  })
+
+  // #1410: TabHub.call() gives its own signal to the pairing lookup behind every browser_* call.
+  it('cancels a browser_* call whose pairing lookup hangs', async () => {
+    const { pairings, seen } = hangingLookups()
+    seen.push(undefined) // no first answer: the call's own lookup hangs
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const stop = new AbortController()
+    const result = runTool(tool('browser_snapshot'), {}, ctx(hub.forSession('s1'), agent, stop.signal))
+    await expect.poll(() => seen.length).toBe(2)
+    // The call's signal, joined with its deadline (registry.ts withDeadline, #1918).
+    expect(seen[1]?.aborted).toBe(false)
+    stop.abort()
+    expect(seen[1]?.aborted).toBe(true)
+    expect(text(await result)).toMatch(/the call was cancelled/)
+  })
+
+  it("words the not-run error by why the wait ended: the user's word is not a connected tab", async () => {
+    const hub = new TabHub()
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(result)).toBe(tabBackNotRun('browser_set_param', 'user_back'))
+    expect(text(result)).toMatch(/^the user said they are back \(a tab may not be attached yet\), but browser_set_param was not run/)
+    expect(tabBackNotRun('browser_click', 'reconnected')).toMatch(/^the session has a connected tab again, but browser_click was not run/)
+    const read = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => Promise.resolve({ back: true, why: 'user_back' as const }),
+    })
+    expect(text(read)).toMatch(/The user said they were back, but no tab is attached here yet\.$/)
+  })
+
+  it('fails with the wait\'s outcome when the tab did not come back, and retries only once', async () => {
+    const hub = new TabHub()
+    let waited = 0
+    const timedOut = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: false, message: 'timed_out: the user did not reply within 300 s.' })
+      },
+    })
+    expect(text(timedOut)).toMatch(/^no browser attached: .*timed_out: the user did not reply within 300 s\.$/s)
+    // "Back" on a replica the tab is not on: the second call fails as usual, with no second wait.
+    const stillGone = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited += 1
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
+      },
+    })
+    expect(text(stillGone)).toMatch(/^no browser attached: no ScadBuddy tab is paired with this session.*The session's tab reconnected, but it cannot be reached now/s)
+    expect(waited).toBe(2)
+  })
+
+  it('only no_browser waits: a tab that does not answer fails as before', async () => {
+    const hub = new TabHub({ callTimeoutMs: 20 })
+    await tab(hub, TAB, () => undefined)
+    hub.pairSession('s1', TAB)
+    let waited = false
+    const result = await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: () => {
+        waited = true
+        return Promise.resolve({ back: true, why: 'reconnected' as const })
+      },
+    })
+    expect(text(result)).toMatch(/did not answer/)
+    expect(waited).toBe(false)
   })
 })

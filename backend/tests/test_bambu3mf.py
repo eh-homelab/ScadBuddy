@@ -4,40 +4,56 @@ import io
 import json
 import math
 import os
+import re
+import tracemalloc
 import zipfile
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
+from typing import Any, BinaryIO
 from xml.etree import ElementTree as ET
 
 import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import bambu3mf, zipcopy
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
+    MAX_SETTINGS_BYTES,
+    MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
     PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
+    PRESET_PLACEHOLDER,
     PRODUCTION_NS,
+    ArchiveTooLargeError,
     PlateParts,
     cover_names,
     laid_out_plates,
+    layout_of,
+    nozzles_statable,
+    parse_model,
     plate_columns,
     plate_origin,
     plate_settings,
     plates_of,
     replate_3mf,
+    single_plate,
+    state_nozzles,
+    stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
 )
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
+from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
@@ -149,6 +165,46 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
     assert settings["wipe_tower_y"] == ["5"]
 
 
+def _settings_of(out: Path) -> dict[str, object]:
+    with zipfile.ZipFile(out) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+def test_a_render_states_no_material(written: Path) -> None:
+    """ScadBuddy does not know what a render prints in: it names no material rather
+    than invent one."""
+    assert "filament_type" not in _settings_of(written)
+
+
+def test_materials_known_for_every_slot_are_stated_in_slot_order(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog picks each slot's filament preset by ``filament_type``;
+    without one it picks Bambu ABS for an arranged PLA keychain."""
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#1F6FEB": "PETG", "#FF6AC1": "PLA", "#000000": "ABS"},
+    )
+    assert _settings_of(out)["filament_type"] == ["PLA", "PETG"]
+
+
+def test_a_slot_of_unknown_material_states_none_for_any_slot(tmp_path: Path) -> None:
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#FF6AC1": "PLA"},
+    )
+    assert "filament_type" not in _settings_of(out)
+
+
 def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
     out = tmp_path / "one.3mf"
     write_bambu_3mf(_parts()[:1], out, thumbnails=None, model_name="one_box")
@@ -191,6 +247,42 @@ class TestReplate:
         # touches nothing else, so the bytes have to match what a direct write gives.
         direct = _write(tmp_path / "direct.3mf", plate=plate_for("H2C"))
         assert replate_3mf(written.read_bytes(), plate_for("H2C")) == direct.read_bytes()
+
+    def test_replating_copies_an_untouched_entry_as_it_stands(
+        self, written: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2942: a mesh object is copied as its compressed bytes, not inflated and
+        deflated again, and the file is the same as when every entry is rewritten."""
+        copied: list[str] = []
+        real = zipcopy.copy_raw
+
+        def spy(source: BinaryIO, info: zipfile.ZipInfo, *args: Any, **kwargs: Any) -> None:
+            copied.append(info.filename)
+            real(source, info, *args, **kwargs)
+
+        monkeypatch.setattr(bambu3mf, "copy_raw", spy)
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        objects = [name for name in ENTRIES if name.startswith("3D/Objects/")]
+        assert objects and set(objects) <= set(copied)
+        assert not {bambu3mf.ROOT_MODEL_NAME, bambu3mf.PROJECT_SETTINGS_NAME} & set(copied)
+
+        monkeypatch.setattr(bambu3mf, "raw_copy_checked", lambda: False)
+        copied.clear()
+        assert replate_3mf(written.read_bytes(), plate_for("H2C")) == moved
+        assert copied == []
+
+    def test_replating_rewrites_an_entry_compressed_against_the_policy(self, written: Path) -> None:
+        """An object stored uncompressed by someone else is not copied as it stands: the
+        replated file is deflated as the writer deflates it."""
+        stored = io.BytesIO()
+        with (
+            zipfile.ZipFile(written) as source,
+            zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as out,
+        ):
+            for info in source.infolist():
+                out.writestr(info.filename, source.read(info))
+        expected = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        assert replate_3mf(stored.getvalue(), plate_for("H2C")) == expected
 
     def test_replating_keeps_every_other_entry(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
@@ -240,6 +332,37 @@ class TestReplate:
         assert settings["extruder_nozzle_stats"] == stats
         assert settings["extruder_nozzle_stats_new"] == stats
 
+    def test_replating_states_each_extruders_flow(self, written: Path) -> None:
+        """#484: the one key Bambu Studio 02.08.02.61 sets per extruder for High Flow,
+        in the slicer's order; the CLI keeps it because the H2C printer preset has
+        none. ``default_nozzle_volume_type`` is left alone (Studio keeps it Standard),
+        and ``slice_info.config`` stays the slicer's output."""
+        flows = ["High Flow", "Standard"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4", nozzle_volume_type=flows
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+            names = archive.namelist()
+        assert settings["nozzle_volume_type"] == flows
+        assert "default_nozzle_volume_type" not in settings
+        assert "Metadata/slice_info.config" not in names
+        # The five keys the slicer dereferences are all still there.
+        for key in (
+            "printer_settings_id",
+            "print_settings_id",
+            "filament_settings_id",
+            "nozzle_diameter",
+            "printable_height",
+        ):
+            assert key in settings
+
+    def test_replating_without_a_flow_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.4")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "nozzle_volume_type" not in settings
+
     def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:
@@ -264,6 +387,256 @@ class TestReplate:
         )
         with pytest.raises(PlateFitError, match="A1 mini"):
             replate_3mf(big.read_bytes(), plate_for("A1 mini"))
+
+
+def _with_entries(payload: bytes, extra: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(buffer, "w") as out:
+        for info in source.infolist():
+            if info.filename not in extra:
+                out.writestr(info.filename, source.read(info.filename))
+        for name, data in extra.items():
+            out.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_stating_the_nozzles_of_a_library_file_changes_nothing_else(written: Path) -> None:
+    """#484: a library file's copy states the flow and nozzle stats as a replated output
+    does, and is otherwise the file: same entries, same placement, same settings."""
+    payload = written.read_bytes()
+    flows, stats = ["High Flow", "High Flow"], ["High Flow#1", "High Flow#0"]
+
+    stated = state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows)
+
+    assert nozzles_statable(payload)
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(stated)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != "Metadata/project_settings.config":
+                assert after.read(name) == before.read(name), name
+        old = json.loads(before.read("Metadata/project_settings.config"))
+        new = json.loads(after.read("Metadata/project_settings.config"))
+    assert new == {
+        **old,
+        "nozzle_volume_type": flows,
+        "extruder_nozzle_stats": stats,
+        "extruder_nozzle_stats_new": stats,
+    }
+    # The same file stated the same way is the same bytes, so its copy is found again.
+    assert state_nozzles(payload, nozzle_stats=stats, nozzle_volume_type=flows) == stated
+
+
+def test_only_an_unsliced_3mf_with_bambus_settings_can_state_its_nozzles(written: Path) -> None:
+    payload = written.read_bytes()
+    assert not nozzles_statable(_with_entries(payload, {"Metadata/plate_1.gcode": b"; G28\n"}))
+    assert not nozzles_statable(
+        _with_entries(payload, {"Metadata/project_settings.config": b"<config/>"})
+    )
+    assert not nozzles_statable(b"solid stl\nendsolid\n")
+
+
+def _settings_bomb(size: int) -> bytes:
+    """A 3MF whose ``project_settings.config`` is valid JSON of ``size`` bytes, almost
+    all whitespace, which deflates to a few KB."""
+    body = b'{"nozzle_diameter": ["0.4"]' + b" " * (size - 29) + b"}\n"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("3D/3dmodel.model", "<model/>")
+        out.writestr("Metadata/project_settings.config", body)
+    return buffer.getvalue()
+
+
+def _declaring(payload: bytes, name: str, size: int) -> bytes:
+    """``payload`` with ``name``'s uncompressed size declared as ``size`` in both its
+    local header and the central directory: a header that lies."""
+    data = bytearray(payload)
+    encoded = name.encode()
+    # (signature, offset of the uncompressed size, offset of the file name)
+    for signature, size_at, name_at in ((b"PK\x03\x04", 22, 30), (b"PK\x01\x02", 24, 46)):
+        start = data.find(signature)
+        while start != -1:
+            if data[start + name_at : start + name_at + len(encoded)] == encoded:
+                data[start + size_at : start + size_at + 4] = size.to_bytes(4, "little")
+            start = data.find(signature, start + 4)
+    return bytes(data)
+
+
+class _Inflated:
+    """Counts the bytes every zip entry read hands back."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.total = 0
+        read = zipfile.ZipExtFile.read
+
+        def counted(entry: zipfile.ZipExtFile, n: int = -1) -> bytes:
+            data = read(entry, n)
+            self.total += len(data)
+            return data
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", counted)
+
+
+def test_settings_that_expand_past_the_cap_are_not_statable_and_not_inflated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A library file is untrusted (MakerWorld downloads land there too): a few KB that
+    inflate to gigabytes must not exhaust the worker. Over the cap is not statable, so
+    the file prints as it is, and nothing past the cap is ever decompressed."""
+    bomb = _settings_bomb(MAX_SETTINGS_BYTES * 64)
+    assert len(bomb) < MAX_SETTINGS_BYTES
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(bomb)
+    assert inflated.total <= 64 * 1024  # the model's few bytes at most, never the settings
+
+
+def test_a_header_that_understates_its_size_does_not_get_past_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared size is checked first, but not trusted: reads are counted, and an
+    entry that inflates past what it declares is refused."""
+    lying = _declaring(
+        _settings_bomb(MAX_SETTINGS_BYTES * 64), "Metadata/project_settings.config", 1024
+    )
+    inflated = _Inflated(monkeypatch)
+
+    assert not nozzles_statable(lying)
+    assert inflated.total <= MAX_SETTINGS_BYTES + 64 * 1024
+
+
+def test_the_archive_cap_bounds_one_prints_memory_and_fits_real_projects() -> None:
+    """``state_nozzles`` holds the download and its copy at once, so the cap is that
+    print's memory, give or take. The largest real 3MF measured for #484 (a sliced
+    multi-plate archive, 18 MB compressed) inflates to 73 MB."""
+    assert 73_193_348 * 2 < MAX_UNCOMPRESSED_BYTES <= 256 * 1024 * 1024
+
+
+def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
+    payload = _declaring(written.read_bytes(), "3D/3dmodel.model", MAX_UNCOMPRESSED_BYTES + 1)
+    assert not nozzles_statable(payload)
+
+
+# --- #1752: whoever laid a 3MF out, a print lays it out the one way ---------------------
+
+
+def _saved_by_an_author(payload: bytes) -> bytes:
+    """``payload`` as Bambu Studio saves a project: its settings name a real printer
+    and process preset rather than ScadBuddy's placeholder."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+    settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
+    return _with_entries(
+        payload, {"Metadata/project_settings.config": json.dumps(settings).encode()}
+    )
+
+
+def test_a_3mf_laid_out_for_a_printer_names_it_as_bambu_studio_does(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog pre-picks the printer by this name; with ScadBuddy's
+    placeholder it took the first one it lists."""
+    out = _write(tmp_path / "a1.3mf", covers=False, plate=plate_for("A1"))
+    settings = _settings_of(out)
+    assert settings["printer_settings_id"] == "Bambu Lab A1 0.4 nozzle"
+    # Still ScadBuddy's own layout, to re-place for another printer.
+    assert layout_of(out.read_bytes()) == "scadbuddy"
+
+
+def test_re_placing_names_the_new_printer_and_nozzle(written: Path) -> None:
+    payload = written.read_bytes()
+    named = replate_3mf(payload, plate_for("H2C"), nozzle_diameter="0.2")
+    assert _settings_of_bytes(named)["printer_settings_id"] == "Bambu Lab H2C 0.2 nozzle"
+    # Moved to another printer: named for it, at the nozzle the file states.
+    moved = replate_3mf(named, plate_for("A1"))
+    assert _settings_of_bytes(moved)["printer_settings_id"] == "Bambu Lab A1 0.2 nozzle"
+    # The fallback plate is no printer.
+    assert _settings_of_bytes(replate_3mf(named, DEFAULT_PLATE))["printer_settings_id"] == (
+        PRESET_PLACEHOLDER
+    )
+
+
+def _settings_of_bytes(payload: bytes) -> dict[str, object]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+def test_a_3mf_is_laid_out_by_scadbuddy_by_its_author_or_as_it_is(written: Path) -> None:
+    payload = written.read_bytes()
+
+    assert layout_of(payload) == "scadbuddy"
+    assert layout_of(_saved_by_an_author(payload)) == "author"
+    # ScadBuddy's placeholder on a file whose plates do not read back is not ScadBuddy's
+    # to re-place, but its settings can still be stated.
+    assert layout_of(_with_entries(payload, {"3D/3dmodel.model": b"<model/>"})) == "author"
+    assert layout_of(_with_entries(payload, {"Metadata/plate_1.gcode": b"; G28\n"})) == "as_is"
+    assert layout_of(b"solid stl\nendsolid\n") == "as_is"
+
+
+def test_stating_an_authors_file_keeps_every_plate_and_states_the_colours(
+    tmp_path: Path,
+) -> None:
+    """The riskiest part of #1752: an author's multi-plate layout is theirs. Only the
+    settings change, and in them only the nozzles and the filament colours."""
+    payload = _saved_by_an_author(_write_plates(tmp_path / "maze.3mf").read_bytes())
+    flows, stats = ["High Flow", "Standard"], ["High Flow#1", "Standard#0"]
+
+    stated = state_nozzles(
+        payload,
+        nozzle_stats=stats,
+        nozzle_volume_type=flows,
+        filament_colour=["#00FF00", "#0000FF", "#FFFFFF"],
+    )
+
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(stated)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != "Metadata/project_settings.config":
+                assert after.read(name) == before.read(name), name
+        old = json.loads(before.read("Metadata/project_settings.config"))
+        new = json.loads(after.read("Metadata/project_settings.config"))
+    assert [plate.index for plate in plates_of(io.BytesIO(stated))] == [1, 2]
+    assert new == {
+        **old,
+        "nozzle_volume_type": flows,
+        "extruder_nozzle_stats": stats,
+        "extruder_nozzle_stats_new": stats,
+        "filament_colour": ["#00FF00", "#0000FF", "#FFFFFF"],
+    }
+
+
+def test_colours_of_another_count_are_not_stated(written: Path) -> None:
+    payload = written.read_bytes()
+
+    stated = state_nozzles(payload, filament_colour=["#00FF00"])
+
+    with zipfile.ZipFile(io.BytesIO(stated)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
+
+
+def test_an_stl_is_wrapped_as_scadbuddys_one_plate_of_one_filament() -> None:
+    stl = trimesh.creation.box(extents=(20, 10, 5)).export(file_type="stl")
+
+    wrapped = stl_3mf(stl, model_name="bracket")
+
+    assert layout_of(wrapped) == "scadbuddy"
+    assert [plate.index for plate in plates_of(io.BytesIO(wrapped))] == [1]
+    with zipfile.ZipFile(io.BytesIO(wrapped)) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert len(settings["filament_colour"]) == 1
+    # Laid out for a printer like any of ScadBuddy's own.
+    replate_3mf(wrapped, plate_for("H2C"), nozzle_diameter="0.4")
+
+
+def test_an_stl_with_no_triangles_is_not_wrapped() -> None:
+    with pytest.raises(ValueError):
+        stl_3mf(b"solid empty\nendsolid empty\n")
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:
@@ -860,3 +1233,778 @@ def test_a_write_that_fails_part_way_leaves_the_previous_3mf_whole(
         _write_plates(out, covers=False)
     assert out.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["model.3mf"]
+
+
+def _model_zip(body: str, name: str = "3D/3dmodel.model") -> zipfile.ZipFile:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, f'<model xmlns="{CORE_NS}"><resources>{body}</resources></model>')
+    return zipfile.ZipFile(io.BytesIO(out.getvalue()))
+
+
+def test_a_model_file_s_meshes_are_read_into_arrays_and_left_out_of_the_tree() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        '<vertex x="1" y="2" z="3"/><vertex x="4" y="5" z="6"><x/></vertex><vertex x="7"/>'
+        "</vertices><triangles>"
+        '<triangle v1="0" v2="1" v3="2"/>'
+        '<triangle v1="2" v2="1" v3="0" pid="5" p1="1"/>'
+        '<triangle v1="0" v2="2" v3="1" pid="7"/>'
+        "</triangles></mesh></object>"
+        '<object id="2"><components><component objectid="1"/></components></object>'
+    )
+
+    model = parse_model(archive, "3D/3dmodel.model")
+
+    (mesh_element, mesh), *rest = model.meshes.items()
+    assert not rest
+    assert model.root.find(f".//{{{CORE_NS}}}mesh") is mesh_element
+    left = mesh_element.find(f"{{{CORE_NS}}}vertices")
+    assert left is not None and not len(left)
+    assert model.root.find(f".//{{{CORE_NS}}}component") is not None
+    assert mesh.vertices.tolist() == [[1, 2, 3], [4, 5, 6], [7, 0, 0]]
+    assert mesh.faces.tolist() == [[0, 1, 2], [2, 1, 0], [0, 2, 1]]
+    assert [mesh.pids[i] if i >= 0 else None for i in mesh.pid] == [None, "5", "7"]
+    assert mesh.p1.tolist() == [-1, 1, -1]
+    assert mesh.paint is None and not mesh.prusa_painted
+
+
+def test_a_painted_mesh_keeps_each_triangles_paint_code() -> None:
+    # The first triangle is unpainted: a mesh's codes start once one is painted (#1965).
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        '<triangle v1="0" v2="0" v3="0"/><triangle v1="0" v2="0" v3="0" paint_color="8"/>'
+        '<triangle v1="0" v2="0" v3="0"/></triangles></mesh></object>'
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.paint == ("", "8", "") and not mesh.prusa_painted
+
+
+def test_a_paint_code_past_its_cap_is_refused_as_it_is_parsed() -> None:
+    # The archive cap bounds a code's bytes, not what decoding one costs: refused while
+    # parsing, before any decode sees it (#1965).
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        f'<triangle v1="0" v2="0" v3="0" paint_color="{"4" * (MAX_CODE_DIGITS + 1)}"/>'
+        "</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="paint_color"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_prusaslicer_painting_marks_its_mesh() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"'
+        ' xmlns:s="http://schemas.slic3r.org/3mf/2017/06" s:mmu_segmentation="4"/>'
+        "</triangles></mesh></object>"
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.prusa_painted and mesh.paint is None
+
+
+def test_a_model_file_past_its_cap_is_refused_whatever_its_header_says() -> None:
+    archive = _model_zip("<object/>" * 1000)
+
+    with pytest.raises(ArchiveTooLargeError, match="inflates past 100 bytes"):
+        parse_model(archive, "3D/3dmodel.model", cap=100)
+
+
+def test_a_model_file_costs_about_its_own_size_to_read() -> None:
+    """An element per vertex costs some 500 bytes against the 27 of XML it is read from,
+    so an untrusted model entry near the archive's cap would take gigabytes (#1949)."""
+    vertices = 300_000
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices>'
+        + '<vertex x="1" y="2" z="3"/>' * vertices
+        + "</vertices><triangles/></mesh></object>"
+    )
+    size = archive.getinfo("3D/3dmodel.model").file_size
+
+    tracemalloc.start()
+    try:
+        model = parse_model(archive, "3D/3dmodel.model")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    (mesh,) = model.meshes.values()
+    assert mesh.vertices.shape == (vertices, 3)
+    # ET.fromstring measured 13x here; arrays and expat's buffers stay well under 4x.
+    assert peak < 4 * size, f"{peak} bytes to read {size}"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="99999999999999999999"/>', id="index-past-64-bits"
+        ),
+        pytest.param(
+            '<triangle v1="0" v2="0" v3="0" p1="99999999999999999999"/>', id="p1-past-64-bits"
+        ),
+        pytest.param('<triangle v1="x" v2="0" v3="0"/>', id="not-a-number"),
+    ],
+)
+def test_a_triangle_that_is_not_an_index_is_a_value_error(body: str) -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{body}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("body", "block"),
+    [
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<vertices><vertex x="1" y="0" z="0"/></vertices><triangles/>',
+            "vertices",
+            id="vertices",
+        ),
+        pytest.param(
+            '<vertices><vertex x="0" y="0" z="0"/></vertices>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>'
+            '<triangles><triangle v1="0" v2="0" v3="0"/></triangles>',
+            "triangles",
+            id="triangles",
+        ),
+    ],
+)
+def test_a_mesh_with_a_repeated_block_is_refused(body: str, block: str) -> None:
+    """#2024: a second block would be appended to the first, so its indices would not
+    mean what the writer meant. The old parse read only the first."""
+    archive = _model_zip(f'<object id="1"><mesh>{body}</mesh></object>')
+
+    with pytest.raises(ValueError, match=f"more than one <{block}>"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_each_mesh_has_its_own_blocks() -> None:
+    mesh = (
+        '<mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"/></triangles></mesh>'
+    )
+    archive = _model_zip(f'<object id="1">{mesh}</object><object id="2">{mesh}</object>')
+
+    assert len(parse_model(archive, "3D/3dmodel.model").meshes) == 2
+
+
+def test_a_mesh_naming_too_many_property_groups_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2024: each distinct ``pid`` costs a dict entry, so their number is capped."""
+    monkeypatch.setattr(bambu3mf, "MAX_MESH_PIDS", 3)
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n}"/>' for n in range(4))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="more than 3 property groups"):
+        parse_model(archive, "3D/3dmodel.model")
+    # As many as the cap still read, and the same pid again costs nothing.
+    triangles = "".join(f'<triangle v1="0" v2="0" v3="0" pid="{n % 3}"/>' for n in range(9))
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        f"<triangles>{triangles}</triangles></mesh></object>"
+    )
+    [arrays] = parse_model(archive, "3D/3dmodel.model").meshes.values()
+    assert arrays.pids == ("0", "1", "2")
+
+
+def test_a_mesh_inside_a_mesh_is_refused() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/>'
+        "<mesh/></vertices><triangles/></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="inside another"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("painted_in", "tower"),
+    [
+        pytest.param(LID, False, id="its-own-filament"),
+        pytest.param("#FF6AC1", True, id="another-filament"),
+    ],
+)
+def test_a_painting_needs_a_tower_only_in_a_filament_the_plate_does_not_use(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2108: one part, painted all over (state 1 is whole-triangle ``4``) in its own
+    filament, uses one filament and needs no tower; in another, it uses two."""
+    mesh = trimesh.creation.box(extents=(20, 20, 4))
+    paint = Paint(("4",) * len(mesh.faces), (painted_in,))
+    part = ColourPart(1, "Lid", LID, mesh, paint=paint)
+    colours = [LID] if painted_in == LID else [LID, painted_in]
+    out = tmp_path / "painted.3mf"
+    write_plates_3mf([PlateParts((part,), (1,))], colours, out, thumbnails=None)
+    with zipfile.ZipFile(out) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert ("wipe_tower_x" in settings) is tower
+
+
+# ── #956: one object per declared object ──────────────────────────────────────
+
+
+def _two_objects(colours: tuple[str, str] = ("#FF6AC1", "#FF6AC1")) -> PlateParts:
+    """Two 10 mm boxes 60 mm apart, each its own object; in one colour by default."""
+    left = ColourPart(1, "Left", colours[0], trimesh.creation.box(extents=(10, 10, 4)))
+    right = ColourPart(
+        2,
+        "Right",
+        colours[1],
+        trimesh.creation.box(extents=(10, 10, 8), transform=_translate(60, 0, 2)),
+    )
+    extruders = (1, 1) if colours[0] == colours[1] else (1, 2)
+    return PlateParts((left, right), extruders, (1, 2))
+
+
+def _items(payload: bytes) -> list[ET.Element]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = parse_model(archive, "3D/3dmodel.model").root
+    return list(root.iter(f"{{{bambu3mf.CORE_NS}}}item"))
+
+
+def test_each_declared_object_is_its_own_build_item_on_its_plate(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    plate = _two_objects()
+    write_plates_3mf([plate], ["#FF6AC1"], out, thumbnails=None, model_name="bins")
+
+    payload = out.read_bytes()
+    items = _items(payload)
+    # Two objects, each placed by the plate's one offset, so they keep their spacing.
+    assert len(items) == 2
+    assert items[0].get("transform") == items[1].get("transform")
+    with zipfile.ZipFile(out) as archive:
+        [settings] = plate_settings(ET.fromstring(archive.read("Metadata/model_settings.config")))
+        [laid_out] = laid_out_plates(archive)
+    assert len(settings.object_ids) == 2
+    assert laid_out.assembly_ids == tuple(item.get("objectid") for item in items)
+    assert laid_out.extruders == frozenset({1})
+    assert [entry.name for entry in plates_of(out)] == ["bins"]  # named as a plate (#2874 review)
+    # A reader of any 3MF (Arrange's) sees the two objects too.
+    assert [obj.name for obj in read_objects(payload)] == ["bins (object 1)", "bins (object 2)"]
+
+
+def test_one_object_writes_the_file_it_always_did(tmp_path: Path) -> None:
+    parts = _parts()
+    implicit, explicit = tmp_path / "implicit.3mf", tmp_path / "explicit.3mf"
+    write_plates_3mf([single_plate(parts)], ["#FF6AC1", "#1F6FEB"], implicit, thumbnails=None)
+    write_plates_3mf(
+        [PlateParts(tuple(parts), (1, 2), (7, 7))],
+        ["#FF6AC1", "#1F6FEB"],
+        explicit,
+        thumbnails=None,
+    )
+    assert implicit.read_bytes() == explicit.read_bytes()
+
+
+def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
+    """#2874 review: a packed plate of many copies is named after the model, not after
+    every object's name joined; one object leaves the name unset, as it always did."""
+    many, one = tmp_path / "many.3mf", tmp_path / "one.3mf"
+    parts = tuple(
+        ColourPart(n, f"Bin {n}", "#FF6AC1", trimesh.creation.box(extents=(4, 4, 4)))
+        for n in range(1, 21)
+    )
+    write_plates_3mf(
+        [PlateParts(parts, (1,) * 20, tuple(range(1, 21)))],
+        ["#FF6AC1"],
+        many,
+        thumbnails=None,
+        model_name="Bins",
+    )
+    write_plates_3mf([single_plate(_parts())], ["#FF6AC1", "#1F6FEB"], one, thumbnails=None)
+
+    assert [plate.name for plate in plates_of(many)] == ["Bins"]
+    # With several plates, each is numbered.
+    two = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts(parts[:2], (1, 1), (1, 2)), PlateParts(parts[2:4], (1, 1), (1, 2))],
+        ["#FF6AC1"],
+        two,
+        thumbnails=None,
+        model_name="Bins",
+    )
+    assert [plate.name for plate in plates_of(two)] == ["Bins (plate 1)", "Bins (plate 2)"]
+    with zipfile.ZipFile(one) as archive:
+        [plate] = plate_settings(ET.fromstring(archive.read("Metadata/model_settings.config")))
+    assert plate.metadata["plater_name"] == ""  # a one-object plate is left unnamed
+
+
+def test_re_placing_moves_every_object_of_a_plate_together(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    write_plates_3mf([_two_objects()], ["#FF6AC1"], out, thumbnails=None)
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    transforms = {item.get("transform") for item in _items(moved)}
+    assert len(transforms) == 1
+    assert transforms != {item.get("transform") for item in _items(out.read_bytes())}
+    # One filament across both objects: no prime tower, though the plate has two parts.
+    assert "wipe_tower_x" not in _settings_of_bytes(moved)
+
+
+def test_objects_in_two_colours_still_get_a_prime_tower(tmp_path: Path) -> None:
+    out = tmp_path / "objects.3mf"
+    write_plates_3mf(
+        [_two_objects(("#FF6AC1", "#1F6FEB"))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
+    )
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+    assert "wipe_tower_x" in _settings_of_bytes(moved)
+
+
+@pytest.mark.parametrize(("painted_in", "tower"), [("#1F6FEB", True), ("#FF6AC1", False)])
+def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2874 review: two packed copies of a piece painted in a second filament. Their
+    parts state one extruder, and replate counted only those, so it dropped the tower
+    the painting needs. A painting in the filament they already use still needs none."""
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), (painted_in,))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    colours = ["#FF6AC1"] if painted_in == "#FF6AC1" else ["#FF6AC1", painted_in]
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf([PlateParts((left, painted), (1, 1), (1, 2))], colours, out, thumbnails=None)
+    assert ("wipe_tower_x" in _settings_of_bytes(out.read_bytes())) is tower
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower
+
+
+def _rewritten_objects(payload: bytes, change: Callable[[bytes], bytes]) -> bytes:
+    """``payload`` with every object file passed through ``change``."""
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            data = archive.read(info.filename)
+            if info.filename.startswith("3D/Objects/"):
+                data = change(data)
+            out.writestr(info, data)
+    return buffer.getvalue()
+
+
+def _painted_two_objects(tmp_path: Path) -> bytes:
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), ("#1F6FEB",))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf(
+        [PlateParts((left, painted), (1, 1), (1, 2))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
+    )
+    return out.read_bytes()
+
+
+def test_re_placing_reads_its_own_object_files_without_parsing_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2877: a print's re-placement parsed every vertex and triangle of every object
+    file, through Python, to learn one box per plate; an 86 MB library file held the
+    print worker for 39 s. A file this writer wrote is read by pattern, and gives the
+    very bytes the parse gave."""
+    payload = _painted_two_objects(tmp_path)
+    parsed = replate_3mf(payload, plate_for("Bambu Lab H2C"))
+    real = bambu3mf.parse_model
+
+    def no_object_parse(archive: zipfile.ZipFile, name: str, *args: object, **kw: object) -> object:
+        assert not name.startswith("3D/Objects/"), f"{name} was parsed vertex by vertex"
+        return real(archive, name, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bambu3mf, "parse_model", no_object_parse)
+
+    assert replate_3mf(payload, plate_for("Bambu Lab H2C")) == parsed
+    assert "wipe_tower_x" in _settings_of_bytes(parsed)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Attributes in another order: not this writer's vertex.
+        lambda data: data.replace(b'<vertex x="', b'<vertex  x="'),
+        # A comment could hide a vertex the pattern would count.
+        lambda data: data.replace(b"<vertices>", b"<vertices><!-- a note -->"),
+        # The core namespace under a prefix the pattern does not name.
+        lambda data: data.replace(b"<vertex ", f'<m:vertex xmlns:m="{CORE_NS}" '.encode()),
+    ],
+    ids=["reordered", "comment", "prefixed"],
+)
+def test_an_object_file_written_otherwise_is_parsed_and_placed_the_same(
+    tmp_path: Path, change: Callable[[bytes], bytes]
+) -> None:
+    payload = _painted_two_objects(tmp_path)
+    other = _rewritten_objects(payload, change)
+
+    assert (
+        bambu3mf._written_extents(
+            zipfile.ZipFile(io.BytesIO(other)).read("3D/Objects/object_1.model")
+        )
+        is None
+    )
+    parsed, read = replate_3mf(other, plate_for("H2C")), replate_3mf(payload, plate_for("H2C"))
+    assert [item.get("transform") for item in _items(parsed)] == [
+        item.get("transform") for item in _items(read)
+    ]
+    # The painting's tower too, which the paint codes decide.
+    assert _settings_of_bytes(parsed) == _settings_of_bytes(read)
+    assert "wipe_tower_x" in _settings_of_bytes(parsed)
+
+
+def test_a_written_paint_code_past_its_cap_is_parsed_and_refused(tmp_path: Path) -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    long = b'paint_color="' + b"4" * (MAX_CODE_DIGITS + 1) + b'"'
+    other = _rewritten_objects(
+        _painted_two_objects(tmp_path), lambda data: data.replace(b'paint_color="8"', long)
+    )
+    with pytest.raises(ValueError, match="paint_color"):
+        replate_3mf(other, plate_for("H2C"))
+
+
+def _object_bytes(
+    vertices: bytes,
+    triangles: bytes = b'<triangle v1="0" v2="1" v3="2"/>',
+    *,
+    head: bytes = b"",
+    tail: bytes = b"",
+) -> bytes:
+    """One object file in :func:`bambu3mf.object_model`'s shape, around ``vertices``
+    and ``triangles``; ``head`` and ``tail`` go inside the object, around its mesh."""
+    return (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n<model xmlns="'
+        + CORE_NS.encode()
+        + b'"><resources><object id="1" type="model">'
+        + head
+        + b"<mesh><vertices>"
+        + vertices
+        + b"</vertices><triangles>"
+        + triangles
+        + b"</triangles></mesh>"
+        + tail
+        + b"</object></resources><build/></model>"
+    )
+
+
+_THREE = b'<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="2"/>'
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # #2024: a second <vertices> block, which the parse refuses.
+        _object_bytes(_THREE + b'</vertices><vertices><vertex x="9" y="9" z="9"/>'),
+        # A second <triangles> block.
+        _object_bytes(_THREE, b'<triangle v1="0" v2="1" v3="2"/></triangles><triangles>'),
+        # Two meshes in one object.
+        _object_bytes(
+            _THREE, tail=b'<mesh><vertices><vertex x="5" y="5" z="5"/></vertices></mesh>'
+        ),
+        # A second object.
+        _object_bytes(_THREE, tail=b'</object><object id="2" type="model">'),
+    ],
+    ids=["two-vertices", "two-triangles", "two-meshes", "two-objects"],
+)
+def test_other_than_one_object_mesh_and_block_is_left_to_the_parse(data: bytes) -> None:
+    assert bambu3mf._written_extents(_object_bytes(_THREE)) is not None
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_a_second_vertices_block_is_refused_as_the_parse_refuses_it(tmp_path: Path) -> None:
+    second = b'</vertices>\n    <vertices><vertex x="9" y="9" z="9"/>'
+    other = _rewritten_objects(
+        _painted_two_objects(tmp_path), lambda data: data.replace(b"</vertices>", second, 1)
+    )
+    with pytest.raises(ValueError, match="more than one"):
+        replate_3mf(other, plate_for("H2C"))
+
+
+def test_a_processing_instruction_is_left_to_the_parse() -> None:
+    assert bambu3mf._written_extents(_object_bytes(_THREE)) is not None
+    assert bambu3mf._written_extents(_object_bytes(_THREE, head=b"<?note hi?>")) is None
+
+
+def test_a_paint_code_off_a_triangle_paints_nothing() -> None:
+    """The parse reads ``paint_color`` only on a ``<triangle>``; the pattern agrees."""
+    data = _object_bytes(_THREE, head=b"<metadata " + PAINT_ATTRIBUTE.encode() + b'="8"/>')
+    # The two paint counts differ, so the file is left to the parse (#3254 review): not
+    # read here as unpainted.
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
+    """#2877 review: a numpy bytes array is as wide as its longest value, so one 2 MB
+    coordinate among a hundred short ones would have cost 600 MB to read a box. A
+    coordinate longer than the writer ever writes leaves the file to the parse."""
+    vertex = b'\n     <vertex x="1" y="2" z="3"/>'
+    long = b'\n     <vertex x="1.' + b"0" * 2_000_000 + b'" y="2" z="3"/>'
+    data = _object_bytes(vertex * 100 + long)
+    assert bambu3mf._written_extents(_object_bytes(vertex * 101)) is not None
+
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [b"<triangle ", b'<triangle paint_color="'],
+    ids=["unterminated tags", "unterminated codes"],
+)
+def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
+    """Security review of #3254: an unbounded run inside the paint pattern rescanned to
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Every run
+    in it is bounded, so no match reads further than a tag's worth of bytes; checked on
+    the pattern itself, not by a clock a loaded shard can skew (#3476 review)."""
+    assert not re.search(rb"(?<!\\)[*+]", bambu3mf._PAINT_CODE.pattern)
+    # A crafted file is read, whatever it then answers, without hanging on it.
+    bambu3mf._written_extents(_object_bytes(_THREE, junk * 40_000))
+
+
+def test_reading_a_box_makes_no_copy_of_the_file() -> None:
+    """#3254 review: skipping the XML declaration by slicing copied the whole object
+    file (86 MB on #2942's) just to look past it."""
+    padding = b'<metadata name="note">' + b"x" * 4_000_000 + b"</metadata>"
+    data = _object_bytes(_THREE, head=padding)
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is not None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+@pytest.mark.parametrize(
+    "root",
+    [b'<model xmlns="urn:not-3mf">', b'<model xmlns="%s"><x xmlns="urn:other">' % CORE_NS.encode()],
+    ids=["another root namespace", "a default redeclared inside"],
+)
+def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) -> None:
+    """#3254 review: a bare ``<vertex>`` is the 3MF's only under the core namespace,
+    which the parse requires; the pattern now asks the same of the root."""
+    data = _object_bytes(_THREE).replace(b'<model xmlns="' + CORE_NS.encode() + b'">', root, 1)
+    assert data != _object_bytes(_THREE)
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security review of #3434's fix: a search for the root re-ran its bounded run
+    from every ``<model`` in a file made of them. The pattern is tried once, where the
+    root starts; checked by what it is asked, not by a clock (#3476 review)."""
+    declaration = b'<?xml version="1.0"?>'
+    data = declaration + b"\n" + b"<model " * 400_000
+    asked: list[int] = []
+    real = bambu3mf._CORE_ROOT
+
+    class Once:
+        def match(self, text: bytes, pos: int = 0) -> re.Match[bytes] | None:
+            asked.append(pos)
+            return real.match(text, pos)
+
+        def search(self, *_: object) -> None:
+            raise AssertionError("the root is matched where it starts, never searched for")
+
+    monkeypatch.setattr(bambu3mf, "_CORE_ROOT", Once())
+    assert bambu3mf._written_extents(data) is None
+    assert asked == [len(declaration) + 1]
+
+
+def test_a_core_model_inside_another_root_is_left_to_the_parse() -> None:
+    """#3476 review: the root is the first element, so a ``<model>`` nested in another
+    is not taken for the 3MF's."""
+    core = _object_bytes(_THREE)
+    head, body = core.split(b"?>", 1)
+    assert bambu3mf._written_extents(head + b"?><foo>" + body + b"</foo>") is None
+    assert bambu3mf._written_extents(core) is not None
+
+
+def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    painted = (
+        b'\n     <triangle v1="0" v2="1" v3="2" paint_color="'
+        + b"4" * (MAX_CODE_DIGITS + 10)
+        + b'"/>'
+    )
+    assert (
+        bambu3mf._written_extents(_object_bytes(b'<vertex x="1" y="2" z="3"/>' * 3, painted))
+        is None
+    )
+
+
+def test_written_extents_are_read_a_window_at_a_time() -> None:
+    """#3678: vertices are matched a window of the file at a time; a box over several
+    windows is the box over every vertex, and none is counted twice or missed."""
+    count = 3 * bambu3mf._WINDOW // len(b'<vertex x="0" y="0" z="1"/>')
+    vertices = b"".join(b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(count))
+    data = _object_bytes(vertices)
+    assert len(list(bambu3mf._windows(data, 0))) > 2
+    box, painted = bambu3mf._written_extents(data) or (None, None)
+    assert box is not None
+    assert box.tolist() == [[0, -(count - 1), 1], [count - 1, 0, 1]]
+    assert painted == frozenset()
+
+
+def test_a_run_of_paint_attributes_is_counted_without_being_held() -> None:
+    """Security review of #3711: the bare attribute needs no ``<``, so a window can hold
+    any number of them; collecting them cost four times the file, which at the archive's
+    cap is gigabytes."""
+    junk = b' paint_color="' * 400_000
+    data = _object_bytes(_THREE, tail=b'<metadata name="' + junk + b'"/>')
+    tracemalloc.start()
+    try:
+        bambu3mf._written_extents(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+def test_windows_cover_the_file_and_end_before_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3678: the windows run end to end from where they start, and each but the last
+    ends just before a ``<``, so no tag starts in one window and ends in the next."""
+    data = _object_bytes(b'<vertex x="1" y="2" z="3"/>' * 50)
+    monkeypatch.setattr(bambu3mf, "_WINDOW", 100)
+    windows = list(bambu3mf._windows(data, 7))
+    assert len(windows) > 5
+    assert windows[0][0] == 7 and windows[-1][1] == len(data)
+    assert all(end == start for (_, end), (start, _) in pairwise(windows))
+    assert all(data[end : end + 1] == b"<" for _, end in windows[:-1])
+
+
+def _object_files(payload: bytes) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return [
+            (name, archive.read(name))
+            for name in archive.namelist()
+            if name.startswith("3D/Objects/")
+        ]
+
+
+def _parsed(name: str, data: bytes, **limits: int) -> bambu3mf.ParsedModel:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, data)
+    return parse_model(zipfile.ZipFile(io.BytesIO(out.getvalue())), name, **limits)
+
+
+def _assert_read_alike(fast: bambu3mf.ParsedModel, slow: bambu3mf.ParsedModel) -> None:
+    """The same arrays and the same tree, but for the space between the vertices and
+    triangles the parse keeps as their parent's text (#3679)."""
+    (got,), (want,) = fast.meshes.values(), slow.meshes.values()
+    for field in ("vertices", "faces", "pid", "p1"):
+        a, b = getattr(got, field), getattr(want, field)
+        assert a.dtype == b.dtype and a.shape == b.shape and np.array_equal(a, b), field
+    assert (got.pids, got.paint, got.prusa_painted) == (want.pids, want.paint, want.prusa_painted)
+    blocks = {f"{{{CORE_NS}}}vertices", f"{{{CORE_NS}}}triangles"}
+    for x, y in zip(fast.root.iter(), slow.root.iter(), strict=True):
+        assert (x.tag, x.attrib, x.tail) == (y.tag, y.attrib, y.tail)
+        assert x.text == y.text or (x.tag in blocks and not x.text and not (y.text or "").strip())
+
+
+def _parsed_by_xml(monkeypatch: pytest.MonkeyPatch, name: str, data: bytes) -> bambu3mf.ParsedModel:
+    with monkeypatch.context() as patch:
+        patch.setattr(bambu3mf, "_written_mesh", lambda *_: None)
+        return _parsed(name, data)
+
+
+@pytest.mark.parametrize("window", [None, 64], ids=["one window", "many windows"])
+def test_a_written_object_file_is_read_by_pattern_as_the_parse_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, window: int | None
+) -> None:
+    """#3679: an object file in the writer's own shape has its vertices and triangles
+    read by pattern, painted ones included, and comes out as the parse reads it."""
+    if window is not None:
+        monkeypatch.setattr(bambu3mf, "_WINDOW", window)
+    files = _object_files(_painted_two_objects(tmp_path))
+    assert any(b"paint_color" in data for _, data in files)
+    for name, data in files:
+        assert bambu3mf._written_mesh(data, None, None) is not None
+        _assert_read_alike(_parsed(name, data), _parsed_by_xml(monkeypatch, name, data))
+
+
+def test_the_rest_of_a_written_object_file_is_still_parsed_as_xml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3679: only the two blocks are read by pattern; an entity outside them is the
+    XML parser's to expand, and a file that is not XML is refused as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    named = data.replace(b'name="', b'name="&#60;', 1)
+    fast = bambu3mf._written_mesh(named, None, None)
+    assert fast is not None
+    _assert_read_alike(fast, _parsed_by_xml(monkeypatch, name, named))
+    with pytest.raises(ET.ParseError):
+        _parsed(name, data.replace(b"</object>", b"</objekt>"))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: data.replace(b"<mesh>", b"<!-- a note --><mesh>"),
+        lambda data: data.replace(b"<mesh>", b"<?note hi?><mesh>"),
+        lambda data: data.replace(b'<vertex x="', b'<vertex id="1" x="', 1),
+        lambda data: re.sub(rb'x="[^"]*"', b'x="1e2"', data, count=1),
+        lambda data: data.replace(b'"/>\n    </triangles>', b'" pid="1"/>\n    </triangles>'),
+    ],
+    ids=["comment", "instruction", "attribute", "exponent", "pid"],
+)
+def test_an_object_file_written_otherwise_is_left_to_the_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Callable[[bytes], bytes]
+) -> None:
+    """#3679: anything the pattern does not read exactly as the parse would, or that
+    could hide a block's tags, is parsed as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    other = change(data)
+    assert other != data
+    assert bambu3mf._written_mesh(other, None, None) is None
+    _assert_read_alike(_parsed(name, other), _parsed_by_xml(monkeypatch, name, other))
+
+
+def test_a_written_object_file_past_its_limits_is_refused_as_the_parse_refuses_it(
+    tmp_path: Path,
+) -> None:
+    from scadbuddy.render.bambu3mf import TooManyTrianglesError
+
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    with pytest.raises(TooManyTrianglesError) as triangles:
+        _parsed(name, data, max_triangles=1)
+    with pytest.raises(TooManyTrianglesError) as vertices:
+        _parsed(name, data, max_vertices=1)
+    assert (triangles.value.kind, vertices.value.kind) == ("triangles", "vertices")
+
+
+def test_an_entry_too_large_to_hold_is_parsed_as_it_inflates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    expected = _parsed_by_xml(monkeypatch, name, data)
+    monkeypatch.setattr(bambu3mf, "_HELD_ENTRY", len(data) // 3)
+
+    def unused(*_: object) -> None:
+        raise AssertionError("an entry past what is held was held")
+
+    monkeypatch.setattr(bambu3mf, "_written_mesh", unused)
+    _assert_read_alike(_parsed(name, data), expected)

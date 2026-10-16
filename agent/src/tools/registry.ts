@@ -1,15 +1,20 @@
+import type { AttachmentStore } from '../attachments/store.js'
+import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
+import { type SessionFiles, workspaceOf } from '../workspace/store.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import type { SwitchedOff } from './switches.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -34,6 +39,24 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 /** Long-running tools report here; a no-op when the caller sent no progress token. */
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
+/** How a browser_* call's wait for its tab ended (ToolServices `waitForTab`). */
+export type TabWait =
+  /** `why`: the hub saw the session's tab again, or the user said they are back (the tab may still not be here). */
+  | { back: true; why: 'reconnected' | 'user_back' }
+  | { back: false; message: string }
+/**
+ * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
+ * `isBack`: whether the call's tab is connected now, checked once the wait is
+ * recorded, so a tab that came back in between is not waited for; `signal`
+ * aborts once the wait no longer needs the answer, and the check stops then.
+ */
+export type WaitForTab = (request: {
+  tool: string
+  toolUseId: string | undefined
+  signal: AbortSignal
+  isBack: (signal: AbortSignal) => Promise<boolean>
+}) => Promise<TabWait>
+
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
@@ -47,6 +70,10 @@ export type ToolServices = {
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
   renderWaitMs: number
+  /** How long a command follows a 202 (tools/command.ts); `COMMAND_FOLLOW_MS` when unset. */
+  commandFollowMs?: number
+  /** How long a call may run past its own waits before it is answered as timed out; `TOOL_DEADLINE_MS` when unset. */
+  toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
@@ -55,16 +82,83 @@ export type ToolServices = {
   renderLimiter?: RenderLimiter
   /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
   sessions?: SessionManager | undefined
+  /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
+  attachments?: AttachmentStore | undefined
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): the session's files, or
+   * the principal's own outside a session. The workspace_* tools refuse without it.
+   */
+  workspace?: SessionFiles | undefined
+  /**
+   * The secrets a tool must never hand the model (#2329): every saved Claude
+   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
+   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
+   */
+  secrets?: (() => Promise<readonly string[]>) | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
+  /**
+   * #815 §2: parks a browser_* call that found no tab until the session's tab is
+   * back, the user replies, or the wait times out. Only a turn of a session the
+   * browser user owns has one (sessions/manager.ts); without it the call fails at once.
+   */
+  waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
+  /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
+  switchedOff?: SwitchedOff | undefined
+  /**
+   * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
+   * a raised tier or a disabled tool, read at each call. Every tool runs at its
+   * own tier without it.
+   */
+  toolOverrides?: ToolOverrides | undefined
 }
+
+/** One tool's override: a tier at or above its own, and whether it is disabled. */
+export type ToolOverride = { tier?: Risk; disabled: boolean }
+
+export type ToolOverrides = {
+  of(tool: string): Promise<ToolOverride>
+  /** Every disabled tool's name, for a tool list (/mcp). */
+  disabled(): Promise<ReadonlySet<string>>
+}
+
+/** What a tool runs at now: its tier raised by any override, whether that gates it, and whether it is disabled. */
+export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
+
+/**
+ * A tool's tier and gate with Settings' override applied (#1953). An override
+ * only raises, so a tool raised to `outward` is gated like any outward tool
+ * (`approval: 'none'` tools are outward already, so this never gates them).
+ */
+export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+  const override = await services.toolOverrides?.of(tool.name)
+  const risk = raiseTier(tool.risk, override?.tier)
+  return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
+}
+
+/** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
+export type FlowImages = { get(name: string): Promise<StoredBlob | undefined> }
+
+/** A flow run's step that sends a session's turn (#2481; agent-durable models.py `FlowTurn`). */
+export type FlowTurn = { run_id: string; call_id: string }
 
 export type ToolContext = ToolServices & {
   principal: Principal
+  /** In a flow run's call only: that run's images, by name. */
+  flowImages?: FlowImages | undefined
+  /**
+   * In a flow run's call only (#2481): the run and the call, from the activity's own
+   * context (`flow-<run>`, `tool-<call id>`), never from its input. A turn the call
+   * sends (sessions_start, sessions_send) carries it, so the run's grant may cover it.
+   */
+  flowTurn?: FlowTurn | undefined
   /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
   session?: string | undefined
+  /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */
+  toolUseId?: string | undefined
   progress: Progress
   signal: AbortSignal
   /** The projection's own tools by name, so `confirm_action` can run the approved one. */
@@ -77,8 +171,25 @@ export type ToolContext = ToolServices & {
    * prepared a second time. Only the harness projection sets it
    * (projections.ts `createHarnessServer`); the in-process server is reachable
    * only from a harness query.
+   *
+   * `workflow`: the call is an activity on `agent-tools` (temporal/toolActivities.ts,
+   * #1055), which a durable session's workflow schedules only once its own approval
+   * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
-  gate?: 'harness'
+  gate?: 'harness' | 'workflow'
+  /**
+   * Under `harness`: the tier the turn's permission seam applied to this tool.
+   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
+   * tool raised to `outward` since then was not parked, and is refused here
+   * rather than run unasked (#2100).
+   */
+  seamTier?: Risk
+  /**
+   * The tier and Settings state the caller already resolved for this call and checked
+   * it against (toolActivities.ts, #2088). Used as given, never read again, so the
+   * check and the run cannot see two different overrides.
+   */
+  effective?: EffectiveTool
   /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
@@ -119,12 +230,27 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   /**
+   * What a call does, in a few words, for the assistant panel (#782): worded as
+   * the action ("Render cable-clip"), since the panel shows whether it is
+   * running or done beside it. Defaults to the name in words, with the `slug`
+   * argument when there is one (`defaultTitle`). Shown to everyone watching
+   * the session, so never put a secret argument in it.
+   */
+  title?: (args: z.infer<z.ZodObject<S>>) => string
+  /**
    * Where the content this tool returns comes from, for the untrusted-data
    * envelope every text result is wrapped in (safety/untrusted.ts, #258).
    * Say who could have written it, e.g. "the model's README, written by its
    * author or imported from the web". Defaults to DEFAULT_SOURCE.
    */
   source?: string
+  /**
+   * The longest this call waits by design (a render, the user, a tab, another
+   * session's turn), on top of which `TOOL_DEADLINE_MS` is allowed before the
+   * call is answered as timed out (#1918). `Infinity` for a wait with no bound
+   * of its own (ask_user). None for a tool that only asks and answers.
+   */
+  waitsMs?: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => number
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
 }
 
@@ -142,11 +268,24 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
+  /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
+  title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
   parse(args: unknown): Record<string, unknown>
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
   execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
+  /** How long the call may run before `runTool` answers it as timed out (ToolSpec.waitsMs). */
+  deadlineMs(args: unknown, ctx: ToolContext): number
 }
+
+/**
+ * How long a call may run past its own waits (ToolSpec.waitsMs) before it is
+ * answered as timed out (#1918). Most backend calls carry only the call's
+ * abort signal, so a backend that never answers would otherwise hold the turn
+ * until the user presses Stop. Generous: a command route alone may wait
+ * `ACCEPTING_MS` (4 min) for the backend to accept it (tools/command.ts).
+ */
+export const TOOL_DEADLINE_MS = 5 * 60_000
 
 export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
   const readOnly = spec.readOnly ?? spec.risk === 'read'
@@ -172,13 +311,35 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
+    title(args) {
+      const parsed = spec.input.safeParse(args)
+      if (!parsed.success) return defaultTitle(spec.name, args)
+      return spec.title ? spec.title(parsed.data) : defaultTitle(spec.name, parsed.data)
+    },
     parse(args) {
       return spec.input.parse(args) as Record<string, unknown>
     },
     execute(args, ctx) {
       return spec.handler(spec.input.parse(args), ctx)
     },
+    deadlineMs(args, ctx) {
+      const parsed = spec.waitsMs ? spec.input.safeParse(args) : undefined
+      const waits = parsed?.success ? spec.waitsMs!(parsed.data, ctx) : 0
+      return waits + (ctx.toolDeadlineMs ?? TOOL_DEADLINE_MS)
+    },
   }
+}
+
+/**
+ * A tool's title when it declares none (#782): its name in words, and the model
+ * it acts on when it takes a `slug`: `get_readme {slug: 'cable-clip'}` →
+ * "Get readme → cable-clip".
+ */
+export function defaultTitle(name: string, args: unknown): string {
+  const words = name.replace(/_/g, ' ')
+  const phrase = words.charAt(0).toUpperCase() + words.slice(1)
+  const slug = typeof args === 'object' && args !== null ? (args as { slug?: unknown }).slug : undefined
+  return typeof slug === 'string' && slug !== '' ? `${phrase} → ${slug}` : phrase
 }
 
 export class ToolError extends Error {
@@ -281,8 +442,9 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     args,
     {
       ...ctx,
+      // Merged: confirm_action reports the approval and the tool, and the tool it ran may add its own detail.
       report: (r) => {
-        reported = r
+        reported = { ...reported, ...r }
       },
     },
     executed,
@@ -343,16 +505,39 @@ async function runJudgedByResult(
   ctx: ToolContext,
   executed: () => Pick<Tool, 'name' | 'source'>,
 ): Promise<ToolRun> {
-  if (!hasTier(ctx.principal, tool.risk)) {
+  let effective: EffectiveTool
+  try {
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
+  } catch {
+    // Fails closed: a database blip never runs a tool Settings disabled.
+    return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
+  }
+  if (effective.disabled) {
+    return refused(`${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`)
+  }
+  if (!hasTier(ctx.principal, effective.risk)) {
     return refused(
-      `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
+      `${tool.name} needs the "${effective.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
+    )
+  }
+  const off = await ctx.switchedOff?.(tool.name)
+  if (off) return refused(off)
+  if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
+    return refused(
+      `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +
+        'nothing was sent. It asks for one from the next turn.',
     )
   }
   try {
-    if (tool.gated && ctx.gate !== 'harness') {
+    if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
-      const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })
+      const action = await ctx.pending.prepare(ctx.principal, {
+        tool: tool.name,
+        input,
+        summary: tool.summarize(args),
+        workspace: workspaceOf(ctx),
+      })
       return {
         result: json({
           status: 'pending_approval',
@@ -369,10 +554,25 @@ async function runJudgedByResult(
       }
     }
     // Every backend call names the agent, so each commit it makes is the agent's (#252).
-    const raw = await tool.execute(args, {
-      ...ctx,
-      backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session)),
-    })
+    const deadline = tool.deadlineMs(args, ctx)
+    const raw = await withDeadline(deadline, ctx.signal, (signal) =>
+      tool.execute(args, {
+        ...ctx,
+        signal,
+        backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session, tool.name)),
+      }),
+    )
+    if (raw === TIMED_OUT) {
+      const after = `${tool.name} did not answer within ${Math.round(deadline / 1000)} s`
+      // A read can simply be asked again. Anything else may have been done by
+      // the backend all the same (a handler need not heed the abort), and a
+      // retry is a new call with a new idempotency key: a second print.
+      return failed(
+        tool.risk === 'read'
+          ? `${after} and was stopped: what it calls is not answering. Try it again later, or carry on without it.`
+          : `${after}. It may still have taken effect: check whether it did before calling ${tool.name} again.`,
+      )
+    }
     const by = executed()
     const result = markUntrusted(raw, by.name, by.source)
     return result.isError
@@ -388,6 +588,61 @@ async function runJudgedByResult(
     if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
     // An unexpected error's message can quote anything (a response body, a path).
     return failedWith(by, `${by.name} failed`, err instanceof Error ? err.message : String(err), UNEXPECTED_ERROR_SOURCE)
+  }
+}
+
+const TIMED_OUT = Symbol('timed out')
+
+/** How long a stopped call's handler has to answer before the Stop is answered for it (#2099). */
+const STOP_GRACE_MS = 1_000
+
+/**
+ * `run`'s result, or `TIMED_OUT` once `ms` passes, when the signal it was given
+ * is aborted, or an `AbortError` shortly after `outer` is (a user Stop). Both
+ * answer whether or not the handler heeds that signal; one that does not is
+ * left to finish unobserved.
+ */
+async function withDeadline<T>(
+  ms: number,
+  outer: AbortSignal,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T | typeof TIMED_OUT> {
+  const timer = new AbortController()
+  let handle: ReturnType<typeof setTimeout> | undefined
+  const racers: Promise<T | typeof TIMED_OUT>[] = []
+  if (Number.isFinite(ms)) {
+    racers.push(
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        handle = setTimeout(() => {
+          // Settled before the abort, so the handler's own AbortError cannot win the race.
+          resolve(TIMED_OUT)
+          timer.abort()
+        }, ms)
+      }),
+    )
+  }
+  // A Stop is answered for the handler only once it has had STOP_GRACE_MS to answer
+  // itself: one that heeds the signal can say what it had already done (a submitted
+  // render's job id), and that is worth more to the model than a bare cancel.
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let stop = () => {}
+  racers.push(
+    new Promise<never>((_, reject) => {
+      stop = () => {
+        grace = setTimeout(() => reject(new DOMException('the call was cancelled', 'AbortError')), STOP_GRACE_MS)
+      }
+      if (outer.aborted) stop()
+      else outer.addEventListener('abort', stop, { once: true })
+    }),
+  )
+  const running = run(AbortSignal.any([outer, timer.signal]))
+  running.catch(() => {})
+  try {
+    return await Promise.race([running, ...racers])
+  } finally {
+    clearTimeout(handle)
+    clearTimeout(grace)
+    outer.removeEventListener('abort', stop)
   }
 }
 

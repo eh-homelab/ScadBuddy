@@ -7,12 +7,18 @@
  * pending with a diff until approved; a refused package answers 422 with `problems`.
  *
  * Git URLs the mock knows: `https://git.example/greeter.git` (clean; `ref: "v2"`
- * gives a second commit), `https://git.example/shell.git` (refused), and the
- * marketplace `https://git.example/market.git` with entry `greeter`.
+ * gives a second commit), `https://git.example/shell.git` (installs, but its review
+ * lists refusals, so it is approved only with `allow_refused`),
+ * `https://git.example/reserved.git` (a name that is not a path segment: refused outright), and the marketplace
+ * `https://git.example/market.git` with entry `greeter`. `https://git.example/scadbuddy.git`
+ * (or any marketplace entry `scadbuddy`) is ScadBuddy's own plugin: 409 with
+ * `built_in: true`. The two built-ins are listed first.
  */
 import { HttpResponse, delay, http } from 'msw'
 import { packageFetch } from '../api/aiPlugins'
 import type {
+  BuiltInPluginPackage,
+  ListedPackage,
   PackageReview,
   PluginPackage,
   PluginTest,
@@ -37,6 +43,11 @@ export const SHELL_PROBLEMS = [
   'skills/status/SKILL.md: runs a shell command through dynamic context injection (!`...`)',
   'hooks/hooks.json: Stop has a "command" hook',
 ]
+export const RESERVED_PROBLEMS = ['plugin name "bad name" is not 1–64 letters, digits, ".", "_" and "-", starting with a letter or digit']
+export const SHELL = {
+  commit: '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f',
+  hash: 'sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e',
+}
 
 const REVIEW_V1: PackageReview = {
   name: 'greeter',
@@ -48,6 +59,20 @@ const REVIEW_V1: PackageReview = {
   hooks: [{ event: 'Stop', type: 'prompt' }],
   mcp_servers: [{ name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }],
   files: ['.claude-plugin/plugin.json', '.mcp.json', 'README.md', 'agents/helper.md', 'commands/wave.md', 'hooks/hooks.json', 'skills/hello/SKILL.md'],
+  refused: [],
+}
+const REVIEW_SHELL: PackageReview = {
+  name: 'shell',
+  description: 'Runs commands.',
+  version: null,
+  skills: ['shell:status'],
+  commands: [],
+  agents: [],
+  hooks: [{ event: 'Stop', type: 'command' }],
+  mcp_servers: [],
+  files: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/status/SKILL.md'],
+  refused: SHELL_PROBLEMS,
+  builtin_tools: ['Bash'],
 }
 const REVIEW_V2: PackageReview = {
   ...REVIEW_V1,
@@ -59,15 +84,41 @@ const REVIEW_V2: PackageReview = {
 interface State {
   remote: Map<string, RemotePlugin>
   packages: Map<string, PluginPackage>
+  builtIns: Map<string, BuiltInPluginPackage>
 }
 
-const state: State = { remote: new Map(), packages: new Map() }
+const state: State = { remote: new Map(), packages: new Map(), builtIns: new Map() }
+
+const emptyReview = { commands: [], hooks: [], mcp_servers: [], refused: [], builtin_tools: [] }
+function builtIns(): BuiltInPluginPackage[] {
+  return [
+    {
+      name: 'scadbuddy',
+      built_in: true,
+      source: { kind: 'built_in', path: 'agent/plugins/scadbuddy' },
+      review: {
+        ...emptyReview,
+        name: 'scadbuddy',
+        description: `ScadBuddy's own plugin as the agent harness loads it.`,
+        version: '0.1.10',
+        skills: ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
+        agents: ['scadbuddy:model-author', 'scadbuddy:print-analyst'],
+        files: ['.claude-plugin/plugin.json', 'agents/model-author.md', 'skills/authoring/SKILL.md'],
+      },
+      approved: true,
+      enabled: true,
+    },
+  ]
+}
+
+export const BUILT_IN_ANSWER = `ScadBuddy's own plugin is built in: the assistant already loads its skills and subagents, with its tools in-process. There is nothing to install.`
 
 const now = () => new Date('2026-09-28T09:00:00Z').toISOString()
 
 export function resetAiPluginMocks(): void {
   state.remote.clear()
   state.packages.clear()
+  state.builtIns = new Map(builtIns().map((b) => [b.name, b]))
   state.remote.set('hindsight', {
     name: 'hindsight',
     kind: 'remote_mcp',
@@ -76,6 +127,7 @@ export function resetAiPluginMocks(): void {
     tool_prefix: 'mcp__hindsight__',
     auth: { header: 'Authorization', last4: '9f3a' },
     usable: true,
+    problem: null,
     tool_tiers: { recall: 'read' },
     disabled_tools: [],
     created_at: now(),
@@ -89,7 +141,23 @@ const detail = (status: number, text: string, extra: Record<string, unknown> = {
 
 function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry?: string): PluginPackage | string[] | undefined {
   const known = url === 'https://git.example/greeter.git' || (kind === 'marketplace' && url === 'https://git.example/market.git' && entry === 'greeter')
-  if (url === 'https://git.example/shell.git') return SHELL_PROBLEMS
+  if (url === 'https://git.example/reserved.git') return RESERVED_PROBLEMS
+  if (url === 'https://git.example/shell.git') {
+    return {
+      name: 'shell',
+      source: { kind: 'git', url, ref, path: '' },
+      commit_sha: SHELL.commit,
+      content_hash: SHELL.hash,
+      review: REVIEW_SHELL,
+      approved: false,
+      approved_at: null,
+      allow_refused: false,
+      enabled: false,
+      pending: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+  }
   if (!known) return undefined
   // A marketplace re-pin to `moved` finds the entry in another repository.
   const v = ref === 'v2' || ref === 'moved' ? GREETER_V2 : GREETER_V1
@@ -104,11 +172,18 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
     review: ref === 'v2' ? REVIEW_V2 : REVIEW_V1,
     approved: false,
     approved_at: null,
+    allow_refused: false,
     enabled: false,
     pending: null,
     created_at: now(),
     updated_at: now(),
   }
+}
+
+/** A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved and enabled. */
+export function seedStoredPackage(name: string): void {
+  const greeter = packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage
+  state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
 }
 
 function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
@@ -130,16 +205,33 @@ function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
   })
 }
 
+/** The remote plugins as the mock has them now; `GET /plugins` lists them after the built-ins (`features/builtInToolSets.ts`). */
+/** Gives a stored remote plugin a problem, as the agent reports a reserved name (#2127). */
+export function setRemotePluginProblem(name: string, problem: string | null): void {
+  const plugin = state.remote.get(name)
+  if (plugin) state.remote.set(name, { ...plugin, problem })
+}
+
+export function remotePluginList(): RemotePlugin[] {
+  return [...state.remote.values()]
+}
+
+/** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
+const BUILT_IN_SETS = new Set(['scadbuddy'])
+
 export const aiPluginHandlers = [
-  // ---- remote MCP endpoints
-  http.get(`${base}/plugins`, () => HttpResponse.json([...state.remote.values()])),
+  // ---- remote MCP endpoints. A name that is no remote plugin falls through to
+  // features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
 
   http.post(`${base}/plugins`, async ({ request }) => {
     const body = (await request.json()) as RemotePluginCreate
     if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(body.name)) {
       return detail(400, 'name must be 2–32 characters: lower-case letters, digits and single hyphens')
     }
-    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback')
+    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback or private addresses')
+    if (BUILT_IN_SETS.has(body.name)) {
+      return detail(409, `"${body.name}" is built in: it cannot be added: it ships with the agent`, { built_in: true })
+    }
     if (state.remote.has(body.name)) return detail(409, `a plugin named "${body.name}" already exists`)
     const plugin: RemotePlugin = {
       name: body.name,
@@ -149,6 +241,7 @@ export const aiPluginHandlers = [
       tool_prefix: `mcp__${body.name}__`,
       auth: body.secret ? { header: body.auth_header || 'Authorization', last4: body.secret.slice(-4) } : null,
       usable: true,
+      problem: null,
       tool_tiers: {},
       disabled_tools: [],
       created_at: now(),
@@ -160,7 +253,7 @@ export const aiPluginHandlers = [
 
   http.patch(`${base}/plugins/:name`, async ({ params, request }) => {
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, `no plugin named "${String(params.name)}"`)
+    if (!plugin) return undefined
     const body = (await request.json()) as RemotePluginPatch
     const next: RemotePlugin = {
       ...plugin,
@@ -174,14 +267,14 @@ export const aiPluginHandlers = [
   }),
 
   http.delete(`${base}/plugins/:name`, ({ params }) => {
-    if (!state.remote.delete(String(params.name))) return detail(404, 'no such plugin')
+    if (!state.remote.delete(String(params.name))) return undefined
     return new HttpResponse(null, { status: 204 })
   }),
 
   http.post(`${base}/plugins/:name/test`, async ({ params }) => {
-    await delay(100)
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, 'no such plugin')
+    if (!plugin) return undefined
+    await delay(100)
     const result: PluginTest = {
       ok: true,
       detail: 'connected; 3 tools',
@@ -194,7 +287,9 @@ export const aiPluginHandlers = [
   }),
 
   // ---- plugin packages
-  http.get(`${base}/plugin-packages`, () => HttpResponse.json([...state.packages.values()])),
+  http.get(`${base}/plugin-packages`, () =>
+    HttpResponse.json<ListedPackage[]>([...state.builtIns.values(), ...state.packages.values()]),
+  ),
 
   http.post(`${base}/plugin-packages`, async ({ request }) => {
     await delay(150)
@@ -202,6 +297,9 @@ export const aiPluginHandlers = [
       source: { kind: 'git' | 'marketplace'; url: string; ref?: string; path?: string; entry?: string }
     }
     if (!/^https?:\/\//.test(source.url)) return detail(400, 'source url must be https (or http to loopback)')
+    if (source.url === 'https://git.example/scadbuddy.git' || source.entry === 'scadbuddy') {
+      return detail(409, BUILT_IN_ANSWER, { built_in: true })
+    }
     const found = packageFor(source.url, source.ref || 'HEAD', source.kind, source.entry)
     if (found === undefined) return detail(502, `git fetch failed: repository ${source.url} not found`)
     if (Array.isArray(found)) return detail(422, 'the plugin package is refused', { problems: found })
@@ -215,8 +313,14 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages/:name/approve`, async ({ params, request }) => {
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
-    const body = (await request.json()) as { commit_sha: string; content_hash: string }
-    if (pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash) {
+    const body = (await request.json()) as { commit_sha: string; content_hash: string; allow_refused?: boolean }
+    const isPending = pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash
+    const refused = (isPending ? pkg.pending!.review : pkg.review).refused ?? []
+    if (refused.length && !body.allow_refused && (isPending || body.commit_sha === pkg.commit_sha)) {
+      return detail(409, `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`)
+    }
+    const allow_refused = Boolean(body.allow_refused) && refused.length > 0
+    if (pkg.pending && isPending) {
       const { url, path } = packageFetch(pkg)
       const moved = pkg.pending.plugin_url !== url || pkg.pending.plugin_path !== path
       const next: PluginPackage = {
@@ -231,13 +335,14 @@ export const aiPluginHandlers = [
         review: pkg.pending.review,
         approved: true,
         approved_at: now(),
+        allow_refused,
         pending: null,
       }
       state.packages.set(pkg.name, next)
       return HttpResponse.json(next)
     }
     if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
-      const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now() }
+      const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
       state.packages.set(pkg.name, next)
       return HttpResponse.json(next)
     }
@@ -245,6 +350,13 @@ export const aiPluginHandlers = [
   }),
 
   http.patch(`${base}/plugin-packages/:name`, async ({ params, request }) => {
+    const builtIn = state.builtIns.get(String(params.name))
+    if (builtIn) {
+      const { enabled } = (await request.json()) as { enabled: boolean }
+      const next = { ...builtIn, enabled }
+      state.builtIns.set(builtIn.name, next)
+      return HttpResponse.json(next)
+    }
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { enabled } = (await request.json()) as { enabled: boolean }
@@ -289,6 +401,9 @@ export const aiPluginHandlers = [
   }),
 
   http.delete(`${base}/plugin-packages/:name`, ({ params }) => {
+    if (state.builtIns.has(String(params.name)) && !state.packages.has(String(params.name))) {
+      return detail(409, `"${String(params.name)}" is built in: it cannot be removed. Disable it instead.`, { built_in: true })
+    }
     if (!state.packages.delete(String(params.name))) return detail(404, 'no such plugin package')
     return new HttpResponse(null, { status: 204 })
   }),

@@ -70,6 +70,20 @@ export const TOOLS = {
       })
       .strict(),
   }),
+  highlight: tool({
+    description:
+      'Point at the visible element with this ARIA role and accessible name: it scrolls into view and ' +
+      'is outlined for a moment, so the user can see what you are talking about. Changes nothing.',
+    risk: 'read',
+    scope: 'global',
+    input: z
+      .object({
+        role: z.string().min(1).describe('ARIA role, e.g. "button", "link", "tab", "checkbox"'),
+        name: z.string().describe('Accessible name, matched exactly (case-insensitive)'),
+        index: z.number().int().min(0).optional().describe('Which match, when several share the name'),
+      })
+      .strict(),
+  }),
   fill: tool({
     description:
       'Fallback for UI no other tool covers: type a value into the visible field with this label ' +
@@ -143,11 +157,17 @@ export const TOOLS = {
   }),
   generate: tool({
     description:
-      'Save the settled render as an output (the Generate button). Needed before the print or send dialog can open.',
+      'Save the settled render as an output (the Generate button). Needed before the print or send dialog can open. ' +
+      "It files the 3MF in the Project picker's project. When that is not the project this model (with the preset " +
+      'in use) was last filed in, it saves nothing and names both: call again with project_id set to the one meant ' +
+      '(null for no project; an id Bambuddy does not list is refused), which also moves the picker there.',
     risk: 'write',
     scope: 'customize',
     input: z
-      .object({ timeout_ms: z.number().int().min(0).max(120_000).default(30_000) })
+      .object({
+        timeout_ms: z.number().int().min(0).max(120_000).default(30_000),
+        project_id: z.number().int().nullable().optional(),
+      })
       .strict(),
   }),
   select_plate: tool({

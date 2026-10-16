@@ -1,9 +1,38 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
-import { seedPlan } from './filaments'
+import { carriedPlan, seedPlan } from './filaments'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { useLatest } from './useLatest'
+
+/**
+ * §7 — what a Print-dialog re-arrange was made for, carried onto the output it makes:
+ * the plan, and `ready` once that output's choices have been read. While it is set,
+ * the dialog's choices are kept rather than reset and seeded for a new source.
+ */
+export interface Carry {
+  plan: SlotChoice[]
+  ready: boolean
+}
+
+/**
+ * The dialog's one carry, held across renders; the hooks read and settle it. It is not
+ * state: `usePrintChoices` reads it while rendering, so every `set` must come with a
+ * state change that re-renders (#2250).
+ */
+export class CarryBox {
+  private value: Carry | null = null
+  get(): Carry | null {
+    return this.value
+  }
+  set(value: Carry | null) {
+    this.value = value
+  }
+  /** The new output's choices are in: the next plan seeded from it is the last one. */
+  markReady() {
+    if (this.value) this.value.ready = true
+  }
+}
 
 /**
  * #87 — the inventory behind the filament picker, and the plan built on it, for the plate
@@ -16,12 +45,18 @@ export function useFilamentPlan(
   source: PrintSource | undefined,
   choices: ChoicesView | null,
   plate: number | 'all',
+  carry?: CarryBox,
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
+  /**
+   * #2186 — the choices `plan` was seeded from. The plan follows the choices one render
+   * late (it is set by the effect below), so for that render it is the last read's.
+   */
+  const [planFor, setPlanFor] = useState<ChoicesView | null>(null)
 
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
@@ -31,10 +66,29 @@ export function useFilamentPlan(
   const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
 
   /**
+   * #1044 — every spool the plan has held for these choices, by slot. A plate change
+   * keeps the pick for each slot the new plate still has, and a slot one plate lacks
+   * gets its pick back on a plate that has it; only a slot never seen is seeded. It only
+   * gains: a reset to the suggestion on one plate resets that plate's slots, and a slot
+   * it does not show keeps its pick. Keyed by the `choices` object, so this relies on a
+   * plate change never re-reading the choices (`usePrintChoices` re-reads on open,
+   * source and printer only); a re-read starts the plan afresh.
+   */
+  const held = useRef<{ choices: ChoicesView; slots: Map<number, SlotChoice> } | null>(null)
+  useEffect(() => {
+    for (const choice of plan) held.current?.slots.set(choice.slot_id, choice)
+  }, [plan])
+
+  /**
    * The filament step: plate 1 is in the choices read already; another plate's slots
    * are that plate's own, and all plates' are their union, so those are read for it.
    */
   const filamentAttempt = useRef(0)
+  /**
+   * #2249 — bumped by Retry after a failed read. Print stays held while there is no plan
+   * for these choices (`planReady`): sending an empty one would print with no spools.
+   */
+  const [retries, setRetries] = useState(0)
   useEffect(() => {
     const token = (filamentAttempt.current += 1)
     setFilamentError(null)
@@ -42,13 +96,40 @@ export function useFilamentPlan(
     if (!choices || !current) {
       setFilaments(null)
       setPlan([])
+      setPlanFor(null)
       return
     }
     const seed = (next: FilamentOptions) => {
       setFilaments(next)
+      setPlanFor(choices)
+      const carried = carry?.get()
+      if (carried) {
+        // A re-arrange: the plan it was made for, less any slot the new file lacks.
+        held.current = { choices, slots: new Map() }
+        setPlan(carriedPlan(next, carried.plan))
+        if (carried.ready) carry?.set(null)
+        return
+      }
       // What this model last printed with seeds the selection, else the server's
       // auto-match (#78); every slot stays editable.
-      setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
+      const seeded = seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[])
+      if (held.current?.choices === choices) {
+        // The same choices on another plate: what is picked already holds (#1044), and a
+        // slot new to this plate is seeded as the first plate's were.
+        const inventory = new Set((next.spools ?? []).map((spool) => spool.spool_id))
+        const kept = held.current.slots
+        setPlan(
+          (next.slots ?? []).flatMap((slot) => {
+            const pick = kept.get(slot.slot_id)
+            if (pick && inventory.has(pick.spool_id)) return [{ ...pick }]
+            const choice = seeded.find((entry) => entry.slot_id === slot.slot_id)
+            return choice ? [choice] : []
+          }),
+        )
+        return
+      }
+      held.current = { choices, slots: new Map() }
+      setPlan(seeded)
     }
     if (chosenPlate === 1 && !allPlates) {
       seed(choices.filaments)
@@ -65,11 +146,12 @@ export function useFilamentPlan(
         if (token !== filamentAttempt.current) return
         setFilaments(null)
         setPlan([])
+        setPlanFor(null)
         setFilamentError(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan])
+  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =
@@ -79,5 +161,10 @@ export function useFilamentPlan(
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
-  return { filaments, plan, setPlan, planChanged, filamentError }
+  /** Whether `plan` was seeded from these choices, so it may be sent with them. */
+  const planReady = choices !== null && planFor === choices
+
+  const retryFilaments = () => setRetries((n) => n + 1)
+
+  return { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments }
 }

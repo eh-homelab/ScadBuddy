@@ -1,7 +1,8 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { BrowserRouter, MemoryRouter, Link, Route, Routes, useNavigate } from 'react-router'
+import { BrowserRouter, MemoryRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Settings } from '../api/types'
@@ -10,6 +11,8 @@ import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handl
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+import { SETTLE_MS } from './settings/sectionNav'
+import { choose, optionDisabled } from '../test/select'
 
 // #322 — every runtime setting in the UI, with where its value came from; a save per
 // section; the remembered choices; About.
@@ -20,9 +23,294 @@ async function seeded() {
   )
 }
 
-function region(name: string) {
-  return screen.getByRole('region', { name })
+/** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
+async function enter(user: UserEvent, field: HTMLElement, text: string) {
+  await user.click(field)
+  await user.paste(text)
 }
+
+/**
+ * A section, by its heading. A role query over all of Settings (~1000 elements) runs
+ * jsdom's getComputedStyle on each of them, ~0.5 s after every change, and these tests
+ * ran into their 5 s under load (#1485); so buttons are looked for in their section.
+ */
+function region(name: string): HTMLElement {
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
+  if (!section) throw new Error(`no section headed ${name}`)
+  return section
+}
+
+// #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list) opens
+// Settings scrolled to it, once the page has loaded. #2345 — only the pane scrolls, never
+// the window, and the section stays in view while the sections above it load; #2346 — a
+// section link puts its section in the address, focuses it, and marks it current.
+describe('SettingsPage section links (#1307, #2345, #2346)', () => {
+  /**
+   * jsdom lays nothing out: each section is given a top (its id's entry in `tops`, read at
+   * each call), and the pane's scrolls are recorded. `scrollIntoView` must not be called:
+   * it scrolls the window too.
+   */
+  function stubLayout(tops: Record<string, number>) {
+    const scrolls: number[] = []
+    const intoView = vi.fn()
+    const proto = Element.prototype as unknown as Record<string, unknown>
+    const saved = { rect: proto.getBoundingClientRect, scrollTo: proto.scrollTo, intoView: proto.scrollIntoView }
+    proto.getBoundingClientRect = function (this: Element) {
+      const top = tops[this.id] ?? 0
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }
+    }
+    proto.scrollTo = function (this: Element, options: ScrollToOptions) {
+      if (this.classList.contains('sb-settings')) scrolls.push(options.top ?? 0)
+    }
+    proto.scrollIntoView = intoView
+    const restore = () => {
+      proto.getBoundingClientRect = saved.rect
+      if (saved.scrollTo === undefined) delete proto.scrollTo
+      else proto.scrollTo = saved.scrollTo
+      if (saved.intoView === undefined) delete proto.scrollIntoView
+      else proto.scrollIntoView = saved.intoView
+    }
+    return { scrolls, intoView, restore }
+  }
+
+  /**
+   * A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected.
+   * Only those on the pane's content are listed: Radix measures its own controls too.
+   */
+  function stubResizeObserver() {
+    const observers: { fire: () => void; disconnected: boolean }[] = []
+    class Fake {
+      entry: { fire: () => void; disconnected: boolean }
+      constructor(callback: () => void) {
+        this.entry = { fire: callback, disconnected: false }
+      }
+      observe(target: Element) {
+        if (target.parentElement?.classList.contains('sb-settings')) observers.push(this.entry)
+      }
+      unobserve() {}
+      disconnect() {
+        this.entry.disconnected = true
+      }
+    }
+    vi.stubGlobal('ResizeObserver', Fake)
+    return observers
+  }
+
+  /** Where the router is, rendered beside the page. */
+  function Where() {
+    const location = useLocation()
+    return <p data-testid="where">{location.hash}</p>
+  }
+
+  it('scrolls only the pane to the section the URL names, under the nav', async () => {
+    const { scrolls, intoView, restore } = stubLayout({ libraries: 5000 })
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#libraries' })
+      await seeded()
+      // 8 px under the nav (no height in jsdom).
+      await waitFor(() => expect(scrolls).toContain(4992))
+      expect(intoView).not.toHaveBeenCalled()
+      // The sr-only boxes are placed in the pane, so the document is no taller than the window.
+      expect(document.querySelector('.sb-settings')).toHaveClass('relative')
+    } finally {
+      restore()
+    }
+  })
+
+  it.each(['wheel', 'touchstart', 'keydown', 'pointerdown'])(
+    'keeps a deep-linked section in view while the sections above it load, until a %s',
+    async (stop) => {
+      const tops = { libraries: 5000 }
+      const { scrolls, restore } = stubLayout(tops)
+      const observers = stubResizeObserver()
+      try {
+        renderPage(<SettingsPage />, { route: '/settings#libraries' })
+        await seeded()
+        await waitFor(() => expect(scrolls).toContain(4992))
+        // The first is the deep link's follow; the section-in-view one comes after it.
+        const observer = observers[0]!
+        // Remembered choices finish loading above it and push it down.
+        tops.libraries = 6900
+        act(() => observer.fire())
+        expect(scrolls.at(-1)).toBe(6892)
+        document.querySelector('.sb-settings')!.dispatchEvent(new Event(stop))
+        expect(observer.disconnected).toBe(true)
+      } finally {
+        restore()
+        vi.unstubAllGlobals()
+      }
+    },
+  )
+
+  it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    const observers = stubResizeObserver()
+    const timeouts = vi.spyOn(window, 'setTimeout')
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#libraries' })
+      await seeded()
+      await waitFor(() => expect(scrolls).toContain(4992))
+      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
+      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
+      expect(settle).toBeDefined()
+      act(() => (settle![0] as () => void)())
+      expect(observers[0]!.disconnected).toBe(true)
+    } finally {
+      timeouts.mockRestore()
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('marks the section that a load above moves into view current, without a scroll (#2947 review)', async () => {
+    const tops: Record<string, number> = {}
+    const { restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings' })
+      await seeded()
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      const ids = within(nav)
+        .getAllByRole('link')
+        .map((link) => link.getAttribute('href')!.slice(1))
+      const at = ids.indexOf('libraries')
+      // Each section 1000 px below the last, the first at the top.
+      ids.forEach((id, index) => (tops[id] = index * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      const libraries = within(nav).getByRole('link', { name: 'Libraries' })
+      expect(libraries).not.toHaveAttribute('aria-current')
+      // Everything above Libraries shrinks as it loads: Libraries is now at the top.
+      ids.forEach((id, index) => (tops[id] = (index - at) * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      expect(libraries).toHaveAttribute('aria-current', 'location')
+    } finally {
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('a section link on a page with unsaved changes scrolls there without a hash, so one Back is still held (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    window.history.replaceState(null, '', '/')
+    window.history.pushState(null, '', '/settings')
+    try {
+      const user = userEvent.setup()
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/" element={<p>The catalogue</p>} />
+          </Routes>
+        </BrowserRouter>,
+      )
+      await seeded()
+      await user.clear(screen.getByLabelText('Render timeout'))
+      await user.type(screen.getByLabelText('Render timeout'), '45')
+
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      await user.click(within(nav).getByRole('link', { name: 'Libraries' }))
+      expect(scrolls).toContain(4992)
+      await waitFor(() => expect(document.activeElement).toBe(document.getElementById('libraries-heading')))
+      expect(window.location.hash).toBe('')
+
+      act(() => window.history.back())
+      expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+      expect(window.location.pathname).toBe('/settings')
+    } finally {
+      restore()
+    }
+  })
+
+  it('still opens, unscrolled, at a hash with a malformed escape (#2113)', async () => {
+    const { scrolls, restore } = stubLayout({})
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#%E0%A4%A' })
+      await seeded()
+      expect(scrolls).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('leaves the page at the top without a hash', async () => {
+    const { scrolls, restore } = stubLayout({})
+    try {
+      renderPage(<SettingsPage />, { route: '/settings' })
+      await seeded()
+      expect(scrolls).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('a section link puts it in the address, focuses its heading and marks it current', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    try {
+      const { user } = renderPage(
+        <>
+          <SettingsPage />
+          <Where />
+        </>,
+        { route: '/settings' },
+      )
+      await seeded()
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      const link = within(nav).getByRole('link', { name: 'Libraries' })
+      await user.click(link)
+      expect(screen.getByTestId('where')).toHaveTextContent('#libraries')
+      await waitFor(() => expect(document.activeElement).toBe(document.getElementById('libraries-heading')))
+      expect(scrolls).toContain(4992)
+      expect(link).toHaveAttribute('aria-current', 'location')
+      expect(within(nav).getByRole('link', { name: 'Connection' })).not.toHaveAttribute('aria-current')
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('SettingsPage field checks and descriptions (#2347, #2348, #2456)', () => {
+  it('refuses a negative or fractional number before sending, and ties the error to the field', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    const renders = screen.getByLabelText('Renders at once')
+    // The help is read with the field, before any error.
+    const helpId = timeout.getAttribute('aria-describedby')
+    expect(helpId).toBe('setting-render_timeout-help')
+    expect(document.getElementById(helpId!)).toBeInTheDocument()
+    expect(timeout).not.toHaveAttribute('aria-invalid')
+
+    await user.clear(timeout)
+    await enter(user, timeout, '-5')
+    await user.clear(renders)
+    await enter(user, renders, '1.5')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+
+    expect(await screen.findByText('Enter 0 or more.')).toBeInTheDocument()
+    expect(screen.getByText('Enter a whole number.')).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    expect(timeout).toHaveAttribute('aria-invalid', 'true')
+    expect(timeout).toHaveAttribute('aria-describedby', 'setting-render_timeout-help setting-render_timeout-error')
+    expect(document.getElementById('setting-render_timeout-error')).toHaveTextContent('Enter 0 or more.')
+    // The help stays beside the error.
+    expect(document.getElementById('setting-render_timeout-help')).toBeInTheDocument()
+    put.mockRestore()
+  })
+
+  it('names one landmark Assistant: the status inside it is "Assistant status"', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const assistant = document.getElementById('assistant')!
+    expect(assistant).toHaveAccessibleName('Assistant')
+    const status = document.getElementById('ai-status-heading')!.closest('[role="region"]')!
+    expect(status).toHaveAccessibleName('Assistant status')
+  })
+})
 
 describe('SettingsPage sources (#322)', () => {
   it('badges each field with where its value comes from', async () => {
@@ -36,21 +324,28 @@ describe('SettingsPage sources (#322)', () => {
     expect(cleared).toHaveTextContent('Cleared')
     expect(cleared).toHaveTextContent('SCADBUDDY_GOOGLE_FONTS_API_KEY is ignored')
     // Only a stored or cleared value has something to reset.
-    expect(within(cleared).getByRole('button', { name: /Reset google_fonts_api_key/ })).toBeInTheDocument()
+    expect(within(cleared).getByRole('button', { name: 'Reset to deployment value: Google Fonts API key' })).toBeInTheDocument()
     expect(within(screen.getByTestId('source-public_url')).queryByRole('button')).toBeNull()
   })
 
   it('resets a saved value back to the deployment value', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
+    // This page is ~1000 elements, and it took most of the test's 5 s under load (#1485):
+    // each keystroke re-renders all of it, and a role query over all of it runs jsdom's
+    // getComputedStyle on every element (~0.5 s). So the value is pasted, and the buttons
+    // are looked for in their section and badge. Reset is the point here.
     const field = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(field)
-    await user.type(field, 'https://mine.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(field)
+    await user.paste('https://mine.test')
+    await user.click(within(field.closest('section')!).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('Set here'))
 
     const put = vi.spyOn(api, 'putSettings')
-    await user.click(screen.getByRole('button', { name: 'Reset public_url to the deployment value' }))
+    await user.click(
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
+    )
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL'))
     expect(put).toHaveBeenCalledWith({ reset: ['public_url'] })
     await waitFor(() => expect(field).toHaveValue('https://scadbuddy.internal.nullreference.io'))
@@ -60,7 +355,7 @@ describe('SettingsPage sources (#322)', () => {
   it('resets a cleared key so the deployment one applies again', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(screen.getByRole('button', { name: 'Reset google_fonts_api_key to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-google_fonts_api_key')).getByRole('button', { name: 'Reset to deployment value: Google Fonts API key' }))
     await waitFor(() =>
       expect(screen.getByTestId('source-google_fonts_api_key')).toHaveTextContent('From SCADBUDDY_GOOGLE_FONTS_API_KEY'),
     )
@@ -77,7 +372,7 @@ describe('SettingsPage sources (#322)', () => {
     const field = screen.getByLabelText('Renders at once')
     await user.clear(field)
     await user.type(field, '4')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() =>
       expect(screen.getByTestId('source-render_concurrency')).toHaveTextContent('Saved; restart ScadBuddy to apply'),
     )
@@ -94,19 +389,19 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
     expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     // Only what changed in that section: the rest of the page is not posted back.
     expect(put.mock.calls[0]?.[0]).toEqual({ render_timeout: 45 })
     await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
     expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here')
     // The other section kept its edit.
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     put.mockRestore()
   })
@@ -127,7 +422,7 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
@@ -156,12 +451,12 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
-    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
+    await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
 
     await act(async () => release())
@@ -182,10 +477,10 @@ describe('SettingsPage sections (#322)', () => {
     await user.clear(timeout)
     await user.type(timeout, '45')
 
-    await user.click(screen.getByRole('button', { name: 'Discard Fonts changes' }))
+    await user.click(within(region('Fonts')).getByRole('button', { name: 'Discard Fonts changes' }))
     expect(ttl).toHaveValue(86400)
     expect(within(region('Fonts')).queryByText('Unsaved')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Save Fonts' })).toBeDisabled()
+    expect(within(region('Fonts')).getByRole('button', { name: 'Save Fonts' })).toBeDisabled()
     expect(timeout).toHaveValue(45)
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
@@ -214,14 +509,14 @@ describe('SettingsPage sections (#322)', () => {
     await seeded()
     const limit = screen.getByLabelText('Largest media upload')
     expect(limit).toHaveValue(1)
-    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GiB')
+    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveTextContent('GiB')
 
     // Picking a unit converts the number; typing one reinterprets it in that unit.
-    await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
+    await choose(user, screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
     expect(limit).toHaveValue(1073.742)
     await user.clear(limit)
     await user.type(limit, '500')
-    await user.click(screen.getByRole('button', { name: 'Save Uploads' }))
+    await user.click(within(region('Uploads')).getByRole('button', { name: 'Save Uploads' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500_000_000 })
     put.mockRestore()
@@ -251,7 +546,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(timeout, '45')
 
     await user.click(screen.getByRole('link', { name: 'Catalogue' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(dialog).toHaveTextContent('Rendering')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.queryByText('The catalogue')).toBeNull()
@@ -293,7 +588,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     await user.click(screen.getByRole('button', { name: 'Go home' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(screen.queryByText('The catalogue')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByText('The catalogue')).toBeInTheDocument()
@@ -316,7 +611,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(window.location.pathname).toBe('/settings')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
@@ -347,7 +642,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     act(() => window.history.back())
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(window.location.pathname).toBe('/settings')
@@ -374,7 +669,7 @@ describe('SettingsPage secrets (#322)', () => {
     // Emptied again, the field is back to leaving the stored key alone.
     await user.clear(key)
     expect(key).toHaveAttribute('placeholder', 'A key is stored. Paste a new one to replace it.')
-    expect(screen.getByRole('button', { name: 'Save Connection' })).toBeDisabled()
+    expect(within(region('Connection')).getByRole('button', { name: 'Save Connection' })).toBeDisabled()
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
   })
@@ -424,7 +719,7 @@ describe('SettingsPage remembered choices (#322)', () => {
     const { user } = renderPage(<SettingsPage />)
     await screen.findByRole('table', { name: 'Remembered choices' })
     await user.click(screen.getByRole('button', { name: 'Forget all' }))
-    await user.click(screen.getByRole('button', { name: 'Yes, forget all' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Yes, forget all' }))
     expect(await screen.findByText('Nothing is remembered yet.')).toBeInTheDocument()
   })
 })
@@ -435,10 +730,11 @@ describe('SettingsPage connection and About (#322)', () => {
     await seeded()
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
     const scopes = await screen.findByRole('list', { name: 'Scopes' })
-    expect(within(scopes).getAllByRole('listitem')).toHaveLength(5)
+    expect(within(scopes).getAllByRole('listitem')).toHaveLength(6)
     expect(scopes).toHaveTextContent('Read Status: granted.')
     expect(scopes).toHaveTextContent('Manage Queue: not checked.')
     expect(scopes).toHaveTextContent('Manage Archives (optional): not checked.')
+    expect(scopes).toHaveTextContent('Manage Inventory (optional): not checked.')
   })
 
   it('says Bambuddy takes no finish photo, with a link to turn it on', async () => {
@@ -524,8 +820,8 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.type(screen.getByLabelText('Render key'), 'narrow')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, screen.getByLabelText('Render key'), 'narrow')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: 'narrow' })
     await waitFor(() => expect(screen.queryByTestId('render-key-fallback')).toBeNull())
@@ -537,11 +833,11 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    expect(store).toHaveValue('local')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeEnabled()
-    await user.selectOptions(store, 'bambuddy')
+    expect(store).toHaveTextContent('This server’s volume')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(false)
+    await choose(user, store, /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ store_backend: 'bambuddy' })
   })
@@ -550,14 +846,14 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     const own = screen.getByLabelText(/ScadBuddy.s own URL/)
     await user.clear(own)
-    await user.type(own, 'https://scadbuddy.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, own, 'https://scadbuddy.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('store_backend')
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
   })
 
   it('falls back to the local store when the Bambuddy store loses its inbox', async () => {
@@ -565,11 +861,11 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    await waitFor(() => expect(store).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
-    expect(store).toHaveValue('local')
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(store).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(true)
+    expect(store).toHaveTextContent('This server’s volume')
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: null, store_backend: 'local' })
   })
@@ -578,22 +874,22 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
     // The choice follows the saved URL, so it moves once Connection is saved.
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('local'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('This server’s volume'))
   })
 
   it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
   })
@@ -602,7 +898,7 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve(stored)
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
   })
@@ -611,12 +907,12 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
     const own = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(own)
-    await user.type(own, 'https://mine.test')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await enter(user, own, 'https://mine.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ public_url: 'https://mine.test' })
   })
@@ -625,10 +921,10 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '3')
-    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Keychains')
+    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: 3 })
   })
@@ -640,7 +936,7 @@ describe('SettingsPage blob store (#426)', () => {
     const row = screen.getByLabelText('Render key').closest('div') as HTMLElement
     await user.click(within(row).getByRole('button', { name: 'Remove key' }))
     expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Cleared when you save.')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: '' })
   })
@@ -651,23 +947,24 @@ describe('SettingsPage blob store (#426)', () => {
     // Saved: an inbox folder, no Bambuddy URL.
     const url = await screen.findByLabelText('Bambuddy URL')
     await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
-    await user.type(url, 'https://bambuddy.new.test')
-    const option = screen.getByRole('option', { name: /Bambuddy library/ })
-    expect(option).toBeDisabled()
+    await enter(user, url, 'https://bambuddy.new.test')
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
     expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
-    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(option).toBeEnabled())
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(async () =>
+      expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(false),
+    )
     expect(screen.queryByTestId('store-backend-hint')).toBeNull()
-    await user.selectOptions(screen.getByLabelText('Blob store'), 'bambuddy')
+    await choose(user, screen.getByLabelText('Blob store'), /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
+    expect(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
     serve({ ...stored, library_folder_id: null })
-    renderPage(<SettingsPage />)
+    const { user } = renderPage(<SettingsPage />)
     await seeded()
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
   })
 
   it('shows what the blob store holds, where, against its caps', async () => {
@@ -722,8 +1019,8 @@ describe('SettingsPage Administration (#668)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const administration = region('Administration')
-    await user.type(within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
-    await user.click(screen.getByRole('button', { name: 'Save Administration' }))
+    await enter(user, within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
+    await user.click(within(region('Administration')).getByRole('button', { name: 'Save Administration' }))
     const link = await within(administration).findByRole('link', { name: /Temporal UI/ })
     expect(link).toHaveAttribute('href', 'https://temporal.lan')
     // A page that is not ScadBuddy's: a new tab, which also escapes Bambuddy's sandbox.
@@ -744,5 +1041,58 @@ describe('SettingsPage Administration (#668)', () => {
     const link = await within(region('Administration')).findByRole('link', { name: /Temporal UI/ })
     expect(link).toHaveAttribute('href', 'https://temporal.env')
     expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
+  })
+})
+
+// #2173 — every section folds from its heading, remembered per browser.
+describe('SettingsPage folded sections (#2173)', () => {
+  function fold(name: string): HTMLElement {
+    return within(region(name)).getByRole('button', { name })
+  }
+
+  it('folds a section from its heading, and the next visit keeps it folded', async () => {
+    localStorage.clear()
+    const { user, unmount } = renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true')
+    await user.click(fold('Rendering'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByLabelText('Render timeout')).not.toBeVisible()
+    unmount()
+
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(fold('Connection')).toHaveAttribute('aria-expanded', 'true')
+    localStorage.clear()
+  })
+
+  it('keeps a folded section’s edits, its Unsaved badge and its Save bar', async () => {
+    localStorage.clear()
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(fold('Rendering'))
+
+    expect(within(region('Rendering')).getByText('Unsaved')).toBeVisible()
+    expect(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' })).toBeEnabled()
+    await user.click(fold('Rendering'))
+    expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
+    localStorage.clear()
+  })
+
+  it('unfolds the section a link or the nav goes to', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['libraries', 'rendering']))
+    const { user } = renderPage(<SettingsPage />, { route: '/settings#libraries' })
+    await seeded()
+    await waitFor(() => expect(fold('Libraries')).toHaveAttribute('aria-expanded', 'true'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+    await user.click(within(nav).getByRole('link', { name: 'Rendering' }))
+    await waitFor(() => expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true'))
+    localStorage.clear()
   })
 })

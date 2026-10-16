@@ -3,6 +3,7 @@ place in the catalogue."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -15,6 +16,9 @@ from unittest import mock
 import psycopg
 import pytest
 import trimesh
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
@@ -30,13 +34,14 @@ from scadbuddy.library.previews import (
     sweep_work_dirs,
 )
 from scadbuddy.render import previews as previews_module
-from scadbuddy.render.jobs import ModelSource, SnapshotUnavailableError
+from scadbuddy.render.jobs import ModelSource, SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.previews import PreviewFailedError, is_render_error, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import write_openscad_3mf
+from tests.conftest import read_png, write_openscad_3mf
+from tests.support.media import MemoryMediaStore
 
 SLUG = "widget"
 CONFIG = Config(data_dir=Path("/unused"))
@@ -128,14 +133,19 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     store.write(SLUG, "a" * 64, b"png")
 
     removed = Catalogue(
-        paths, previews=store, wrapper_prefix=WRAPPER_PREFIX
+        paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
     ).sweep_orphan_previews()
 
     assert removed == ["gone"]
     assert store.record("gone") is None
     assert store.image(SLUG) == b"png"
     # The file sweep has nothing of the previews' to look at.
-    assert Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans() == []
+    assert (
+        Catalogue(
+            paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphans()
+        == []
+    )
 
 
 def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
@@ -149,7 +159,10 @@ def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
 
     with caplog.at_level("ERROR"):
         removed = Catalogue(
-            paths, previews=PreviewStore(unreachable), wrapper_prefix=WRAPPER_PREFIX
+            paths,
+            previews=PreviewStore(unreachable),
+            media_store=MemoryMediaStore(),
+            wrapper_prefix=WRAPPER_PREFIX,
         ).sweep_orphan_previews()
 
     assert removed == []
@@ -177,7 +190,9 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
 def test_the_catalogue_ranks_its_own_image_over_the_preview(
     store: PreviewStore, paths: DataPaths
 ) -> None:
-    catalogue = Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
@@ -194,7 +209,11 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(
 def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths: DataPaths) -> None:
     store.write(SLUG, "a" * 64, b"preview")
     catalogue = Catalogue(
-        paths, previews=store, serve_previews=False, wrapper_prefix=WRAPPER_PREFIX
+        paths,
+        previews=store,
+        serve_previews=False,
+        media_store=MemoryMediaStore(),
+        wrapper_prefix=WRAPPER_PREFIX,
     )
 
     assert catalogue.thumbnail_source(SLUG).source is None
@@ -253,7 +272,7 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema(parameters=[Parameter(name="width", type="number", initial=10)])
@@ -274,12 +293,48 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
     assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == ["model.scad"]
 
 
+async def test_a_multi_plate_templates_preview_is_its_first_plate(paths: DataPaths) -> None:
+    """#453: rendered at once, a template that echoes `plates = 2` draws both plates'
+    parts together; the catalogue shows plate 1, what its first plate prints."""
+    asked: list[list[str]] = []
+    tray = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(20, 20, 4)))
+    lid = ("Color 2", "#FF000000", trimesh.creation.box(extents=(20, 20, 4)))
+    lid[2].apply_translation((40, 0, 0))
+
+    async def plated(*args: object, **kwargs: object) -> object:
+        defines = list(kwargs.get("extra_defines", ()))  # type: ignore[call-overload]
+        asked.append(defines)
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [tray] if "$plate=1" in defines else [tray, lid])
+        return mock.Mock(log_tail=[], missing_files=(), plates=2)
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", plated),
+        mock.patch.object(previews_module, "cached_schema", cached_schema),
+    ):
+        png = await render_preview(
+            SLUG, config=CONFIG, paths=paths, history=None, assets=AssetStore(paths.assets)
+        )
+
+    assert asked == [[], ["-D", "$plate=1"]]
+    image = read_png(png)
+    opaque = image[image[..., 3] > 0][:, :3].astype(int)
+    # Shaded blue, never red: the lid on plate 2 is not drawn.
+    assert (opaque[:, 2] > opaque[:, 0]).any()
+    assert not ((opaque[:, 0] > 150) & (opaque[:, 1] < 80) & (opaque[:, 2] < 80)).any()
+    assert not any(paths.preview_work.iterdir())
+
+
 async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) -> None:
     async def nothing(*args: object, **kwargs: object) -> object:
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()
@@ -320,7 +375,11 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     a render's write, whether or not previews are served, so the previous model's
     preview never survives it."""
     catalogue = Catalogue(
-        paths, previews=store, serve_previews=serving, wrapper_prefix=WRAPPER_PREFIX
+        paths,
+        previews=store,
+        serve_previews=serving,
+        media_store=MemoryMediaStore(),
+        wrapper_prefix=WRAPPER_PREFIX,
     )
     writer, _, release = _held_write(store)
 
@@ -344,7 +403,9 @@ def test_the_orphan_sweep_leaves_a_live_model_being_written(
     writer, _, release = _held_write(store)
 
     sweeping = threading.Thread(
-        target=Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphan_previews
+        target=Catalogue(
+            paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphan_previews
     )
     sweeping.start()
     sweeping.join(0.2)
@@ -420,7 +481,7 @@ async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()
@@ -492,3 +553,175 @@ def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -
 def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
     """Infrastructure: the scheduler tries again rather than blaming the source."""
     assert not is_render_error(error)
+
+
+async def test_a_preview_waiting_on_its_snapshot_is_tried_again_by_itself() -> None:
+    """#1419 review: `pin` now stops waiting after `PIN_TIMEOUT`. The scheduler must
+    come back for the slug once the snapshot should be stored; nothing else would
+    before the model's next edit or the next boot."""
+    calls = 0
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SnapshotPendingError("still uploading", retry_after=0)
+        return b"png"
+
+    loop = asyncio.get_running_loop()
+    written = asyncio.Event()
+    store = mock.MagicMock()
+    # `write` runs in a worker thread.
+    store.write.side_effect = lambda *args, **kwargs: loop.call_soon_threadsafe(written.set)
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), store, runner, timeout=1.0, debounce=0, interval=0
+    )
+    with (
+        mock.patch.object(scheduler, "plan", return_value="key"),
+        # The backoff's floor (#1773), so the retry comes at once here.
+        mock.patch.object(previews_module, "PIN_TIMEOUT", 0),
+    ):
+        scheduler.start()
+        scheduler.request(SLUG)
+        try:
+            await asyncio.wait_for(written.wait(), 5)
+        finally:
+            await scheduler.aclose()
+    assert calls == 2
+    store.record_failure.assert_not_called()
+
+
+async def test_an_edit_during_a_pending_pin_is_not_pushed_back_by_the_backoff() -> None:
+    """#1433: an edit's request that lands while the pin is in flight is due after the
+    debounce. The pending snapshot's backoff must not move it back to its own delay."""
+    calls: list[float] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        calls.append(loop.time())
+        if len(calls) == 1:
+            in_flight.set()
+            await release.wait()
+            raise SnapshotPendingError("still uploading", retry_after=30)
+        return b"png"
+
+    store = mock.MagicMock()
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), store, runner, timeout=1.0, debounce=0.05, interval=0
+    )
+    with mock.patch.object(scheduler, "plan", return_value="key"):
+        scheduler.start()
+        try:
+            scheduler.request(SLUG)
+            await asyncio.wait_for(in_flight.wait(), 5)
+            scheduler.request(SLUG)  # the edit
+            await asyncio.sleep(0.01)  # `request` schedules through the loop
+            release.set()
+            async with asyncio.timeout(5):
+                while len(calls) < 2:
+                    await asyncio.sleep(0.01)
+        finally:
+            await scheduler.aclose()
+    # Well before the backoff's 30 s: the debounce, plus however long the pin held it.
+    assert calls[1] - calls[0] < 5
+
+
+async def test_a_preview_waiting_on_its_snapshot_backs_off() -> None:
+    """#1435: each try holds the scheduler's one worker for up to `PIN_TIMEOUT`, so a
+    stalled Bambuddy must not have it retried at a fixed rate, starving every other
+    model's preview. The wait doubles, up to a cap, and starts over once the snapshot
+    is stored."""
+    pending = True
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        if pending:
+            raise SnapshotPendingError("still uploading", retry_after=100)
+        return b"png"
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    with (
+        mock.patch.object(scheduler, "plan", return_value="key"),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
+    ):
+        for _ in range(5):
+            assert await scheduler.refresh(SLUG) is True
+        pending = False
+        assert await scheduler.refresh(SLUG) is True
+        pending = True
+        assert await scheduler.refresh(SLUG) is True
+    cap = previews_module.MAX_SNAPSHOT_RETRY_DELAY
+    # Doubling from `PIN_TIMEOUT` (30 s), never below the store's own Retry-After.
+    assert delays == [100, 100, 120, 240, 480, 100]
+    assert max(delays) <= cap
+
+
+async def test_a_preview_backoff_does_not_compound_the_stores_own() -> None:
+    """#1773 2: the store's Retry-After already grows with the time its store has
+    run. Doubling it again reached the cap after a try or two; the wait doubles
+    from `PIN_TIMEOUT` instead, and the store's hint is only a floor."""
+    hints = iter([30, 60, 120, 180, 180])
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        raise SnapshotPendingError("still uploading", retry_after=next(hints))
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    with (
+        mock.patch.object(scheduler, "plan", return_value="key"),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
+    ):
+        for _ in range(5):
+            assert await scheduler.refresh(SLUG) is True
+    assert delays == [30, 60, 120, 240, 480]
+
+
+async def test_a_new_source_does_not_inherit_an_older_ones_backoff() -> None:
+    """#1773 3: the tries are counted per source, so an edit that brings a slug back
+    starts from the store's own Retry-After, not from where its last revision was."""
+
+    async def runner(slug: str, timeout: float) -> bytes:
+        raise SnapshotPendingError("still uploading", retry_after=30)
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    delays: list[float] = []
+    keys = iter(["old", "old", "old", "new"])
+    with (
+        mock.patch.object(scheduler, "plan", side_effect=lambda slug: next(keys)),
+        mock.patch.object(scheduler, "_schedule", lambda slug, delay, **_: delays.append(delay)),
+    ):
+        for _ in range(4):
+            assert await scheduler.refresh(SLUG) is True
+    assert delays == [30, 60, 120, 30]
+
+
+async def test_a_preview_render_starts_a_root_span_its_workflow_joins(
+    spans: InMemorySpanExporter,
+) -> None:
+    async def runner(slug: str, timeout: float) -> bytes:
+        # Stands in for the traced Temporal client's StartWorkflow, a CLIENT span the
+        # default sampler drops unless something sampled is above it.
+        with trace.get_tracer("t").start_as_current_span(
+            "StartWorkflow:RenderPreview", kind=SpanKind.CLIENT
+        ):
+            return b"png"
+
+    scheduler = previews_module.PreviewScheduler(
+        mock.MagicMock(), mock.MagicMock(), runner, timeout=1.0
+    )
+    with mock.patch.object(scheduler, "plan", return_value="key"):
+        assert await scheduler._refresh(SLUG, raise_unrun=False) is True
+    finished = {s.name: s for s in spans.get_finished_spans()}
+    root = finished["render.preview"]
+    assert root.parent is None
+    assert (root.attributes or {})["scadbuddy.slug"] == SLUG
+    start = finished["StartWorkflow:RenderPreview"]
+    assert start.context.trace_id == root.context.trace_id

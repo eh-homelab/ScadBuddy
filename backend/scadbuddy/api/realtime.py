@@ -62,18 +62,23 @@ from urllib.parse import urlsplit
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
+from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
+    ActivityEvent,
+    AgentOperationEvent,
     AnalyzerDecisionEvent,
     BusResync,
     Event,
+    FlowRunEvent,
     FontInstalled,
     JobEvent,
     JobProgress,
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
+    OperationEvent,
     OutputEvent,
+    PresetsChanged,
     PrintEvent,
     PrintRunEvent,
     SessionBusEvent,
@@ -105,7 +110,20 @@ MAX_FRAME_CHARS = 16_384
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings", "analyzers"})
+COLLECTION_TOPICS = frozenset(
+    {
+        "models",
+        "outputs",
+        "libraries",
+        "fonts",
+        "settings",
+        "analyzers",
+        "workflow-runs",
+        "activity",
+    }
+)
+#: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
+FLOW_RUN_ID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 
 def _strip_anchors(pattern: str) -> str:
@@ -116,11 +134,14 @@ _TOPIC = re.compile(
     "^(?:"
     + "|".join(
         [
-            f"job:{_strip_anchors(JOB_ID_PATTERN)}",
+            f"job:{_strip_anchors(HEX_ID_PATTERN)}",
             f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
             # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
             r"print:library:[1-9][0-9]{0,17}",
+            f"workflow-run:{FLOW_RUN_ID_PATTERN}",
+            # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
+            r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),
         ]
     )
@@ -141,12 +162,14 @@ def topics_of(event: Event) -> list[str]:
             return [f"job:{event.job_id}"]
         case ModelEvent():
             return ["models", f"model:{event.slug}"]
-        case SourceChanged() | VersionCommitted() | UpstreamAvailable():
+        case SourceChanged() | VersionCommitted() | UpstreamAvailable() | PresetsChanged():
             return [f"model:{event.slug}"]
         case OutputEvent():
             return ["outputs", f"model:{event.slug}"]
         case PrintEvent() | PrintRunEvent():
             return [f"print:{event.output_id}"]
+        case FlowRunEvent():
+            return ["workflow-runs", f"workflow-run:{event.run_id}"]
         case LibraryChanged():
             return ["libraries", f"model:{event.slug}"]
         case LibraryRemoved():
@@ -157,6 +180,13 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case ActivityEvent():
+            return ["activity", f"activity:{event.activity_id}"]
+        case AgentOperationEvent():
+            return []
+        case OperationEvent():
+            # Followed by `GET /operations/{id}` (#1053); the event log keeps it.
+            return []
         case SessionBusEvent():
             # The agent's own (#300): the UI follows sessions over the agent's
             # chat socket, which knows who may see which.
@@ -215,14 +245,22 @@ class RateLimit:
         self._tokens = float(burst)
         self._at = clock()
 
-    def take(self) -> bool:
+    def _refill(self) -> None:
         now = self._clock()
         self._tokens = min(self.burst, self._tokens + (now - self._at) * self.per_second)
         self._at = now
+
+    def take(self) -> bool:
+        self._refill()
         if self._tokens < 1:
             return False
         self._tokens -= 1
         return True
+
+    def retry_after(self) -> float:
+        """Seconds until one more frame is allowed; 0 when one is now (a ``Retry-After``)."""
+        self._refill()
+        return max(0.0, (1 - self._tokens) / self.per_second)
 
 
 Send = Callable[[dict[str, Any]], Awaitable[None]]
@@ -310,19 +348,30 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
             )
 
 
-@router.websocket("/ws")
-async def realtime(websocket: WebSocket, state: StateDep) -> None:
+async def refuse_foreign_origin(websocket: WebSocket, state: AppState, what: str) -> bool:
+    """Close ``websocket`` with 1008 before accepting it, and say True, when its
+    ``Origin`` is not `origin_allowed`. Browsers do not apply the same-origin policy to
+    sockets, so this is all that keeps another site's page off every socket (the
+    realtime one, #266; the language servers', #1317). Call it before taking a permit."""
     origin = websocket.headers.get("origin")
     public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
-    if not origin_allowed(origin, public_url, state.settings.allowed_origin_list):
-        logger.warning(
-            "refused a realtime socket from origin %r: not the public URL's origin (%r) "
-            "and not in SCADBUDDY_ALLOWED_ORIGINS (%r)",
-            origin,
-            public_url,
-            state.settings.allowed_origins,
-        )
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    if origin_allowed(origin, public_url, state.settings.allowed_origin_list):
+        return False
+    logger.warning(
+        "refused a %s socket from origin %r: not the public URL's origin (%r) "
+        "and not in SCADBUDDY_ALLOWED_ORIGINS (%r)",
+        what,
+        origin,
+        public_url,
+        state.settings.allowed_origins,
+    )
+    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+    return True
+
+
+@router.websocket("/ws")
+async def realtime(websocket: WebSocket, state: StateDep) -> None:
+    if await refuse_foreign_origin(websocket, state, "realtime"):
         return
     # No await between the check and the acquire, so nothing can take the permit in
     # between (the same pattern as `api/lsp.py`). Refused sockets reconnect with

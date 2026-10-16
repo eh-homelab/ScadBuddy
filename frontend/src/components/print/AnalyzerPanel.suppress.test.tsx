@@ -13,6 +13,7 @@ import type {
 import {
   analysisReport,
   analysisScopes,
+  fixDigest,
   openEdgesDiagnostic,
   overhangDiagnostic,
 } from '../../mocks/analyzers'
@@ -52,7 +53,7 @@ function watchDecisions() {
 }
 
 function renderPanel() {
-  return renderPage(<AnalyzerPanel outputId={output.id} request={request} />)
+  return renderPage(<AnalyzerPanel target={{ output_id: output.id }} request={request} />)
 }
 
 /** A suppression of SB1002:part-2 already stored, as another dialog or the agent leaves it. */
@@ -210,6 +211,9 @@ describe('AnalyzerPanel · suppress at a scope', () => {
   })
 
   it('offers a finding with an accepted fix only scopes at or under the acceptance', async () => {
+    // The acceptance holds only while its diff is the fix's (`decide` in mocks/analyzers.ts).
+    const fix = overhangDiagnostic.fixes![0]!
+    const withFix: AnalyzerDiagnostic = { ...openEdgesDiagnostic, fixes: [fix] }
     const accept: AnalyzerDecision = {
       id: 'c'.repeat(32),
       diagnostic_id: 'SB1002',
@@ -218,12 +222,13 @@ describe('AnalyzerPanel · suppress at a scope', () => {
       scope: { kind: 'template', key: output.slug },
       reason: null,
       enforced: false,
-      fix_id: 'none',
+      fix_id: fix.id,
+      diff_digest: fixDigest(fix),
       created_at: '2026-09-28T00:00:00Z',
     }
     server.use(
       http.post('/api/v1/analyzers/run', () =>
-        HttpResponse.json(analysisReport(output, request, [openEdgesDiagnostic], [accept])),
+        HttpResponse.json(analysisReport(output, request, [withFix], [accept])),
       ),
     )
     const { posted } = watchDecisions()

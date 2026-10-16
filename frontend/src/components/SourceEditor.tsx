@@ -3,10 +3,11 @@ import type * as Monaco from 'monaco-editor/editor/editor.api'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type { Diagnostic } from '../api/types'
 import { connectLanguageServer } from '../lib/languageClient'
+import { LEAVE_HINT, letTabLeave } from '../lib/editorExit'
 import { definitionFile, definitionLabel, directoryOf, type DefinitionFile } from '../lib/lsp'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
-import { SCADBUDDY_DARK, SCADBUDDY_LIGHT } from '../lib/openscadLanguage'
+import { editorTheme } from '../lib/openscadLanguage'
 import { useLatest } from '../lib/useLatest'
 import { Button } from './ui/Button'
 
@@ -47,6 +48,8 @@ interface Props {
   readOnly?: boolean
   /** Filled in once the editor mounts; see `SourceEditHandle`. */
   editRef?: RefObject<SourceEditHandle | null>
+  /** #997 — what Ctrl/Cmd+S does in the editor: the page's own Save. */
+  onSave?: () => void
 }
 
 /** A definition's file the editor is showing in place of the model's source. */
@@ -108,13 +111,14 @@ export function SourceEditor({
   label,
   readOnly = false,
   editRef,
+  onSave,
 }: Props) {
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const [textModel, setTextModel] = useState<Monaco.editor.ITextModel | null>(null)
   const [viewing, setViewing] = useState<Viewing | null>(null)
   // Where to put the cursor once the editor shows the model a jump switched to.
   const landing = useRef<Target | null>(null)
-  const latest = useLatest({ uri, onChange })
+  const latest = useLatest({ uri, onChange, onSave })
   // A new model ends any definition view, rather than hiding it until that model comes
   // back: by then the file's model has gone with the old session, and the view would
   // reopen on an empty one. Reset while rendering, React's way to follow a prop.
@@ -206,11 +210,6 @@ export function SourceEditor({
     setViewing(null)
   }
 
-  const dark =
-    typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-color-scheme: dark)').matches
-      : true
-
   const fileName = uri.slice(uri.lastIndexOf('/') + 1)
 
   return (
@@ -232,7 +231,7 @@ export function SourceEditor({
         <Editor
           path={shown?.uri ?? uri}
           language={OPENSCAD_LANGUAGE_ID}
-          theme={dark ? SCADBUDDY_DARK : SCADBUDDY_LIGHT}
+          theme={editorTheme()}
           // Held back while a definition is shown: the wrapper writes `value` into
           // whichever model the editor has, and that is not the model's source then.
           value={shown ? undefined : value}
@@ -262,7 +261,8 @@ export function SourceEditor({
                 element: () => instance.getDomNode(),
               }
             }
-            instance.updateOptions({ ariaLabel: label })
+            letTabLeave(instance, label)
+            instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave?.())
             applyMarkers()
             setTextModel(instance.getModel())
             // Only the model's own source: a definition shown read-only has no session.
@@ -277,6 +277,10 @@ export function SourceEditor({
           loading={<span className="text-[13px] text-muted">Loading the editor</span>}
         />
       </div>
+      {/* Read as part of the editor's name (#1672), so hidden here from screen readers. */}
+      <p aria-hidden="true" className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+        {LEAVE_HINT}
+      </p>
     </div>
   )
 }

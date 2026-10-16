@@ -56,6 +56,14 @@ BODY_LIMITS: Mapping[str, int] = {
 #: its own limit, `media_upload_max_bytes`, in place of the multipart cap; the route
 #: streams the body to the data volume rather than spooling it.
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/v1/models/[^/]+/media$")
+#: A print's photo or video upload (#309): as large as a template's media.
+ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/prints/\d+/attachments$")
+#: A mesh model's upload (#2146): a 3MF up to the library download cap, streamed like
+#: a media upload, so it has its own limit in place of the multipart cap.
+MESH_UPLOAD_PATH = re.compile(r"^/api/v1/models/from-mesh/upload$")
+#: An upload into a Bambuddy library folder (#2686): a file up to the library download
+#: cap, streamed like a mesh upload.
+LIBRARY_UPLOAD_PATH = re.compile(r"^/api/v1/print/library/files$")
 
 
 def megabytes(size: int) -> str:
@@ -141,18 +149,25 @@ class BodySizeGate:
 
         received = 0
         started = False
+        exceeded = False
 
         async def counted_receive() -> Message:
-            nonlocal received
+            nonlocal received, exceeded
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
+                    exceeded = True
                     raise _BodyTooLargeError
             return message
 
         async def tracked_send(message: Message) -> None:
             nonlocal started
+            if exceeded and not started:
+                # Whatever the app made of the cut-off read: FastAPI turns any error
+                # raised while it reads a pydantic body into a 400 "error parsing the
+                # body" (#1315), so the exception above may never come back out.
+                return
             if message["type"] == "http.response.start":
                 started = True
             await send(message)
@@ -162,6 +177,7 @@ class BodySizeGate:
         except _BodyTooLargeError:
             if started:  # pragma: no cover - the body is read before any response
                 raise
+        if exceeded and not started:
             await self._refuse(scope, receive, send, too_large)
 
     @staticmethod

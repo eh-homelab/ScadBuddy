@@ -103,7 +103,7 @@ export class Subscriptions {
 
   #push(key: string): void {
     if (this.#closed) return
-    const now = Date.now()
+    const now = performance.now()
     const w = this.#windows.get(key)
     if (!w || (now - w.last >= this.#minMs && w.timer === undefined)) {
       this.#windows.set(key, { last: now })
@@ -113,7 +113,7 @@ export class Subscriptions {
     if (w.timer !== undefined) return
     w.timer = setTimeout(() => {
       w.timer = undefined
-      w.last = Date.now()
+      w.last = performance.now()
       // Unsubscribed meanwhile: nothing to say.
       if (key === LIST || this.#uris.has(key)) this.#send(key)
     }, Math.max(0, this.#minMs - (now - w.last)))

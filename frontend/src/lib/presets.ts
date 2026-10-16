@@ -1,6 +1,6 @@
 import type { CustomizerSchema, ParamPreset, ParamValue } from '../api/types'
 import { joinInputs, splitInputs, type InputsExtra, type JsonObject } from './inputs'
-import { allParams, defaultValues, diffFromDefaults, type ParamValues } from './params'
+import { allParams, defaultValues, diffFromDefaults, textLength, type ParamValues } from './params'
 
 export interface AppliedPreset {
   /** The whole set of values on screen once the preset is applied. */
@@ -51,18 +51,13 @@ export function foldTag(tag: string): string {
   return tag.toUpperCase().toLowerCase()
 }
 
-/** A tag's length as the server counts it: in code points, not UTF-16 units. */
-export function tagLength(tag: string): number {
-  return [...tag].length
-}
-
 /**
  * Why this description would be refused, in words, or null. Its length is counted as
- * the server counts it, in code points -- the same count as a tag's, where a
- * `maxLength` on the field would count UTF-16 units and cut an emoji short.
+ * the server counts it, in code points (`textLength`) -- the same count as a tag's,
+ * where a `maxLength` on the field would count UTF-16 units and cut an emoji short.
  */
 export function presetDescriptionProblem(description: string): string | null {
-  return tagLength(description) > MAX_PRESET_DESCRIPTION
+  return textLength(description) > MAX_PRESET_DESCRIPTION
     ? `The description is longer than ${MAX_PRESET_DESCRIPTION} characters.`
     : null
 }
@@ -91,7 +86,7 @@ export function parsePresetTags(text: string): string[] {
  */
 export function presetTagsProblem(tags: readonly string[]): string | null {
   if (tags.length > MAX_PRESET_TAGS) return `At most ${MAX_PRESET_TAGS} tags.`
-  const long = tags.find((tag) => tagLength(tag) > MAX_PRESET_TAG)
+  const long = tags.find((tag) => textLength(tag) > MAX_PRESET_TAG)
   return long ? `“${long}” is longer than ${MAX_PRESET_TAG} characters.` : null
 }
 

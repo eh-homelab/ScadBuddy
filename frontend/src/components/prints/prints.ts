@@ -6,6 +6,11 @@ export function printPath(archiveId: number): string {
   return `/prints/${archiveId}`
 }
 
+/** #1755 — the history of one Bambuddy library file's prints. */
+export function libraryPrintsPath(fileId: number): string {
+  return `/prints?file=${fileId}`
+}
+
 /** A printer Bambuddy gave no name for. */
 export function printerLabel(id: number): string {
   return `Printer ${id}`
@@ -16,10 +21,13 @@ export function printLabel(print: Pick<PrintSummary, 'archive_id' | 'output_name
   return print.output_name ?? `Print #${print.archive_id}`
 }
 
-/** The one slide a history item can show before the print's detail has loaded. */
+/**
+ * The one slide a history item can show before the print's detail has loaded: the cover
+ * whole, not the card's small copy of it (#2355).
+ */
 export function coverSlides(print: PrintSummary): Slide[] {
   if (!print.cover) return []
-  return [{ key: 'cover', kind: 'image', src: print.cover.url, alt: printLabel(print) }]
+  return [{ key: 'cover', kind: 'image', src: print.cover.full_url, alt: printLabel(print) }]
 }
 
 /**
@@ -48,7 +56,7 @@ export function printSlides(print: PrintDetail): Slide[] {
       key: 'timelapse',
       kind: 'video',
       src: media.timelapse.url,
-      poster: media.timelapse.poster_frames[0]?.data_url,
+      poster: media.timelapse.poster_url,
       alt: `${label}, timelapse`,
       caption: 'Timelapse',
       contentType: 'video/mp4',
@@ -68,8 +76,9 @@ export function printSlides(print: PrintDetail): Slide[] {
       key: `plate:${plate.index}`,
       kind: 'image',
       src: plate.url,
-      alt: `${label}, plate ${plate.index}`,
-      caption: `Plate ${plate.index}`,
+      alt: `${label}, ${plate.name ?? `plate ${plate.index}`}`,
+      // #2055 — by what the plate holds, as the print dialog names it.
+      caption: plate.name ?? `Plate ${plate.index}`,
     })
   }
   return slides.length > 0 ? slides : coverSlides(print)

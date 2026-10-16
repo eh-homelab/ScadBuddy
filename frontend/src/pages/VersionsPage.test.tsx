@@ -1,15 +1,19 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import type { ReactElement } from 'react'
+import { describe, expect, it, vi } from 'vitest'
+import { AssistantOpenerContext } from '../agent/chat/opener'
 import { api } from '../api/client'
-import { BUILTIN_SLUG, versionIds } from '../mocks/fixtures'
+import type { ModelVersion } from '../api/types'
+import { setSessionResources } from '../mocks/features/assistantSessions'
+import { BUILTIN_SLUG, versionIds, versions } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { VersionsPage } from './VersionsPage'
 
-function render(slug = 'name-keychain') {
-  return renderPage(<VersionsPage />, {
+function render(slug = 'name-keychain', wrap: (page: ReactElement) => ReactElement = (page) => page) {
+  return renderPage(wrap(<VersionsPage />), {
     route: `/m/${encodeURIComponent(slug)}/versions`,
     path: '/m/:slug/versions',
   })
@@ -35,14 +39,14 @@ describe('VersionsPage', () => {
 
     const alert = screen.getByRole('alert')
     expect(alert).toHaveTextContent('Could not load this model')
-    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Restore this version/ })).not.toBeInTheDocument()
 
     fail = false
     await user.click(within(alert).getByRole('button', { name: 'Try again' }))
 
     const restored = await rows()
     expect(
-      await within(restored[1] as HTMLElement).findByRole('button', { name: 'Restore this version' }),
+      await within(restored[1] as HTMLElement).findByRole('button', { name: /^Restore this version/ }),
     ).toBeEnabled()
     expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
   })
@@ -100,8 +104,9 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -120,8 +125,9 @@ describe('VersionsPage', () => {
     await screen.findByTestId('diff')
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     await waitFor(async () => {
       const updated = await rows()
@@ -138,7 +144,7 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     expect(
-      within(listed[0] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[0] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     ).toBeDisabled()
   })
 
@@ -155,8 +161,9 @@ describe('VersionsPage', () => {
     const listed = await rows()
 
     await user.click(
-      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+      within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }),
     )
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('the worktree is locked')
     expect(await rows()).toHaveLength(3)
@@ -182,16 +189,16 @@ describe('VersionsPage', () => {
 
     expect(listed).toHaveLength(2)
     expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
-    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Restore this version/ })).not.toBeInTheDocument()
     expect(
-      within(listed[1] as HTMLElement).getByRole('button', { name: 'Customize this version' }),
+      within(listed[1] as HTMLElement).getByRole('button', { name: /^Customize this version/ }),
     ).toBeEnabled()
   })
 
   it('offers a restore on every revision of a model of the user\'s own', async () => {
     render()
     await rows()
-    expect(screen.getAllByRole('button', { name: 'Restore this version' })).toHaveLength(3)
+    expect(screen.getAllByRole('button', { name: /^Restore this version/ })).toHaveLength(3)
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
   })
 })
@@ -204,5 +211,168 @@ describe('VersionsPage, live (#269)', () => {
     emitRealtime('version.committed', ['model:name-keychain'], { slug: 'name-keychain' })
     await waitFor(async () => expect((await rows()).length).toBe(before + 1))
     expect(screen.getByText('Committed by another tab')).toBeInTheDocument()
+  })
+})
+
+describe('VersionsPage, item context (#975)', () => {
+  it("names each revision's actions after it", async () => {
+    render()
+    const listed = await rows()
+    const short = versionIds.added.slice(0, 7)
+    const oldest = listed[2] as HTMLElement
+    expect(within(oldest).getByRole('button', { name: `Customize this version, ${short}` })).toBeInTheDocument()
+    expect(within(oldest).getByRole('button', { name: `Restore this version, ${short}` })).toBeInTheDocument()
+  })
+
+  it('asks before restoring, and Cancel changes nothing', async () => {
+    const { user } = render()
+    const listed = await rows()
+    await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
+
+    const dialog = screen.getByRole('dialog', { name: `Restore version ${versionIds.added.slice(0, 7)}?` })
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await rows()).toHaveLength(3)
+  })
+
+  it('says what the restore did, and puts focus on the revision it made', async () => {
+    const { user } = render()
+    const listed = await rows()
+    await user.click(within(listed[2] as HTMLElement).getByRole('button', { name: /^Restore this version/ }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' }))
+
+    await waitFor(async () => expect(await rows()).toHaveLength(4))
+    const head = (await rows())[0] as HTMLElement
+    await waitFor(() => expect(within(head).getByRole('button', { pressed: true })).toHaveFocus())
+    expect(screen.getByTestId('versions-status')).toHaveTextContent(
+      `Restored ${versionIds.added.slice(0, 7)} as a new version`,
+    )
+  })
+
+  describe('an agent-made revision (#1288)', () => {
+    /** The newest revision of name-keychain, made by the agent with `agent`. */
+    function agentMade(agent: ModelVersion['agent']) {
+      server.use(
+        http.get('/api/v1/models/name-keychain/versions', () =>
+          HttpResponse.json(
+            (versions['name-keychain'] ?? []).map((v, i) => (i === 0 ? { ...v, author: 'ScadBuddy agent', agent } : v)),
+          ),
+        ),
+      )
+    }
+    const withOpener = (openSession: (id: string) => void) => (page: ReactElement) => (
+      <AssistantOpenerContext.Provider value={{ openSession }}>{page}</AssistantOpenerContext.Provider>
+    )
+
+    it('says who it ran for, and opens the chat that made it', async () => {
+      setSessionResources('sess-made', [], { title: 'Rename the keychain' })
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      const openSession = vi.fn()
+      const { user } = render('name-keychain', withOpener(openSession))
+      const [newest, older] = await rows()
+
+      const badge = within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you: open the chat that made/ })
+      expect(badge).toHaveTextContent('Agent · you · open chat')
+      expect(within(older as HTMLElement).queryByText(/^Agent ·/)).not.toBeInTheDocument()
+
+      await user.click(badge)
+      await waitFor(() => expect(openSession).toHaveBeenCalledWith('sess-made'))
+    })
+
+    it('says so, and opens nothing, when the chat is gone or not the user\'s', async () => {
+      agentMade({ principal: 'token:ci-bot', session: 'sess-gone' })
+      const openSession = vi.fn()
+      const { user } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for MCP token ci-bot/ }))
+      expect(await within(newest as HTMLElement).findByRole('status')).toHaveTextContent(
+        'That chat is gone, or is not one you can open.',
+      )
+      expect(openSession).not.toHaveBeenCalled()
+    })
+
+    it('says it could not open the chat when the agent fails, and opens nothing', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      server.use(
+        http.get('/api/v1/ai/sessions/:id', () =>
+          HttpResponse.json(
+            { title: 'Service Unavailable', status: 503, detail: 'no database' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const openSession = vi.fn()
+      const { user } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      expect(await within(newest as HTMLElement).findByRole('status')).toHaveTextContent('Could not open that chat.')
+      expect(openSession).not.toHaveBeenCalled()
+    })
+
+    /** Holds `GET /api/v1/ai/sessions/:id` until the returned `answer` is called (#2212). */
+    function heldSessionRead(): { answer: (response: Response) => void; asked: () => boolean } {
+      let release: ((response: Response) => void) | undefined
+      server.use(
+        http.get('/api/v1/ai/sessions/:id', () => new Promise<Response>((resolve) => (release = resolve))),
+      )
+      return { answer: (response) => release?.(response), asked: () => release !== undefined }
+    }
+
+    it('still opens the chat when its row is gone before the session read answers (#2212)', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      const held = heldSessionRead()
+      const openSession = vi.fn()
+      const error = vi.spyOn(console, 'error')
+      const { user, unmount } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      await waitFor(() => expect(held.asked()).toBe(true))
+      unmount()
+      held.answer(HttpResponse.json({ id: 'sess-made', title: 'Rename the keychain' }))
+
+      await waitFor(() => expect(openSession).toHaveBeenCalledWith('sess-made'))
+      expect(error).not.toHaveBeenCalled()
+      error.mockRestore()
+    })
+
+    it('opens nothing, and says nothing, when a gone row\u2019s session read is refused (#2212)', async () => {
+      agentMade({ principal: 'browser', session: 'sess-made' })
+      const held = heldSessionRead()
+      const read = vi.spyOn(api, 'getAiSession')
+      const openSession = vi.fn()
+      const error = vi.spyOn(console, 'error')
+      const { user, unmount } = render('name-keychain', withOpener(openSession))
+      const [newest] = await rows()
+
+      await user.click(within(newest as HTMLElement).getByRole('button', { name: /^Agent, for you/ }))
+      await waitFor(() => expect(held.asked()).toBe(true))
+      unmount()
+      held.answer(
+        HttpResponse.json(
+          { title: 'Not Found', status: 404, detail: 'no such session' },
+          { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      )
+
+      // The read the row started, settled; its handler runs in the microtasks after it.
+      await read.mock.results[0]!.value.catch(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(openSession).not.toHaveBeenCalled()
+      read.mockRestore()
+      expect(error).not.toHaveBeenCalled()
+      error.mockRestore()
+    })
+
+    it('is only text without the assistant, or without a session to open', async () => {
+      agentMade({ principal: 'anonymous:3f2a', session: null })
+      render('name-keychain', withOpener(vi.fn()))
+      const [newest] = await rows()
+
+      expect(within(newest as HTMLElement).getByText('Agent · an anonymous MCP client')).toBeVisible()
+      expect(within(newest as HTMLElement).queryByRole('button', { name: /open the chat/ })).not.toBeInTheDocument()
+    })
   })
 })

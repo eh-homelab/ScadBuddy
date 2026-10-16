@@ -3,14 +3,19 @@ as the API, run as its own Deployment; it serves `/healthz` and `/metrics` on 90
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import signal
+import time
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -20,7 +25,24 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from temporalio.client import Client
 from temporalio.service import RPCError
+from temporalio.worker import Worker
 
+from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.bambuddy.archive_cache import ArchiveCache
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import FollowActivities, Follower
+from scadbuddy.bambuddy.operations import bambuddy_kinds_over
+from scadbuddy.bambuddy.output_reader import RemoteOutputs
+from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.progress import (
+    PrintProgress,
+    ProgressObserver,
+    library_progress,
+    progress_for,
+)
+from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import Metrics
@@ -28,22 +50,58 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flows.keys import approval_key, payload_keys
+from scadbuddy.flows.operations import flow_kinds
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    InstallPermits,
+    LibraryStore,
+)
 from scadbuddy.library.library_seed import seed_libraries
-from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.settings_store import SettingsStore, load_render_store_settings
+from scadbuddy.operations.store import OperationStore
+from scadbuddy.rack.usage import RackUsageStore, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.client import connect, drained, is_current, make_current, render_worker
+from scadbuddy.workflows.client import (
+    DEPLOYMENT_NAME,
+    PRINT_DEPLOYMENT_NAME,
+    bambuddy_worker,
+    connect,
+    current_routing,
+    drained,
+    follow_worker,
+    is_current,
+    make_current,
+    render_worker,
+)
+from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
+from scadbuddy.workflows.flows_client import connect_flows
+from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
+from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.projects_worker import projects_worker
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -58,13 +116,23 @@ DRAIN_POLL = 5.0
 DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
-#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY` until it takes or the
+#: worker stops: a worker that gave up left a deployment whose current build had no
+#: poller once the old pods went, and every render hung (#2341). After
+#: `MAKE_CURRENT_ERROR_AFTER` seconds each failure logs an error instead of a warning.
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
-MAKE_CURRENT_DEADLINE = 60.0
+MAKE_CURRENT_ERROR_AFTER = 60.0
+#: How often a make-current that is still refused past `MAKE_CURRENT_ERROR_AFTER` tries
+#: again, and so logs its error: once a minute, not every `MAKE_CURRENT_EVERY` (#2538).
+MAKE_CURRENT_ERROR_EVERY = 60.0
 
 
-def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+def build_worker_deps(
+    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+) -> tuple[WorkerDeps, StoreBundle]:
+    """``stopping`` ends the wait for the API's schema and grants
+    (`WorkerStoppedError`)."""
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -79,9 +147,6 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    checkouts = CheckoutGate()
-    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    fetcher = CheckoutFetcher(libraries, asyncio.Semaphore(INSTALL_CONCURRENCY), checkouts)
     # The projection's job events go out on the API's bus: `publish_in` writes and
     # NOTIFYs in the row's transaction, so the listener is never started here.
     events = PgNotifyEventBus(
@@ -90,7 +155,18 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, events=events
     )
-    projection.open()
+    # Never migrated here (#601): the worker's own role may not, and in a rollout the
+    # API, which does, may not have started yet. Wait for it instead.
+    projection.open(migrate_schema=False)
+    # The `project` activity writes `mark_started`/`finish` here: its state changes reach
+    # activity in the same transaction, and NOTIFY on the API's listeners.
+    projection.activity = ActivityIndex(projection.pool, events=events, metrics=metrics)
+    # The leases in Postgres, where the API's removals see them (#872).
+    checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
+    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
+    fetcher = CheckoutFetcher(
+        libraries, InstallPermits(INSTALL_CONCURRENCY, projection.pool), checkouts
+    )
     assets = AssetStore(
         paths.assets,
         projection.pool,
@@ -98,6 +174,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         max_count=config.asset_max_count,
     )
     try:
+        wait_until_ready(projection.pool, stopping=stopping)
         source = RenderSettingsSource(projection.pool, settings)
         current = load_render_store_settings(projection.pool, settings)
         source.seed(current)
@@ -113,6 +190,8 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
             history=None,
             fonts=FontService(settings.data_dir),
             metrics=metrics,
+            # #2788: none unless set, and never one the API reads (README).
+            downloads_dir=config.download_cache_dir,
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.
@@ -125,6 +204,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         blobs=store.blobs,
         refs=BlobRefs(projection.pool),
         projection=projection,
+        geometry=GeometryIndex(projection.pool),
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
@@ -150,6 +230,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         blobs=state.store.blobs,
         refs=state.refs,
         projection=state.projection,
+        geometry=GeometryIndex(state.refs.pool),
         history=state.history,
         checkouts=state.checkouts,
         fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
@@ -160,10 +241,11 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         snapshots=state.store.snapshots,
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
+        openscad_version=state.openscad_version or "",
     )
 
 
-DrainOutcome = Literal["drained", "current", "timed_out"]
+DrainOutcome = Literal["drained", "current", "timed_out", "stopped"]
 
 
 async def _drain(
@@ -173,24 +255,66 @@ async def _drain(
     timeout: float,
     poll: float,
     grace: float,
+    stop_now: asyncio.Event | None = None,
 ) -> DrainOutcome:
     """Poll until no run is pinned to this build (``drained``) or ``timeout`` passes
     (``timed_out``). A build that is still, or again, current (``current``) ends it
     too, because another worker of the same build serves its pinned runs (#874); but
     only after ``grace``, during which this worker keeps serving them itself, in case
-    the pod that replaces it is slow to come, or never comes."""
+    the pod that replaces it is slow to come, or never comes. ``stop_now`` (a second
+    signal, #605) ends it at once (``stopped``)."""
     loop = asyncio.get_running_loop()
     trust_current_at = loop.time() + grace
+
+    async def polled() -> DrainOutcome:
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    if await is_drained():
+                        return "drained"
+                    if loop.time() >= trust_current_at and await still_current():
+                        return "current"
+                    await asyncio.sleep(poll)
+        except TimeoutError:
+            return "timed_out"
+
+    polling = asyncio.create_task(polled())
+    stopping = asyncio.create_task((stop_now or asyncio.Event()).wait())
     try:
-        async with asyncio.timeout(timeout):
-            while True:
-                if await is_drained():
-                    return "drained"
-                if loop.time() >= trust_current_at and await still_current():
-                    return "current"
-                await asyncio.sleep(poll)
-    except TimeoutError:
-        return "timed_out"
+        await asyncio.wait({polling, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        polling.cancel()
+        stopping.cancel()
+        await asyncio.wait({polling, stopping})
+    return polling.result() if not polling.cancelled() else "stopped"
+
+
+def deployment_writes(
+    client: Client, build_id: str, deployment_name: str
+) -> tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[str | None]]]:
+    """``make_current_until_polled``'s write and read for this build. Each write carries
+    the conflict token of the last read that succeeded (#2538), so a rollout that lands
+    between the read and the write makes Temporal refuse it rather than be overwritten;
+    the next read then sees that rollout's build and the retry stops."""
+    token = b""
+
+    async def read() -> str | None:
+        nonlocal token
+        build, token = await current_routing(
+            client, namespace=client.namespace, deployment_name=deployment_name
+        )
+        return build
+
+    async def write() -> None:
+        await make_current(
+            client,
+            namespace=client.namespace,
+            build_id=build_id,
+            deployment_name=deployment_name,
+            conflict_token=token,
+        )
+
+    return write, read
 
 
 async def make_current_until_polled(
@@ -199,75 +323,164 @@ async def make_current_until_polled(
     build_id: str,
     backoff: Sequence[float],
     every: float,
-    deadline: float,
-) -> bool:
-    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
-    passed; False when it never took. Any other error propagates."""
+    error_after: float,
+    error_every: float | None = None,
+    current: Callable[[], Awaitable[str | None]] | None = None,
+) -> None:
+    """Make the build current, retrying an `RPCError` until it takes; cancel it to
+    stop. Failures past ``error_after`` seconds log at error level, and are retried
+    every ``error_every`` (default ``every``). Any other error propagates.
+
+    With ``current`` (the deployment's current build), it stops once a build other than
+    this one and the one current when it began is made current (#2538): a newer
+    rollout's worker has taken over, and a late write here would hand the deployment
+    back to this old build, whose stop then skips its drain because it is current.
+    (``deployment_writes`` closes the gap between the read and the write with the
+    read's conflict token.)
+
+    The build current when it began is what it never takes over from. When that first
+    read fails, the first read that succeeds is taken instead: a newer rollout made
+    current in between is then indistinguishable from the old build, and this one may
+    still take the deployment back. Accepted: it needs a failed read and a rollout in
+    the same few seconds, and the next rollout's worker makes its own build current."""
     loop = asyncio.get_running_loop()
-    give_up = loop.time() + deadline
+    escalate = loop.time() + error_after
+    unread = object()
+    before: object = unread
+
+    async def read() -> object:
+        assert current is not None
+        try:
+            return await current()
+        except RPCError:
+            logger.warning("could not read the deployment's current build", exc_info=True)
+            return unread
+
+    if current is not None:
+        before = await read()
     attempt = 0
     while True:
         attempt += 1
+        if current is not None and attempt > 1:
+            now = await read()
+            if before is unread:
+                before = now
+            elif now not in (unread, None, build_id, before):
+                logger.info(
+                    "another build was made current; this one no longer tries to be",
+                    extra={"build_id": build_id, "current": now},
+                )
+                return
         try:
             await set_current()
         except RPCError as error:
+            late = loop.time() >= escalate
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
-            logger.warning(
+            if late and error_every is not None:
+                delay = max(delay, error_every)
+            logger.log(
+                logging.ERROR if late else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
-            if loop.time() + delay > give_up:
-                logger.error(
-                    "could not make this build current; polling anyway",
-                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
-                )
-                return False
             await asyncio.sleep(delay)
         else:
             logger.info("made this build current", extra={"build_id": build_id})
-            return True
+            return
 
 
 async def _poll(
-    settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event, *, drain: bool
+    settings: Settings,
+    deps: WorkerDeps,
+    client: Client,
+    stop: asyncio.Event,
+    *,
+    drain: bool,
+    stop_now: asyncio.Event | None = None,
 ) -> None:
     config = deps.config
     build_id = settings.revision
+    # What every output's record names (§8.4): this image and its openscad. The
+    # in-process worker has the API's probe already; running openscad again here, in a
+    # task beside the API's first requests, would only race them.
+    deps.revision = settings.revision
+    if not deps.openscad_version:
+        deps.openscad_version = await probe_openscad_version(config) or ""
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
         RenderActivities(deps),
+        pipeline=PipelineActivities(deps),
         build_id=build_id,
         max_concurrent_activities=config.render_concurrency,
         graceful_shutdown_timeout=timedelta(
             seconds=config.render_timeout + ACTIVITY_TIMEOUT_MARGIN
         ),
     )
+    await _serve_versioned(
+        client,
+        [worker],
+        stop,
+        build_id=build_id,
+        deployment_name=DEPLOYMENT_NAME,
+        drain_timeout=2 * config.activity_timeout + 120 if drain else None,
+        stop_now=stop_now,
+    )
+
+
+async def _serve_versioned(
+    client: Client,
+    workers: Sequence[Worker],
+    stop: asyncio.Event,
+    *,
+    build_id: str,
+    deployment_name: str,
+    drain_timeout: float | None,
+    stop_now: asyncio.Event | None = None,
+) -> None:
+    """Run ``workers`` (one deployment version) until ``stop``, making the build current
+    beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
+    ``stop_now`` cuts the drain short (#605)."""
 
     async def is_drained() -> bool:
         try:
-            return await drained(client, namespace=client.namespace, build_id=build_id)
+            return await drained(
+                client,
+                namespace=client.namespace,
+                build_id=build_id,
+                deployment_name=deployment_name,
+            )
         except RPCError:
             logger.warning("could not count this build's running workflows", exc_info=True)
             return False
 
     async def still_current() -> bool:
         try:
-            return await is_current(client, namespace=client.namespace, build_id=build_id)
+            return await is_current(
+                client,
+                namespace=client.namespace,
+                build_id=build_id,
+                deployment_name=deployment_name,
+            )
         except RPCError:
             logger.warning("could not read the deployment's current build", exc_info=True)
             return False
 
-    async with worker:
+    async with contextlib.AsyncExitStack() as running:
+        for worker in workers:
+            await running.enter_async_context(worker)
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
+        set_current, read_current = deployment_writes(client, build_id, deployment_name)
         current = asyncio.create_task(
             make_current_until_polled(
-                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                set_current,
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
-                deadline=MAKE_CURRENT_DEADLINE,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
+                error_every=MAKE_CURRENT_ERROR_EVERY,
+                current=read_current,
             )
         )
         stopped = asyncio.create_task(stop.wait())
@@ -280,14 +493,13 @@ async def _poll(
             current.cancel()
             stopped.cancel()
             await asyncio.wait({current, stopped})
-        if not drain:
+        if drain_timeout is None:
             return
 
         # A workflow is PINNED to the build that started it: one waiting between two
         # activities is served by no other build, so keep polling until none is left,
         # unless this build is still current: a restart of the same build (a manifest
         # change, a node drain) leaves its runs to the next pod of that build.
-        drain_timeout = 2 * config.activity_timeout + 120
         logger.info(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
@@ -298,6 +510,7 @@ async def _poll(
             timeout=drain_timeout,
             poll=DRAIN_POLL,
             grace=min(DRAIN_CURRENT_GRACE, drain_timeout),
+            stop_now=stop_now,
         )
         if outcome == "drained":
             logger.info("drained", extra={"build_id": build_id})
@@ -306,6 +519,12 @@ async def _poll(
                 "stopping without draining: this build is still current, so its pinned"
                 " workflows are left to the next worker of this build; until one polls,"
                 " they wait",
+                extra={"build_id": build_id},
+            )
+        elif outcome == "stopped":
+            logger.warning(
+                "stopping now on a second signal; exiting with workflows still running"
+                " on this build",
                 extra={"build_id": build_id},
             )
         else:
@@ -322,41 +541,93 @@ class _HealthServer(uvicorn.Server):
         yield
 
 
-async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle) -> None:
-    """The store gauges this process owns: its piece cache and the key it holds. The
-    store's usage is the API's to export (one database, one set of numbers)."""
+def _allocated_bytes(root: Path) -> int:
+    """Bytes allocated to everything under ``root``, directories included and a file
+    with several links once, as ``du`` (and so kubelet, measuring an emptyDir) counts
+    them. A symlink to a directory counts its own blocks, not its target's, as ``du``
+    does without ``-L``. An entry removed while it is walked is skipped."""
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    for directory, dirs, files in os.walk(root):
+        # `os.walk` lists a symlinked directory in `dirs` but never walks it.
+        links = (name for name in dirs if os.path.islink(os.path.join(directory, name)))
+        names = (*files, *links)
+        for path in (directory, *(os.path.join(directory, name) for name in names)):
+            with contextlib.suppress(FileNotFoundError):
+                stat = os.lstat(path)
+                if stat.st_nlink > 1:
+                    if (stat.st_dev, stat.st_ino) in seen:
+                        continue
+                    seen.add((stat.st_dev, stat.st_ino))
+                total += stat.st_blocks * 512
+    return total
+
+
+#: Seconds one walk of the data directory answers the scraper for (#2020). The walk
+#: covers libraries, fonts and the piece cache, so a 15-30 s scrape would otherwise
+#: walk all of it each time; the API keeps its store walk as long (`STORE_USAGE_MAX_AGE`).
+#: The gauge feeds an eviction alert that fires over minutes, so a minute stale is fine.
+DATA_USAGE_MAX_AGE = 60.0
+
+
+@dataclass
+class _DataUsage:
+    """``_allocated_bytes(root)``, walked again only once ``max_age`` has passed."""
+
+    root: Path
+    max_age: float = DATA_USAGE_MAX_AGE
+    clock: Callable[[], float] = time.monotonic
+    _value: int | None = field(default=None, init=False)
+    _read_at: float = field(default=0.0, init=False)
+
+    async def read(self) -> int:
+        now = self.clock()
+        if self._value is None or now - self._read_at >= self.max_age:
+            self._value = await asyncio.to_thread(_allocated_bytes, self.root)
+            self._read_at = now
+        return self._value
+
+
+async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _DataUsage) -> None:
+    """The store gauges this process owns: its whole data directory, which is an
+    emptyDir evicted past its sizeLimit (#1785), first, since it needs no database; then
+    its piece cache and the key it holds. The store's usage is the API's to export (one
+    database, one set of numbers)."""
+    metrics.render_data_bytes.set(await data.read())
     health = await store_health(store)
     metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
         metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
 
 
-def _health_app(settings: Settings, metrics: Metrics, store: StoreBundle) -> Starlette:
+def _health_app(
+    settings: Settings, metrics: Metrics, store: StoreBundle | None, task_queue: str
+) -> Starlette:
+    """``store`` is the render worker's; the print worker holds none (#1060)."""
+    data = _DataUsage(settings.data_dir)
+
     async def healthz(_: Request) -> JSONResponse:
-        return JSONResponse(
-            {
-                "ok": True,
-                "build_id": settings.revision,
-                "task_queue": settings.temporal_task_queue_render,
-                "store": (await store_health(store)).model_dump(),
-            }
-        )
+        body: dict[str, Any] = {"ok": True, "build_id": settings.revision, "task_queue": task_queue}
+        if store is not None:
+            body["store"] = (await store_health(store)).model_dump()
+        return JSONResponse(body)
 
     async def exposition(_: Request) -> Response:
-        try:
-            await _refresh_store_metrics(metrics, store)
-        except Exception:
-            # Like the API's: keep the last values, never fail the scrape.
-            logger.exception("could not read the store's gauges")
+        if store is not None:
+            try:
+                await _refresh_store_metrics(metrics, store, data)
+            except Exception:
+                # Like the API's: keep the last values, never fail the scrape.
+                logger.exception("could not read the store's gauges")
         return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
     return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
 
 
 def _health_server(
-    settings: Settings, metrics: Metrics, store: StoreBundle, port: int
+    settings: Settings, metrics: Metrics, store: StoreBundle | None, port: int, task_queue: str
 ) -> _HealthServer:
-    app = _health_app(settings, metrics, store)
+    app = _health_app(settings, metrics, store, task_queue)
     return _HealthServer(
         uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
     )
@@ -442,26 +713,34 @@ async def run_worker(
     settings: Settings,
     *,
     stop: asyncio.Event | None = None,
+    stop_now: asyncio.Event | None = None,
     health_port: int | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
     # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool and reads the store settings.
-    deps, store = await asyncio.to_thread(build_worker_deps, settings)
+    # the rest opens the projection's pool, waits for the API's schema and grants
+    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    try:
+        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
+    except WorkerStoppedError:
+        logger.info("stopped before the database was ready for this worker")
+        return
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)
         server = (
-            _health_server(settings, deps.metrics, store, health_port)
+            _health_server(
+                settings, deps.metrics, store, health_port, settings.temporal_task_queue_render
+            )
             if health_port is not None
             else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _poll(settings, deps, client, stop, drain=True)
+            await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -485,18 +764,304 @@ async def run_inprocess_worker(
     await _poll(settings, deps, client, stop, drain=False)
 
 
-async def _main(settings: Settings) -> None:
-    stop = asyncio.Event()
+@dataclass
+class PrintWorkerDeps:
+    """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres, the
+    event bus, the Bambuddy key (in the stored settings) and the API's internal URL. It
+    mounts no data volume and runs no template code."""
+
+    settings_store: SettingsStore
+    events: PgNotifyEventBus
+    outputs: RemoteOutputs
+    rack: RackUsageStore
+    metrics: Metrics
+    print_runs: PrintRunStore
+    operations: OperationStore
+    activities: list[Callable[..., Any]]
+    follow_print: Callable[..., Any]
+
+    async def aclose(self) -> None:
+        await self.outputs.aclose()
+        await self.events.aclose()
+        await asyncio.to_thread(self.rack.close)
+        await asyncio.to_thread(self.settings_store.close)
+
+
+class ApiUrlMissingError(ValueError):
+    pass
+
+
+def build_print_deps(settings: Settings) -> PrintWorkerDeps:
+    """The print worker's stores, over the API's database and its internal routes. The
+    Bambuddy settings, key included, are read from the database on every use."""
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for --queue bambuddy: the print worker"
+            " reads outputs through the API's cluster-internal Service, e.g."
+            " http://scadbuddy:8080"
+        )
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    events = PgNotifyEventBus(
+        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
+    )
+    settings_store = SettingsStore(settings, events=events)
+    settings_store.open()
+    pool = settings_store.pool
+    uploads = BambuddyUploadStore(pool)
+    links = PrintLinkStore(pool)
+    outputs = RemoteOutputs(settings.api_internal_url)
+    rack = RackUsageStore(settings.database_url)
+    observer = ProgressObserver(events)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        # As the API's: the follow links archives too (#306), which the rack's settle
+        # hook needs (#836).
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(client, meta, uploads=uploads, links=links)
+
+    async def read_library(subject: PrintSubject) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await library_progress(client, subject, links, uploads=uploads)
+
+    activity = ActivityIndex(pool, events=events, metrics=metrics)
+    print_runs = PrintRunStore(pool, events=events, activity=activity)
+    operations = OperationStore(pool, events=events, activity=activity)
+    follower = Follower(
+        outputs=outputs,
+        observer=observer,
+        read=read_progress,
+        read_library=read_library,
+        events=events,
+        on_settled=[settle_hook(rack, links, settings_store.load)],
+        newest_failed=newest_failed_from(print_runs, settings_store.load),
+    )
+    kinds = bambuddy_kinds_over(
+        settings_store=settings_store,
+        outputs=outputs,
+        uploads=uploads,
+        links=links,
+        archive_cache=ArchiveCache(),
+    )
+    printing = PrintActivities(
+        PrintDeps(
+            settings_store=settings_store,
+            outputs=outputs,
+            prints=OutputPrintStore(pool),
+            uploads=uploads,
+            store=print_runs,
+            observer=observer,
+            rack=rack,
+            links=links,
+        )
+    )
+    return PrintWorkerDeps(
+        settings_store=settings_store,
+        events=events,
+        outputs=outputs,
+        rack=rack,
+        metrics=metrics,
+        print_runs=print_runs,
+        operations=operations,
+        activities=[
+            *printing.all(),
+            *operation_activities(
+                operations,
+                settings_store,
+                {kind.name: kind for kind in kinds},
+            ),
+        ],
+        follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
+    )
+
+
+async def run_print_worker(
+    settings: Settings,
+    *,
+    stop: asyncio.Event | None = None,
+    stop_now: asyncio.Event | None = None,
+    health_port: int | None = HEALTH_PORT,
+    client: Client | None = None,
+) -> None:
+    """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
+    (#1060), versioned like the render worker but not drained: its workflows are
+    AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
+    stop = stop or asyncio.Event()
+    deps = await asyncio.to_thread(build_print_deps, settings)
+    try:
+        await deps.events.start()
+        if client is None:
+            client = await connect(settings.temporal_address, settings.temporal_namespace)
+        queue = settings.temporal_task_queue_bambuddy
+        build_id = settings.revision
+        workers = [
+            bambuddy_worker(client, queue, deps.activities, build_id=build_id),
+            follow_worker(client, queue, deps.follow_print, build_id=build_id),
+        ]
+        server = (
+            _health_server(settings, deps.metrics, None, health_port, queue)
+            if health_port is not None
+            else None
+        )
+        serving = asyncio.create_task(server.serve()) if server is not None else None
+        try:
+            await _serve_versioned(
+                client,
+                workers,
+                stop,
+                build_id=build_id,
+                deployment_name=PRINT_DEPLOYMENT_NAME,
+                drain_timeout=None,
+                stop_now=stop_now,
+            )
+        finally:
+            if server is not None and serving is not None:
+                server.should_exit = True
+                await serving
+    finally:
+        await deps.aclose()
+
+
+class ProjectsKeyMissingError(ValueError):
+    pass
+
+
+async def run_projects_worker(
+    settings: Settings,
+    *,
+    stop: asyncio.Event | None = None,
+    health_port: int | None = HEALTH_PORT,
+) -> None:
+    """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
+    §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
+    runs unsealed. Unversioned (plan 2026-10-09 Ruling 13), so it stops without a drain;
+    a run in flight resumes on the next worker from its history."""
+    stop = stop or asyncio.Event()
+    keys = payload_keys(settings)
+    if keys is None:
+        raise ProjectsKeyMissingError(
+            "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
+            " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
+        )
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for --queue projects: a flow's render,"
+            " print and arrange call the API's cluster-internal Service, e.g."
+            " http://scadbuddy:8080"
+        )
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    events = PgNotifyEventBus(
+        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
+    )
+    settings_store = SettingsStore(settings, events=events)
+    await asyncio.to_thread(settings_store.open)
+    try:
+        await events.start()
+        client = await connect_flows(
+            settings.temporal_address, settings.temporal_namespace, keys[0]
+        )
+        store = FlowStore(settings_store.pool, events=events)
+        queue = settings.temporal_task_queue_projects
+        decisions = operation_activities(
+            OperationStore(settings_store.pool, events=events),
+            settings_store,
+            {
+                kind.name: kind
+                for kind in flow_kinds(
+                    store,
+                    keys[0],
+                    approval_key(settings),
+                    api=lambda: api_client(settings.api_internal_url),
+                )
+            },
+        )
+        api = api_client(settings.api_internal_url)
+        routes = FlowRoutes(api)
+        grants = FlowGrants(store, api, approval_key(settings))
+        worker = projects_worker(
+            client,
+            queue,
+            [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
+        )
+        server = (
+            _health_server(settings, metrics, None, health_port, queue)
+            if health_port is not None
+            else None
+        )
+        serving = asyncio.create_task(server.serve()) if server is not None else None
+        try:
+            async with worker:
+                await stop.wait()
+        finally:
+            if server is not None and serving is not None:
+                server.should_exit = True
+                await serving
+            await routes.aclose()
+    finally:
+        await events.aclose()
+        await asyncio.to_thread(settings_store.close)
+
+
+Queue = Literal["render", "bambuddy", "projects"]
+
+#: Each worker's ``service.name`` (#2292): the Deployment it runs as, so the render and
+#: print workers are told apart in Tempo rather than all reporting as one service.
+SERVICE_NAMES: dict[Queue, str] = {
+    "render": "scadbuddy-render",
+    "bambuddy": "scadbuddy-print",
+    "projects": "scadbuddy-projects",
+}
+
+
+def _on_signal(stop: asyncio.Event, stop_now: asyncio.Event) -> Callable[[], None]:
+    """The first SIGTERM/SIGINT stops and drains; a second cuts the drain short (#605)."""
+
+    def handle() -> None:
+        if stop.is_set():
+            stop_now.set()
+        else:
+            stop.set()
+
+    return handle
+
+
+async def _main(settings: Settings, queue: Queue = "render") -> None:
+    stop, stop_now = asyncio.Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
-    await run_worker(settings, stop=stop)
+        loop.add_signal_handler(sig, _on_signal(stop, stop_now))
+    if queue == "bambuddy":
+        await run_print_worker(settings, stop=stop, stop_now=stop_now)
+    elif queue == "projects":
+        await run_projects_worker(settings, stop=stop)
+    else:
+        await run_worker(settings, stop=stop, stop_now=stop_now)
+
+
+def parse_queue(argv: Sequence[str] | None = None) -> Queue:
+    parser = argparse.ArgumentParser(prog="python -m scadbuddy.worker")
+    parser.add_argument(
+        "--queue",
+        choices=("render", "bambuddy", "projects"),
+        default="render",
+        help="render: the render worker (scadbuddy-render); bambuddy: the print worker"
+        " (scadbuddy-print, #1060); projects: flow runs (scadbuddy-projects, #1057)",
+    )
+    queue: Queue = parser.parse_args(argv).queue
+    return queue
 
 
 def main() -> None:
+    queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
-    asyncio.run(_main(settings))
+    # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
+    if queue not in SERVICE_NAMES:
+        # Not an assert, which python -O strips (#3020 review).
+        raise SystemExit(f"queue {queue!r} has no service name")
+    configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
+    asyncio.run(_main(settings, queue))
 
 
 if __name__ == "__main__":

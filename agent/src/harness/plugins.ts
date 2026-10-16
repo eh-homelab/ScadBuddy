@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { HOOK_EVENTS } from '@anthropic-ai/claude-agent-sdk'
 import path from 'node:path'
 
 // Vetting a local plugin before the harness loads it (spec §8.6, "Malicious or
@@ -8,8 +9,9 @@ import path from 'node:path'
 // Why it matters here: the harness passes the Claude credential to Claude Code
 // through the SDK's `env` (run.ts), and every process Claude Code starts for a
 // plugin inherits that environment. A plugin that runs a program of its own
-// therefore gets ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN. `tools: []` removes
-// Bash, but not these, which Claude Code starts itself.
+// therefore gets ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN /
+// ANTHROPIC_AUTH_TOKEN. `tools: []` removes Bash, but not these, which Claude
+// Code starts itself.
 //
 // What starts a process, per the plugin manifest reference
 // (https://code.claude.com/docs/en/plugins-reference, "Fields", "Component
@@ -21,6 +23,17 @@ import path from 'node:path'
 //     `http`, `mcp_tool`, `prompt` or `agent`; `command` runs a shell command.
 //     Refused: any handler that is not one of the four non-command types, so a
 //     missing or unknown type is refused too.
+//   - hooks modules: a hooks file's `modules` names a JavaScript module
+//     (`export function register(on)`) that Claude Code runs itself, with
+//     process, network and environment access (`$.process.run`, `$.http`,
+//     `$.env.get`), so with the credential env. Claude Code 2.1.283 loaded one
+//     only with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; 2.1.287 loads it by
+//     default, and that variable no longer turns it off (measured 2026-10-06:
+//     a module's prompt.context hook put the gateway token in the model
+//     request). Refused when present, in any hooks config. A hooks file may
+//     carry only the keys 2.1.287's hooks-file schema reads besides that one
+//     (`$schema`, `description`, `hooks`; `surface` is gone), so a later CLI's
+//     new loader key is refused by default.
 //   - MCP servers: `.mcp.json`, merged with the manifest's `mcpServers` ("Path,
 //     object, or array of either": a `.json` file, an `.mcpb`/`.dxt` bundle or
 //     bundle URL, or an inline map). A server with a `command`, or of type
@@ -70,11 +83,22 @@ export function isInside(root: string, target: string): boolean {
   return resolved === base || resolved.startsWith(base.endsWith(path.sep) ? base : base + path.sep)
 }
 
+const OUTSIDE = ' is outside the plugin'
+
+/**
+ * Whether a problem names a path that leaves the plugin. A plugin package's
+ * admin can allow what the rules refuse (src/plugins/packages/vet.ts), but not
+ * this: such a file is not part of the pinned, hashed package.
+ */
+export function isOutsideProblem(problem: string): boolean {
+  return problem.endsWith(OUTSIDE)
+}
+
 /** Reads a JSON file inside the plugin; a missing default file is `undefined`. */
 function readJson(root: string, relative: string, problems: string[], required: boolean): Json {
   const file = path.resolve(root, relative)
   if (!isInside(root, file)) {
-    problems.push(`${relative} is outside the plugin`)
+    problems.push(`${relative}${OUTSIDE}`)
     return undefined
   }
   if (!existsSync(file)) {
@@ -95,16 +119,48 @@ function eachDeclared(value: Json): Json[] {
   return Array.isArray(value) ? value : [value]
 }
 
+/** The keys a hooks file may carry besides `modules`, which is refused on its own. */
+const HOOKS_FILE_KEYS = new Set(['$schema', 'description', 'hooks'])
+
+/**
+ * A hooks config's events. A hooks file is `{ "hooks": { Event: [...] },
+ * "modules"?: [...] }`; inline manifest hooks are `{ Event: [...] }` (the
+ * settings.json shape). Both are accepted (also by src/plugins/packages/vet.ts).
+ * Any hooks-file key makes it a file, whatever its value: no event has one of
+ * those names, and judging by the value's shape let `{ "hooks": [...],
+ * "loaders": [...] }` pass as two inline events, skipping the key check.
+ */
+export function hookEvents(config: Json): { file: boolean; events: Json } {
+  const file = isRecord(config) && ['modules', ...HOOKS_FILE_KEYS].some((key) => key in config)
+  return { file, events: file ? (config.hooks === undefined ? {} : config.hooks) : config }
+}
+
+/**
+ * Claude Code's hook events, from the SDK pinned with the CLI (2.1.289: 33
+ * events). An inline `{ Event: [...] }` takes any key as an event, so without
+ * this a manifest's `{ "loaders": [...] }` passed as one; an event the pinned
+ * CLI does not know is refused, and a new one is read when the pin moves.
+ * Plugin packages allow fewer (PACKAGE_HOOK_EVENTS, src/plugins/packages/vet.ts).
+ */
+const KNOWN_HOOK_EVENTS: ReadonlySet<string> = new Set(HOOK_EVENTS)
+
 function checkHooksConfig(config: Json, where: string, problems: string[]): void {
   if (config === undefined) return
-  // A hooks file is `{ "hooks": { Event: [...] } }`; inline manifest hooks are
-  // `{ Event: [...] }` (the settings.json shape). Accept both.
-  const events = isRecord(config) && isRecord(config.hooks) ? config.hooks : config
+  if (isRecord(config) && config.modules !== undefined) {
+    problems.push(`${where}: names a hooks module, which runs JavaScript inside Claude Code`)
+  }
+  const { file, events } = hookEvents(config)
+  if (file && isRecord(config)) {
+    for (const key of Object.keys(config)) {
+      if (key !== 'modules' && !HOOKS_FILE_KEYS.has(key)) problems.push(`${where}: a hooks file may not set "${key}"`)
+    }
+  }
   if (!isRecord(events)) {
     problems.push(`${where}: hooks are not an object`)
     return
   }
   for (const [event, groups] of Object.entries(events)) {
+    if (!KNOWN_HOOK_EVENTS.has(event)) problems.push(`${where}: "${event}" is not a Claude Code hook event`)
     for (const group of Array.isArray(groups) ? groups : [groups]) {
       const handlers = isRecord(group) ? group.hooks : undefined
       for (const handler of Array.isArray(handlers) ? handlers : [handlers]) {
@@ -115,6 +171,16 @@ function checkHooksConfig(config: Json, where: string, problems: string[]): void
       }
     }
   }
+}
+
+/**
+ * No command: absent or null, as agent-durable's runner.py `_remote_entry` reads it (#2563).
+ * The one reading the vetting (here and plugins/packages/vet.ts) and the forwarder
+ * (plugins/packages/mcp.ts) share, so an entry is never remote to one and local to
+ * another (#2621).
+ */
+export function noCommand(config: Record<string, unknown>): boolean {
+  return config.command === undefined || config.command === null
 }
 
 function checkMcpMap(map: Json, where: string, problems: string[]): void {
@@ -131,7 +197,7 @@ function checkMcpMap(map: Json, where: string, problems: string[]): void {
       typeof server.type === 'string' &&
       REMOTE_MCP_TYPES.has(server.type) &&
       typeof server.url === 'string' &&
-      server.command === undefined
+      noCommand(server)
     if (!remote) problems.push(`${where}: MCP server "${name}" is a local (stdio) server`)
   }
 }

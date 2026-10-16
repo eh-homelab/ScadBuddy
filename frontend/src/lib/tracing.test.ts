@@ -1,0 +1,324 @@
+import { trace } from '@opentelemetry/api'
+import { HttpResponse, http } from 'msw'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ATTENTION_PATH, RUNNING_PATH } from '../agent/attention'
+import { AI_STATUS_PATH } from '../agent/chat/availability'
+import { api, printRunPoll } from '../api/client'
+import { queuedResult } from '../mocks/choices'
+import { server } from '../mocks/server'
+import { backfillOutputs, runArrange } from './arrange'
+import { RELAY_PATH } from './relayExporter'
+import { TRACER_NAME, messageTraceparent, traceAction } from './traceAction'
+import { startTracing } from './tracing'
+
+const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
+/** Spec §6: a poll outside an action is a parentless CLIENT span, propagated unsampled. */
+const UNSAMPLED = /^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/
+const CROSS_ORIGIN = 'https://fonts.googleapis.com/css2'
+
+/** The `traceparent` each request to `url` arrived with (null: none). */
+function capture(url: string): (string | null)[] {
+  const seen: (string | null)[] = []
+  server.use(
+    http.get(url, ({ request }) => {
+      seen.push(request.headers.get('traceparent'))
+      return HttpResponse.json({})
+    }),
+  )
+  return seen
+}
+
+describe('startTracing', () => {
+  let stop: (() => Promise<void>) | undefined
+  afterEach(async () => {
+    await stop?.()
+    stop = undefined
+  })
+
+  it('injects traceparent into a same-origin request', async () => {
+    const seen = capture('/api/v1/models')
+    stop = startTracing()
+    await traceAction('generate', {}, () => fetch('/api/v1/models'))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a request outside any action, so a page’s loads reach the backend traced (#2187)', async () => {
+    const seen = capture('/api/v1/print/library/7/choices')
+    stop = startTracing()
+    await fetch('/api/v1/print/library/7/choices')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it.each([
+    ['the attention badge', ATTENTION_PATH],
+    ['the running-session check', RUNNING_PATH],
+    ['the assistant availability', AI_STATUS_PATH],
+    ['an output print’s progress', '/api/v1/print/outputs/abc/progress'],
+    ['a library print’s progress', '/api/v1/print/library/7/progress'],
+    ['a print run’s follow', '/api/v1/print/runs/r1'],
+    ['an operation’s follow', '/api/v1/operations/op1'],
+    ['an agent operation’s follow', '/api/v1/ai/operations/op1'],
+    ['a render job’s fallback poll', '/api/v1/jobs/j1'],
+    ['Arrange’s backfill follow of an output', '/api/v1/outputs/o1'],
+  ])('sends a poll (%s) unsampled, so the backend drops it too', async (_name, url) => {
+    const seen = capture(new URL(url, location.href).pathname)
+    stop = startTracing()
+    await fetch(url)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(UNSAMPLED)
+  })
+
+  it('samples the sessions list when it is not the running check', async () => {
+    const seen = capture('/api/v1/ai/sessions')
+    stop = startTracing()
+    await fetch('/api/v1/ai/sessions?status=closed')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a job’s own files: only the job read itself is the poll', async () => {
+    const seen = capture('/api/v1/jobs/j1/preview.glb')
+    stop = startTracing()
+    await fetch('/api/v1/jobs/j1/preview.glb')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples an output’s own files: only the output read itself is the poll', async () => {
+    const seen = capture('/api/v1/outputs/o1/plates')
+    stop = startTracing()
+    await fetch('/api/v1/outputs/o1/plates')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a parentless write to a poll’s path: only a GET is a poll', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.delete('/api/v1/print/runs/r1', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    stop = startTracing()
+    await fetch('/api/v1/print/runs/r1', { method: 'DELETE' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('samples a poll’s path inside an action: the action decides', async () => {
+    const seen = capture('/api/v1/print/library/7/progress')
+    stop = startTracing()
+    await traceAction('print', {}, () => fetch('/api/v1/print/library/7/progress'))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(TRACEPARENT)
+  })
+
+  it('never injects traceparent into a cross-origin request', async () => {
+    const foreign = capture(CROSS_ORIGIN)
+    const own = capture('/api/v1/models')
+    stop = startTracing()
+    await traceAction('generate', {}, async (within) => {
+      await within(() => fetch(CROSS_ORIGIN))
+      await within(() => fetch('/api/v1/models'))
+    })
+    expect(foreign).toEqual([null])
+    // The same page, the same moment, its own origin: injected, so the absence is the origin's doing.
+    expect(own[0]).toMatch(TRACEPARENT)
+  })
+
+  it('parents an action’s first request on the action’s span', async () => {
+    const seen = capture('/api/v1/outputs')
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('generate', {}, async () => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      await fetch('/api/v1/outputs')
+    })
+    expect(seen[0]?.split('-')[1]).toBe(actionTrace)
+  })
+
+  it('parents the real createOutput write on the generate action', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/outputs', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return HttpResponse.json({})
+      }),
+    )
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('generate', {}, () => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      return api.createOutput('box', 'job-1')
+    })
+    expect(seen[0]).toMatch(TRACEPARENT)
+    expect(seen[0]?.split('-')[1]).toBe(actionTrace)
+  })
+
+  it('parents the real runPrint POST, and its retry, on the print action', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out1/run', ({ request }) => {
+        seen.push(request.headers.get('traceparent'))
+        return seen.length === 1
+          ? new HttpResponse(null, { status: 502 })
+          : HttpResponse.json({ id: 'r1', status: 'succeeded', result: queuedResult })
+      }),
+    )
+    stop = startTracing()
+    const saved = printRunPoll.intervalMs
+    printRunPoll.intervalMs = 1
+    let actionTrace: string | undefined
+    try {
+      await traceAction('print', {}, (within) => {
+        actionTrace = trace.getActiveSpan()?.spanContext().traceId
+        return api.runPrint('out1', {} as never, undefined, within)
+      })
+    } finally {
+      printRunPoll.intervalMs = saved
+    }
+    expect(seen).toHaveLength(2)
+    for (const header of seen) {
+      expect(header).toMatch(TRACEPARENT)
+      expect(header?.split('-')[1]).toBe(actionTrace)
+    }
+  })
+
+  it('parents an arrange’s re-render, start and save on the arrange action, but not its follows (#2292)', async () => {
+    const seen: Record<string, (string | null)[]> = {}
+    const note = (key: string, request: Request) => (seen[key] ??= []).push(request.headers.get('traceparent'))
+    server.use(
+      http.post('/api/v1/outputs/o1/backfill', ({ request }) => {
+        note('backfill', request)
+        return HttpResponse.json({ id: 'b1', status: 'done' })
+      }),
+      http.get('/api/v1/outputs/o1', ({ request }) => {
+        note('output', request)
+        return HttpResponse.json({ id: 'o1', slug: 'box', manifest: [{ part: 'Box', count: 1 }] })
+      }),
+      http.post('/api/v1/outputs/arrange', ({ request }) => {
+        note('arrange', request)
+        return HttpResponse.json({ id: 'a1', status: 'pending' })
+      }),
+      http.get('/api/v1/jobs/a1', ({ request }) => {
+        note('job', request)
+        return HttpResponse.json({ id: 'a1', status: 'done', plates: [] })
+      }),
+      http.post('/api/v1/models/box/outputs', ({ request }) => {
+        note('save', request)
+        return HttpResponse.json({ id: 'arranged' })
+      }),
+    )
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('arrange', {}, async (within) => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      await backfillOutputs([{ id: 'o1' }], { within, pollMs: 1 })
+      await runArrange('box', { objects: [], slug: 'box', goal: 'fewest_plates' }, { within, pollMs: 1 })
+    })
+    for (const key of ['backfill', 'arrange', 'save']) {
+      expect(seen[key]?.[0], key).toMatch(TRACEPARENT)
+      expect(seen[key]?.[0]?.split('-')[1], key).toBe(actionTrace)
+    }
+    // The follows are polls: unsampled, in no action's trace.
+    for (const key of ['output', 'job']) {
+      expect(seen[key]?.length, key).toBeGreaterThan(0)
+      for (const header of seen[key] ?? []) expect(header, key).toMatch(UNSAMPLED)
+    }
+  })
+
+  it('carries no baggage header', async () => {
+    let baggage: string | null = 'unset'
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        baggage = request.headers.get('baggage')
+        return HttpResponse.json([])
+      }),
+    )
+    stop = startTracing()
+    await fetch('/api/v1/models')
+    expect(baggage).toBeNull()
+  })
+
+  it('is started once however often it is called', () => {
+    stop = startTracing()
+    expect(startTracing()).toBe(stop)
+  })
+
+  it('stops tracing for good once the relay answers off', async () => {
+    const seen = capture('/api/v1/models')
+    stop = startTracing()
+    // msw's default relay answers off.
+    trace.getTracer(TRACER_NAME).startSpan('before-off').end()
+    window.dispatchEvent(new Event('pagehide'))
+    await vi.waitFor(async () => {
+      await fetch('/api/v1/models')
+      expect(seen.at(-1)).toBeNull()
+    })
+    await traceAction('assistant.message', {}, async () => {
+      expect(messageTraceparent()).toBeUndefined()
+    })
+    expect(messageTraceparent()).toBeUndefined()
+  })
+
+  describe('flushing when the page goes away', () => {
+    /** Posts the relay receives, with the `traceparent` each carried. */
+    function relay(): (string | null)[] {
+      const posts: (string | null)[] = []
+      server.use(
+        http.post(RELAY_PATH, ({ request }) => {
+          posts.push(request.headers.get('traceparent'))
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      return posts
+    }
+    const endSpan = () => trace.getTracer(TRACER_NAME).startSpan('hidden-test').end()
+    const hide = () => {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+
+    afterEach(() => vi.restoreAllMocks())
+
+    it('flushes on visibilitychange to hidden, with no traceparent on the relay post', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      hide()
+      await vi.waitFor(() => expect(posts).toHaveLength(1))
+      expect(posts[0]).toBeNull()
+    })
+
+    it('does not flush on visibilitychange to visible', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(posts).toHaveLength(0)
+    })
+
+    it('flushes on pagehide', async () => {
+      const posts = relay()
+      stop = startTracing()
+      endSpan()
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.waitFor(() => expect(posts).toHaveLength(1))
+    })
+
+    it('stops listening once undone', async () => {
+      const posts = relay()
+      const undo = startTracing()
+      await undo()
+      stop = undefined
+      hide()
+      window.dispatchEvent(new Event('pagehide'))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(posts).toHaveLength(0)
+    })
+  })
+})

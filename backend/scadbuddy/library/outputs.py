@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import threading
 import uuid
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from fastapi import status
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import InvalidSlugError, slugify
@@ -23,10 +27,22 @@ from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
+from scadbuddy.render.job_models import (
+    FILE_NAME_PATTERN,
+    BomEntry,
+    ManifestObject,
+    OutputRecord,
+    PipelineOutput,
+    PlateInfo,
+)
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
+
+if TYPE_CHECKING:
+    from scadbuddy.library.output_prints import OutputPrintStore
+    from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +54,18 @@ PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
 #: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
 GEOMETRY_NAME = "geometry.json"
+#: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
+BOM_NAME = "bom.json"
+RECORD_NAME = "record.json"
+MANIFEST_NAME = "manifest.json"
+ARRANGED_NAME = "arranged_from.json"
+#: #902: the re-render that will give an output saved before manifests its own. Removed
+#: once attached; kept with an ``error`` when the re-render did not finish.
+BACKFILL_NAME = "backfill.json"
+_ID_LIST = TypeAdapter(list[str])
+#: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
+OUTPUT_HOLDER = "output"
+FILES_DIR = "files"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -61,7 +89,36 @@ class PlateSend(BaseModel):
 
     plate_id: int
     queue_item_id: int
-    slice_job_id: int
+    #: ``None`` for a plate queued with no slice (#2671).
+    slice_job_id: int | None = None
+
+
+class BackfillState(BaseModel):
+    """`backfill.json` (#902)."""
+
+    job_id: str
+    error: str | None = None
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write ``path`` whole or not at all: a reader never sees half a file."""
+    _replace_bytes(path, text.encode("utf-8"))
+
+
+def _replace_bytes(path: Path, data: bytes) -> None:
+    """`_replace` for bytes."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
+def _cover_from_3mf(model: Path, thumbnail: Path) -> None:
+    """Plate 1's cover out of ``model`` as ``thumbnail``; nothing when the 3MF has none
+    (its cover render timed out or failed, `render.jobs.plate_thumbnails`). Written
+    whole or not at all (#2556): ``has_thumbnail`` would report a truncated one."""
+    with zipfile.ZipFile(model) as archive:
+        if PLATE_THUMBNAIL in archive.namelist():
+            _replace_bytes(thumbnail, archive.read(PLATE_THUMBNAIL))
 
 
 class OutputMeta(BaseModel):
@@ -85,6 +142,20 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: Kept deliberately though no UI reads it yet (#2557); the description is the
+    #: published contract, see spec 2026-09-27 §7.
+    layout_plates: list[PlateInfo] = Field(
+        default_factory=list,
+        description=(
+            "Every plate of the output's 3MF (spec §6.4) as the render recorded it: index,"
+            " bounding box and colours per plate, for an arranged output (#2281) or a"
+            " multi-plate template's. Lets a reader (History, the Print dialog, an agent)"
+            " check or summarise each plate against a printer without opening the 3MF."
+            " Empty for a one-plate output, whose plate is `bbox_mm` and `colors`, and on"
+            " outputs saved before the field existed. Not `plates`, which is what the last"
+            " print queued."
+        ),
+    )
     # The output's uploads to Bambuddy's file library are in Postgres
     # (`bambuddy.uploads`, #455), not here. The keys an older record carries for them
     # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as
@@ -133,11 +204,19 @@ class _ResolvedCover:
     archive: Path | None
 
 
+class OutputFiles(Protocol):
+    async def model_3mf(self, output_id: str) -> bytes | None:
+        """The output's stored ``model.3mf``; ``None`` when it has none (or is gone)."""
+        ...
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
-    def __init__(self, paths: DataPaths) -> None:
+    def __init__(self, paths: DataPaths, *, prints: OutputPrintStore | None = None) -> None:
         self.paths = paths
+        #: The last print of each output (#1060), laid over what ``meta.json`` says.
+        self.prints = prints
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
@@ -152,6 +231,11 @@ class OutputStore:
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: #2755 — where each output's directory was last found. Finding one by id means
+        #: globbing every model's directory (~90 ms on the NAS share in production),
+        #: and a listing's details asked about ten times per output. A hit is checked
+        #: with one stat, so a moved or deleted output is looked for again.
+        self._dirs: dict[str, Path] = {}
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -162,8 +246,13 @@ class OutputStore:
             logger.exception("an output change listener failed", extra={"slug": slug})
 
     def _find_dir(self, output_id: str) -> Path:
+        known = self._dirs.get(output_id)
+        if known is not None and (known / META_NAME).is_file():
+            return known
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
+            self._dirs[output_id] = meta_path.parent
             return meta_path.parent
+        self._dirs.pop(output_id, None)
         raise OutputNotFoundError(output_id)
 
     def directory(self, output_id: str) -> Path:
@@ -171,7 +260,29 @@ class OutputStore:
 
     def get(self, output_id: str) -> OutputMeta:
         directory = self._find_dir(output_id)
-        return OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        [meta] = self._with_last_prints([meta])
+        return meta
+
+    def _with_last_prints(self, metas: list[OutputMeta]) -> list[OutputMeta]:
+        """Each output's recorded last print (#1060) over its file's; one with no row
+        keeps what an older release wrote into its ``meta.json``."""
+        if self.prints is None:
+            return metas
+        rows = self.prints.for_outputs([meta.id for meta in metas])
+        return [
+            meta.model_copy(update=rows[meta.id].fields()) if meta.id in rows else meta
+            for meta in metas
+        ]
+
+    async def model_3mf(self, output_id: str) -> bytes | None:
+        return await asyncio.to_thread(self._model_3mf, output_id)
+
+    def _model_3mf(self, output_id: str) -> bytes | None:
+        try:
+            return (self._find_dir(output_id) / MODEL_NAME).read_bytes()
+        except (OutputNotFoundError, FileNotFoundError):
+            return None
 
     def provenance(self, output_id: str) -> Provenance | None:
         """What the 3MF itself says produced it — the fallback when the record is gone."""
@@ -211,11 +322,14 @@ class OutputStore:
         directory = self.paths.outputs / slug
         if not directory.is_dir():
             return []
-        metas = [
-            OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
-            for path in directory.glob(f"*/{META_NAME}")
-        ]
-        return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
+        metas = []
+        for path in directory.glob(f"*/{META_NAME}"):
+            meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
+            # Found by the listing's own glob: the details read next need no search.
+            if meta.id == path.parent.name:
+                self._dirs[meta.id] = path.parent
+            metas.append(meta)
+        return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
 
     def ids_for(self, slug: str) -> list[str]:
         """The id of every output directory of ``slug``, readable record or not."""
@@ -236,8 +350,22 @@ class OutputStore:
         name: str | None = None,
         public_url: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        index: int = 0,
+        files_dir: Path | None = None,
+        arranged_from: Sequence[str] = (),
+        output_id: str | None = None,
+        print_settings: Mapping[str, str] | None = None,
     ) -> OutputMeta:
-        if job.result is None:
+        """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
+        one result for a job without outputs. ``files_dir`` holds that output's extra
+        files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
+        that holds the output's Parts first name the output before it exists.
+        ``print_settings`` are the template's (#770), written into the saved 3MF."""
+        if job.outputs and not 0 <= index < len(job.outputs):
+            raise IndexError(index)
+        chosen = job.outputs[index] if job.outputs else None
+        result = chosen.result if chosen is not None else job.result
+        if result is None:
             raise ValueError("the job has no result to persist")
         # The store's own guarantee, kept even though the route checked the same
         # thing: checked before anything is written, so inputs the job did not
@@ -245,38 +373,67 @@ class OutputStore:
         recorded = normalize_inputs(
             inputs if inputs is not None else (job.inputs or None), job.params
         ).data
-        output_id = uuid.uuid4().hex
+        if output_id is None:
+            output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
-
+        # Every copy and write, or none: a failure part-way (a source gone from the
+        # store, a full disk) leaves no half-written output behind to list.
         try:
-            shutil.copyfile(self.paths.root / job.result.model_3mf, directory / MODEL_NAME)
-            shutil.copyfile(self.paths.root / job.result.preview_glb, directory / PREVIEW_NAME)
+            shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
+            (directory / PARAMS_NAME).write_text(
+                json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            (directory / INPUTS_NAME).write_text(
+                json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            # A job from before the hash existed has none to read back; the live tree is
+            # then the closest thing to what it rendered.
+            version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            # Stamped as it is copied (#2755): one read of the job's 3MF and one write,
+            # not a copy and then a rewrite of the copy.
+            stamp(
+                directory / MODEL_NAME,
+                Provenance(
+                    model=job.slug,
+                    version=version,
+                    output=output_id,
+                    params=dict(job.params),
+                    edit_url=edit_url(public_url, output_id),
+                ),
+                print_settings,
+                source=self.paths.root / result.model_3mf,
+            )
+
+            if chosen is not None:
+                # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
+                # a bill of materials only when the pipeline wrote one.
+                (directory / RECORD_NAME).write_text(
+                    chosen.record.model_copy(update={"output_index": index}).model_dump_json(),
+                    encoding="utf-8",
+                )
+                if chosen.bom:
+                    (directory / BOM_NAME).write_text(
+                        json.dumps([b.model_dump(mode="json") for b in chosen.bom]),
+                        encoding="utf-8",
+                    )
+                if files_dir is not None and chosen.files:
+                    shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+                if chosen.manifest:
+                    (directory / MANIFEST_NAME).write_text(
+                        json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
+                        encoding="utf-8",
+                    )
+            if arranged_from:
+                (directory / ARRANGED_NAME).write_text(
+                    json.dumps(list(arranged_from)), encoding="utf-8"
+                )
+                # No viewer captured an arrange (#2281): its cover is plate 1's own.
+                _cover_from_3mf(directory / MODEL_NAME, directory / THUMBNAIL_NAME)
         except OSError:
-            # A result swept mid-copy: no `meta.json`, so nothing would ever list or
-            # remove the directory.
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        (directory / PARAMS_NAME).write_text(
-            json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (directory / INPUTS_NAME).write_text(
-            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-
-        # A job from before the hash existed has none to read back; the live tree is
-        # then the closest thing to what it rendered.
-        version = job.result.source_version or source_version(self.paths.model_dir(job.slug))
-        stamp(
-            directory / MODEL_NAME,
-            Provenance(
-                model=job.slug,
-                version=version,
-                output=output_id,
-                params=dict(job.params),
-                edit_url=edit_url(public_url, output_id),
-            ),
-        )
 
         meta = OutputMeta(
             id=output_id,
@@ -284,12 +441,13 @@ class OutputStore:
             model_version=version,
             name=name or None,
             job_id=job.id,
-            created_at=datetime.now(UTC),
-            bbox_mm=job.result.bbox_mm,
-            colors=list(job.result.colors),
-            parts=list(job.result.parts),
-            warnings=list(job.result.warnings),
-            libraries=list(job.result.libraries),
+            created_at=self._next_created_at(job.slug),
+            bbox_mm=result.bbox_mm,
+            colors=list(result.colors),
+            parts=list(result.parts),
+            warnings=list(result.warnings),
+            layout_plates=list(result.plates),
+            libraries=list(result.libraries),
         )
         self._write_meta(directory, meta)
         # After the record is complete: a lookup racing the writes above may have
@@ -298,44 +456,138 @@ class OutputStore:
         self._changed(job.slug)
         return meta
 
-    def record_send(
-        self,
-        output_id: str,
-        *,
-        queue_item_id: int | None = None,
-        print_route: PrintRoute | None = None,
-        slice_job_id: int | None = None,
-        project_id: int | None = None,
-        plates: list[PlateSend] | None = None,
-    ) -> OutputMeta:
-        """Persist the Bambuddy ids a send produced, leaving omitted ones alone.
+    def _next_created_at(self, slug: str) -> datetime:
+        """Now, or just after the model's newest output when the clock reads earlier.
 
-        A new print (``print_route`` given) without ``plates`` clears the previous
-        print's plates, so they never describe a print they were not part of.
-        """
-        directory = self._find_dir(output_id)
-        meta = self.get(output_id)
-        if plates is None and print_route is not None:
-            plates = []
-        updated = meta.model_copy(
-            update={
-                key: value
-                for key, value in (
-                    ("queue_item_id", queue_item_id),
-                    ("print_route", print_route),
-                    ("slice_job_id", slice_job_id),
-                    ("project_id", project_id),
-                    ("plates", plates),
-                )
-                if value is not None
-            }
+        Outputs are ordered by ``created_at`` (the cover is the oldest's, the list is
+        newest first), and a wall clock that steps back between two saves would put
+        the second before the first. Never earlier than an existing output keeps the
+        order the saves happened in; the stamp then runs ahead by the step."""
+        now = datetime.now(UTC)
+        existing = self._oldest_first(slug)
+        if existing and existing[-1].created_at >= now:
+            return existing[-1].created_at + timedelta(microseconds=1)
+        return now
+
+    def bom(self, output_id: str) -> list[BomEntry]:
+        path = self.directory(output_id) / BOM_NAME
+        if not path.is_file():
+            return []
+        return [BomEntry.model_validate(e) for e in json.loads(path.read_text(encoding="utf-8"))]
+
+    def manifest(self, output_id: str) -> list[ManifestObject]:
+        """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
+        try:
+            path = self.directory(output_id) / MANIFEST_NAME
+        except OutputNotFoundError:
+            return []
+        if not path.is_file():
+            return []
+        return [
+            ManifestObject.model_validate(m) for m in json.loads(path.read_text(encoding="utf-8"))
+        ]
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        """For an arranged output, the outputs its objects came from, and each library
+        file ScadBuddy did not make as `library:<id>` (#2284)."""
+        try:
+            path = self.directory(output_id) / ARRANGED_NAME
+        except OutputNotFoundError:
+            return []
+        if not path.is_file():
+            return []
+        return _ID_LIST.validate_json(path.read_text(encoding="utf-8"))
+
+    def backfill(self, output_id: str) -> BackfillState | None:
+        """The re-render queued to give this output a manifest (#902), if any."""
+        try:
+            path = self.directory(output_id) / BACKFILL_NAME
+        except OutputNotFoundError:
+            return None
+        if not path.is_file():
+            return None
+        return BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def start_backfill(self, output_id: str, job_id: str) -> None:
+        _replace(
+            self.directory(output_id) / BACKFILL_NAME,
+            BackfillState(job_id=job_id).model_dump_json(),
         )
-        self._write_meta(directory, updated)
-        return updated
+
+    def fail_backfill(self, output_id: str, job_id: str, error: str) -> None:
+        state = BackfillState(job_id=job_id, error=error)
+        _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
+
+    def clear_backfill(self, output_id: str) -> None:
+        directory = self.directory(output_id)
+        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        self._changed(directory.parent.name)
+
+    def pending_backfills(self) -> list[tuple[str, BackfillState]]:
+        """Every output waiting on a re-render that has not failed."""
+        pending: list[tuple[str, BackfillState]] = []
+        for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
+            try:
+                state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValidationError):
+                continue  # deleted under us, or half written: the next pass reads it
+            if state.error is None:
+                pending.append((path.parent.name, state))
+        return pending
+
+    def attach_backfill(self, output_id: str, chosen: PipelineOutput) -> None:
+        """Give the output what a new one records (§7, §8.4) from its re-render, keeping
+        its id, name and files. Run again, it writes the same files."""
+        directory = self.directory(output_id)
+        if not (directory / RECORD_NAME).is_file():
+            _replace(directory / RECORD_NAME, chosen.record.model_dump_json())
+        _replace(
+            directory / MANIFEST_NAME,
+            json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
+        )
+        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        self._changed(directory.parent.name)
+
+    def record(self, output_id: str) -> OutputRecord | None:
+        path = self.directory(output_id) / RECORD_NAME
+        if not path.is_file():
+            return None
+        return OutputRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def files(self, output_id: str) -> list[str]:
+        directory = self.directory(output_id) / FILES_DIR
+        if not directory.is_dir():
+            return []
+        return sorted(p.name for p in directory.iterdir() if p.is_file())
+
+    def file_path(self, output_id: str, name: str) -> Path:
+        """An extra file of the output; its name is a plain file name, never a path."""
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
+            raise OutputNotFoundError(name)
+        path = self.directory(output_id) / FILES_DIR / name
+        if not path.is_file():
+            raise OutputNotFoundError(name)
+        return path
+
+    def rename(self, output_id: str, name: str | None) -> OutputMeta:
+        """Give the output ``name``, or none (#2288). Only ``meta.json`` changes: the
+        3MF's provenance names the output by id, and a download is named at download.
+
+        A read-modify-write with no lock: nothing else rewrites ``meta.json`` once the
+        output is saved. A second writer of it needs a lock here, or one rename loses."""
+        directory = self._find_dir(output_id)
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        renamed = meta.model_copy(update={"name": name or None})
+        _replace(
+            directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        )
+        return self.get(output_id)
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
         shutil.rmtree(directory, ignore_errors=True)
+        # A long-lived process would otherwise keep every deleted id's entry (#2909).
+        self._dirs.pop(output_id, None)
         self.forget_plate_cover(directory.parent.name)
         self._changed(directory.parent.name)
 
@@ -476,6 +728,34 @@ class OutputStore:
         partial.replace(cache)
         return analysis
 
+    def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
+        """The cached analysis whose weak joints name their scene objects at
+        ``model_version`` (see :meth:`geometry`), or None when there is none, or it was
+        made by another :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION`."""
+        try:
+            stored = json.loads(self._attributed_path(output_id, plate).read_text("utf-8"))
+            cached = GeometryAnalysis.model_validate(stored["analysis"])
+            if stored["model_version"] != model_version or cached.version != ANALYSIS_VERSION:
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return cached
+
+    def write_attributed(
+        self, output_id: str, plate: int, model_version: str, analysis: GeometryAnalysis
+    ) -> None:
+        path = self._attributed_path(output_id, plate)
+        body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
+        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        partial.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+        partial.replace(path)
+
+    def _attributed_path(self, output_id: str, plate: int) -> Path:
+        name = (
+            "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
+        )
+        return self._find_dir(output_id) / name
+
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME
 
@@ -496,3 +776,175 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = meta.id
     # A built-in's bare slug: `:` is not a character a saved file name can carry.
     return f"{meta.slug.removeprefix(BUILTIN_PREFIX)}-{suffix}.3mf"
+
+
+def require_output(store: OutputStore, output_id: str) -> OutputMeta:
+    """The output, or the 404 a route answers for it."""
+    try:
+        return store.get(output_id)
+    except OutputNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
+
+
+def hold_parts(
+    refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject], slug: str
+) -> None:
+    """The output's Parts outlive the job that rendered them: Arrange reads them (§7).
+    The output's slug is recorded first, so the reaper can tell a deleted output from
+    one whose slug directory is missing."""
+    _record_slug(refs, output_id, slug)
+    for obj in manifest:
+        refs.add(obj.part, OUTPUT_HOLDER, output_id)
+
+
+def release_parts(refs: BlobRefs, output_id: str) -> None:
+    refs.drop_holder(OUTPUT_HOLDER, output_id)
+    with refs.pool.connection() as conn:
+        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+
+def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
+            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
+            (output_id, slug),
+        )
+
+
+def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
+    """Record many outputs' slugs in ONE statement (#2353): the reaper used to upsert
+    every held, live output's slug on every pass, one transaction each, all no-ops once
+    recorded. Rows that already say the same slug are not written."""
+    if not slugs:
+        return
+    ids = sorted(slugs)
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO output_hold_slugs (output_id, slug)"
+            " SELECT * FROM unnest(%s::text[], %s::text[])"
+            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
+            " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
+            (ids, [slugs[output_id] for output_id in ids]),
+        )
+
+
+def _live_outputs(root: Path) -> dict[str, set[str]]:
+    """Every slug directory under ``root``, with the ids of its outputs that have a
+    meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
+    instead of being skipped. Symlinks are followed, as ``OutputStore``'s own globs
+    follow them: an output it serves must not look deleted."""
+    live: dict[str, set[str]] = {}
+    with os.scandir(root) as slugs:
+        for slug in slugs:
+            if not slug.is_dir(follow_symlinks=True):
+                continue
+            ids = live.setdefault(slug.name, set())
+            with os.scandir(slug.path) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=True) and os.path.isfile(
+                        os.path.join(entry.path, META_NAME)
+                    ):
+                        ids.add(entry.name)
+    return live
+
+
+#: How old an `output` hold must be before the reaper may call it orphaned: a save holds
+#: its Parts before it writes meta.json (api/outputs.py `create_output`).
+ORPHAN_HOLD_GRACE = timedelta(hours=1)
+
+
+def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
+    """Remove a released orphan's directory (#1815): no read sees it (they glob for
+    meta.json), but its bytes stay. Only an output's own directory, still without
+    meta.json, and untouched for ``grace``: a save writes its files before meta.json.
+    Best effort: its holds are already gone, so a failure costs only the bytes."""
+    if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or directory.is_symlink():
+        return
+    try:
+        if (directory / META_NAME).exists():
+            return
+        age = datetime.now(UTC).timestamp() - directory.stat().st_mtime
+        if age < grace.total_seconds():
+            return
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.exception(
+            "could not remove an orphaned output's directory", extra={"path": str(directory)}
+        )
+
+
+def reap_orphan_holds(
+    refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
+) -> int:
+    """Release every `output` hold older than ``grace`` whose output has no meta.json
+    (#1007): a save that failed between holding its Parts and writing meta.json, or a
+    hold taken after a delete's release, leaves holds that nothing else ever drops.
+    Returns how many outputs' holds it released. Each released output's directory, if
+    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815).
+
+    It never mistakes a missing directory for deleted outputs. An output's hold is
+    released only when the reaper knows the output's slug (``output_hold_slugs``) and
+    listed that slug's directory. A slug directory that is missing (not yet copied onto
+    a new volume, say) releases nothing for that slug and is logged. A directory it
+    cannot list (permissions, a stale NFS handle) raises and ends the pass, since
+    ``Path.glob`` would skip it. An unmounted or empty volume lists no slug at all, so
+    releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
+    and with no live output to learn it from) is never released here. The cost of all
+    this: holds orphaned by a model's whole deletion stay until a person drops them."""
+    root = store.paths.outputs
+    with refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT holder_id FROM blob_refs"
+            " WHERE holder_kind = %s AND created_at < now() - %s",
+            (OUTPUT_HOLDER, grace),
+        ).fetchall()
+    held = {row["holder_id"] for row in rows}
+    if not held:
+        return 0
+    live = _live_outputs(root) if root.is_dir() else {}
+    live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
+    # Holds taken before slugs were recorded: a live output tells its own slug.
+    _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
+    candidates = sorted(held - live_slug.keys())
+    with refs.pool.connection() as conn:
+        slug_rows = conn.execute(
+            "SELECT output_id, slug FROM output_hold_slugs WHERE output_id = ANY(%s)",
+            (candidates,),
+        ).fetchall()
+    slug_of = {row["output_id"]: row["slug"] for row in slug_rows}
+    orphans: list[str] = []
+    missing: dict[str, int] = {}
+    unknown = 0
+    for output_id in candidates:
+        slug = slug_of.get(output_id)
+        if slug is None:
+            unknown += 1
+        elif slug not in live:
+            missing[slug] = missing.get(slug, 0) + 1
+        else:
+            orphans.append(output_id)
+    for slug, n in sorted(missing.items()):
+        logger.error(
+            "the outputs directory of %s is missing while %d of its outputs hold Parts;"
+            " not releasing them",
+            slug,
+            n,
+            extra={"root": str(root), "slug": slug},
+        )
+    for output_id in orphans:
+        release_parts(refs, output_id)
+        _remove_orphan_directory(root / slug_of[output_id] / output_id, grace)
+    if orphans or unknown:
+        # One line to spot an unexpected mass release (#1806 review).
+        logger.warning(
+            "released the Parts of %d orphaned outputs (%d held past the grace; %d of"
+            " unknown template kept)",
+            len(orphans),
+            len(held),
+            unknown,
+            extra={"ids": orphans[:50]},
+        )
+    return len(orphans)

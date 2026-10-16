@@ -26,6 +26,7 @@
  * | `user` message with the matching `tool_result` block         | `tool.result`          |
  * | `canUseTool` / `PreToolUse` for an `outward` tool (§8.2)      | `approval.required`    |
  * | `canUseTool` for AskUserQuestion (#940)                       | `question.asked`       |
+ * | a subagent's `ask_user` MCP call (#940)                      | `question.asked`       |
  * | `result` (total cost, number of turns)                       | `session.result`       |
  *
  * The exact SDK field names (for example the result message's cost and turn fields)
@@ -53,6 +54,10 @@ export type Risk = z.infer<typeof RiskSchema>
 /** §6 origins. */
 export const OriginSchema = z.enum(['chat', 'mcp', 'analyzer', 'hook'])
 export type Origin = z.infer<typeof OriginSchema>
+
+/** Plan 5d — how a session runs: in the agent's harness, or as a durable Temporal workflow. */
+export const SessionModeSchema = z.enum(['classic', 'durable'])
+export type SessionMode = z.infer<typeof SessionModeSchema>
 
 /** §6 statuses. */
 export const SessionStatusSchema = z.enum([
@@ -129,12 +134,83 @@ export const QuestionSchema = z.object({
   .refine((q) => !q.multiSelect || q.options.every((o) => !o.label.includes(',')), 'no comma in a multi-select label')
 export type Question = z.infer<typeof QuestionSchema>
 
+/** #815 — what makes a `question.asked` an attention request (agent `src/sessions/protocol.ts` `AttentionView`). */
+export const AttentionSchema = z.union([
+  z.object({
+    reason: z.enum(['tab_disconnected', 'question', 'blocked', 'done']),
+    onTimeout: z.enum(['proceed', 'wait', 'stop']),
+    expiresAt: z.string().min(1),
+  }),
+  /**
+   * A `done` summary (#815 §4): no timer, nothing waits on it, and it stays until the
+   * user dismisses it. `summary` is ScadBuddy's own Markdown list of what the turn
+   * touched (agent `src/questions/doneSummary.ts`).
+   */
+  z.object({ reason: z.literal('done'), summary: z.string() }),
+])
+export type Attention = z.infer<typeof AttentionSchema>
+/** A `done` summary's attention block. */
+export type DoneAttention = Extract<Attention, { summary: string }>
+
+/**
+ * #1383 — the one rule for "a `done` summary, not a wait": reason `done` and no timer. An
+ * older replica's timed `done` row is an attention request its turn is parked on. The
+ * agent's own copy is its `src/questions/waiting.ts`.
+ */
+export const isDoneSummary = (reason: string, timed: boolean): boolean => reason === 'done' && !timed
+
+/** Whether `a` is a `done` summary, which is dismissed rather than answered. */
+export const isDone = (a: Attention | undefined): a is DoneAttention =>
+  a !== undefined && isDoneSummary(a.reason, 'onTimeout' in a)
+
+/**
+ * #1200 — `GET /api/v1/ai/pending-input`'s body as the badge reads it (agent
+ * `src/routes/pendingInput.ts` `PendingInputPage`): only what it counts by.
+ */
+export const PendingInputSchema = z.object({
+  entries: z.array(
+    z.object({
+      kind: z.enum(['approval', 'answer']),
+      /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
+      expiring: z.boolean().optional(),
+      /** #2482 — a flow run's entry: at hop `parent` it waits for the starting session, not yet for the user. */
+      run: z
+        .object({
+          hop: z.enum(['parent', 'person']).nullable(),
+          id: z.string().optional(),
+          name: z.string().optional(),
+          /** The session that started the run; null for one started from the browser. */
+          starter_session: z.string().nullable().optional(),
+        })
+        .optional(),
+      attention: z
+        .object({ reason: z.string(), on_timeout: z.string().nullable(), summary: z.string().optional() })
+        .optional(),
+    }),
+  ),
+  /** Absent from an older agent. */
+  summaries_truncated: z.boolean().optional(),
+})
+export type PendingInput = z.infer<typeof PendingInputSchema>
+
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
   title: z.string(),
   origin: OriginSchema,
   owner: OwnerSchema,
   status: SessionStatusSchema,
+  /** #795 — for the switcher: its parent (forks nest under it), last activity, and spend; absent from an older agent. */
+  parentId: z.string().nullable().optional(),
+  updatedAt: z.string().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  budgetUsd: z.number().positive().optional(),
+  /** Plan 5d — how it runs; absent from an older agent (classic). */
+  mode: SessionModeSchema.optional(),
+  /**
+   * #1284 — a live handoff offer: to whom, until when. Absent from an older agent. The
+   * target's id is left out for a viewer that may not see it (agent `ownerSeenBy`).
+   */
+  offer: z.object({ to: OwnerSchema.partial({ id: true }), until: z.string() }).nullable().optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 
@@ -154,6 +230,52 @@ export const PageContextSchema = z.object({
   page: z.record(z.string(), z.unknown()).optional(),
 })
 export type PageContext = z.infer<typeof PageContextSchema>
+
+/**
+ * #1866 — the types an image the user sends may be (the four the Messages API reads), and
+ * its preview's. The composer uploads both as bytes (`api.uploadAttachment`, #2479); the
+ * agent checks the bytes, the types and the caps (agent `src/sessions/images.ts`).
+ */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
+export const PREVIEW_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
+
+/**
+ * #1941 — an image the composer uploaded when it was attached (agent `POST
+ * /api/v1/ai/attachments`), sent by its id: no image travels in the socket's frames.
+ */
+export const AttachmentRefSchema = z.object({ kind: z.literal('attachment'), id: z.uuid() })
+export type AttachmentRef = z.infer<typeof AttachmentRefSchema>
+
+/**
+ * #782 — an image a tool result carried, by name: the agent keeps the bytes (agent
+ * `src/sessions/blobs.ts`) and serves them on the panel's own origin (`blobUrl`).
+ */
+export const ToolImageSchema = z.object({
+  name: z.string().regex(/^[0-9a-f]{64}\.(png|jpg|gif|webp)$/),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES),
+})
+export type ToolImage = z.infer<typeof ToolImageSchema>
+
+/**
+ * An image the user sent, as a `user.turn` names it (#2479): the full image and its
+ * preview, each stored with the session (agent `src/sessions/blobs.ts` `sentImageBlobs`)
+ * and served by `blobUrl`. Never the bytes: a turn that carries them does not parse. A turn
+ * logged before #2479 whose full image could not be stored names its preview only.
+ */
+export const SentImageSchema = z.strictObject({
+  name: ToolImageSchema.shape.name.optional(),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES).optional(),
+  preview: z.strictObject({ name: ToolImageSchema.shape.name, mediaType: z.enum(PREVIEW_MEDIA_TYPES) }),
+})
+export type SentImage = z.infer<typeof SentImageSchema>
+
+/**
+ * Where the agent serves one of a session's stored images, a tool result's or one the
+ * user sent (agent `GET /api/v1/ai/sessions/:id/blobs/:name`).
+ */
+export function blobUrl(sessionId: string, name: string): string {
+  return `/api/v1/ai/sessions/${encodeURIComponent(sessionId)}/blobs/${encodeURIComponent(name)}`
+}
 
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1)
@@ -177,6 +299,10 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     title: z.string().optional(),
     /** What the session may spend in all (#790); absent on sessions started before it. */
     budgetUsd: z.number().positive().optional(),
+    /** Plan 5d — how it runs; absent on sessions started before it (classic). */
+    mode: SessionModeSchema.optional(),
+    /** Plan 5d — why a session whose mode came from the default runs classic, not durable (the bare reason). */
+    modeFallback: z.string().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -186,6 +312,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     turnId: z.string().min(1),
     text: z.string(),
     author: OwnerSchema,
+    /** #1866 — previews of the images sent with the turn, each naming its stored full image. */
+    images: z.array(SentImageSchema).optional(),
   }),
   z.object({
     v,
@@ -208,6 +336,14 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     name: z.string().min(1),
     input: z.record(z.string(), z.unknown()),
     risk: RiskSchema,
+    /** A subagent's call (#1108): the id of the session's `Agent` call that spawned it. */
+    parent: z.string().min(1).optional(),
+    /**
+     * #782 — what the call does, in words, as the tool itself declares it (agent
+     * `src/tools/registry.ts` `ToolSpec.title`). Absent for a tool outside ScadBuddy's
+     * registry, which the panel names itself (`labels.ts` `toolTitle`).
+     */
+    title: z.string().min(1).max(200).optional(),
   }),
   z.object({
     v,
@@ -218,6 +354,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     summary: z.string(),
     sources: z.array(SourceSchema).optional(),
     version: VersionLinkSchema.optional(),
+    /** #782 — the images the result carried, each served by the agent's `blobUrl` route. */
+    images: z.array(ToolImageSchema).max(16).optional(),
   }),
   z.object({
     v,
@@ -236,11 +374,16 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     id: z.string().min(1),
     approved: z.boolean(),
+    /** How it ended (#979); absent from events logged before it existed, where `approved` says it. */
+    decision: z.enum(['approved', 'denied', 'expired', 'cancelled']).optional(),
     by: OwnerSchema.optional(),
+    /** Why an expired or cancelled one ended. */
+    reason: z.string().optional(),
   }),
   /**
    * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.
-   * `tool` is the AskUserQuestion `tool.call` id.
+   * `tool` is the AskUserQuestion or `ask_user` tool_use id, a `tool.call` in the
+   * feed (a subagent's, tagged with `parent`, since #1108).
    */
   z.object({
     v,
@@ -249,6 +392,12 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     id: z.string().min(1),
     tool: z.string().min(1),
     questions: z.array(QuestionSchema).min(1).max(QUESTIONS_MAX),
+    /**
+     * #815 — an attention request (`request_user_attention`), not a question: one card,
+     * and a timer that resolves it at `expiresAt` without an answer (`onTimeout` says
+     * what the agent does then; never an approval).
+     */
+    attention: AttentionSchema.optional(),
   }),
   /**
    * Answered (`answers`, one per question in order, and `by`), or cancelled with its
@@ -263,6 +412,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string()).optional(),
     by: OwnerSchema.optional(),
     reason: z.string().optional(),
+    /** #815 — an attention request for a disconnected tab ended because the tab is back. */
+    reconnected: z.literal(true).optional(),
   }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
   z.object({
@@ -283,6 +434,22 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     costUsd: z.number().nonnegative(),
     budgetUsd: z.number().positive(),
+  }),
+  /**
+   * #2329 — a file was uploaded into, or deleted from, the session's workspace through
+   * its files route: the Files list reads again, and the feed notes it. `size`,
+   * `mediaType` and `sha256` are an upload's.
+   */
+  z.object({
+    v,
+    type: z.literal('workspace.file'),
+    sessionId,
+    path: z.string().min(1),
+    change: z.enum(['uploaded', 'deleted']),
+    by: OwnerSchema,
+    size: z.number().int().nonnegative().optional(),
+    mediaType: z.string().optional(),
+    sha256: z.string().optional(),
   }),
   z.object({
     v,
@@ -329,6 +496,19 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     text: z.string().min(1),
     context: PageContextSchema,
+    /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
+    images: z.array(AttachmentRefSchema).min(1).optional(),
+    /** Plan 5d — a new chat's mode, from the composer's picker; absent, the agent's default applies. */
+    mode: SessionModeSchema.optional(),
+    /**
+     * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
+     * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent
+     * before the page's tracing has loaded; an agent that predates it ignores it.
+     */
+    traceparent: z
+      .string()
+      .regex(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/)
+      .optional(),
   }),
   z.object({
     v,

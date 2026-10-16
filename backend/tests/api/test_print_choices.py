@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.extruders import default_nozzles
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import StoredSettings
 from tests.api.test_print import printers_route
@@ -43,7 +45,7 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     printers_route()
     inventory_routes()
     h2c_presets()
-    respx.get(f"{API}/printers/1/status").mock(
+    status_read = respx.get(f"{API}/printers/1/status").mock(
         return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
     )
     respx.get(f"{API}/archives/").mock(
@@ -52,14 +54,23 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1").json()
 
+    # #2504: one read, shared by the rack and the filament step.
+    assert status_read.call_count == 1
+
     assert body["nozzle_sizes"] == ["0.2", "0.4", "0.6", "0.8"]
     assert {(n["size"], n["flow"]) for n in body["installed"]} >= {("0.2", "standard")}
+    # #1895: read from this printer's own nozzles.
+    status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
+    assert body["default_nozzles"] == [n.model_dump() for n in default_nozzles(status)]
     assert body["tiers"]["0.2"][0] == {
         "tier": "fine",
         "process_name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
     }
     assert "0.08mm High Quality @BBL H2C" in body["processes"]["0.4"]
     assert body["last_bed_type"] == "Textured PEI Plate"
+    # #2366: the H2C's own plates, once each, by Bambu Studio's labels.
+    assert body["bed_types"] == ["Engineering Plate", "Textured PEI Plate", "Supertack Plate"]
+    assert body["bed_type_labels"]["Supertack Plate"] == "Bambu Cool Plate SuperTack"
     assert body["filaments"]["slots"]
 
 
@@ -118,6 +129,11 @@ def test_an_offline_printer_still_opens_the_dialog(client: TestClient, model: st
     assert response.status_code == 200
     assert response.json()["installed"] == []
     assert response.json()["bed_type"] == "Textured PEI Plate"
+    # Nothing known of its nozzles: Standard, as before #1895.
+    assert response.json()["default_nozzles"] == [
+        {"size": "0.4", "flow": "standard"},
+        {"size": "0.4", "flow": "standard"},
+    ]
 
 
 @respx.mock
@@ -147,8 +163,9 @@ def test_choices_list_the_filament_presets_each_nozzle_size_takes(
     assert len(names_02) == len(set(names_02))
     abs_02 = next(row for row in by_size["0.2"] if row["name"] == "Bambu ABS @BBL H2C 0.2 nozzle")
     assert abs_02["ref"] == {"source": "cloud", "id": "GFSB00_23"}
-    # Fix round 1 #7 — the dialog reads only the name and the ref.
-    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name"}
+    # Fix round 1 #7 — the dialog reads only the name and the ref, and the material it
+    # filters the list by (#2164).
+    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name", "filament_type"}
 
 
 @respx.mock

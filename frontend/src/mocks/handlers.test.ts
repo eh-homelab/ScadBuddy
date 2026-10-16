@@ -2,6 +2,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
 import { DEFAULT_NOZZLES } from '../lib/printChoices'
+import { verifiedFixDiagnostic } from './analyzers'
+import { setMockAnalyzerDiagnostics } from './features/analyzers'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -884,6 +886,16 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(poster.headers.get('Content-Type')).toBe('image/png')
   })
 
+  it('serves a thumbnail of an image and of a video poster (#624)', async () => {
+    const items = (await api.getModel(GALLERY_SLUG)).media ?? []
+    const slug = encodeURIComponent(GALLERY_SLUG)
+    for (const item of items) {
+      const response = await fetch(`/api/v1/models/${slug}/media/${item.id}/thumbnail`)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe('image/webp')
+    }
+  })
+
   it('drops the cover with the last image', async () => {
     const removed = await api.deleteMedia('name-keychain', 'thumbnail')
     expect(removed.media).toEqual([])
@@ -1163,6 +1175,41 @@ describe('the print detail mock', () => {
   })
 })
 
+describe('mock API: analyzer fixes', () => {
+  beforeEach(() => resetMockState())
+
+  it('lists what an apply still needs verified once each, as the preview does', async () => {
+    const fix = verifiedFixDiagnostic.fixes![0]!
+    const change = fix.changes[0]!
+    const unverified = { ...change, verified: false, to_verify: 'Whether the queue item takes it' }
+    setMockAnalyzerDiagnostics([
+      {
+        ...verifiedFixDiagnostic,
+        fixes: [{ ...fix, changes: [unverified, { ...unverified, setting: 'timelapse_type' }] }],
+      },
+    ])
+    const body = {
+      target: { output_id: outputs[0]!.id },
+      request: { plate_id: 1, all_plates: false },
+      diagnostic_key: verifiedFixDiagnostic.key,
+      fix_id: fix.id,
+      scope: null,
+    }
+    const preview = await api.previewFix(body)
+    expect(preview.blockers).toEqual(['Whether the queue item takes it'])
+    expect(preview.applicable).toBe(false)
+    await expect(
+      api.applyFix({ ...body, scope: preview.scope, fingerprint: preview.fingerprint, confirm: true }),
+    ).rejects.toMatchObject({
+      status: 409,
+      problem: {
+        type: 'https://scadbuddy.dev/problems/analyzer-fix-unverified',
+        to_verify: ['Whether the queue item takes it'],
+      },
+    })
+  })
+})
+
 describe('mock API: analyzer decisions', () => {
   beforeEach(() => resetMockState())
 
@@ -1212,8 +1259,8 @@ describe('library print', () => {
   it('lists the root 3MFs, and every file under all', async () => {
     const plain = await api.listLibrary({ folderId: null, all: false })
     const every = await api.listLibrary({ folderId: null, all: true })
-    expect(plain.files?.map((file) => file.id)).toEqual([89])
-    expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
+    expect(plain.files?.map((file) => file.id)).toEqual([89, 91])
+    expect(every.files?.find((file) => file.id === 104)).toMatchObject({ printable: true, sliced: true })
     expect(plain.hidden).toBe(1)
   })
 
@@ -1236,8 +1283,8 @@ describe('library print', () => {
     expect((await api.getLibraryChoices(89)).model_choices?.printer_id ?? null).toBeNull()
   })
 
-  it('refuses a sliced file and a missing one', async () => {
-    await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
+  it('runs a sliced file and refuses a missing one', async () => {
+    await expect(api.runLibraryPrint(104, runBody)).resolves.toMatchObject({ library_file_id: 104 })
     await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
   })
 })

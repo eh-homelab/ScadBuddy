@@ -66,6 +66,8 @@ def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path
         "image/jpeg",
         "image/webp",
     }
+    # Usually WebP, but a file it cannot shrink is served as it is (#1427).
+    assert success_types("/api/v1/models/{slug}/media/{item_id}/thumbnail", "get") == {"image/*"}
     assert success_types("/api/v1/models/{slug}/source", "get") == {"text/plain"}
     for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
         for method in ("put", "delete"):
@@ -97,3 +99,22 @@ def test_the_view_routes_document_a_png(tmp_path: Path) -> None:
         "/api/v1/outputs/{output_id}/views/{view}.png",
     ):
         assert set(paths[path]["get"]["responses"]["200"]["content"]) == {"image/png"}, path
+
+
+def test_the_view_routes_document_the_camera(tmp_path: Path) -> None:
+    """#830: an agent works a camera out from a feature's coordinates, so the
+    conventions are in the spec, not only in the code."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+
+    for path in (
+        "/api/v1/jobs/{job_id}/views/{view}.png",
+        "/api/v1/outputs/{output_id}/views/{view}.png",
+        "/api/v1/jobs/{job_id}/colours.png",
+    ):
+        params = {p["name"]: p for p in paths[path]["get"]["parameters"]}
+        for name in ("azimuth", "elevation", "zoom", "target_x", "target_y", "target_z"):
+            assert params[name]["in"] == "query", (path, name)
+            assert params[name]["description"], (path, name)
+        assert "+Z" in params["azimuth"]["description"], path
+        assert "front" in params["azimuth"]["description"], path
+        assert '"maximum": 90' in json.dumps(params["elevation"]["schema"]), path

@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import io
 import os
+import shutil
 import threading
 import time
 import zipfile
@@ -231,6 +232,30 @@ async def test_eviction_skips_a_directory_touched_after_the_scan(
     assert a.local.exists("claimed")
 
 
+async def test_an_eviction_cut_short_leaves_no_hit_behind(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1271: a worker killed mid-removal leaves a directory whose marker no longer
+    claims the published bytes, so the next fetch downloads it again."""
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("old") / "m").write_bytes(b"x" * 10)
+    await a.publish("old", scope=SCOPE)
+    past = time.time() - 3600
+    os.utime(a.local.root / "old", (past, past))
+
+    def killed_part_way(path: Path, *args: object, **kwargs: object) -> None:
+        (path / "m").unlink()  # the content goes first; the process dies before the rest
+        raise SystemExit
+
+    monkeypatch.setattr(shutil, "rmtree", killed_part_way)
+    with pytest.raises(SystemExit):
+        a.evict()
+    monkeypatch.undo()
+    assert not (a.local.root / "old" / MARKER).exists()
+    assert await a.fetch("old")
+    assert (a.local.root / "old" / "m").read_bytes() == b"x" * 10
+
+
 async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_index(
     tmp_path: Path, content: ContentStore
 ) -> None:
@@ -399,3 +424,25 @@ async def test_a_row_on_another_backend_is_not_this_caches_to_fetch(
     assert await b.fetch("k") is False
     assert await b.indexed_sha("k") is None
     assert b.exists("k") is False
+
+
+async def test_a_template_activity_another_worker_published_is_reused_not_run_again(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """Identical `ctx.activity` calls share one `act-` key: the second worker fetches
+    the first's blob and returns its value, and publishes nothing."""
+    from tests.test_template_activities import RecordingRefs, _call, _world
+
+    refs_a, refs_b = RecordingRefs(), RecordingRefs()
+    a, _ = _world(tmp_path / "a", blobs=worker(tmp_path / "a", content), refs=refs_a)
+    on_b = worker(tmp_path / "b", content)
+    b, _ = _world(tmp_path / "b", blobs=on_b, refs=refs_b)
+    count = tmp_path / "count"
+    env = ActivityEnvironment()
+    first = await env.run(a.run_template_activity, _call("counted", str(count), job_id="j1"))
+    second = await env.run(b.run_template_activity, _call("counted", str(count), job_id="j2"))
+    assert second == first
+    assert count.read_text() == "x"  # ran once, on A
+    key = first["key"]
+    assert (on_b.dir_for(key) / "n.txt").read_text() == "n"
+    assert (key, "job", "j2") in refs_b.held

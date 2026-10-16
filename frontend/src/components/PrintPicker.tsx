@@ -1,22 +1,55 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api } from '../api/client'
+import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
   AnalysisRequest,
+  AnalysisTarget,
   FilamentWarning,
+  NozzlePlan as NozzlePlanView,
+  Output,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
+  PrintSequence,
+  SupportsChoice,
+  PrimeTowerChoice,
   RackAlgorithm,
 } from '../api/types'
+import {
+  arrangedName,
+  arrangedNote,
+  backfillFailures,
+  backfillIds,
+  backfillNote,
+  backfillOutputs,
+  GOAL_LABELS,
+  needsBackfill,
+  runArrange,
+  type ArrangeGoal,
+} from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
+import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
-import { printChoicesOf } from '../lib/printChoices'
+import { plateLabel } from '../lib/plate'
+import { resolvedColors } from '../lib/plateColors'
+import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
+import { useFilamentProfiles } from '../lib/filamentProfiles'
+import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
-import { sourceApi, type PrintSource } from '../lib/printSource'
+import {
+  attachPrintToProject,
+  optionsSubject,
+  printSubject,
+  sourceApi,
+  sourceKey,
+  type PrintSource,
+} from '../lib/printSource'
 import { useAsync } from '../lib/useAsync'
-import { useFilamentPlan } from '../lib/useFilamentPlan'
+import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
+import { usePreviewSlice } from '../lib/usePreviewSlice'
+import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -24,16 +57,32 @@ import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
+import { FlowChoice } from './print/FlowChoice'
+import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
+import { PreviewPane } from './print/PreviewPane'
+import { TrayQuestion } from './print/TrayQuestion'
+import { useDeclinedTrays } from '../lib/trays'
 import { PrintVerdict } from './print/PrintVerdict'
+import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
+import { FilamentProfilesStep } from './print/FilamentProfilesStep'
+import { PrintSequenceStep } from './print/PrintSequenceStep'
+import { SupportsStep } from './print/SupportsStep'
+import { PrimeTowerStep } from './print/PrimeTowerStep'
+import { overriddenTowerKeys } from '../lib/primeTower'
+import { overriddenSupportKeys } from '../lib/supports'
+import { SlicerDefaults } from './print/SlicerDefaults'
+import { SlicedSettings } from './print/SlicedSettings'
+import { slicedEstimate } from '../lib/slicedEstimate'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
+import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import { type ProjectList, useProjectList } from '../lib/projects'
+import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -61,7 +110,8 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  *   Checks. The nozzles, quality, plate type, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
  *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
+ *   remembered copies and the page's project, else the last one printed to; that project is
+ *   named in a "Filed under" line (#1660). Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
@@ -70,12 +120,11 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  */
 
 /**
- * The notes about the nozzle step, shown in Advanced mode only (#772): the High Flow
- * choice's `hf-unsupported` and the rack's `not-installed`. A mounted High Flow nozzle
- * of the chosen size (`hf-mounted`, #797), whatever flow is chosen, is not one of them,
- * so Simple shows it.
+ * The notes about the nozzle step, shown in Advanced mode only (#772): the rack's
+ * `not-installed`. A side the slice may use with a nozzle of the chosen size mounted in
+ * the other flow (`hf-mounted`, #797, #484) is not one of them, so Simple shows it.
  */
-const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['hf-unsupported', 'not-installed'])
+const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
 
 interface Props {
   open: boolean
@@ -99,32 +148,170 @@ interface Props {
     /** #665 — a "Create project" in this picker is in flight. */
     onCreating?: (creating: boolean) => void
   }
+  /**
+   * #1294 — the model's own slicer defaults (`print_settings`), shown read-only for an
+   * output. A library file has none of ScadBuddy's.
+   */
+  printSettings?: Record<string, string> | undefined
+  /**
+   * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
+   * the print waits in Bambuddy's queue rather than starting. It can be unticked.
+   */
+  queue?: boolean
 }
 
-export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, project }: Props) {
+export function PrintPicker({
+  open,
+  source: given,
+  onClose,
+  onRan,
+  onPrinterModel,
+  project,
+  printSettings,
+  queue = false,
+}: Props) {
+  /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
+  const [arranged, setArranged] = useState<Output | null>(null)
+  const [arrangeGoal, setArrangeGoal] = useState<ArrangeGoal>('fewest_swaps')
+  const [arranging, setArranging] = useState(false)
+  const [arrangeNote, setArrangeNote] = useState<string | null>(null)
+  const [arrangeError, setArrangeError] = useState<string | null>(null)
+  /** #902 — the output in view, read back after a re-render gave it its objects. */
+  const [backfilled, setBackfilled] = useState<Output | null>(null)
+  /** The output being asked about (re-render it first?), by id, so it never names another. */
+  const [askFor, setAskFor] = useState<string | null>(null)
+  /** The output Arrange said needs a re-render, though it showed objects; by id, likewise. */
+  const [flaggedId, setFlaggedId] = useState<string | null>(null)
+  const [backfillProgress, setBackfillProgress] = useState<Record<string, string>>({})
   /**
-   * The model, for its print-options scope — the same slug its choices are remembered
-   * under (`sourceApi`). A library file has none.
+   * What a re-arrange was made for, carried across the switch to its output: the new
+   * file's slot N is the old one's colour (`colours` pins the order), so the plan and
+   * the settings still apply. While it is set, the hooks keep the dialog's choices
+   * instead of resetting and seeding them for a new source.
    */
-  const slug = source?.kind === 'output' ? source.output.slug : undefined
-  // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
-  const outputId = source?.kind === 'output' ? source.output.id : undefined
-  const picker = usePrintChoices(open, source)
-  const { choices, loading, loadError, printers, printerId, printer, selection, size } = picker
+  const [carry] = useState(() => new CarryBox())
+  /** The re-arrange in flight: closing the dialog (or unmounting it) stops its wait. */
+  const arrangeRun = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (open) return
+    arrangeRun.current?.abort()
+    arrangeRun.current = null
+    setAskFor(null)
+    setFlaggedId(null)
+  }, [open])
+  useEffect(() => () => arrangeRun.current?.abort(), [])
+  const givenKey = sourceKey(given)
+  useEffect(() => {
+    // A new source from the caller is not a re-arrange: nothing carries to it, and a
+    // re-arrange of the old one still in flight must not land on it.
+    arrangeRun.current?.abort()
+    arrangeRun.current = null
+    carry.set(null)
+    setArranged(null)
+    setAskFor(null)
+    setFlaggedId(null)
+  }, [givenKey, carry])
+  const source: PrintSource | undefined = arranged ? { kind: 'output', output: arranged } : given
+  /** The output in view, with what Re-arrange needs of it (a library file has none). */
+  const inView = source?.kind === 'output' ? source.output : undefined
+  const target = inView && backfilled?.id === inView.id ? backfilled : inView
+  /** Its objects, when the caller knows them; an unknown list offers no Re-arrange. */
+  const known = target?.manifest !== undefined
+  const stale = known && (flaggedId === target.id || needsBackfill(target))
+  const askBackfill = target !== undefined && askFor === target.id
+
+  /**
+   * What its own print options are remembered under, as its choices are (#1754): the
+   * model, or the library file. A string, so the effects below see a change of key.
+   */
+  const subject = optionsSubject(source)
+  const scopeKey = subject?.key
+  /** #1751 — what this dialog's print is followed and filed by: the output, or the library file. */
+  const printed = printSubject(source)
+  /** What the analyzers judge: the output, or the library file, as any print (#1753). */
+  const analysisTarget: AnalysisTarget | undefined = !source
+    ? undefined
+    : source.kind === 'output'
+      ? { output_id: source.output.id }
+      : { library_file_id: source.file.id }
+  const picker = usePrintChoices(open, source, carry)
+  const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
+    picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
     plate,
+    carry,
   )
+  /**
+   * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
+   * and only the plates it holds G-code for are offered.
+   */
+  const sliced = choices?.sliced ?? null
+  const slicedPlates = useMemo(() => (sliced?.plates ?? []).map((entry) => entry.index), [sliced])
+  const plates = useMemo(
+    () =>
+      slicedPlates.length > 0 ? picker.plates.filter((entry) => slicedPlates.includes(entry.index)) : picker.plates,
+    [picker.plates, slicedPlates],
+  )
+  const { setPlate } = picker
+  useEffect(() => {
+    const first = slicedPlates[0]
+    if (first !== undefined && plate !== 'all' && !slicedPlates.includes(plate)) setPlate(first)
+  }, [slicedPlates, plate, setPlate])
 
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
   const [copies, setCopies] = useState<number | null>(null)
+  /** #1723 — the plate in 3D, over this dialog; every choice here stays as it is. */
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewColors = useMemo(
+    () => resolvedColors(filaments?.slots ?? [], filaments?.spools ?? [], plan),
+    [filaments, plan],
+  )
   /** #145 — the remembered options, so the box can say what an unset Copies queues. */
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
+  // Memoised: it is a dependency of the run and of the background analysis.
+  // Seeded only while it was never chosen. `null` is the user handing it back to the
+  // remembered value or Bambuddy's ("the default"): sent as no override at all.
+  const sentOptions = useMemo(() => {
+    if (!queue) return options
+    const { manual_start: start, ...rest } = options
+    if (start === undefined) return { ...rest, manual_start: true }
+    return start === null ? rest : options
+  }, [queue, options])
+  /**
+   * #2786 review — the disclosure's edits, kept as the user's own: it builds each edit
+   * from the value it shows, which in a Queue carries the seed. The seed passing back
+   * through is not a choice; Queue's start dropped from what it showed is "the default".
+   */
+  const editOptions = (next: PrintOptions) => {
+    if (!queue) return setOptions(next)
+    const { manual_start: start, ...rest } = next
+    if (start === undefined) return setOptions({ ...rest, manual_start: null })
+    // A `true` while never chosen is the seed passing back through, not a choice. The
+    // select already shows Yes then, so picking Yes fires nothing either: to remember
+    // Yes, the user picks No and then Yes, and that one is kept.
+    setOptions(start === true && options.manual_start === undefined ? rest : next)
+  }
+  /** What Remember saves: the user's edits, never Queue's seed or an unset. */
+  const rememberOptions = useMemo(() => {
+    const { manual_start: start, ...rest } = options
+    return start === null || start === undefined ? rest : options
+  }, [options])
+  /**
+   * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
+   * never remembered (until #1754 decides remembered choices by subject).
+   */
+  const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  // #1899 — this print's supports; `null` leaves them to the template and the process.
+  const [supports, setSupports] = useState<SupportsChoice | null>(null)
+  // #3628 — this print's prime tower; `null` leaves it to the template and the process.
+  const [primeTower, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -136,12 +323,40 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    * while the new printer's choices are read (claude-review on #1043).
    */
   const [chosenAlgorithm, setChosenAlgorithm] = useState<RackAlgorithm | null>(null)
-  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? choices?.rack_algorithm ?? 'least_used'
+  /**
+   * A printer's algorithm as an earlier session's save left it, when that save landed
+   * after this dialog started reading the choices (#1086 review). Shown only, never sent,
+   * and only on that printer. A choices read started after the save landed supersedes it;
+   * one started before it may still answer with the old algorithm, so it does not.
+   */
+  const [savedAlgorithm, setSavedAlgorithm] = useState<{
+    printerId: number
+    algorithm: RackAlgorithm
+    /** The last choices read started when the save landed. */
+    afterRead: number
+    /** The save's `algorithmSave` number, so an earlier one landing later is ignored. */
+    save: number
+  } | null>(null)
+  const storedAlgorithm =
+    savedAlgorithm && savedAlgorithm.printerId === printerId && choicesRead <= savedAlgorithm.afterRead
+      ? savedAlgorithm.algorithm
+      : choices?.rack_algorithm
+  const rackAlgorithm: RackAlgorithm = chosenAlgorithm ?? storedAlgorithm ?? 'least_used'
   const [rackPosition, setRackPosition] = useState<number | null>(null)
   /** A failed save of the algorithm: this print still uses it, the next one may not. */
   const [algorithmUnsaved, setAlgorithmUnsaved] = useState(false)
+  /** Bumped when a session's algorithm is dropped, so a save still in flight cannot
+   *  report its failure on the next one (#1086 review). */
+  const algorithmSession = useRef(0)
+  /** Bumped by each algorithm save: only the latest one's outcome counts, whatever
+   *  order the answers arrive in (#1086 review). */
+  const algorithmSave = useRef(0)
+  /** The saves, one at a time: two in flight at once could be applied in either order,
+   *  leaving the printer on a choice the user had replaced (#1086 review). */
+  const algorithmSaves = useRef<Promise<unknown>>(Promise.resolve())
   // Only a change of printer drops the hand pick and the chosen algorithm.
   useEffect(() => {
+    algorithmSession.current += 1
     setChosenAlgorithm(null)
     setRackPosition(null)
     setAlgorithmUnsaved(false)
@@ -149,8 +364,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   // Simple mode shows no rack step, so a hand pick would be sent unseen (as
   // usePrintChoices' toggleAdvanced drops the other Advanced-only choices).
   const { advanced } = picker
+  // The same for the prime tower (#3648 review): Simple mode sends none.
   useEffect(() => {
-    if (!advanced) setRackPosition(null)
+    if (!advanced) {
+      setRackPosition(null)
+      setPrimeTower(null)
+    }
   }, [advanced])
   useEffect(() => {
     setRackPosition(null)
@@ -158,18 +377,74 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   function changeRackAlgorithm(next: RackAlgorithm) {
     setChosenAlgorithm(next)
     setAlgorithmUnsaved(false)
-    if (printerId !== null)
-      void api.putPrinterRackAlgorithm(printerId, next).catch(() => setAlgorithmUnsaved(true))
+    const session = algorithmSession.current
+    const save = ++algorithmSave.current
+    const savedOn = printerId
+    if (savedOn === null) return
+    // Taken when chosen, not when sent, so the order is the user's (#1216).
+    const version = nextRackAlgorithmVersion()
+    const saving = algorithmSaves.current.then(() =>
+      api.putPrinterRackAlgorithm(savedOn, next, version, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+    )
+    algorithmSaves.current = saving.catch(() => undefined)
+    void saving.then(
+      () => {
+        // Saved after its session ended (#1086 review): the printer now stores `next`,
+        // which a dialog that already read its choices does not know. Show it for that
+        // printer without carrying it in as a choice, and without re-reading the
+        // choices, which would reset the bed type and filament plan set since.
+        if (algorithmSession.current !== session)
+          setSavedAlgorithm((shown) =>
+            shown && shown.printerId === savedOn && shown.save > save
+              ? shown
+              : { printerId: savedOn, algorithm: next, afterRead: picker.readsStarted.current, save },
+          )
+      },
+      (error: unknown) => {
+        // A 409 is a newer save already stored (#1216): by definition that one won, so
+        // there is nothing to report.
+        if (error instanceof ApiError && error.status === 409) return
+        if (algorithmSave.current === save && algorithmSession.current === session)
+          setAlgorithmUnsaved(true)
+      },
+    )
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
-  const projectId = project ? project.value : ownProjectId
   /**
    * #768 — the dialog's own list, read here rather than by its picker, which is an
    * Advanced step: Simple mode must still seed the project from the last one printed to.
    * Read on each open, as the picker was, and never when the page passes its project.
    */
   const ownProjects = useProjectList(setOwnProjectId, open && !project)
+  /**
+   * #1045 — while the list has not been read (still loading, or failed) an unset picker
+   * is not a choice of "No project": the run leaves `project_id` out, so the server files
+   * it under the remembered project instead.
+   */
+  const pickedProject = project ? project.value : ownProjectId
+  // A page project without a shared list is read by its own picker, out of sight here.
+  const projectKnown = project ? project.list?.choices !== null : ownProjects.choices !== null
+  const projectId = pickedProject === null && !projectKnown ? undefined : pickedProject
+
+  /**
+   * #1660 — the project the print is filed under, named, for Simple mode: its picker is an
+   * Advanced step, so a project carried over from earlier would otherwise go unseen. None
+   * while the list is unread, when the server chooses (`projectId` undefined).
+   */
+  const shownProjects = (project ? project.list : ownProjects)?.choices?.projects
+  const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
+  const filedUnderLabel =
+    projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
+  /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
+  const focusProject = useRef(false)
+  useEffect(() => {
+    if (!picker.advanced || !focusProject.current) return
+    focusProject.current = false
+    const select = document.getElementById('print-project')
+    select?.scrollIntoView?.({ block: 'nearest' })
+    select?.focus()
+  }, [picker.advanced])
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -184,6 +459,13 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     project?.onCreating?.(creating)
   }
 
+  // #717 — profiles the chosen spools match, each on unless switched off.
+  const filamentProfiles = useFilamentProfiles({
+    spools: filaments?.spools,
+    plan,
+    choices: printChoicesOf(selection),
+  })
+
   const runPrint = useRunPrint({
     source,
     choices,
@@ -193,7 +475,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     planChanged,
     copies,
     projectId,
-    options,
+    options: sentOptions,
+    printSequence,
+    supports,
+    primeTower,
+    filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     onRan,
@@ -211,7 +497,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    * #89 — follow only the print this dialog just started, so opening the dialog on an
    * output printed last week does not start polling a run nobody is watching.
    */
-  const { progress, polling } = usePrintProgress(outputId, open && result !== null)
+  const { progress, polling } = usePrintProgress(printed, open && result !== null)
 
   /**
    * #79 — file the finished print under its project, once the progress read (#89) has
@@ -220,27 +506,122 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    */
   const attached = useRef<string | null>(null)
   useEffect(() => {
-    if (!outputId || projectId === null || !progress?.settled) return
+    // A run that left the project to the server says where it went (#1045).
+    const filedUnder = projectId === undefined ? (result?.project_id ?? null) : projectId
+    if (!printed || filedUnder === null || !progress?.settled) return
     const entries = (progress.copies_detail ?? [])
       .map((copy) => copy.queue_entry_id)
       .filter((id): id is number => typeof id === 'number')
     if (entries.length === 0) return
-    const key = `${outputId}:${projectId}:${entries.join(',')}`
+    const key = `${printed}:${filedUnder}:${entries.join(',')}`
     if (attached.current === key) return
     attached.current = key
-    void api
-      .attachToProject(outputId, { project_id: projectId, queue_item_ids: entries })
-      .catch(() => {
-        attached.current = null
-      })
-  }, [outputId, projectId, progress])
+    void attachPrintToProject(printed, { project_id: filedUnder, queue_item_ids: entries }).catch(() => {
+      attached.current = null
+    })
+  }, [printed, projectId, result, progress])
 
   // One output's options do not survive a change of output — the other half of
-  // usePrintChoices' reset on the same `sourceKey`.
-  const { sourceKey } = picker
+  // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange
+  // made of it, which keeps the dialog's settings.
+  const { sourceKey: currentKey } = picker
+  const { reset: resetProfiles } = filamentProfiles
   useEffect(() => {
+    if (carry.get()) return
     setOptions({})
-  }, [sourceKey])
+    setPrintSequence(null)
+    setSupports(null)
+    setPrimeTower(null)
+    resetProfiles()
+  }, [currentKey, carry, resetProfiles])
+
+  /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
+  async function rearrange(backfill: boolean) {
+    if (!target?.slug) return
+    setAskFor(null)
+    setArranging(true)
+    setArrangeNote(null)
+    setArrangeError(null)
+    const controller = new AbortController()
+    arrangeRun.current = controller
+    try {
+      // One action from the re-render to the save, as the Arrange dialog's (#2292).
+      await traceAction(
+        'arrange',
+        // `scadbuddy.output_id` is the arranged output, as on the Arrange dialog's span
+        // (#2891); the output it was arranged from is its own attribute.
+        { 'scadbuddy.source_output_id': target.id, 'scadbuddy.rerendered': backfill ? 1 : 0 },
+        async (within, span) => {
+          let from = target
+          if (backfill) {
+            const { ready, failed } = await backfillOutputs([target], {
+              signal: controller.signal,
+              within,
+              onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
+            })
+            const read = ready[0]
+            if (!read) {
+              setArrangeError(backfillFailures(failed, 'Re-arrange'))
+              // Not a failure the span would see, nor a success (#2891): the same end
+              // state, and value, as the Arrange dialog's when nothing was arranged.
+              span.setAttribute('scadbuddy.outcome', 'nothing_arranged')
+              return
+            }
+            from = read
+            setBackfilled(read)
+            setFlaggedId(null)
+          }
+          const next = await runArrange(
+            from.slug,
+            {
+              objects: (from.manifest ?? []).map((object) => ({
+                output_id: from.id,
+                part: object.part,
+                count: object.count,
+                // #3637 — each colouring of a part is its own entry: named by its colours.
+                recolour: object.recolour ?? {},
+              })),
+              goal: arrangeGoal,
+              printer_id: printerId,
+              filament_plan: { slots: plan, force_colour_match: false },
+              // #3637 — every colour a recoloured copy prints in has its slot, whether
+              // or not this output's `colors` already lists it.
+              colours: [
+                ...new Set([
+                  // Upper case on both sides, as the API compares them: one colour, one slot.
+                  ...(from.colors ?? []).map((c) => c.toUpperCase()),
+                  ...(from.manifest ?? []).flatMap((object) =>
+                    Object.values(object.recolour ?? {}).map((c) => c.toUpperCase()),
+                  ),
+                ]),
+              ],
+              name: arrangedName(from.name),
+            },
+            { signal: controller.signal, within },
+          )
+          span.setAttribute('scadbuddy.output_id', next.output.id)
+          // Closed while the output was being saved: it is saved, a normal output in
+          // History, but this dialog keeps the output it was opened for.
+          if (controller.signal.aborted) return
+          carry.set({ plan, ready: false })
+          setArranged(next.output)
+          setArrangeNote(arrangedNote(next.plates))
+        },
+      )
+    } catch (cause) {
+      if (controller.signal.aborted) return
+      if (backfillIds(cause)) {
+        setFlaggedId(target.id)
+        setAskFor(target.id)
+        return
+      }
+      setArrangeError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+    } finally {
+      if (arrangeRun.current === controller) arrangeRun.current = null
+      setArranging(false)
+      setBackfillProgress({})
+    }
+  }
 
   /** #81 — the chosen printer's model, reported once the choices have landed. */
   const printerModel = choices ? (printer?.model ?? null) : undefined
@@ -259,13 +640,13 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     return () => {
       live = false
     }
-  }, [open, slug])
+  }, [open, scopeKey])
 
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,
       printerId === null ? undefined : remembered?.printers?.[String(printerId)],
-      slug === undefined ? undefined : remembered?.models?.[slug],
+      scopeKey === undefined ? undefined : remembered?.models?.[scopeKey],
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
 
@@ -273,11 +654,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
    * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
    * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
    * "All plates" the filament checks read every plate; the mesh checks read plate 1.
+   * Not before the plan is seeded: an empty plan is judged once and then again (#2361).
    */
   const printChoices = printChoicesOf(selection)
   const allPlates = plate === 'all'
   const analysisRequest: AnalysisRequest | null =
-    choices && printChoices
+    choices && printChoices && planReady
       ? {
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
@@ -285,7 +667,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
           copies: effectiveCopies,
-          options,
+          options: sentOptions,
         }
       : null
 
@@ -304,9 +686,69 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           all_plates: allPlates,
           rack_position: rackPosition,
           rack_algorithm: chosenAlgorithm,
+          // #2367: the sequence is a process override, so it changes what the run
+          // slices; the check and the background slice must see it as the run does.
+          // #1899, #717: supports and the profiles left on are process overrides too, and
+          // Checks says when one can't apply.
+          // #3628: and so is the prime tower.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  /**
+   * #2169 — the choices on screen, sliced in the background once the check finds nothing
+   * the run would refuse. A run of the same choices queues that slice.
+   */
+  const sliceable = check.current && check.verdict !== null && (check.verdict.errors ?? []).length === 0
+  /**
+   * #2169 — the plate the docked pane shows: the one chosen to print, or one clicked to
+   * look at. "All plates" shows plate 1 until another is clicked.
+   */
+  const [clickedPlate, setClickedPlate] = useState<number | null>(null)
+  const previewPlate = clickedPlate ?? (plate === 'all' ? 1 : plate)
+  useEffect(() => {
+    setClickedPlate(null)
+  }, [plate, currentKey])
+  const multiPlate = plates.length > 1
+  const previewLabel = plateLabel(plates, previewPlate)
+  // The plate the pane shows, sliced on its own: the run's own slice of it when it is
+  // the plate chosen to print.
+  const previewRequest =
+    checkRequest && (allPlates || previewPlate !== plate)
+      ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
+      : checkRequest
+  const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
+  // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
+  // plate being printed has landed, its sides are the ones shown.
+  // Memoised: `asSliced` builds a new plan on every call, and the effect below stores it,
+  // so an unmemoised one re-rendered the dialog without end (#2737 review).
+  const slicedShown = plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+  const nozzlePlan = check.verdict?.nozzle_plan
+  const sliceResult = previewSlice.result
+  const slicedNow = useMemo(
+    () => (slicedShown ? asSliced(nozzlePlan, sliceResult) : null),
+    [slicedShown, nozzlePlan, sliceResult],
+  )
+  // #2737 review: previewing another plate does not unsay it. The printed plate's slice
+  // still holds for these choices, so its sides stay until the choices or the plate change.
+  const slicedFor = `${plate}|${currentKey}|${check.request}`
+  const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
+  useEffect(() => {
+    // New choices or another plate: the last slice's sides no longer hold, so they go
+    // rather than wait to be overwritten (#2737 review).
+    if (!slicedNow) {
+      setLastSliced((last) => (last === null || last.key === slicedFor ? last : null))
+      return
+    }
+    setLastSliced((last) =>
+      last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
+    )
+  }, [slicedNow, slicedFor])
+  const slicedPlan =
+    slicedNow ??
+    (previewPlate !== plate && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
+  /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
+  const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
   // position gone from its options) would be sent unseen, so it goes back to Automatic.
   // Only a current verdict decides: one still on its way keeps the pick.
@@ -324,17 +766,41 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     picker.advanced
       ? (warnings ?? [])
       : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
-  const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
+  /**
+   * #2365 — the background slice's grams, for the plate the slots describe: the one
+   * chosen to print, when its result is of that plate. The result is kept, stale, while
+   * the next slice runs or after it fails, so it can be another plate's (#2714 review):
+   * the plate it was sliced for decides, not the plate on screen. "All plates" slices
+   * plate 1 alone, which is not every plate's need.
+   */
+  const slicedForSlots = plate !== 'all' && previewSlice.plateId === plate ? previewSlice.result : null
+  const pickerOptions = useMemo(
+    () => (filaments ? withSlicedGrams(filaments, slicedForSlots) : null),
+    [filaments, slicedForSlots],
+  )
+  // The check reads grams from the 3MF, which an unsliced upload does not carry, so a
+  // spool short of what the slice needs is said here (#2365).
+  // Not from a stale slice: Checks would state an old need as this one's.
+  const slicedShort =
+    slicedForSlots && !previewSlice.stale && pickerOptions
+      ? checkPlan(pickerOptions, plan, effectiveCopies).filter(
+          (warning) =>
+            warning.kind === 'low-filament' &&
+            !(check.verdict?.warnings ?? []).some(
+              (known) => known.kind === 'low-filament' && known.slot_id === warning.slot_id,
+            ),
+        )
+      : []
+  const checkVerdict = check.verdict && {
+    ...check.verdict,
+    warnings: [...shown(check.verdict.warnings), ...slicedShort],
+  }
   const verdict = (
     <>
       <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
       <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
     </>
   )
-  const verdictShown =
-    check.error !== undefined ||
-    Boolean(check.verdict?.rack) ||
-    (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
@@ -345,31 +811,46 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
+    setPrintSequence(null)
+    setSupports(null)
+    setPrimeTower(null)
+    filamentProfiles.reset()
     setRackPosition(null)
+    // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
+    algorithmSession.current += 1
+    setChosenAlgorithm(null)
+    setAlgorithmUnsaved(false)
     runPrint.reset()
     picker.reset()
+    // The choices it carried are reset with the rest.
+    carry.set(null)
     onClose()
   }
 
   return (
     <Dialog
       open={open}
-      title="Print"
+      title={queue ? 'Queue' : 'Print'}
       description={
         result || unanswered !== null
           ? undefined
-          : picker.advanced
-            ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-            : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+          : sliced
+            ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
+            : picker.advanced
+              ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+              : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
+      size={(choices || source) && !result && unanswered === null ? 'split' : 'md'}
       footer={
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
-              Open in queue
-            </Button>
+            {result.bambuddy_url && (
+              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
+                Open in queue
+              </Button>
+            )}
           </>
         ) : unanswered !== null ? (
           <>
@@ -395,13 +876,20 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
               // Held while the dialog's own project list loads, so a Simple-mode print
               // cannot go out before the last project has seeded it.
               disabled={
-                running || loading || !choices || refused || runRefuses || ownProjects.loading || projectCreating
+                running ||
+                loading ||
+                !choices ||
+                !planReady ||
+                refused ||
+                runRefuses ||
+                ownProjects.loading ||
+                projectCreating
               }
               data-testid="run-print"
               {...USER_ONLY}
             >
               {running && <Spinner />}
-              Print
+              {queue ? 'Queue' : 'Print'}
             </Button>
           </>
         )
@@ -413,6 +901,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
           printerName={printer?.name ?? null}
           progress={progress}
           polling={polling}
+          plates={plates}
         />
       ) : unanswered !== null ? (
         <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
@@ -445,166 +934,409 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             </div>
           )}
 
-          {choices && (
-            <div className="space-y-3">
-              <AdvancedSwitch
-                value={picker.advanced}
-                onToggle={picker.toggleAdvanced}
-                disabled={projectCreating}
-              />
-              {printers.length > 1 && (
-                <div>
-                  <label htmlFor="print-printer" className="block text-[13px]">
-                    Printer
-                  </label>
-                  <select
-                    id="print-printer"
-                    value={printerId === null ? '' : String(printerId)}
-                    onChange={(event) =>
-                      picker.askPrinter(
-                        event.target.value === '' ? null : Number(event.target.value),
-                      )
-                    }
-                    className="sb-field mt-1.5 cursor-pointer"
-                  >
-                    {printerId === null && <option value="">Choose a printer</option>}
-                    {printers.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name}
-                        {entry.model ? ` (${entry.model})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {filamentError && (
-                <p className="text-[12px] text-warn" data-testid="filaments-unavailable">
-                  ScadBuddy could not read the filament inventory: {filamentError}
-                </p>
-              )}
-              {filaments && (
-                <FilamentPicker
-                  options={filaments}
-                  plan={plan}
-                  onChange={setPlan}
-                  copies={effectiveCopies}
-                />
-              )}
-
-              {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
-                <PresetOverrides
-                  size={size}
-                  slots={filaments.slots ?? []}
-                  presets={choices.filament_presets?.[size] ?? []}
-                  overrides={overrides}
-                  onChange={picker.setOverride}
-                />
-              )}
-
-              {picker.plates.length > 1 && source && (
-                <PlatesToPrint
-                  plates={picker.plates}
-                  value={plate}
-                  onChange={picker.setPlate}
-                  thumbnailUrl={sourceApi(source).plateThumbnailUrl}
-                />
-              )}
-
-              {/* #768 — Simple mode sends these steps' defaults without showing them. */}
-              {picker.advanced && (
+          {/* #2550 — the plates and the preview need only the source, so a choices read
+              that is slow or failed (its error and Retry above) never hides them. Only
+              the spool, printer and print controls wait for the choices. */}
+          {(choices || source) && (
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+            <div className="min-w-0 space-y-3">
+              {choices && (
                 <>
-                  <NozzleStep
-                    sizes={choices.nozzle_sizes ?? []}
-                    installed={choices.installed ?? []}
-                    value={nozzles}
-                    onChange={picker.changeNozzles}
+                  <AdvancedSwitch
+                    value={picker.advanced}
+                    onToggle={picker.toggleAdvanced}
+                    disabled={projectCreating}
                   />
-                  {check.verdict?.rack && (
-                    <RackNozzleStep
-                      rack={check.verdict.rack}
-                      algorithm={rackAlgorithm}
-                      position={rackPosition}
-                      algorithmUnsaved={algorithmUnsaved}
-                      onAlgorithm={changeRackAlgorithm}
-                      onPosition={setRackPosition}
+                  {printers.length > 1 && (
+                    <div>
+                      <label htmlFor="print-printer" className="block text-[13px]">
+                        Printer
+                      </label>
+                      <select
+                        id="print-printer"
+                        value={printerId === null ? '' : String(printerId)}
+                        onChange={(event) =>
+                          picker.askPrinter(
+                            event.target.value === '' ? null : Number(event.target.value),
+                          )
+                        }
+                        className="sb-field mt-1.5 cursor-pointer"
+                      >
+                        {printerId === null && <option value="">Choose a printer</option>}
+                        {printers.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name}
+                            {entry.model ? ` (${entry.model})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {printerId !== null && <PlateClearNotice printerId={printerId} />}
+
+                  {filamentError && (
+                    <div className="flex items-center gap-3" data-testid="filaments-unavailable">
+                      <p className="text-[12px] text-warn">
+                        ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
+                        until it loads.
+                      </p>
+                      <Button size="sm" onClick={retryFilaments}>
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+                  {sliced && <SlicedSettings profile={sliced} />}
+                  {!picker.advanced && !sliced && (
+                    <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
+                  )}
+                  {printerId !== null &&
+                    trays.open.map((tray) => (
+                      <TrayQuestion
+                        key={`${tray.ams_id}:${tray.tray_id}`}
+                        printerId={printerId}
+                        tray={tray}
+                        spools={filaments?.spools ?? []}
+                        onAssigned={picker.reload}
+                        onDecline={() => trays.decline(tray)}
+                      />
+                    ))}
+                  {filaments && (
+                    <FilamentPicker
+                      options={pickerOptions ?? filaments}
+                      plan={plan}
+                      onChange={setPlan}
+                      copies={effectiveCopies}
+                      offeredTrays={trays.offered}
+                      gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  <QualityStep
-                    size={size}
-                    tiers={choices.tiers?.[size] ?? []}
-                    processes={choices.processes?.[size] ?? []}
-                    tier={tier}
-                    processName={processName}
-                    onChange={picker.changeQuality}
-                  />
-                  {bedType !== null && (
-                    <PlateStep
-                      bedTypes={
-                        (choices.bed_types ?? []).includes(bedType)
-                          ? (choices.bed_types ?? [])
-                          : [bedType, ...(choices.bed_types ?? [])]
-                      }
-                      value={bedType}
-                      lastBedType={choices.last_bed_type ?? null}
-                      printerName={printer?.name ?? null}
-                      onChange={picker.setBedType}
+                  {!sliced && (
+                    <NozzlePlanLine
+                      plan={slicedPlan ?? check.verdict?.nozzle_plan}
+                      stale={!check.current}
+                      sliced={slicedPlan !== null}
                     />
                   )}
-
-                  <PrintOptionsDisclosure
-                    slug={slug}
-                    printerId={printerId}
-                    value={copies === null ? options : { ...options, quantity: copies }}
-                    onChange={({ quantity, ...rest }) => {
-                      setCopies(quantity ?? null)
-                      setOptions(rest)
-                    }}
-                  />
-
-                  {/* #79 — a send to a project uploads into that project's folder. */}
-                  {project ? (
-                    <ProjectPicker
-                      value={project.value}
-                      onChange={project.onChange}
-                      list={project.list}
-                      disabled={project.disabled || projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
-                  ) : (
-                    <ProjectPicker
-                      value={ownProjectId}
-                      onChange={setOwnProjectId}
-                      list={ownProjects}
-                      disabled={projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
+                  {target && known && (
+                    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
+                      <legend className="px-1 text-[13px] text-ink">Arrange</legend>
+                      {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
+                      <label htmlFor="arrange-for" className="text-[12px] text-muted">
+                        Arrange for
+                      </label>
+                      <select
+                        id="arrange-for"
+                        value={arrangeGoal}
+                        onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
+                        className="sb-field mt-1.5"
+                      >
+                        {Object.entries(GOAL_LABELS)
+                          .filter(([value]) => value !== 'keep_together')
+                          .map(([value, text]) => (
+                            <option key={value} value={value}>
+                              {text}
+                            </option>
+                          ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        className="mt-1.5"
+                        disabled={arranging || askBackfill}
+                        onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
+                      >
+                        Re-arrange for these spools
+                      </Button>
+                      {askBackfill && (
+                        <div className="mt-1.5">
+                          <BackfillPrompt
+                            outputs={[target]}
+                            onConfirm={() => void rearrange(true)}
+                            onCancel={() => setAskFor(null)}
+                          />
+                        </div>
+                      )}
+                      <BackfillProgress outputs={[target]} progress={backfillProgress} />
+                      {arrangeNote && (
+                        <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
+                          {arrangeNote}
+                        </p>
+                      )}
+                      {arrangeError && (
+                        <p role="alert" className="mt-1.5 text-[13px] text-warn">
+                          {arrangeError}
+                        </p>
+                      )}
+                    </fieldset>
                   )}
 
-                  <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                  {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
+                  {!sliced && (
+                    <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
+                  )}
+
+                  {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
+                    <PresetOverrides
+                      size={size}
+                      slots={filaments.slots ?? []}
+                      presets={choices.filament_presets?.[size] ?? []}
+                      overrides={overrides}
+                      onChange={picker.setOverride}
+                    />
+                  )}
                 </>
               )}
 
-              {/* The analyzers judge an output's own 3MF; a library file has none (#313), so its
-                  Checks are the nozzle verdict alone (#755). */}
-              {outputId !== undefined ? (
-                <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates}>
-                  {verdict}
-                </AnalyzerPanel>
-              ) : (
-                verdictShown && (
-                  <section
-                    aria-labelledby="print-checks-title"
-                    data-testid="print-checks"
-                    className="rounded-[6px] border border-line bg-surface-2 px-3 py-2"
+              {/* #986 — one plate has no choice to make, but its name still says what prints. */}
+              {plates.length === 1 && plates[0]?.name && (
+                <p className="text-[13px]" data-testid="single-plate">
+                  <span className="text-muted">Plate:</span>{' '}
+                  <button
+                    type="button"
+                    onClick={() => setClickedPlate(1)}
+                    className="underline decoration-dotted underline-offset-2 hover:text-accent"
+                    title="Show it in the preview"
                   >
-                    <h3 id="print-checks-title" className="text-[13px] text-ink">
-                      Checks
-                    </h3>
-                    {verdict}
-                  </section>
-                )
+                    {plates[0].name}
+                  </button>
+                </p>
               )}
+
+              {plates.length > 1 && source && (
+                <PlatesToPrint
+                  plates={plates}
+                  value={plate}
+                  onChange={picker.setPlate}
+                  thumbnailUrl={sourceApi(source).plateThumbnailUrl}
+                  previewed={previewPlate}
+                  onPreview={setClickedPlate}
+                />
+              )}
+
+              {source && !sliced && (
+                <div>
+                  <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
+                    Preview in 3D
+                  </Button>
+                  {/* Mounted only while open, keyed by plate: each open starts on Colors,
+                      with no cut left over from another plate. */}
+                  {previewOpen && (
+                    <PlatePreviewDialog
+                      key={plate}
+                      open
+                      onClose={() => setPreviewOpen(false)}
+                      url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
+                      label={
+                        // An output's preview is the whole output; a library file's, one
+                        // plate, the first when every plate prints.
+                        source.kind === 'output' && plates.length > 1
+                          ? 'Every plate'
+                          : plate === 'all' && plates.length > 1
+                            ? `${plateLabel(plates, 1)} (first of ${plates.length} plates)`
+                            : plateLabel(plates, plate === 'all' ? 1 : plate)
+                      }
+                      colors={previewColors}
+                      toolpathUrl={
+                        // #2072 — the background slice's toolpaths, while they are of the
+                        // choices on screen and of the plate this dialog shows. A multi-plate
+                        // output's dialog shows every plate, which no one plate's slice is.
+                        previewSlice.result &&
+                        !previewSlice.stale &&
+                        !(source.kind === 'output' && picker.plates.length > 1) &&
+                        previewPlate === (plate === 'all' ? 1 : plate)
+                          ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
+                          : null
+                      }
+                    />
+                  )}
+                </div>
+              )}
+
+              {choices && (
+                <>
+                  {/* #1660 — Simple hides the project step, but not where the print is filed. */}
+                  {!picker.advanced && filedUnderLabel !== null && (
+                    <p className="text-[13px] text-muted" data-testid="print-filed-under">
+                      Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          focusProject.current = true
+                          picker.toggleAdvanced()
+                        }}
+                        disabled={projectCreating}
+                        className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                        data-testid="print-filed-under-change"
+                      >
+                        (change)
+                      </button>
+                    </p>
+                  )}
+
+                  {/* #3635 — Simple mode shows no Options, but never hides a remembered
+                      one that holds the job. */}
+                  {!picker.advanced && (
+                    <PrintOptionsDisclosure
+                      heldOnly
+                      known={remembered}
+                      subject={subject}
+                      printerId={printerId}
+                      value={sentOptions}
+                      toRemember={rememberOptions}
+                      onChange={editOptions}
+                    />
+                  )}
+                  {/* #768 — Simple mode sends these steps' defaults without showing them. */}
+                  {picker.advanced && (
+                    <>
+                      {!sliced && (
+                        <>
+                          <NozzleStep
+                            sizes={choices.nozzle_sizes ?? []}
+                            installed={choices.installed ?? []}
+                            value={nozzles}
+                            onChange={picker.changeNozzles}
+                          />
+                          <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
+                          {check.verdict?.rack && (
+                            <RackNozzleStep
+                              rack={check.verdict.rack}
+                              algorithm={rackAlgorithm}
+                              position={rackPosition}
+                              algorithmUnsaved={algorithmUnsaved}
+                              onAlgorithm={changeRackAlgorithm}
+                              onPosition={setRackPosition}
+                            />
+                          )}
+                          <QualityStep
+                            size={size}
+                            tiers={choices.tiers?.[size] ?? []}
+                            processes={choices.processes?.[size] ?? []}
+                            tier={tier}
+                            processName={processName}
+                            onChange={picker.changeQuality}
+                          />
+                          {bedType !== null && (
+                            <PlateStep
+                              bedTypes={
+                                (choices.bed_types ?? []).includes(bedType)
+                                  ? (choices.bed_types ?? [])
+                                  : [bedType, ...(choices.bed_types ?? [])]
+                              }
+                              labels={choices.bed_type_labels ?? {}}
+                              value={bedType}
+                              lastBedType={choices.last_bed_type ?? null}
+                              printerName={printer?.name ?? null}
+                              onChange={picker.setBedType}
+                            />
+                          )}
+
+                          <PrintSequenceStep
+                            value={printSequence}
+                            onChange={setPrintSequence}
+                            objects={check.current ? (check.verdict?.objects ?? null) : null}
+                          />
+
+                          <SupportsStep
+                            value={supports}
+                            onChange={setSupports}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                          />
+
+                          <PrimeTowerStep
+                            value={primeTower}
+                            onChange={setPrimeTower}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                            // The filament step is the chosen plate's (useFilamentPlan reads it per
+                            // plate), so these are that plate's filaments; null while they load.
+                            colours={filaments ? (filaments.slots ?? []).length : null}
+                          />
+
+                          {given?.kind === 'output' && (
+                            <SlicerDefaults
+                              settings={printSettings}
+                              overridden={[
+                                ...(printSequence !== null ? ['print_sequence'] : []),
+                                ...overriddenSupportKeys(supports),
+                                ...overriddenTowerKeys(primeTower),
+                              ]}
+                            />
+                          )}
+                        </>
+                      )}
+
+                      <PrintOptionsDisclosure
+                        subject={subject}
+                        printerId={printerId}
+                        value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
+                        toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
+                        onChange={({ quantity, ...rest }) => {
+                          setCopies(quantity ?? null)
+                          editOptions(rest)
+                        }}
+                      />
+
+                      {/* #79 — a send to a project uploads into that project's folder. */}
+                      {project ? (
+                        <ProjectPicker
+                          value={project.value}
+                          onChange={project.onChange}
+                          list={project.list}
+                          disabled={project.disabled || projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      ) : (
+                        <ProjectPicker
+                          value={ownProjectId}
+                          onChange={setOwnProjectId}
+                          list={ownProjects}
+                          disabled={projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      )}
+
+                      <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                    </>
+                  )}
+
+                  {/* The analyzers judge what the print slices: an output's 3MF, or a library
+                      file's, read as a print of it reads it (#1753). */}
+                  {/* #2671 — a sliced file's mesh is not read, so only the verdict shows. */}
+                  {sliced ? (
+                    verdict
+                  ) : (
+                    <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                      {verdict}
+                    </AnalyzerPanel>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
+              <PreviewPane
+                key={previewPlate}
+                // A sliced file has no mesh ScadBuddy reads: its plate image stands in.
+                url={source && !sliced ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
+                thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(previewPlate) : null}
+                label={multiPlate || plates[0]?.name ? previewLabel : null}
+                slots={filaments?.slots ?? []}
+                spools={filaments?.spools ?? []}
+                plan={plan}
+                colors={previewColors}
+                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, plate) : previewSlice.result}
+                nozzlePlan={previewSlice.plan}
+                plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
+                  // The plates offered: a sliced file's own, not every plate Bambuddy lists.
+                  plates: plates.length,
+                  chosen: plate,
+                  sliced: previewSlice.plateId,
+                })}
+                stale={previewSlice.stale}
+                slicing={previewSlice.slicing}
+                sliceError={previewSlice.error}
+              />
+            </div>
             </div>
           )}
 

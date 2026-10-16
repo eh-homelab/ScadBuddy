@@ -21,11 +21,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
-import psycopg
-from fastapi import APIRouter, Path, Query, Response, status
-from psycopg_pool import PoolTimeout
+from fastapi import APIRouter, Depends, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from scadbuddy.analyzers import builtin
@@ -53,21 +52,31 @@ from scadbuddy.analyzers.runner import (
 )
 from scadbuddy.api.deps import (
     CatalogueDep,
+    ConfigDep,
     EventsDep,
+    FetcherDep,
+    HistoryDep,
     OutputsDep,
+    PathsDep,
     SettingsStoreDep,
+    StateDep,
     UploadsDep,
+    downloads_of,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.outputs import require_output
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.api.params import require_valid_params, schema_of
+from scadbuddy.bambuddy.options import library_options_scope
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
+from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.download_cache import DownloadCache
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +88,6 @@ STALE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-stale"
 CONFIRMATION_PROBLEM = "https://scadbuddy.dev/problems/confirmation-required"
 SCOPE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-scope"
 UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
-DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
 
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 #: Where an applied diff would land, and what applying does today.
@@ -89,16 +97,15 @@ ROUTE_NOTE = (
     "outward approval of AI spec §8.2 before it does."
 )
 
-#: What a database that cannot be reached raises through the store.
-DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
-
 
 class AnalysisTarget(BaseModel):
-    """An output, or a configuration: a template and one parameter set.
+    """An output, a configuration (a template and one parameter set), or a file in
+    Bambuddy's library (#1753).
 
     A configuration is judged on the newest output rendered with exactly those
     parameters when there is one; without one, the analyzers that need a render are
-    skipped and say so.
+    skipped and say so. A library file is judged as any print is: its mesh read from
+    the 3MF the print path fetches, its slots off the file itself.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -106,11 +113,15 @@ class AnalysisTarget(BaseModel):
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
     slug: str | None = Field(default=None, pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     params: dict[str, ParamValue] | None = None
+    library_file_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _one_subject(self) -> AnalysisTarget:
-        if (self.output_id is None) == (self.slug is None):
-            raise ValueError("name either an output_id or a slug (with its params), not both")
+        named = [self.output_id, self.slug, self.library_file_id]
+        if sum(value is not None for value in named) != 1:
+            raise ValueError(
+                "name one of an output_id, a slug (with its params) or a library_file_id"
+            )
         if self.output_id is not None and self.params is not None:
             raise ValueError("an output's parameters are its own; params go with a slug")
         return self
@@ -221,9 +232,41 @@ def _stored[T](call: Callable[[], T]) -> T:
         raise _unavailable(error) from None
 
 
+@dataclass(frozen=True)
+class ParamsCheck:
+    """Refuses a configuration's params the way the render route does (#995): a
+    configuration a render would 422 is not one the analyzers can judge, and judging it
+    anyway answers "Nothing to report" for input that is wrong."""
+
+    catalogue: CatalogueDep
+    paths: PathsDep
+    history: HistoryDep
+    config: ConfigDep
+    fetcher: FetcherDep
+
+    async def __call__(self, target: AnalysisTarget) -> None:
+        if target.slug is None or not target.params:
+            return
+        require_model_exists(self.catalogue, target.slug)
+        _, schema = await schema_of(
+            target.slug,
+            None,
+            paths=self.paths,
+            history=self.history,
+            config=self.config,
+            fetcher=self.fetcher,
+        )
+        require_valid_params(schema, target.params)
+
+
+ParamsCheckDep = Annotated[ParamsCheck, Depends()]
+
+
 def _subject(
     target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
-) -> tuple[str, dict[str, ParamValue], OutputMeta | None]:
+) -> tuple[str | None, dict[str, ParamValue], OutputMeta | None]:
+    if target.library_file_id is not None:
+        return None, {}, None
     if target.output_id is not None:
         output = require_output(outputs, target.output_id)
         return output.slug, outputs.params(output.id), output
@@ -237,6 +280,19 @@ def _subject(
     return target.slug, params, meta
 
 
+def _remembered(
+    target: AnalysisTarget, slug: str | None, settings: StoredSettings
+) -> ModelPrintChoices | None:
+    """What the dialog reopens with for this subject: a library file's own (#313), else
+    the template's, both in the one store under the subject's options scope (#1754)."""
+    scope = (
+        library_options_scope(target.library_file_id)
+        if target.library_file_id is not None
+        else slug
+    )
+    return settings.model_print_choices.get(scope) if scope is not None else None
+
+
 async def _context(
     target: AnalysisTarget,
     request: AnalysisRequest,
@@ -244,26 +300,32 @@ async def _context(
     catalogue: Catalogue,
     store: SettingsStore,
     uploads: BambuddyUploadStore,
+    paths: DataPaths,
+    budget: ReadBudget,
+    downloads: DownloadCache | None = None,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
+    settings = store.load()
+    remembered = _remembered(target, slug, settings)
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
-        # needs the plate's slots. Without a database the analyzers still run, with the
-        # inventory reported unavailable (#461).
-        try:
-            copies = await uploads.for_output(meta.id)
-        except DatabaseRequiredError:
-            copies = []
+        # needs the plate's slots.
+        copies = await uploads.for_output(meta.id)
         library_file_id = copies[-1].id if copies else None
     return await gather_context(
         outputs=outputs,
-        settings=store.load(),
+        settings=settings,
         slug=slug,
         params=params,
         request=request,
         meta=meta,
         library_file_id=library_file_id,
+        remembered=remembered,
+        library_subject=target.library_file_id,
+        cache=paths.cache,
+        budget=budget,
+        downloads=downloads,
     )
 
 
@@ -359,6 +421,9 @@ async def post_run(
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
     decisions: DecisionsDep,
+    check: ParamsCheckDep,
+    paths: PathsDep,
+    state: StateDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -375,7 +440,19 @@ async def post_run(
     With a database that cannot be reached, the analyzers still run;
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    await check(body.target)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
+    )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
     except DATABASE_ERRORS as error:
@@ -399,11 +476,26 @@ async def post_preview(
     uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
+    check: ParamsCheckDep,
+    paths: PathsDep,
+    state: StateDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    await check(body.target)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
+    )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
@@ -429,6 +521,9 @@ async def post_apply(
     store: SettingsStoreDep,
     decisions: DecisionsDep,
     events: EventsDep,
+    check: ParamsCheckDep,
+    paths: PathsDep,
+    state: StateDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -437,13 +532,26 @@ async def post_apply(
     removable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for
     what a send that consumes it must do.
 
-    Refused, in this order: a scope this finding does not fall in (422); a fingerprint
+    Refused, in this order: a configuration's params a render would refuse (422,
+    naming them in ``parameters``); a scope this finding does not fall in (422); a fingerprint
     that differs from the one this apply computes, because the diff, the scope, the
     print or its base moved since the preview (409, ``analyzer-fix-stale``); a change
     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
+    await check(body.target)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
+    )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:

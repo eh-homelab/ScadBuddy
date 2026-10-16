@@ -49,7 +49,7 @@ wall_fit = 0; // [-0.2:0.02:0.2]
 // Word inlaid in a tile's top, or in the front face of a brick, plate or slope (left out where there is no room: a standard plate's face, a 1-stud slope)
 top_text = ""; // 20
 
-// Typeface (the app fills this dropdown from the fonts installed in the image)
+// Typeface
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Colors] */

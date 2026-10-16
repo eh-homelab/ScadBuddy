@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.googlefonts import licence_slug
-from scadbuddy.store.archive import pack_dir, read_marker, unpack_dir
+from scadbuddy.store.archive import read_marker, staged_pack, unpack_dir
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
 from scadbuddy.store.locks import KeyLocks
@@ -61,23 +62,24 @@ class FontMirror:
         self.locks = locks or KeyLocks()
 
     async def _publish_dir(self, directory: Path) -> None:
-        data = await asyncio.to_thread(pack_dir, directory)
-        await self.content.put(
-            "font",
-            data,
-            name=f"{font_key(directory.name)}.zip",
-            scope=SHARED,
-            key=font_key(directory.name),
-            meta={"dir": directory.name},
-        )
+        async with staged_pack(directory) as data:
+            await self.content.put(
+                "font",
+                data,
+                name=f"{font_key(directory.name)}.zip",
+                scope=SHARED,
+                key=font_key(directory.name),
+                meta={"dir": directory.name},
+            )
 
     async def publish(self, family: str) -> None:
         directory = self.fonts.family_dir(family)
         if directory.is_dir():
             await self._publish_dir(directory)
 
-    async def backfill(self) -> int:
-        """Mirror every family installed before the store was (the API's boot)."""
+    async def backfill(self, *, stop: threading.Event | None = None) -> int:
+        """Mirror every family installed before the store was (the API's boot). Once
+        ``stop`` is set it publishes no further family (#2128), as `RemoteAssets.backfill`."""
         root = self.fonts.root
         if not root.is_dir():
             return 0
@@ -85,6 +87,8 @@ class FontMirror:
         for directory in sorted(
             p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
         ):
+            if stop is not None and stop.is_set():
+                break
             if await asyncio.to_thread(self.content.index.get, font_key(directory.name)) is None:
                 await self._publish_dir(directory)
                 done += 1

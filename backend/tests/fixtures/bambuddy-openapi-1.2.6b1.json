@@ -1,0 +1,6032 @@
+{
+ "info": {
+  "description": "Archive and manage Bambu Lab 3MF files",
+  "title": "Bambuddy",
+  "version": "1.2.6b1"
+ },
+ "openapi": "3.1.0",
+ "paths": {
+  "/": {
+   "get": {
+    "operationId": "serve_frontend__get",
+    "tags": []
+   }
+  },
+  "/api/v1/ams-history/{printer_id}": {
+   "delete": {
+    "operationId": "delete_old_history_api_v1_ams_history__printer_id__delete",
+    "tags": [
+     "ams-history"
+    ]
+   }
+  },
+  "/api/v1/ams-history/{printer_id}/{ams_id}": {
+   "get": {
+    "operationId": "get_ams_history_api_v1_ams_history__printer_id___ams_id__get",
+    "tags": [
+     "ams-history"
+    ]
+   }
+  },
+  "/api/v1/api-keys/": {
+   "get": {
+    "operationId": "list_api_keys_api_v1_api_keys__get",
+    "tags": [
+     "api-keys"
+    ]
+   },
+   "post": {
+    "operationId": "create_api_key_api_v1_api_keys__post",
+    "tags": [
+     "api-keys"
+    ]
+   }
+  },
+  "/api/v1/api-keys/{key_id}": {
+   "delete": {
+    "operationId": "delete_api_key_api_v1_api_keys__key_id__delete",
+    "tags": [
+     "api-keys"
+    ]
+   },
+   "get": {
+    "operationId": "get_api_key_api_v1_api_keys__key_id__get",
+    "tags": [
+     "api-keys"
+    ]
+   },
+   "patch": {
+    "operationId": "update_api_key_api_v1_api_keys__key_id__patch",
+    "tags": [
+     "api-keys"
+    ]
+   }
+  },
+  "/api/v1/archives/": {
+   "get": {
+    "operationId": "list_archives_api_v1_archives__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/analysis/failures": {
+   "get": {
+    "operationId": "analyze_failures_api_v1_archives_analysis_failures_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/backfill-hashes": {
+   "post": {
+    "operationId": "backfill_content_hashes_api_v1_archives_backfill_hashes_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/compare": {
+   "get": {
+    "operationId": "compare_archives_api_v1_archives_compare_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/confirm/{token}/{verdict}": {
+   "get": {
+    "operationId": "confirm_outcome_page_api_v1_archives_confirm__token___verdict__get",
+    "tags": [
+     "archives"
+    ]
+   },
+   "post": {
+    "operationId": "confirm_outcome_by_token_api_v1_archives_confirm__token___verdict__post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/export": {
+   "get": {
+    "operationId": "export_archives_api_v1_archives_export_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/no-3mf-warning": {
+   "get": {
+    "operationId": "no_3mf_warning_api_v1_archives_no_3mf_warning_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/purge": {
+   "post": {
+    "operationId": "execute_archive_purge_api_v1_archives_purge_post",
+    "tags": [
+     "archives-purge"
+    ]
+   }
+  },
+  "/api/v1/archives/purge/preview": {
+   "get": {
+    "operationId": "preview_archive_purge_api_v1_archives_purge_preview_get",
+    "tags": [
+     "archives-purge"
+    ]
+   }
+  },
+  "/api/v1/archives/purge/settings": {
+   "get": {
+    "operationId": "get_archive_purge_settings_api_v1_archives_purge_settings_get",
+    "tags": [
+     "archives-purge"
+    ]
+   },
+   "put": {
+    "operationId": "update_archive_purge_settings_api_v1_archives_purge_settings_put",
+    "tags": [
+     "archives-purge"
+    ]
+   }
+  },
+  "/api/v1/archives/recalculate-costs": {
+   "post": {
+    "operationId": "recalculate_all_costs_api_v1_archives_recalculate_costs_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/rescan-all": {
+   "post": {
+    "operationId": "rescan_all_archives_api_v1_archives_rescan_all_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/search": {
+   "get": {
+    "operationId": "search_archives_api_v1_archives_search_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/search/rebuild-index": {
+   "post": {
+    "operationId": "rebuild_search_index_api_v1_archives_search_rebuild_index_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/slim": {
+   "get": {
+    "operationId": "list_archives_slim_api_v1_archives_slim_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/stats": {
+   "get": {
+    "operationId": "get_archive_stats_api_v1_archives_stats_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/stats/export": {
+   "get": {
+    "operationId": "export_stats_api_v1_archives_stats_export_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/tags": {
+   "get": {
+    "operationId": "get_all_tags_api_v1_archives_tags_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/tags/{tag_name}": {
+   "delete": {
+    "operationId": "delete_tag_api_v1_archives_tags__tag_name__delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "put": {
+    "operationId": "rename_tag_api_v1_archives_tags__tag_name__put",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/upload": {
+   "post": {
+    "operationId": "upload_archive_api_v1_archives_upload_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/upload-bulk": {
+   "post": {
+    "operationId": "upload_archives_bulk_api_v1_archives_upload_bulk_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/upload-source": {
+   "post": {
+    "operationId": "upload_source_3mf_by_name_api_v1_archives_upload_source_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}": {
+   "delete": {
+    "operationId": "delete_archive_api_v1_archives__archive_id__delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "get": {
+    "operationId": "get_archive_api_v1_archives__archive_id__get",
+    "tags": [
+     "archives"
+    ]
+   },
+   "patch": {
+    "operationId": "update_archive_api_v1_archives__archive_id__patch",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/capabilities": {
+   "get": {
+    "operationId": "get_archive_capabilities_api_v1_archives__archive_id__capabilities_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/delete-impact": {
+   "get": {
+    "operationId": "get_archive_delete_impact_api_v1_archives__archive_id__delete_impact_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/dl/{token}/{filename}": {
+   "get": {
+    "operationId": "download_archive_for_slicer_api_v1_archives__archive_id__dl__token___filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/download": {
+   "get": {
+    "operationId": "download_archive_api_v1_archives__archive_id__download_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/duplicates": {
+   "get": {
+    "operationId": "get_archive_duplicates_api_v1_archives__archive_id__duplicates_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/f3d": {
+   "delete": {
+    "operationId": "delete_f3d_api_v1_archives__archive_id__f3d_delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "get": {
+    "operationId": "download_f3d_api_v1_archives__archive_id__f3d_get",
+    "tags": [
+     "archives"
+    ]
+   },
+   "post": {
+    "operationId": "upload_f3d_api_v1_archives__archive_id__f3d_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/favorite": {
+   "post": {
+    "operationId": "toggle_favorite_api_v1_archives__archive_id__favorite_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/filament-requirements": {
+   "get": {
+    "operationId": "get_filament_requirements_api_v1_archives__archive_id__filament_requirements_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/file/{filename}": {
+   "get": {
+    "operationId": "download_archive_with_filename_api_v1_archives__archive_id__file__filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/gcode": {
+   "get": {
+    "operationId": "get_gcode_api_v1_archives__archive_id__gcode_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/media-download-token": {
+   "post": {
+    "operationId": "create_archive_media_download_token_api_v1_archives__archive_id__media_download_token_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/media/dl/{token}/{filename}": {
+   "get": {
+    "operationId": "download_archive_media_with_token_api_v1_archives__archive_id__media_dl__token___filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/photos": {
+   "post": {
+    "operationId": "upload_photo_api_v1_archives__archive_id__photos_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/photos/{filename}": {
+   "delete": {
+    "operationId": "delete_photo_api_v1_archives__archive_id__photos__filename__delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "get": {
+    "operationId": "get_photo_api_v1_archives__archive_id__photos__filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/plate-preview": {
+   "get": {
+    "operationId": "get_plate_preview_api_v1_archives__archive_id__plate_preview_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/plate-thumbnail/{plate_index}": {
+   "get": {
+    "operationId": "get_plate_thumbnail_api_v1_archives__archive_id__plate_thumbnail__plate_index__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/plates": {
+   "get": {
+    "operationId": "get_archive_plates_api_v1_archives__archive_id__plates_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/printer-media": {
+   "get": {
+    "operationId": "get_archive_printer_media_api_v1_archives__archive_id__printer_media_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/project-image/{image_path}": {
+   "get": {
+    "operationId": "get_project_image_api_v1_archives__archive_id__project_image__image_path__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/project-page": {
+   "get": {
+    "operationId": "get_project_page_api_v1_archives__archive_id__project_page_get",
+    "tags": [
+     "archives"
+    ]
+   },
+   "patch": {
+    "operationId": "update_project_page_api_v1_archives__archive_id__project_page_patch",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/qrcode": {
+   "get": {
+    "operationId": "get_qrcode_api_v1_archives__archive_id__qrcode_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/reprint": {
+   "post": {
+    "operationId": "reprint_archive_api_v1_archives__archive_id__reprint_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/rescan": {
+   "post": {
+    "operationId": "rescan_archive_api_v1_archives__archive_id__rescan_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/runs": {
+   "get": {
+    "operationId": "list_archive_runs_api_v1_archives__archive_id__runs_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/similar": {
+   "get": {
+    "operationId": "find_similar_archives_api_v1_archives__archive_id__similar_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/slice": {
+   "post": {
+    "operationId": "slice_archive_api_v1_archives__archive_id__slice_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/slicer-token": {
+   "post": {
+    "operationId": "create_archive_slicer_token_api_v1_archives__archive_id__slicer_token_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/source": {
+   "delete": {
+    "operationId": "delete_source_3mf_api_v1_archives__archive_id__source_delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "get": {
+    "operationId": "download_source_3mf_api_v1_archives__archive_id__source_get",
+    "tags": [
+     "archives"
+    ]
+   },
+   "post": {
+    "operationId": "upload_source_3mf_api_v1_archives__archive_id__source_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/source-dl/{token}/{filename}": {
+   "get": {
+    "operationId": "download_source_3mf_for_slicer_with_token_api_v1_archives__archive_id__source_dl__token___filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/source-slicer-token": {
+   "post": {
+    "operationId": "create_source_slicer_token_api_v1_archives__archive_id__source_slicer_token_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/source/{filename}": {
+   "get": {
+    "operationId": "download_source_3mf_for_slicer_api_v1_archives__archive_id__source__filename__get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/thumbnail": {
+   "get": {
+    "operationId": "get_thumbnail_api_v1_archives__archive_id__thumbnail_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse": {
+   "delete": {
+    "operationId": "delete_timelapse_api_v1_archives__archive_id__timelapse_delete",
+    "tags": [
+     "archives"
+    ]
+   },
+   "get": {
+    "operationId": "get_timelapse_api_v1_archives__archive_id__timelapse_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/info": {
+   "get": {
+    "operationId": "get_timelapse_info_api_v1_archives__archive_id__timelapse_info_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/process": {
+   "post": {
+    "operationId": "process_timelapse_api_v1_archives__archive_id__timelapse_process_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/scan": {
+   "post": {
+    "operationId": "scan_timelapse_api_v1_archives__archive_id__timelapse_scan_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/select": {
+   "post": {
+    "operationId": "select_timelapse_api_v1_archives__archive_id__timelapse_select_post",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/thumbnails": {
+   "get": {
+    "operationId": "get_timelapse_thumbnails_api_v1_archives__archive_id__timelapse_thumbnails_get",
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/archives/{archive_id}/timelapse/upload": {
+   "post": {
+    "operationId": "upload_timelapse_api_v1_archives__archive_id__timelapse_upload_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "archives"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/admin/{user_id}": {
+   "delete": {
+    "operationId": "admin_disable_2fa_api_v1_auth_2fa_admin__user_id__delete",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/email/disable": {
+   "post": {
+    "operationId": "disable_email_otp_api_v1_auth_2fa_email_disable_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/email/enable": {
+   "post": {
+    "operationId": "enable_email_otp_api_v1_auth_2fa_email_enable_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/email/enable/confirm": {
+   "post": {
+    "operationId": "confirm_enable_email_otp_api_v1_auth_2fa_email_enable_confirm_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/email/send": {
+   "post": {
+    "operationId": "send_email_otp_api_v1_auth_2fa_email_send_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/status": {
+   "get": {
+    "operationId": "get_2fa_status_api_v1_auth_2fa_status_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/totp/disable": {
+   "post": {
+    "operationId": "disable_totp_api_v1_auth_2fa_totp_disable_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/totp/enable": {
+   "post": {
+    "operationId": "enable_totp_api_v1_auth_2fa_totp_enable_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/totp/regenerate-backup-codes": {
+   "post": {
+    "operationId": "regenerate_backup_codes_api_v1_auth_2fa_totp_regenerate_backup_codes_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/totp/setup": {
+   "post": {
+    "operationId": "setup_totp_api_v1_auth_2fa_totp_setup_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/2fa/verify": {
+   "post": {
+    "operationId": "verify_2fa_api_v1_auth_2fa_verify_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/advanced-auth/disable": {
+   "post": {
+    "operationId": "disable_advanced_auth_api_v1_auth_advanced_auth_disable_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/advanced-auth/enable": {
+   "post": {
+    "operationId": "enable_advanced_auth_api_v1_auth_advanced_auth_enable_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/advanced-auth/status": {
+   "get": {
+    "operationId": "get_advanced_auth_status_api_v1_auth_advanced_auth_status_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/disable": {
+   "post": {
+    "operationId": "disable_auth_api_v1_auth_disable_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/encryption-status": {
+   "get": {
+    "operationId": "get_encryption_status_api_v1_auth_encryption_status_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/forgot-password": {
+   "post": {
+    "operationId": "forgot_password_api_v1_auth_forgot_password_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/forgot-password/confirm": {
+   "post": {
+    "operationId": "forgot_password_confirm_api_v1_auth_forgot_password_confirm_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/ldap/provision": {
+   "post": {
+    "operationId": "provision_ldap_user_api_v1_auth_ldap_provision_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/ldap/search": {
+   "get": {
+    "operationId": "search_ldap_directory_api_v1_auth_ldap_search_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/ldap/status": {
+   "get": {
+    "operationId": "get_ldap_status_api_v1_auth_ldap_status_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/ldap/test": {
+   "post": {
+    "operationId": "test_ldap_api_v1_auth_ldap_test_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/login": {
+   "post": {
+    "operationId": "login_api_v1_auth_login_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/logout": {
+   "post": {
+    "operationId": "logout_api_v1_auth_logout_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/me": {
+   "get": {
+    "operationId": "get_current_user_info_api_v1_auth_me_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/media-token": {
+   "post": {
+    "operationId": "mint_media_token_api_v1_auth_media_token_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/authorize/{provider_id}": {
+   "get": {
+    "operationId": "oidc_authorize_api_v1_auth_oidc_authorize__provider_id__get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/callback": {
+   "get": {
+    "operationId": "oidc_callback_api_v1_auth_oidc_callback_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/exchange": {
+   "post": {
+    "operationId": "oidc_exchange_api_v1_auth_oidc_exchange_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/links": {
+   "get": {
+    "operationId": "list_oidc_links_api_v1_auth_oidc_links_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/links/{provider_id}": {
+   "delete": {
+    "operationId": "remove_oidc_link_api_v1_auth_oidc_links__provider_id__delete",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/providers": {
+   "get": {
+    "operationId": "list_oidc_providers_api_v1_auth_oidc_providers_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   },
+   "post": {
+    "operationId": "create_oidc_provider_api_v1_auth_oidc_providers_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/providers/all": {
+   "get": {
+    "operationId": "list_all_oidc_providers_api_v1_auth_oidc_providers_all_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/providers/{provider_id}": {
+   "delete": {
+    "operationId": "delete_oidc_provider_api_v1_auth_oidc_providers__provider_id__delete",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   },
+   "put": {
+    "operationId": "update_oidc_provider_api_v1_auth_oidc_providers__provider_id__put",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/providers/{provider_id}/icon": {
+   "delete": {
+    "operationId": "delete_oidc_provider_icon_api_v1_auth_oidc_providers__provider_id__icon_delete",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   },
+   "get": {
+    "operationId": "get_oidc_provider_icon_api_v1_auth_oidc_providers__provider_id__icon_get",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/oidc/providers/{provider_id}/icon/refresh": {
+   "post": {
+    "operationId": "refresh_oidc_provider_icon_api_v1_auth_oidc_providers__provider_id__icon_refresh_post",
+    "tags": [
+     "2fa",
+     "oidc"
+    ]
+   }
+  },
+  "/api/v1/auth/reset-password": {
+   "post": {
+    "operationId": "reset_user_password_api_v1_auth_reset_password_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/setup": {
+   "post": {
+    "operationId": "setup_auth_api_v1_auth_setup_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/smtp": {
+   "get": {
+    "operationId": "get_smtp_config_api_v1_auth_smtp_get",
+    "tags": [
+     "authentication"
+    ]
+   },
+   "post": {
+    "operationId": "save_smtp_config_api_v1_auth_smtp_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/smtp/test": {
+   "post": {
+    "operationId": "test_smtp_connection_api_v1_auth_smtp_test_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/status": {
+   "get": {
+    "operationId": "get_auth_status_api_v1_auth_status_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/tokens": {
+   "get": {
+    "operationId": "list_long_lived_tokens_api_v1_auth_tokens_get",
+    "tags": [
+     "authentication"
+    ]
+   },
+   "post": {
+    "operationId": "create_long_lived_camera_token_api_v1_auth_tokens_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/tokens/all": {
+   "get": {
+    "operationId": "list_all_long_lived_tokens_api_v1_auth_tokens_all_get",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/tokens/{token_id}": {
+   "delete": {
+    "operationId": "revoke_long_lived_token_api_v1_auth_tokens__token_id__delete",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/auth/ws-token": {
+   "post": {
+    "operationId": "mint_websocket_token_api_v1_auth_ws_token_post",
+    "tags": [
+     "authentication"
+    ]
+   }
+  },
+  "/api/v1/bug-report/start-logging": {
+   "post": {
+    "operationId": "start_logging_api_v1_bug_report_start_logging_post",
+    "tags": [
+     "bug-report"
+    ]
+   }
+  },
+  "/api/v1/bug-report/stop-logging": {
+   "post": {
+    "operationId": "stop_logging_api_v1_bug_report_stop_logging_post",
+    "tags": [
+     "bug-report"
+    ]
+   }
+  },
+  "/api/v1/bug-report/submit": {
+   "post": {
+    "operationId": "submit_bug_report_api_v1_bug_report_submit_post",
+    "tags": [
+     "bug-report"
+    ]
+   }
+  },
+  "/api/v1/camwall/printers": {
+   "get": {
+    "operationId": "list_camwall_printers_api_v1_camwall_printers_get",
+    "tags": [
+     "camwall"
+    ]
+   }
+  },
+  "/api/v1/cloud/builtin-filaments": {
+   "get": {
+    "operationId": "get_builtin_filaments_api_v1_cloud_builtin_filaments_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/devices": {
+   "get": {
+    "operationId": "get_devices_api_v1_cloud_devices_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/fields": {
+   "get": {
+    "operationId": "get_all_preset_fields_api_v1_cloud_fields_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/fields/{preset_type}": {
+   "get": {
+    "operationId": "get_preset_fields_api_v1_cloud_fields__preset_type__get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/filament-id-map": {
+   "get": {
+    "operationId": "get_filament_id_map_api_v1_cloud_filament_id_map_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/filament-info": {
+   "post": {
+    "operationId": "get_filament_info_api_v1_cloud_filament_info_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/filaments": {
+   "get": {
+    "operationId": "get_filament_presets_api_v1_cloud_filaments_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/firmware-updates": {
+   "get": {
+    "operationId": "get_firmware_updates_api_v1_cloud_firmware_updates_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/login": {
+   "post": {
+    "operationId": "login_api_v1_cloud_login_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/logout": {
+   "post": {
+    "operationId": "logout_api_v1_cloud_logout_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/settings": {
+   "get": {
+    "operationId": "get_slicer_settings_api_v1_cloud_settings_get",
+    "tags": [
+     "cloud"
+    ]
+   },
+   "post": {
+    "operationId": "create_setting_api_v1_cloud_settings_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/settings/{setting_id}": {
+   "delete": {
+    "operationId": "delete_setting_api_v1_cloud_settings__setting_id__delete",
+    "tags": [
+     "cloud"
+    ]
+   },
+   "get": {
+    "operationId": "get_setting_detail_api_v1_cloud_settings__setting_id__get",
+    "tags": [
+     "cloud"
+    ]
+   },
+   "put": {
+    "operationId": "update_setting_api_v1_cloud_settings__setting_id__put",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/status": {
+   "get": {
+    "operationId": "get_auth_status_api_v1_cloud_status_get",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/token": {
+   "post": {
+    "operationId": "set_token_api_v1_cloud_token_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/cloud/verify": {
+   "post": {
+    "operationId": "verify_code_api_v1_cloud_verify_post",
+    "tags": [
+     "cloud"
+    ]
+   }
+  },
+  "/api/v1/connect/apps": {
+   "get": {
+    "operationId": "list_connected_apps_api_v1_connect_apps_get",
+    "tags": [
+     "connected-apps"
+    ]
+   },
+   "post": {
+    "operationId": "create_connected_app_api_v1_connect_apps_post",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/connect/apps/{app_id}": {
+   "delete": {
+    "operationId": "delete_connected_app_api_v1_connect_apps__app_id__delete",
+    "tags": [
+     "connected-apps"
+    ]
+   },
+   "patch": {
+    "operationId": "update_connected_app_api_v1_connect_apps__app_id__patch",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/connect/apps/{app_id}/rotate-secret": {
+   "post": {
+    "operationId": "rotate_connected_app_secret_api_v1_connect_apps__app_id__rotate_secret_post",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/connect/authorize": {
+   "post": {
+    "operationId": "authorize_api_v1_connect_authorize_post",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/connect/authorize/info": {
+   "get": {
+    "operationId": "authorize_info_api_v1_connect_authorize_info_get",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/connect/token": {
+   "post": {
+    "operationId": "exchange_code_api_v1_connect_token_post",
+    "tags": [
+     "connected-apps"
+    ]
+   }
+  },
+  "/api/v1/discovery/info": {
+   "get": {
+    "operationId": "get_discovery_info_api_v1_discovery_info_get",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/printers": {
+   "get": {
+    "operationId": "get_discovered_printers_api_v1_discovery_printers_get",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/scan": {
+   "post": {
+    "operationId": "start_subnet_scan_api_v1_discovery_scan_post",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/scan/status": {
+   "get": {
+    "operationId": "get_scan_status_api_v1_discovery_scan_status_get",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/scan/stop": {
+   "post": {
+    "operationId": "stop_subnet_scan_api_v1_discovery_scan_stop_post",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/start": {
+   "post": {
+    "operationId": "start_discovery_api_v1_discovery_start_post",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/status": {
+   "get": {
+    "operationId": "get_discovery_status_api_v1_discovery_status_get",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/discovery/stop": {
+   "post": {
+    "operationId": "stop_discovery_api_v1_discovery_stop_post",
+    "tags": [
+     "discovery"
+    ]
+   }
+  },
+  "/api/v1/external-links/": {
+   "get": {
+    "operationId": "list_external_links_api_v1_external_links__get",
+    "tags": [
+     "external-links"
+    ]
+   },
+   "post": {
+    "operationId": "create_external_link_api_v1_external_links__post",
+    "tags": [
+     "external-links"
+    ]
+   }
+  },
+  "/api/v1/external-links/reorder": {
+   "put": {
+    "operationId": "reorder_external_links_api_v1_external_links_reorder_put",
+    "tags": [
+     "external-links"
+    ]
+   }
+  },
+  "/api/v1/external-links/{link_id}": {
+   "delete": {
+    "operationId": "delete_external_link_api_v1_external_links__link_id__delete",
+    "tags": [
+     "external-links"
+    ]
+   },
+   "get": {
+    "operationId": "get_external_link_api_v1_external_links__link_id__get",
+    "tags": [
+     "external-links"
+    ]
+   },
+   "patch": {
+    "operationId": "update_external_link_api_v1_external_links__link_id__patch",
+    "tags": [
+     "external-links"
+    ]
+   }
+  },
+  "/api/v1/external-links/{link_id}/icon": {
+   "delete": {
+    "operationId": "delete_icon_api_v1_external_links__link_id__icon_delete",
+    "tags": [
+     "external-links"
+    ]
+   },
+   "get": {
+    "operationId": "get_icon_api_v1_external_links__link_id__icon_get",
+    "tags": [
+     "external-links"
+    ]
+   },
+   "post": {
+    "operationId": "upload_icon_api_v1_external_links__link_id__icon_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "external-links"
+    ]
+   }
+  },
+  "/api/v1/filament-catalog/": {
+   "get": {
+    "operationId": "list_filaments_api_v1_filament_catalog__get",
+    "tags": [
+     "filament-catalog"
+    ]
+   },
+   "post": {
+    "operationId": "create_filament_api_v1_filament_catalog__post",
+    "tags": [
+     "filament-catalog"
+    ]
+   }
+  },
+  "/api/v1/filament-catalog/by-type/{filament_type}": {
+   "get": {
+    "operationId": "get_filaments_by_type_api_v1_filament_catalog_by_type__filament_type__get",
+    "tags": [
+     "filament-catalog"
+    ]
+   }
+  },
+  "/api/v1/filament-catalog/calculate-cost": {
+   "post": {
+    "operationId": "calculate_cost_api_v1_filament_catalog_calculate_cost_post",
+    "tags": [
+     "filament-catalog"
+    ]
+   }
+  },
+  "/api/v1/filament-catalog/seed-defaults": {
+   "post": {
+    "operationId": "seed_default_filaments_api_v1_filament_catalog_seed_defaults_post",
+    "tags": [
+     "filament-catalog"
+    ]
+   }
+  },
+  "/api/v1/filament-catalog/{filament_id}": {
+   "delete": {
+    "operationId": "delete_filament_api_v1_filament_catalog__filament_id__delete",
+    "tags": [
+     "filament-catalog"
+    ]
+   },
+   "get": {
+    "operationId": "get_filament_api_v1_filament_catalog__filament_id__get",
+    "tags": [
+     "filament-catalog"
+    ]
+   },
+   "patch": {
+    "operationId": "update_filament_api_v1_filament_catalog__filament_id__patch",
+    "tags": [
+     "filament-catalog"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers": {
+   "get": {
+    "operationId": "list_cost_centers_api_v1_finance_cost_centers_get",
+    "tags": [
+     "finance"
+    ]
+   },
+   "post": {
+    "operationId": "create_cost_center_api_v1_finance_cost_centers_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers/mine": {
+   "get": {
+    "operationId": "get_my_cost_centers_api_v1_finance_cost_centers_mine_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers/{cost_center_id}": {
+   "delete": {
+    "operationId": "delete_cost_center_api_v1_finance_cost_centers__cost_center_id__delete",
+    "tags": [
+     "finance"
+    ]
+   },
+   "get": {
+    "operationId": "get_cost_center_api_v1_finance_cost_centers__cost_center_id__get",
+    "tags": [
+     "finance"
+    ]
+   },
+   "patch": {
+    "operationId": "update_cost_center_api_v1_finance_cost_centers__cost_center_id__patch",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers/{cost_center_id}/budgets": {
+   "patch": {
+    "operationId": "update_cost_center_budgets_api_v1_finance_cost_centers__cost_center_id__budgets_patch",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers/{cost_center_id}/members": {
+   "post": {
+    "operationId": "upsert_cost_center_member_api_v1_finance_cost_centers__cost_center_id__members_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/cost-centers/{cost_center_id}/members/{user_id}": {
+   "delete": {
+    "operationId": "remove_cost_center_member_api_v1_finance_cost_centers__cost_center_id__members__user_id__delete",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/me/balance": {
+   "get": {
+    "operationId": "get_my_balance_api_v1_finance_me_balance_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/me/transactions": {
+   "get": {
+    "operationId": "get_my_transactions_api_v1_finance_me_transactions_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/rebuild-balance-ledger": {
+   "post": {
+    "operationId": "rebuild_balance_ledger_api_v1_finance_rebuild_balance_ledger_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/transactions": {
+   "get": {
+    "operationId": "get_all_transactions_api_v1_finance_transactions_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/transactions/manual": {
+   "post": {
+    "operationId": "create_manual_print_api_v1_finance_transactions_manual_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/transactions/{transaction_id}": {
+   "delete": {
+    "operationId": "delete_transaction_api_v1_finance_transactions__transaction_id__delete",
+    "tags": [
+     "finance"
+    ]
+   },
+   "patch": {
+    "operationId": "edit_transaction_api_v1_finance_transactions__transaction_id__patch",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/users/{user_id}/balance": {
+   "get": {
+    "operationId": "get_user_balance_api_v1_finance_users__user_id__balance_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/users/{user_id}/deposit": {
+   "post": {
+    "operationId": "deposit_user_balance_api_v1_finance_users__user_id__deposit_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/users/{user_id}/transactions": {
+   "get": {
+    "operationId": "get_user_transactions_api_v1_finance_users__user_id__transactions_get",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/finance/users/{user_id}/withdraw": {
+   "post": {
+    "operationId": "withdraw_user_balance_api_v1_finance_users__user_id__withdraw_post",
+    "tags": [
+     "finance"
+    ]
+   }
+  },
+  "/api/v1/firmware/latest": {
+   "get": {
+    "operationId": "get_all_latest_firmware_api_v1_firmware_latest_get",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/firmware/updates": {
+   "get": {
+    "operationId": "check_firmware_updates_api_v1_firmware_updates_get",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/firmware/updates/{printer_id}": {
+   "get": {
+    "operationId": "check_printer_firmware_api_v1_firmware_updates__printer_id__get",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/firmware/updates/{printer_id}/prepare": {
+   "get": {
+    "operationId": "prepare_firmware_upload_api_v1_firmware_updates__printer_id__prepare_get",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/firmware/updates/{printer_id}/upload": {
+   "post": {
+    "operationId": "start_firmware_upload_api_v1_firmware_updates__printer_id__upload_post",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/firmware/updates/{printer_id}/upload/status": {
+   "get": {
+    "operationId": "get_firmware_upload_status_api_v1_firmware_updates__printer_id__upload_status_get",
+    "tags": [
+     "firmware"
+    ]
+   }
+  },
+  "/api/v1/github-backup/cloud-accounts": {
+   "get": {
+    "operationId": "get_cloud_accounts_api_v1_github_backup_cloud_accounts_get",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/commits": {
+   "get": {
+    "operationId": "list_commits_api_v1_github_backup_commits_get",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/config": {
+   "delete": {
+    "operationId": "delete_config_api_v1_github_backup_config_delete",
+    "tags": [
+     "github-backup"
+    ]
+   },
+   "get": {
+    "operationId": "get_config_api_v1_github_backup_config_get",
+    "tags": [
+     "github-backup"
+    ]
+   },
+   "patch": {
+    "operationId": "update_config_api_v1_github_backup_config_patch",
+    "tags": [
+     "github-backup"
+    ]
+   },
+   "post": {
+    "operationId": "save_config_api_v1_github_backup_config_post",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/logs": {
+   "delete": {
+    "operationId": "clear_logs_api_v1_github_backup_logs_delete",
+    "tags": [
+     "github-backup"
+    ]
+   },
+   "get": {
+    "operationId": "get_logs_api_v1_github_backup_logs_get",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/restore": {
+   "post": {
+    "operationId": "restore_backup_api_v1_github_backup_restore_post",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/restore/preview": {
+   "get": {
+    "operationId": "preview_restore_api_v1_github_backup_restore_preview_get",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/run": {
+   "post": {
+    "operationId": "trigger_backup_api_v1_github_backup_run_post",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/status": {
+   "get": {
+    "operationId": "get_status_api_v1_github_backup_status_get",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/test": {
+   "post": {
+    "operationId": "test_connection_api_v1_github_backup_test_post",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/github-backup/test-stored": {
+   "post": {
+    "operationId": "test_stored_connection_api_v1_github_backup_test_stored_post",
+    "tags": [
+     "github-backup"
+    ]
+   }
+  },
+  "/api/v1/groups": {
+   "get": {
+    "operationId": "list_groups_api_v1_groups_get",
+    "tags": [
+     "groups"
+    ]
+   },
+   "post": {
+    "operationId": "create_group_api_v1_groups_post",
+    "tags": [
+     "groups"
+    ]
+   }
+  },
+  "/api/v1/groups/": {
+   "get": {
+    "operationId": "list_groups_api_v1_groups__get",
+    "tags": [
+     "groups"
+    ]
+   },
+   "post": {
+    "operationId": "create_group_api_v1_groups__post",
+    "tags": [
+     "groups"
+    ]
+   }
+  },
+  "/api/v1/groups/permissions": {
+   "get": {
+    "operationId": "list_permissions_api_v1_groups_permissions_get",
+    "tags": [
+     "groups"
+    ]
+   }
+  },
+  "/api/v1/groups/{group_id}": {
+   "delete": {
+    "operationId": "delete_group_api_v1_groups__group_id__delete",
+    "tags": [
+     "groups"
+    ]
+   },
+   "get": {
+    "operationId": "get_group_api_v1_groups__group_id__get",
+    "tags": [
+     "groups"
+    ]
+   },
+   "patch": {
+    "operationId": "update_group_api_v1_groups__group_id__patch",
+    "tags": [
+     "groups"
+    ]
+   }
+  },
+  "/api/v1/groups/{group_id}/users/{user_id}": {
+   "delete": {
+    "operationId": "remove_user_from_group_api_v1_groups__group_id__users__user_id__delete",
+    "tags": [
+     "groups"
+    ]
+   },
+   "post": {
+    "operationId": "add_user_to_group_api_v1_groups__group_id__users__user_id__post",
+    "tags": [
+     "groups"
+    ]
+   }
+  },
+  "/api/v1/ha-sensors/": {
+   "get": {
+    "operationId": "list_ha_sensors_api_v1_ha_sensors__get",
+    "tags": [
+     "ha-sensors"
+    ]
+   },
+   "post": {
+    "operationId": "create_ha_sensor_api_v1_ha_sensors__post",
+    "tags": [
+     "ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/ha-sensors/by-printer/{printer_id}/readings": {
+   "get": {
+    "operationId": "get_printer_sensor_readings_api_v1_ha_sensors_by_printer__printer_id__readings_get",
+    "tags": [
+     "ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/ha-sensors/entities": {
+   "get": {
+    "operationId": "list_bindable_entities_api_v1_ha_sensors_entities_get",
+    "tags": [
+     "ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/ha-sensors/{sensor_id}": {
+   "delete": {
+    "operationId": "delete_ha_sensor_api_v1_ha_sensors__sensor_id__delete",
+    "tags": [
+     "ha-sensors"
+    ]
+   },
+   "get": {
+    "operationId": "get_ha_sensor_api_v1_ha_sensors__sensor_id__get",
+    "tags": [
+     "ha-sensors"
+    ]
+   },
+   "patch": {
+    "operationId": "update_ha_sensor_api_v1_ha_sensors__sensor_id__patch",
+    "tags": [
+     "ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/inventory/assignments": {
+   "get": {
+    "operationId": "list_assignments_api_v1_inventory_assignments_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "assign_spool_api_v1_inventory_assignments_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/assignments/{printer_id}/{ams_id}/{tray_id}": {
+   "delete": {
+    "operationId": "unassign_spool_api_v1_inventory_assignments__printer_id___ams_id___tray_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/catalog": {
+   "get": {
+    "operationId": "get_spool_catalog_api_v1_inventory_catalog_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "add_catalog_entry_api_v1_inventory_catalog_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/catalog/bulk-delete": {
+   "post": {
+    "operationId": "bulk_delete_catalog_entries_api_v1_inventory_catalog_bulk_delete_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/catalog/reset": {
+   "post": {
+    "operationId": "reset_spool_catalog_api_v1_inventory_catalog_reset_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/catalog/{entry_id}": {
+   "delete": {
+    "operationId": "delete_catalog_entry_api_v1_inventory_catalog__entry_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "put": {
+    "operationId": "update_catalog_entry_api_v1_inventory_catalog__entry_id__put",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors": {
+   "get": {
+    "operationId": "get_color_catalog_api_v1_inventory_colors_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "add_color_entry_api_v1_inventory_colors_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/bulk-delete": {
+   "post": {
+    "operationId": "bulk_delete_color_entries_api_v1_inventory_colors_bulk_delete_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/by-material": {
+   "get": {
+    "operationId": "get_color_by_material_api_v1_inventory_colors_by_material_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/lookup": {
+   "get": {
+    "operationId": "lookup_color_api_v1_inventory_colors_lookup_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/map": {
+   "get": {
+    "operationId": "get_color_name_map_api_v1_inventory_colors_map_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/reset": {
+   "post": {
+    "operationId": "reset_color_catalog_api_v1_inventory_colors_reset_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/search": {
+   "get": {
+    "operationId": "search_colors_api_v1_inventory_colors_search_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/sync": {
+   "post": {
+    "operationId": "sync_from_filamentcolors_api_v1_inventory_colors_sync_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/colors/{entry_id}": {
+   "delete": {
+    "operationId": "delete_color_entry_api_v1_inventory_colors__entry_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "put": {
+    "operationId": "update_color_entry_api_v1_inventory_colors__entry_id__put",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/labels": {
+   "post": {
+    "operationId": "render_local_inventory_labels_api_v1_inventory_labels_post",
+    "tags": [
+     "labels"
+    ]
+   }
+  },
+  "/api/v1/inventory/locations": {
+   "get": {
+    "operationId": "list_locations_api_v1_inventory_locations_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "create_location_api_v1_inventory_locations_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/locations/{location_id}": {
+   "delete": {
+    "operationId": "delete_location_api_v1_inventory_locations__location_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "patch": {
+    "operationId": "update_location_api_v1_inventory_locations__location_id__patch",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/shopping-list": {
+   "delete": {
+    "operationId": "clear_shopping_list_api_v1_inventory_shopping_list_delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "get": {
+    "operationId": "get_shopping_list_api_v1_inventory_shopping_list_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "add_to_shopping_list_api_v1_inventory_shopping_list_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/shopping-list/{item_id}": {
+   "delete": {
+    "operationId": "remove_from_shopping_list_api_v1_inventory_shopping_list__item_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/shopping-list/{item_id}/status": {
+   "patch": {
+    "operationId": "update_shopping_list_status_api_v1_inventory_shopping_list__item_id__status_patch",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/sku-settings": {
+   "get": {
+    "operationId": "list_sku_settings_api_v1_inventory_sku_settings_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "upsert_sku_settings_api_v1_inventory_sku_settings_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools": {
+   "get": {
+    "operationId": "list_spools_api_v1_inventory_spools_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "create_spool_api_v1_inventory_spools_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/bulk": {
+   "post": {
+    "operationId": "bulk_create_spools_api_v1_inventory_spools_bulk_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/bulk-archive": {
+   "post": {
+    "operationId": "bulk_archive_spools_api_v1_inventory_spools_bulk_archive_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/bulk-delete": {
+   "post": {
+    "operationId": "bulk_delete_spools_api_v1_inventory_spools_bulk_delete_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/bulk-restore": {
+   "post": {
+    "operationId": "bulk_restore_spools_api_v1_inventory_spools_bulk_restore_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/bulk-update": {
+   "post": {
+    "operationId": "bulk_update_spools_api_v1_inventory_spools_bulk_update_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/by-tag": {
+   "get": {
+    "operationId": "get_spool_by_tag_api_v1_inventory_spools_by_tag_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/export": {
+   "get": {
+    "operationId": "export_spools_csv_api_v1_inventory_spools_export_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/from-slot": {
+   "post": {
+    "operationId": "create_spool_from_slot_api_v1_inventory_spools_from_slot_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/import": {
+   "post": {
+    "operationId": "import_spools_csv_api_v1_inventory_spools_import_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/reset-consumed-counter-bulk": {
+   "post": {
+    "operationId": "bulk_reset_spool_consumed_counter_api_v1_inventory_spools_reset_consumed_counter_bulk_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}": {
+   "delete": {
+    "operationId": "delete_spool_api_v1_inventory_spools__spool_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "get": {
+    "operationId": "get_spool_api_v1_inventory_spools__spool_id__get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "patch": {
+    "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/archive": {
+   "post": {
+    "operationId": "archive_spool_api_v1_inventory_spools__spool_id__archive_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/filament-presets": {
+   "get": {
+    "operationId": "list_filament_presets_api_v1_inventory_spools__spool_id__filament_presets_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "put": {
+    "operationId": "replace_filament_presets_api_v1_inventory_spools__spool_id__filament_presets_put",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/k-profiles": {
+   "get": {
+    "operationId": "list_k_profiles_api_v1_inventory_spools__spool_id__k_profiles_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "put": {
+    "operationId": "replace_k_profiles_api_v1_inventory_spools__spool_id__k_profiles_put",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/link-tag": {
+   "patch": {
+    "operationId": "link_tag_to_spool_api_v1_inventory_spools__spool_id__link_tag_patch",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/reset-consumed-counter": {
+   "post": {
+    "operationId": "reset_spool_consumed_counter_api_v1_inventory_spools__spool_id__reset_consumed_counter_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/restore": {
+   "post": {
+    "operationId": "restore_spool_api_v1_inventory_spools__spool_id__restore_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/suppliers": {
+   "put": {
+    "operationId": "replace_spool_suppliers_api_v1_inventory_spools__spool_id__suppliers_put",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/spools/{spool_id}/usage": {
+   "delete": {
+    "operationId": "clear_spool_usage_history_api_v1_inventory_spools__spool_id__usage_delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "get": {
+    "operationId": "get_spool_usage_history_api_v1_inventory_spools__spool_id__usage_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/stats/suppliers": {
+   "get": {
+    "operationId": "get_supplier_stats_api_v1_inventory_stats_suppliers_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/suppliers": {
+   "get": {
+    "operationId": "list_suppliers_api_v1_inventory_suppliers_get",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "post": {
+    "operationId": "create_supplier_api_v1_inventory_suppliers_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/suppliers/{supplier_id}": {
+   "delete": {
+    "operationId": "delete_supplier_api_v1_inventory_suppliers__supplier_id__delete",
+    "tags": [
+     "inventory"
+    ]
+   },
+   "patch": {
+    "operationId": "update_supplier_api_v1_inventory_suppliers__supplier_id__patch",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/sync-ams-weights": {
+   "post": {
+    "operationId": "sync_weights_from_ams_api_v1_inventory_sync_ams_weights_post",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/inventory/usage": {
+   "get": {
+    "operationId": "get_all_usage_history_api_v1_inventory_usage_get",
+    "tags": [
+     "inventory"
+    ]
+   }
+  },
+  "/api/v1/library/bulk-delete": {
+   "post": {
+    "operationId": "bulk_delete_api_v1_library_bulk_delete_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files": {
+   "get": {
+    "operationId": "list_files_api_v1_library_files_get",
+    "tags": [
+     "library"
+    ]
+   },
+   "post": {
+    "operationId": "upload_file_api_v1_library_files_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/": {
+   "get": {
+    "operationId": "list_files_api_v1_library_files__get",
+    "tags": [
+     "library"
+    ]
+   },
+   "post": {
+    "operationId": "upload_file_api_v1_library_files__post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/add-to-queue": {
+   "post": {
+    "operationId": "add_files_to_queue_api_v1_library_files_add_to_queue_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/extract-zip": {
+   "post": {
+    "operationId": "extract_zip_file_api_v1_library_files_extract_zip_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/move": {
+   "post": {
+    "operationId": "move_files_api_v1_library_files_move_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}": {
+   "delete": {
+    "operationId": "delete_file_api_v1_library_files__file_id__delete",
+    "tags": [
+     "library"
+    ]
+   },
+   "get": {
+    "operationId": "get_file_api_v1_library_files__file_id__get",
+    "tags": [
+     "library"
+    ]
+   },
+   "put": {
+    "operationId": "update_file_api_v1_library_files__file_id__put",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/dl/{token}/{filename}": {
+   "get": {
+    "operationId": "download_library_file_for_slicer_api_v1_library_files__file_id__dl__token___filename__get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/download": {
+   "get": {
+    "operationId": "download_file_api_v1_library_files__file_id__download_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/filament-requirements": {
+   "get": {
+    "operationId": "get_library_file_filament_requirements_api_v1_library_files__file_id__filament_requirements_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/gcode": {
+   "get": {
+    "operationId": "get_gcode_api_v1_library_files__file_id__gcode_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/photos": {
+   "post": {
+    "operationId": "upload_file_photo_api_v1_library_files__file_id__photos_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/photos/{filename}": {
+   "delete": {
+    "operationId": "delete_file_photo_api_v1_library_files__file_id__photos__filename__delete",
+    "tags": [
+     "library"
+    ]
+   },
+   "get": {
+    "operationId": "get_file_photo_api_v1_library_files__file_id__photos__filename__get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/plate-thumbnail/{plate_index}": {
+   "get": {
+    "operationId": "get_library_file_plate_thumbnail_api_v1_library_files__file_id__plate_thumbnail__plate_index__get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/plates": {
+   "get": {
+    "operationId": "get_library_file_plates_api_v1_library_files__file_id__plates_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/preview-thumbnail": {
+   "post": {
+    "operationId": "upload_preview_thumbnail_api_v1_library_files__file_id__preview_thumbnail_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/print": {
+   "post": {
+    "operationId": "print_library_file_api_v1_library_files__file_id__print_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/slice": {
+   "post": {
+    "operationId": "slice_library_file_api_v1_library_files__file_id__slice_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/slicer-token": {
+   "post": {
+    "operationId": "create_library_slicer_token_api_v1_library_files__file_id__slicer_token_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/files/{file_id}/thumbnail": {
+   "get": {
+    "operationId": "get_thumbnail_api_v1_library_files__file_id__thumbnail_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders": {
+   "get": {
+    "operationId": "list_folders_api_v1_library_folders_get",
+    "tags": [
+     "library"
+    ]
+   },
+   "post": {
+    "operationId": "create_folder_api_v1_library_folders_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/": {
+   "get": {
+    "operationId": "list_folders_api_v1_library_folders__get",
+    "tags": [
+     "library"
+    ]
+   },
+   "post": {
+    "operationId": "create_folder_api_v1_library_folders__post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/by-archive/{archive_id}": {
+   "get": {
+    "operationId": "get_folders_by_archive_api_v1_library_folders_by_archive__archive_id__get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/by-project/{project_id}": {
+   "get": {
+    "operationId": "get_folders_by_project_api_v1_library_folders_by_project__project_id__get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/external": {
+   "post": {
+    "operationId": "create_external_folder_api_v1_library_folders_external_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/{folder_id}": {
+   "delete": {
+    "operationId": "delete_folder_api_v1_library_folders__folder_id__delete",
+    "tags": [
+     "library"
+    ]
+   },
+   "get": {
+    "operationId": "get_folder_api_v1_library_folders__folder_id__get",
+    "tags": [
+     "library"
+    ]
+   },
+   "put": {
+    "operationId": "update_folder_api_v1_library_folders__folder_id__put",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/{folder_id}/readme": {
+   "get": {
+    "operationId": "get_folder_readme_api_v1_library_folders__folder_id__readme_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/folders/{folder_id}/scan": {
+   "post": {
+    "operationId": "scan_external_folder_api_v1_library_folders__folder_id__scan_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/generate-stl-thumbnails": {
+   "post": {
+    "operationId": "batch_generate_stl_thumbnails_api_v1_library_generate_stl_thumbnails_post",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/purge": {
+   "post": {
+    "operationId": "execute_purge_api_v1_library_purge_post",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/purge/preview": {
+   "get": {
+    "operationId": "preview_purge_api_v1_library_purge_preview_get",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/stats": {
+   "get": {
+    "operationId": "get_library_stats_api_v1_library_stats_get",
+    "tags": [
+     "library"
+    ]
+   }
+  },
+  "/api/v1/library/tags": {
+   "get": {
+    "operationId": "list_tags_api_v1_library_tags_get",
+    "tags": [
+     "library-tags"
+    ]
+   },
+   "post": {
+    "operationId": "create_tag_api_v1_library_tags_post",
+    "tags": [
+     "library-tags"
+    ]
+   }
+  },
+  "/api/v1/library/tags/": {
+   "get": {
+    "operationId": "list_tags_api_v1_library_tags__get",
+    "tags": [
+     "library-tags"
+    ]
+   },
+   "post": {
+    "operationId": "create_tag_api_v1_library_tags__post",
+    "tags": [
+     "library-tags"
+    ]
+   }
+  },
+  "/api/v1/library/tags/bulk-assign": {
+   "post": {
+    "operationId": "bulk_assign_api_v1_library_tags_bulk_assign_post",
+    "tags": [
+     "library-tags"
+    ]
+   }
+  },
+  "/api/v1/library/tags/{tag_id}": {
+   "delete": {
+    "operationId": "delete_tag_api_v1_library_tags__tag_id__delete",
+    "tags": [
+     "library-tags"
+    ]
+   },
+   "patch": {
+    "operationId": "update_tag_api_v1_library_tags__tag_id__patch",
+    "tags": [
+     "library-tags"
+    ]
+   }
+  },
+  "/api/v1/library/trash": {
+   "delete": {
+    "operationId": "empty_trash_api_v1_library_trash_delete",
+    "tags": [
+     "library-trash"
+    ]
+   },
+   "get": {
+    "operationId": "list_trash_api_v1_library_trash_get",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/trash/settings": {
+   "get": {
+    "operationId": "get_trash_settings_api_v1_library_trash_settings_get",
+    "tags": [
+     "library-trash"
+    ]
+   },
+   "put": {
+    "operationId": "update_trash_settings_api_v1_library_trash_settings_put",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/trash/{file_id}": {
+   "delete": {
+    "operationId": "hard_delete_from_trash_api_v1_library_trash__file_id__delete",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/trash/{file_id}/restore": {
+   "post": {
+    "operationId": "restore_from_trash_api_v1_library_trash__file_id__restore_post",
+    "tags": [
+     "library-trash"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups": {
+   "post": {
+    "operationId": "create_variant_group_api_v1_library_variant_groups_post",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups/": {
+   "post": {
+    "operationId": "create_variant_group_api_v1_library_variant_groups__post",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups/by-file/{file_id}": {
+   "get": {
+    "operationId": "get_group_for_file_api_v1_library_variant_groups_by_file__file_id__get",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups/{group_id}": {
+   "delete": {
+    "operationId": "delete_variant_group_api_v1_library_variant_groups__group_id__delete",
+    "tags": [
+     "library-variants"
+    ]
+   },
+   "get": {
+    "operationId": "get_variant_group_api_v1_library_variant_groups__group_id__get",
+    "tags": [
+     "library-variants"
+    ]
+   },
+   "patch": {
+    "operationId": "update_variant_group_api_v1_library_variant_groups__group_id__patch",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups/{group_id}/members": {
+   "post": {
+    "operationId": "add_variant_group_member_api_v1_library_variant_groups__group_id__members_post",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/library/variant-groups/{group_id}/members/{file_id}": {
+   "delete": {
+    "operationId": "remove_variant_group_member_api_v1_library_variant_groups__group_id__members__file_id__delete",
+    "tags": [
+     "library-variants"
+    ]
+   }
+  },
+  "/api/v1/local-backup/backups": {
+   "get": {
+    "operationId": "list_backups_api_v1_local_backup_backups_get",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/backups/{filename}": {
+   "delete": {
+    "operationId": "delete_backup_api_v1_local_backup_backups__filename__delete",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/backups/{filename}/download": {
+   "get": {
+    "operationId": "download_backup_api_v1_local_backup_backups__filename__download_get",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/backups/{filename}/restore": {
+   "post": {
+    "operationId": "restore_backup_api_v1_local_backup_backups__filename__restore_post",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/path-check": {
+   "get": {
+    "operationId": "check_path_api_v1_local_backup_path_check_get",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/run": {
+   "post": {
+    "operationId": "trigger_backup_api_v1_local_backup_run_post",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-backup/status": {
+   "get": {
+    "operationId": "get_status_api_v1_local_backup_status_get",
+    "tags": [
+     "local-backup"
+    ]
+   }
+  },
+  "/api/v1/local-presets/": {
+   "get": {
+    "operationId": "list_local_presets_api_v1_local_presets__get",
+    "tags": [
+     "Local Presets"
+    ]
+   },
+   "post": {
+    "operationId": "create_local_preset_api_v1_local_presets__post",
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/local-presets/base-cache/refresh": {
+   "post": {
+    "operationId": "refresh_cache_api_v1_local_presets_base_cache_refresh_post",
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/local-presets/base-cache/status": {
+   "get": {
+    "operationId": "base_cache_status_api_v1_local_presets_base_cache_status_get",
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/local-presets/import": {
+   "post": {
+    "operationId": "import_presets_api_v1_local_presets_import_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/local-presets/reclassify": {
+   "post": {
+    "operationId": "reclassify_api_v1_local_presets_reclassify_post",
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/local-presets/{preset_id}": {
+   "delete": {
+    "operationId": "delete_local_preset_api_v1_local_presets__preset_id__delete",
+    "tags": [
+     "Local Presets"
+    ]
+   },
+   "get": {
+    "operationId": "get_local_preset_api_v1_local_presets__preset_id__get",
+    "tags": [
+     "Local Presets"
+    ]
+   },
+   "put": {
+    "operationId": "update_local_preset_api_v1_local_presets__preset_id__put",
+    "tags": [
+     "Local Presets"
+    ]
+   }
+  },
+  "/api/v1/location-ha-sensors/": {
+   "get": {
+    "operationId": "list_location_ha_sensors_api_v1_location_ha_sensors__get",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   },
+   "post": {
+    "operationId": "create_location_ha_sensor_api_v1_location_ha_sensors__post",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/location-ha-sensors/by-location/{location_id}/readings": {
+   "get": {
+    "operationId": "get_location_sensor_readings_api_v1_location_ha_sensors_by_location__location_id__readings_get",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/location-ha-sensors/entities": {
+   "get": {
+    "operationId": "list_bindable_entities_api_v1_location_ha_sensors_entities_get",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/location-ha-sensors/{sensor_id}": {
+   "delete": {
+    "operationId": "delete_location_ha_sensor_api_v1_location_ha_sensors__sensor_id__delete",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   },
+   "get": {
+    "operationId": "get_location_ha_sensor_api_v1_location_ha_sensors__sensor_id__get",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   },
+   "patch": {
+    "operationId": "update_location_ha_sensor_api_v1_location_ha_sensors__sensor_id__patch",
+    "tags": [
+     "location-ha-sensors"
+    ]
+   }
+  },
+  "/api/v1/maintenance/items/{item_id}": {
+   "delete": {
+    "operationId": "remove_maintenance_item_api_v1_maintenance_items__item_id__delete",
+    "tags": [
+     "maintenance"
+    ]
+   },
+   "patch": {
+    "operationId": "update_printer_maintenance_api_v1_maintenance_items__item_id__patch",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/items/{item_id}/history": {
+   "get": {
+    "operationId": "get_maintenance_history_api_v1_maintenance_items__item_id__history_get",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/items/{item_id}/perform": {
+   "post": {
+    "operationId": "perform_maintenance_api_v1_maintenance_items__item_id__perform_post",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/overview": {
+   "get": {
+    "operationId": "get_all_maintenance_overview_api_v1_maintenance_overview_get",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/printers/{printer_id}": {
+   "get": {
+    "operationId": "get_printer_maintenance_api_v1_maintenance_printers__printer_id__get",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/printers/{printer_id}/assign/{type_id}": {
+   "post": {
+    "operationId": "assign_maintenance_type_api_v1_maintenance_printers__printer_id__assign__type_id__post",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/printers/{printer_id}/hours": {
+   "patch": {
+    "operationId": "set_printer_hours_api_v1_maintenance_printers__printer_id__hours_patch",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/summary": {
+   "get": {
+    "operationId": "get_maintenance_summary_api_v1_maintenance_summary_get",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/types": {
+   "get": {
+    "operationId": "get_maintenance_types_api_v1_maintenance_types_get",
+    "tags": [
+     "maintenance"
+    ]
+   },
+   "post": {
+    "operationId": "create_maintenance_type_api_v1_maintenance_types_post",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/types/restore-defaults": {
+   "post": {
+    "operationId": "restore_default_maintenance_types_api_v1_maintenance_types_restore_defaults_post",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/maintenance/types/{type_id}": {
+   "delete": {
+    "operationId": "delete_maintenance_type_api_v1_maintenance_types__type_id__delete",
+    "tags": [
+     "maintenance"
+    ]
+   },
+   "patch": {
+    "operationId": "update_maintenance_type_api_v1_maintenance_types__type_id__patch",
+    "tags": [
+     "maintenance"
+    ]
+   }
+  },
+  "/api/v1/makerworld/import": {
+   "post": {
+    "operationId": "import_instance_api_v1_makerworld_import_post",
+    "tags": [
+     "makerworld"
+    ]
+   }
+  },
+  "/api/v1/makerworld/recent-imports": {
+   "get": {
+    "operationId": "recent_imports_api_v1_makerworld_recent_imports_get",
+    "tags": [
+     "makerworld"
+    ]
+   }
+  },
+  "/api/v1/makerworld/resolve": {
+   "post": {
+    "operationId": "resolve_url_api_v1_makerworld_resolve_post",
+    "tags": [
+     "makerworld"
+    ]
+   }
+  },
+  "/api/v1/makerworld/status": {
+   "get": {
+    "operationId": "get_status_api_v1_makerworld_status_get",
+    "tags": [
+     "makerworld"
+    ]
+   }
+  },
+  "/api/v1/makerworld/thumbnail": {
+   "get": {
+    "operationId": "proxy_thumbnail_api_v1_makerworld_thumbnail_get",
+    "tags": [
+     "makerworld"
+    ]
+   }
+  },
+  "/api/v1/metrics": {
+   "get": {
+    "operationId": "get_metrics_api_v1_metrics_get",
+    "tags": [
+     "metrics"
+    ]
+   }
+  },
+  "/api/v1/notification-templates": {
+   "get": {
+    "operationId": "get_templates_api_v1_notification_templates_get",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notification-templates/": {
+   "get": {
+    "operationId": "get_templates_api_v1_notification_templates__get",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notification-templates/preview": {
+   "post": {
+    "operationId": "preview_template_api_v1_notification_templates_preview_post",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notification-templates/variables": {
+   "get": {
+    "operationId": "get_variables_api_v1_notification_templates_variables_get",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notification-templates/{template_id}": {
+   "get": {
+    "operationId": "get_template_api_v1_notification_templates__template_id__get",
+    "tags": [
+     "notification-templates"
+    ]
+   },
+   "put": {
+    "operationId": "update_template_api_v1_notification_templates__template_id__put",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notification-templates/{template_id}/reset": {
+   "post": {
+    "operationId": "reset_template_api_v1_notification_templates__template_id__reset_post",
+    "tags": [
+     "notification-templates"
+    ]
+   }
+  },
+  "/api/v1/notifications/": {
+   "get": {
+    "operationId": "list_notification_providers_api_v1_notifications__get",
+    "tags": [
+     "notifications"
+    ]
+   },
+   "post": {
+    "operationId": "create_notification_provider_api_v1_notifications__post",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/app-message": {
+   "post": {
+    "operationId": "send_app_message_api_v1_notifications_app_message_post",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/app-message/channels": {
+   "get": {
+    "operationId": "app_message_channels_api_v1_notifications_app_message_channels_get",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/logs": {
+   "delete": {
+    "operationId": "clear_notification_logs_api_v1_notifications_logs_delete",
+    "tags": [
+     "notifications"
+    ]
+   },
+   "get": {
+    "operationId": "get_notification_logs_api_v1_notifications_logs_get",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/logs/stats": {
+   "get": {
+    "operationId": "get_notification_log_stats_api_v1_notifications_logs_stats_get",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/test-all": {
+   "post": {
+    "operationId": "test_all_notification_providers_api_v1_notifications_test_all_post",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/test-config": {
+   "post": {
+    "operationId": "test_notification_config_api_v1_notifications_test_config_post",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/{provider_id}": {
+   "delete": {
+    "operationId": "delete_notification_provider_api_v1_notifications__provider_id__delete",
+    "tags": [
+     "notifications"
+    ]
+   },
+   "get": {
+    "operationId": "get_notification_provider_api_v1_notifications__provider_id__get",
+    "tags": [
+     "notifications"
+    ]
+   },
+   "patch": {
+    "operationId": "update_notification_provider_api_v1_notifications__provider_id__patch",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/notifications/{provider_id}/test": {
+   "post": {
+    "operationId": "test_notification_provider_api_v1_notifications__provider_id__test_post",
+    "tags": [
+     "notifications"
+    ]
+   }
+  },
+  "/api/v1/obico/cached-frame/{nonce}": {
+   "get": {
+    "operationId": "cached_frame_api_v1_obico_cached_frame__nonce__get",
+    "tags": [
+     "obico"
+    ]
+   }
+  },
+  "/api/v1/obico/printer-status": {
+   "get": {
+    "operationId": "get_printer_status_api_v1_obico_printer_status_get",
+    "tags": [
+     "obico"
+    ]
+   }
+  },
+  "/api/v1/obico/status": {
+   "get": {
+    "operationId": "get_status_api_v1_obico_status_get",
+    "tags": [
+     "obico"
+    ]
+   }
+  },
+  "/api/v1/obico/test-connection": {
+   "post": {
+    "operationId": "test_connection_api_v1_obico_test_connection_post",
+    "tags": [
+     "obico"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/device/poll": {
+   "post": {
+    "operationId": "device_poll_api_v1_orca_cloud_device_poll_post",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/device/start": {
+   "post": {
+    "operationId": "device_start_api_v1_orca_cloud_device_start_post",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/logout": {
+   "post": {
+    "operationId": "logout_api_v1_orca_cloud_logout_post",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/profiles": {
+   "get": {
+    "operationId": "list_profiles_api_v1_orca_cloud_profiles_get",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/profiles/{profile_id}": {
+   "get": {
+    "operationId": "get_profile_api_v1_orca_cloud_profiles__profile_id__get",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/orca-cloud/status": {
+   "get": {
+    "operationId": "get_status_api_v1_orca_cloud_status_get",
+    "tags": [
+     "orca-cloud"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/": {
+   "get": {
+    "operationId": "list_pending_uploads_api_v1_pending_uploads__get",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/archive-all": {
+   "post": {
+    "operationId": "archive_all_pending_api_v1_pending_uploads_archive_all_post",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/count": {
+   "get": {
+    "operationId": "get_pending_count_api_v1_pending_uploads_count_get",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/discard-all": {
+   "delete": {
+    "operationId": "discard_all_pending_api_v1_pending_uploads_discard_all_delete",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/{upload_id}": {
+   "delete": {
+    "operationId": "discard_pending_upload_api_v1_pending_uploads__upload_id__delete",
+    "tags": [
+     "pending-uploads"
+    ]
+   },
+   "get": {
+    "operationId": "get_pending_upload_api_v1_pending_uploads__upload_id__get",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pending-uploads/{upload_id}/archive": {
+   "post": {
+    "operationId": "archive_pending_upload_api_v1_pending_uploads__upload_id__archive_post",
+    "tags": [
+     "pending-uploads"
+    ]
+   }
+  },
+  "/api/v1/pipeline-runs": {
+   "get": {
+    "operationId": "list_all_runs_api_v1_pipeline_runs_get",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/pipeline-runs/clear": {
+   "post": {
+    "operationId": "clear_terminal_runs_api_v1_pipeline_runs_clear_post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/pipeline-runs/{run_id}": {
+   "get": {
+    "operationId": "get_run_api_v1_pipeline_runs__run_id__get",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/pipeline-runs/{run_id}/cancel": {
+   "post": {
+    "operationId": "cancel_run_api_v1_pipeline_runs__run_id__cancel_post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/pipeline-runs/{run_id}/retry-failed": {
+   "post": {
+    "operationId": "retry_failed_api_v1_pipeline_runs__run_id__retry_failed_post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/print-log/": {
+   "delete": {
+    "operationId": "clear_print_log_api_v1_print_log__delete",
+    "tags": [
+     "print-log"
+    ]
+   },
+   "get": {
+    "operationId": "get_print_log_api_v1_print_log__get",
+    "tags": [
+     "print-log"
+    ]
+   }
+  },
+  "/api/v1/print-log/{entry_id}": {
+   "delete": {
+    "operationId": "delete_print_log_entry_api_v1_print_log__entry_id__delete",
+    "tags": [
+     "print-log"
+    ]
+   },
+   "patch": {
+    "operationId": "update_print_log_entry_api_v1_print_log__entry_id__patch",
+    "tags": [
+     "print-log"
+    ]
+   }
+  },
+  "/api/v1/print-log/{entry_id}/thumbnail": {
+   "get": {
+    "operationId": "get_print_log_thumbnail_api_v1_print_log__entry_id__thumbnail_get",
+    "tags": [
+     "print-log"
+    ]
+   }
+  },
+  "/api/v1/printer-sensor-history/{printer_id}": {
+   "delete": {
+    "operationId": "delete_old_history_api_v1_printer_sensor_history__printer_id__delete",
+    "tags": [
+     "printer-sensor-history"
+    ]
+   },
+   "get": {
+    "operationId": "get_printer_sensor_history_api_v1_printer_sensor_history__printer_id__get",
+    "tags": [
+     "printer-sensor-history"
+    ]
+   }
+  },
+  "/api/v1/printers/": {
+   "get": {
+    "operationId": "list_printers_api_v1_printers__get",
+    "tags": [
+     "printers"
+    ]
+   },
+   "post": {
+    "operationId": "create_printer_api_v1_printers__post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/available-filaments": {
+   "get": {
+    "operationId": "get_available_filaments_api_v1_printers_available_filaments_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/camera/stream-token": {
+   "post": {
+    "operationId": "create_stream_token_api_v1_printers_camera_stream_token_post",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/developer-mode-warnings": {
+   "get": {
+    "operationId": "get_developer_mode_warnings_api_v1_printers_developer_mode_warnings_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/diagnostic": {
+   "post": {
+    "operationId": "diagnose_connection_api_v1_printers_diagnostic_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/test": {
+   "post": {
+    "operationId": "test_printer_connection_api_v1_printers_test_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/usb-cameras": {
+   "get": {
+    "operationId": "list_usb_cameras_api_v1_printers_usb_cameras_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}": {
+   "delete": {
+    "operationId": "delete_printer_api_v1_printers__printer_id__delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "get": {
+    "operationId": "get_printer_api_v1_printers__printer_id__get",
+    "tags": [
+     "printers"
+    ]
+   },
+   "patch": {
+    "operationId": "update_printer_api_v1_printers__printer_id__patch",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/airduct-mode": {
+   "post": {
+    "operationId": "set_airduct_mode_api_v1_printers__printer_id__airduct_mode_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams-backup": {
+   "post": {
+    "operationId": "set_ams_backup_api_v1_printers__printer_id__ams_backup_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams-labels": {
+   "get": {
+    "operationId": "get_ams_labels_api_v1_printers__printer_id__ams_labels_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams-labels/{ams_id}": {
+   "delete": {
+    "operationId": "delete_ams_label_api_v1_printers__printer_id__ams_labels__ams_id__delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "put": {
+    "operationId": "save_ams_label_api_v1_printers__printer_id__ams_labels__ams_id__put",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams/load": {
+   "post": {
+    "operationId": "ams_load_api_v1_printers__printer_id__ams_load_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams/unload": {
+   "post": {
+    "operationId": "ams_unload_api_v1_printers__printer_id__ams_unload_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams/{ams_id}/slot/{slot_id}/refresh": {
+   "post": {
+    "operationId": "refresh_ams_slot_api_v1_printers__printer_id__ams__ams_id__slot__slot_id__refresh_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/ams/{ams_id}/tray/{tray_id}/reset": {
+   "post": {
+    "operationId": "reset_ams_slot_api_v1_printers__printer_id__ams__ams_id__tray__tray_id__reset_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/bed-jog": {
+   "post": {
+    "operationId": "bed_jog_api_v1_printers__printer_id__bed_jog_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/calibration": {
+   "post": {
+    "operationId": "start_calibration_api_v1_printers__printer_id__calibration_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/check-plate": {
+   "get": {
+    "operationId": "check_plate_empty_api_v1_printers__printer_id__camera_check_plate_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/diagnose": {
+   "post": {
+    "operationId": "diagnose_camera_route_api_v1_printers__printer_id__camera_diagnose_post",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/external/test": {
+   "post": {
+    "operationId": "test_external_camera_api_v1_printers__printer_id__camera_external_test_post",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/plate-detection/calibrate": {
+   "delete": {
+    "operationId": "delete_plate_calibration_api_v1_printers__printer_id__camera_plate_detection_calibrate_delete",
+    "tags": [
+     "camera"
+    ]
+   },
+   "post": {
+    "operationId": "calibrate_plate_detection_api_v1_printers__printer_id__camera_plate_detection_calibrate_post",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/plate-detection/references": {
+   "get": {
+    "operationId": "get_plate_references_api_v1_printers__printer_id__camera_plate_detection_references_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/plate-detection/references/{index}": {
+   "delete": {
+    "operationId": "delete_reference_api_v1_printers__printer_id__camera_plate_detection_references__index__delete",
+    "tags": [
+     "camera"
+    ]
+   },
+   "put": {
+    "operationId": "update_reference_label_api_v1_printers__printer_id__camera_plate_detection_references__index__put",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/plate-detection/references/{index}/thumbnail": {
+   "get": {
+    "operationId": "get_reference_thumbnail_api_v1_printers__printer_id__camera_plate_detection_references__index__thumbnail_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/plate-detection/status": {
+   "get": {
+    "operationId": "get_plate_detection_status_api_v1_printers__printer_id__camera_plate_detection_status_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/snapshot": {
+   "get": {
+    "operationId": "camera_snapshot_api_v1_printers__printer_id__camera_snapshot_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/status": {
+   "get": {
+    "operationId": "camera_status_api_v1_printers__printer_id__camera_status_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/stop": {
+   "get": {
+    "operationId": "stop_camera_stream_api_v1_printers__printer_id__camera_stop_post",
+    "tags": [
+     "camera"
+    ]
+   },
+   "post": {
+    "operationId": "stop_camera_stream_api_v1_printers__printer_id__camera_stop_post",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/stream": {
+   "get": {
+    "operationId": "camera_stream_api_v1_printers__printer_id__camera_stream_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/camera/test": {
+   "get": {
+    "operationId": "test_camera_api_v1_printers__printer_id__camera_test_get",
+    "tags": [
+     "camera"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/chamber-light": {
+   "post": {
+    "operationId": "set_chamber_light_api_v1_printers__printer_id__chamber_light_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/clear-plate": {
+   "post": {
+    "operationId": "clear_plate_api_v1_printers__printer_id__clear_plate_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/connect": {
+   "post": {
+    "operationId": "connect_printer_api_v1_printers__printer_id__connect_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/cover": {
+   "get": {
+    "operationId": "get_printer_cover_api_v1_printers__printer_id__cover_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/current-print-user": {
+   "get": {
+    "operationId": "get_current_print_user_api_v1_printers__printer_id__current_print_user_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/debug/simulate-print-complete": {
+   "post": {
+    "operationId": "debug_simulate_print_complete_api_v1_printers__printer_id__debug_simulate_print_complete_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/diagnostic": {
+   "get": {
+    "operationId": "diagnose_printer_api_v1_printers__printer_id__diagnostic_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/disconnect": {
+   "post": {
+    "operationId": "disconnect_printer_api_v1_printers__printer_id__disconnect_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/drying/start": {
+   "post": {
+    "operationId": "start_drying_api_v1_printers__printer_id__drying_start_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/drying/stop": {
+   "post": {
+    "operationId": "stop_drying_api_v1_printers__printer_id__drying_stop_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/extruder-jog": {
+   "post": {
+    "operationId": "extruder_jog_api_v1_printers__printer_id__extruder_jog_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/fan-speed": {
+   "post": {
+    "operationId": "set_fan_speed_api_v1_printers__printer_id__fan_speed_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files": {
+   "delete": {
+    "operationId": "delete_printer_file_api_v1_printers__printer_id__files_delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "get": {
+    "operationId": "list_printer_files_api_v1_printers__printer_id__files_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/dl/{token}/{filename}": {
+   "get": {
+    "operationId": "download_prepared_printer_files_api_v1_printers__printer_id__files_dl__token___filename__get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/download": {
+   "get": {
+    "operationId": "download_printer_file_api_v1_printers__printer_id__files_download_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/download-job": {
+   "post": {
+    "operationId": "create_printer_files_download_job_api_v1_printers__printer_id__files_download_job_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/download-jobs/{job_id}": {
+   "delete": {
+    "operationId": "cancel_printer_files_download_job_api_v1_printers__printer_id__files_download_jobs__job_id__delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "get": {
+    "operationId": "get_printer_files_download_job_api_v1_printers__printer_id__files_download_jobs__job_id__get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/download-zip": {
+   "post": {
+    "operationId": "download_printer_files_as_zip_api_v1_printers__printer_id__files_download_zip_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/gcode": {
+   "get": {
+    "operationId": "get_printer_file_gcode_api_v1_printers__printer_id__files_gcode_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/plate-thumbnail/{plate_index}": {
+   "get": {
+    "operationId": "get_printer_file_plate_thumbnail_api_v1_printers__printer_id__files_plate_thumbnail__plate_index__get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/files/plates": {
+   "get": {
+    "operationId": "get_printer_file_plates_api_v1_printers__printer_id__files_plates_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/hms/clear": {
+   "post": {
+    "operationId": "clear_hms_errors_api_v1_printers__printer_id__hms_clear_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/hms/execute-action": {
+   "post": {
+    "operationId": "execute_hms_action_api_v1_printers__printer_id__hms_execute_action_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/home-axes": {
+   "post": {
+    "operationId": "home_axes_api_v1_printers__printer_id__home_axes_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/inventory-remain": {
+   "get": {
+    "operationId": "get_inventory_remain_api_v1_printers__printer_id__inventory_remain_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/kprofiles/": {
+   "delete": {
+    "operationId": "delete_kprofile_api_v1_printers__printer_id__kprofiles__delete",
+    "tags": [
+     "kprofiles"
+    ]
+   },
+   "get": {
+    "operationId": "get_kprofiles_api_v1_printers__printer_id__kprofiles__get",
+    "tags": [
+     "kprofiles"
+    ]
+   },
+   "post": {
+    "operationId": "set_kprofile_api_v1_printers__printer_id__kprofiles__post",
+    "tags": [
+     "kprofiles"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/kprofiles/batch": {
+   "post": {
+    "operationId": "set_kprofiles_batch_api_v1_printers__printer_id__kprofiles_batch_post",
+    "tags": [
+     "kprofiles"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/kprofiles/notes": {
+   "get": {
+    "operationId": "get_kprofile_notes_api_v1_printers__printer_id__kprofiles_notes_get",
+    "tags": [
+     "kprofiles"
+    ]
+   },
+   "put": {
+    "operationId": "set_kprofile_note_api_v1_printers__printer_id__kprofiles_notes_put",
+    "tags": [
+     "kprofiles"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/kprofiles/notes/{setting_id}": {
+   "delete": {
+    "operationId": "delete_kprofile_note_api_v1_printers__printer_id__kprofiles_notes__setting_id__delete",
+    "tags": [
+     "kprofiles"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/logging": {
+   "delete": {
+    "operationId": "clear_mqtt_logs_api_v1_printers__printer_id__logging_delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "get": {
+    "operationId": "get_mqtt_logs_api_v1_printers__printer_id__logging_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/logging/disable": {
+   "post": {
+    "operationId": "disable_mqtt_logging_api_v1_printers__printer_id__logging_disable_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/logging/enable": {
+   "post": {
+    "operationId": "enable_mqtt_logging_api_v1_printers__printer_id__logging_enable_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/overlay-status": {
+   "get": {
+    "operationId": "get_overlay_status_api_v1_printers__printer_id__overlay_status_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print-options": {
+   "post": {
+    "operationId": "set_print_option_api_v1_printers__printer_id__print_options_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print-speed": {
+   "post": {
+    "operationId": "set_print_speed_api_v1_printers__printer_id__print_speed_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print/objects": {
+   "get": {
+    "operationId": "get_printable_objects_api_v1_printers__printer_id__print_objects_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print/pause": {
+   "post": {
+    "operationId": "pause_print_api_v1_printers__printer_id__print_pause_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print/resume": {
+   "post": {
+    "operationId": "resume_print_api_v1_printers__printer_id__print_resume_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print/skip-objects": {
+   "post": {
+    "operationId": "skip_objects_api_v1_printers__printer_id__print_skip_objects_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/print/stop": {
+   "post": {
+    "operationId": "stop_print_api_v1_printers__printer_id__print_stop_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/refresh-status": {
+   "post": {
+    "operationId": "refresh_printer_status_api_v1_printers__printer_id__refresh_status_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/runtime-debug": {
+   "get": {
+    "operationId": "get_runtime_debug_api_v1_printers__printer_id__runtime_debug_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/select-extruder": {
+   "post": {
+    "operationId": "select_extruder_api_v1_printers__printer_id__select_extruder_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/slot-presets": {
+   "get": {
+    "operationId": "get_slot_presets_api_v1_printers__printer_id__slot_presets_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/slot-presets/{ams_id}/{tray_id}": {
+   "delete": {
+    "operationId": "delete_slot_preset_api_v1_printers__printer_id__slot_presets__ams_id___tray_id__delete",
+    "tags": [
+     "printers"
+    ]
+   },
+   "get": {
+    "operationId": "get_slot_preset_api_v1_printers__printer_id__slot_presets__ams_id___tray_id__get",
+    "tags": [
+     "printers"
+    ]
+   },
+   "put": {
+    "operationId": "save_slot_preset_api_v1_printers__printer_id__slot_presets__ams_id___tray_id__put",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure": {
+   "post": {
+    "operationId": "configure_ams_slot_api_v1_printers__printer_id__slots__ams_id___tray_id__configure_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/slots/{ams_id}/{tray_id}/spool-defaults": {
+   "get": {
+    "operationId": "get_slot_spool_defaults_api_v1_printers__printer_id__slots__ams_id___tray_id__spool_defaults_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/status": {
+   "get": {
+    "operationId": "get_printer_status_api_v1_printers__printer_id__status_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/storage": {
+   "get": {
+    "operationId": "get_printer_storage_api_v1_printers__printer_id__storage_get",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/temperature/bed": {
+   "post": {
+    "operationId": "set_bed_temperature_api_v1_printers__printer_id__temperature_bed_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/temperature/chamber": {
+   "post": {
+    "operationId": "set_chamber_temperature_api_v1_printers__printer_id__temperature_chamber_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/temperature/nozzle": {
+   "post": {
+    "operationId": "set_nozzle_temperature_api_v1_printers__printer_id__temperature_nozzle_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/printers/{printer_id}/xy-jog": {
+   "post": {
+    "operationId": "xy_jog_api_v1_printers__printer_id__xy_jog_post",
+    "tags": [
+     "printers"
+    ]
+   }
+  },
+  "/api/v1/projects": {
+   "get": {
+    "operationId": "list_projects_api_v1_projects_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/": {
+   "get": {
+    "operationId": "list_projects_api_v1_projects__get",
+    "tags": [
+     "projects"
+    ]
+   },
+   "post": {
+    "operationId": "create_project_api_v1_projects__post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/from-template/{template_id}": {
+   "post": {
+    "operationId": "create_project_from_template_api_v1_projects_from_template__template_id__post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/import": {
+   "post": {
+    "operationId": "import_project_api_v1_projects_import_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/import/file": {
+   "post": {
+    "operationId": "import_project_file_api_v1_projects_import_file_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/templates": {
+   "get": {
+    "operationId": "list_templates_api_v1_projects_templates_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}": {
+   "delete": {
+    "operationId": "delete_project_api_v1_projects__project_id__delete",
+    "tags": [
+     "projects"
+    ]
+   },
+   "get": {
+    "operationId": "get_project_api_v1_projects__project_id__get",
+    "tags": [
+     "projects"
+    ]
+   },
+   "patch": {
+    "operationId": "update_project_api_v1_projects__project_id__patch",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/add-archives": {
+   "post": {
+    "operationId": "add_archives_to_project_api_v1_projects__project_id__add_archives_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/add-queue": {
+   "post": {
+    "operationId": "add_queue_items_to_project_api_v1_projects__project_id__add_queue_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/archives": {
+   "get": {
+    "operationId": "list_project_archives_api_v1_projects__project_id__archives_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/attachments": {
+   "post": {
+    "operationId": "upload_attachment_api_v1_projects__project_id__attachments_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/attachments/{filename}": {
+   "delete": {
+    "operationId": "delete_attachment_api_v1_projects__project_id__attachments__filename__delete",
+    "tags": [
+     "projects"
+    ]
+   },
+   "get": {
+    "operationId": "download_attachment_api_v1_projects__project_id__attachments__filename__get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/bom": {
+   "get": {
+    "operationId": "list_bom_items_api_v1_projects__project_id__bom_get",
+    "tags": [
+     "projects"
+    ]
+   },
+   "post": {
+    "operationId": "create_bom_item_api_v1_projects__project_id__bom_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/bom/{item_id}": {
+   "delete": {
+    "operationId": "delete_bom_item_api_v1_projects__project_id__bom__item_id__delete",
+    "tags": [
+     "projects"
+    ]
+   },
+   "patch": {
+    "operationId": "update_bom_item_api_v1_projects__project_id__bom__item_id__patch",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/cover-image": {
+   "delete": {
+    "operationId": "delete_project_cover_image_api_v1_projects__project_id__cover_image_delete",
+    "tags": [
+     "projects"
+    ]
+   },
+   "get": {
+    "operationId": "get_project_cover_image_api_v1_projects__project_id__cover_image_get",
+    "tags": [
+     "projects"
+    ]
+   },
+   "post": {
+    "operationId": "upload_project_cover_image_api_v1_projects__project_id__cover_image_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/create-template": {
+   "post": {
+    "operationId": "create_template_from_project_api_v1_projects__project_id__create_template_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/export": {
+   "get": {
+    "operationId": "export_project_api_v1_projects__project_id__export_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/file-progress": {
+   "get": {
+    "operationId": "get_project_file_progress_api_v1_projects__project_id__file_progress_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/queue": {
+   "get": {
+    "operationId": "list_project_queue_api_v1_projects__project_id__queue_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/remove-archives": {
+   "post": {
+    "operationId": "remove_archives_from_project_api_v1_projects__project_id__remove_archives_post",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/projects/{project_id}/timeline": {
+   "get": {
+    "operationId": "get_project_timeline_api_v1_projects__project_id__timeline_get",
+    "tags": [
+     "projects"
+    ]
+   }
+  },
+  "/api/v1/queue/": {
+   "get": {
+    "operationId": "list_queue_api_v1_queue__get",
+    "tags": [
+     "queue"
+    ]
+   },
+   "post": {
+    "operationId": "add_to_queue_api_v1_queue__post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/batches": {
+   "get": {
+    "operationId": "list_batches_api_v1_queue_batches_get",
+    "tags": [
+     "queue"
+    ]
+   },
+   "post": {
+    "operationId": "create_batch_api_v1_queue_batches_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/batches/{batch_id}": {
+   "delete": {
+    "operationId": "cancel_batch_api_v1_queue_batches__batch_id__delete",
+    "tags": [
+     "queue"
+    ]
+   },
+   "get": {
+    "operationId": "get_batch_api_v1_queue_batches__batch_id__get",
+    "tags": [
+     "queue"
+    ]
+   },
+   "patch": {
+    "operationId": "update_batch_api_v1_queue_batches__batch_id__patch",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/batches/{batch_id}/dispatch": {
+   "post": {
+    "operationId": "dispatch_batch_api_v1_queue_batches__batch_id__dispatch_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/batches/{batch_id}/ungroup": {
+   "post": {
+    "operationId": "ungroup_batch_api_v1_queue_batches__batch_id__ungroup_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/bulk": {
+   "patch": {
+    "operationId": "bulk_update_queue_items_api_v1_queue_bulk_patch",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/printer/{printer_id}/resume": {
+   "post": {
+    "operationId": "resume_queue_after_failure_api_v1_queue_printer__printer_id__resume_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/reorder": {
+   "post": {
+    "operationId": "reorder_queue_api_v1_queue_reorder_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/{item_id}": {
+   "delete": {
+    "operationId": "delete_queue_item_api_v1_queue__item_id__delete",
+    "tags": [
+     "queue"
+    ]
+   },
+   "get": {
+    "operationId": "get_queue_item_api_v1_queue__item_id__get",
+    "tags": [
+     "queue"
+    ]
+   },
+   "patch": {
+    "operationId": "update_queue_item_api_v1_queue__item_id__patch",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/{item_id}/cancel": {
+   "post": {
+    "operationId": "cancel_queue_item_api_v1_queue__item_id__cancel_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/{item_id}/start": {
+   "post": {
+    "operationId": "start_queue_item_api_v1_queue__item_id__start_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/queue/{item_id}/stop": {
+   "post": {
+    "operationId": "stop_queue_item_api_v1_queue__item_id__stop_post",
+    "tags": [
+     "queue"
+    ]
+   }
+  },
+  "/api/v1/scheduled-dryings": {
+   "get": {
+    "operationId": "list_scheduled_dryings_api_v1_scheduled_dryings_get",
+    "tags": [
+     "scheduled-dryings"
+    ]
+   },
+   "post": {
+    "operationId": "create_scheduled_drying_api_v1_scheduled_dryings_post",
+    "tags": [
+     "scheduled-dryings"
+    ]
+   }
+  },
+  "/api/v1/scheduled-dryings/{scheduled_drying_id}": {
+   "delete": {
+    "operationId": "cancel_scheduled_drying_api_v1_scheduled_dryings__scheduled_drying_id__delete",
+    "tags": [
+     "scheduled-dryings"
+    ]
+   }
+  },
+  "/api/v1/settings": {
+   "get": {
+    "operationId": "get_settings_api_v1_settings_get",
+    "tags": [
+     "settings"
+    ]
+   },
+   "patch": {
+    "operationId": "patch_settings_api_v1_settings_patch",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/": {
+   "get": {
+    "operationId": "get_settings_api_v1_settings__get",
+    "tags": [
+     "settings"
+    ]
+   },
+   "patch": {
+    "operationId": "patch_settings_api_v1_settings__patch",
+    "tags": [
+     "settings"
+    ]
+   },
+   "put": {
+    "operationId": "update_settings_api_v1_settings__put",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/backup": {
+   "get": {
+    "operationId": "create_backup_api_v1_settings_backup_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/check-ffmpeg": {
+   "get": {
+    "operationId": "check_ffmpeg_api_v1_settings_check_ffmpeg_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/default-sidebar-order": {
+   "get": {
+    "operationId": "get_default_sidebar_order_api_v1_settings_default_sidebar_order_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/electricity-price": {
+   "post": {
+    "operationId": "update_electricity_price_api_v1_settings_electricity_price_post",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/mqtt/status": {
+   "get": {
+    "operationId": "get_mqtt_status_api_v1_settings_mqtt_status_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/network-interfaces": {
+   "get": {
+    "operationId": "get_network_interfaces_api_v1_settings_network_interfaces_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/reset": {
+   "post": {
+    "operationId": "reset_settings_api_v1_settings_reset_post",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/restore": {
+   "post": {
+    "operationId": "restore_backup_api_v1_settings_restore_post",
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {}
+     }
+    },
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/spoolman": {
+   "get": {
+    "operationId": "get_spoolman_settings_api_v1_settings_spoolman_get",
+    "tags": [
+     "settings"
+    ]
+   },
+   "put": {
+    "operationId": "update_spoolman_settings_api_v1_settings_spoolman_put",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/ui-flags": {
+   "get": {
+    "operationId": "get_ui_flags_api_v1_settings_ui_flags_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/ui-preferences": {
+   "get": {
+    "operationId": "get_ui_preferences_api_v1_settings_ui_preferences_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/virtual-printer": {
+   "get": {
+    "operationId": "get_virtual_printer_settings_api_v1_settings_virtual_printer_get",
+    "tags": [
+     "settings"
+    ]
+   },
+   "put": {
+    "operationId": "update_virtual_printer_settings_api_v1_settings_virtual_printer_put",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/settings/virtual-printer/models": {
+   "get": {
+    "operationId": "get_virtual_printer_models_api_v1_settings_virtual_printer_models_get",
+    "tags": [
+     "settings"
+    ]
+   }
+  },
+  "/api/v1/slice-jobs/{job_id}": {
+   "get": {
+    "operationId": "get_slice_job_api_v1_slice_jobs__job_id__get",
+    "tags": [
+     "slice-jobs"
+    ]
+   }
+  },
+  "/api/v1/slicer-pipelines/": {
+   "get": {
+    "operationId": "list_pipelines_api_v1_slicer_pipelines__get",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   },
+   "post": {
+    "operationId": "create_pipeline_api_v1_slicer_pipelines__post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/slicer-pipelines/{pipeline_id}": {
+   "delete": {
+    "operationId": "delete_pipeline_api_v1_slicer_pipelines__pipeline_id__delete",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   },
+   "get": {
+    "operationId": "get_pipeline_api_v1_slicer_pipelines__pipeline_id__get",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   },
+   "put": {
+    "operationId": "update_pipeline_api_v1_slicer_pipelines__pipeline_id__put",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/slicer-pipelines/{pipeline_id}/check-eligibility": {
+   "post": {
+    "operationId": "check_eligibility_api_v1_slicer_pipelines__pipeline_id__check_eligibility_post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/slicer-pipelines/{pipeline_id}/run": {
+   "post": {
+    "operationId": "run_pipeline_api_v1_slicer_pipelines__pipeline_id__run_post",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/slicer-pipelines/{pipeline_id}/runs": {
+   "get": {
+    "operationId": "list_runs_for_pipeline_api_v1_slicer_pipelines__pipeline_id__runs_get",
+    "tags": [
+     "Slicer Pipelines"
+    ]
+   }
+  },
+  "/api/v1/slicer/preset-values": {
+   "get": {
+    "operationId": "get_preset_values_api_v1_slicer_preset_values_get",
+    "tags": [
+     "Slicer Presets"
+    ]
+   }
+  },
+  "/api/v1/slicer/presets": {
+   "get": {
+    "operationId": "list_unified_presets_api_v1_slicer_presets_get",
+    "tags": [
+     "Slicer Presets"
+    ]
+   }
+  },
+  "/api/v1/slicer/preview-progress/{request_id}": {
+   "get": {
+    "operationId": "get_preview_slice_progress_api_v1_slicer_preview_progress__request_id__get",
+    "tags": [
+     "Slicer Presets"
+    ]
+   }
+  },
+  "/api/v1/slicer/printer-models": {
+   "get": {
+    "operationId": "list_printer_models_api_v1_slicer_printer_models_get",
+    "tags": [
+     "Slicer Presets"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/": {
+   "get": {
+    "operationId": "list_smart_plugs_api_v1_smart_plugs__get",
+    "tags": [
+     "smart-plugs"
+    ]
+   },
+   "post": {
+    "operationId": "create_smart_plug_api_v1_smart_plugs__post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/by-printer/{printer_id}": {
+   "get": {
+    "operationId": "get_smart_plug_by_printer_api_v1_smart_plugs_by_printer__printer_id__get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/by-printer/{printer_id}/scripts": {
+   "get": {
+    "operationId": "get_script_plugs_by_printer_api_v1_smart_plugs_by_printer__printer_id__scripts_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/discover/devices": {
+   "get": {
+    "operationId": "get_discovered_tasmota_devices_api_v1_smart_plugs_discover_devices_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/discover/scan": {
+   "post": {
+    "operationId": "start_tasmota_scan_api_v1_smart_plugs_discover_scan_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/discover/status": {
+   "get": {
+    "operationId": "get_tasmota_scan_status_api_v1_smart_plugs_discover_status_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/discover/stop": {
+   "post": {
+    "operationId": "stop_tasmota_scan_api_v1_smart_plugs_discover_stop_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/ha/entities": {
+   "get": {
+    "operationId": "list_ha_entities_api_v1_smart_plugs_ha_entities_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/ha/sensors": {
+   "get": {
+    "operationId": "list_ha_sensor_entities_api_v1_smart_plugs_ha_sensors_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/ha/test-connection": {
+   "post": {
+    "operationId": "test_ha_connection_api_v1_smart_plugs_ha_test_connection_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/rest/test-connection": {
+   "post": {
+    "operationId": "test_rest_connection_api_v1_smart_plugs_rest_test_connection_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/test-connection": {
+   "post": {
+    "operationId": "test_connection_api_v1_smart_plugs_test_connection_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/{plug_id}": {
+   "delete": {
+    "operationId": "delete_smart_plug_api_v1_smart_plugs__plug_id__delete",
+    "tags": [
+     "smart-plugs"
+    ]
+   },
+   "get": {
+    "operationId": "get_smart_plug_api_v1_smart_plugs__plug_id__get",
+    "tags": [
+     "smart-plugs"
+    ]
+   },
+   "patch": {
+    "operationId": "update_smart_plug_api_v1_smart_plugs__plug_id__patch",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/{plug_id}/control": {
+   "post": {
+    "operationId": "control_smart_plug_api_v1_smart_plugs__plug_id__control_post",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/smart-plugs/{plug_id}/status": {
+   "get": {
+    "operationId": "get_plug_status_api_v1_smart_plugs__plug_id__status_get",
+    "tags": [
+     "smart-plugs"
+    ]
+   }
+  },
+  "/api/v1/sponsor-prompt/check": {
+   "get": {
+    "operationId": "check_sponsor_prompt_api_v1_sponsor_prompt_check_get",
+    "tags": [
+     "sponsor-prompt"
+    ]
+   }
+  },
+  "/api/v1/sponsor-prompt/dismiss": {
+   "post": {
+    "operationId": "dismiss_sponsor_prompt_api_v1_sponsor_prompt_dismiss_post",
+    "tags": [
+     "sponsor-prompt"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices": {
+   "get": {
+    "operationId": "list_devices_api_v1_spoolbuddy_devices_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/register": {
+   "post": {
+    "operationId": "register_device_api_v1_spoolbuddy_devices_register_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}": {
+   "delete": {
+    "operationId": "unregister_device_api_v1_spoolbuddy_devices__device_id__delete",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/calibration": {
+   "get": {
+    "operationId": "get_calibration_api_v1_spoolbuddy_devices__device_id__calibration_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/calibration/set-factor": {
+   "post": {
+    "operationId": "set_calibration_factor_api_v1_spoolbuddy_devices__device_id__calibration_set_factor_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/calibration/set-tare": {
+   "post": {
+    "operationId": "set_tare_offset_api_v1_spoolbuddy_devices__device_id__calibration_set_tare_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/calibration/tare": {
+   "post": {
+    "operationId": "tare_scale_api_v1_spoolbuddy_devices__device_id__calibration_tare_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/cancel-write": {
+   "post": {
+    "operationId": "cancel_write_api_v1_spoolbuddy_devices__device_id__cancel_write_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/display": {
+   "get": {
+    "operationId": "get_display_settings_api_v1_spoolbuddy_devices__device_id__display_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   },
+   "put": {
+    "operationId": "update_display_settings_api_v1_spoolbuddy_devices__device_id__display_put",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/heartbeat": {
+   "post": {
+    "operationId": "device_heartbeat_api_v1_spoolbuddy_devices__device_id__heartbeat_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/system/command": {
+   "post": {
+    "operationId": "queue_system_command_api_v1_spoolbuddy_devices__device_id__system_command_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/system/command-result": {
+   "post": {
+    "operationId": "system_command_result_api_v1_spoolbuddy_devices__device_id__system_command_result_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/system/config": {
+   "post": {
+    "operationId": "queue_system_config_update_api_v1_spoolbuddy_devices__device_id__system_config_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/update": {
+   "post": {
+    "operationId": "trigger_daemon_update_api_v1_spoolbuddy_devices__device_id__update_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/update-check": {
+   "get": {
+    "operationId": "check_daemon_update_api_v1_spoolbuddy_devices__device_id__update_check_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/devices/{device_id}/update-status": {
+   "post": {
+    "operationId": "report_update_status_api_v1_spoolbuddy_devices__device_id__update_status_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/diagnostics/{device_id}/result": {
+   "get": {
+    "operationId": "get_diagnostic_result_api_v1_spoolbuddy_diagnostics__device_id__result_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   },
+   "post": {
+    "operationId": "report_diagnostic_result_api_v1_spoolbuddy_diagnostics__device_id__result_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/diagnostics/{device_id}/run": {
+   "post": {
+    "operationId": "queue_diagnostic_api_v1_spoolbuddy_diagnostics__device_id__run_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/nfc/tag-removed": {
+   "post": {
+    "operationId": "nfc_tag_removed_api_v1_spoolbuddy_nfc_tag_removed_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/nfc/tag-scanned": {
+   "post": {
+    "operationId": "nfc_tag_scanned_api_v1_spoolbuddy_nfc_tag_scanned_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/nfc/write-result": {
+   "post": {
+    "operationId": "nfc_write_result_api_v1_spoolbuddy_nfc_write_result_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/nfc/write-tag": {
+   "post": {
+    "operationId": "nfc_write_tag_api_v1_spoolbuddy_nfc_write_tag_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/scale/reading": {
+   "post": {
+    "operationId": "scale_reading_api_v1_spoolbuddy_scale_reading_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/scale/update-spool-weight": {
+   "post": {
+    "operationId": "update_spool_weight_api_v1_spoolbuddy_scale_update_spool_weight_post",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolbuddy/ssh/public-key": {
+   "get": {
+    "operationId": "get_ssh_public_key_api_v1_spoolbuddy_ssh_public_key_get",
+    "tags": [
+     "spoolbuddy"
+    ]
+   }
+  },
+  "/api/v1/spoolman/connect": {
+   "post": {
+    "operationId": "connect_spoolman_api_v1_spoolman_connect_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/disconnect": {
+   "post": {
+    "operationId": "disconnect_spoolman_api_v1_spoolman_disconnect_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/filaments": {
+   "get": {
+    "operationId": "get_filaments_api_v1_spoolman_filaments_get",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/filaments": {
+   "get": {
+    "operationId": "list_spoolman_filaments_api_v1_spoolman_inventory_filaments_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/filaments/{filament_id}": {
+   "patch": {
+    "operationId": "patch_spoolman_filament_api_v1_spoolman_inventory_filaments__filament_id__patch",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/slot-assignments": {
+   "get": {
+    "operationId": "get_spoolman_slot_assignment_api_v1_spoolman_inventory_slot_assignments_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "post": {
+    "operationId": "assign_spoolman_slot_api_v1_spoolman_inventory_slot_assignments_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/slot-assignments/all": {
+   "get": {
+    "operationId": "get_all_spoolman_slot_assignments_api_v1_spoolman_inventory_slot_assignments_all_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/slot-assignments/{spoolman_spool_id}": {
+   "delete": {
+    "operationId": "unassign_spoolman_slot_api_v1_spoolman_inventory_slot_assignments__spoolman_spool_id__delete",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools": {
+   "get": {
+    "operationId": "list_spools_api_v1_spoolman_inventory_spools_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "post": {
+    "operationId": "create_spool_api_v1_spoolman_inventory_spools_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/bulk": {
+   "post": {
+    "operationId": "bulk_create_spools_api_v1_spoolman_inventory_spools_bulk_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/bulk-archive": {
+   "post": {
+    "operationId": "bulk_archive_spools_api_v1_spoolman_inventory_spools_bulk_archive_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/bulk-delete": {
+   "post": {
+    "operationId": "bulk_delete_spools_api_v1_spoolman_inventory_spools_bulk_delete_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/bulk-restore": {
+   "post": {
+    "operationId": "bulk_restore_spools_api_v1_spoolman_inventory_spools_bulk_restore_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/bulk-update": {
+   "post": {
+    "operationId": "bulk_update_spools_api_v1_spoolman_inventory_spools_bulk_update_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/reset-consumed-counter-bulk": {
+   "post": {
+    "operationId": "bulk_reset_spool_consumed_counter_api_v1_spoolman_inventory_spools_reset_consumed_counter_bulk_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}": {
+   "delete": {
+    "operationId": "delete_spool_api_v1_spoolman_inventory_spools__spool_id__delete",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "get": {
+    "operationId": "get_spool_api_v1_spoolman_inventory_spools__spool_id__get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "patch": {
+    "operationId": "update_spool_api_v1_spoolman_inventory_spools__spool_id__patch",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/archive": {
+   "post": {
+    "operationId": "archive_spool_api_v1_spoolman_inventory_spools__spool_id__archive_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/filament-presets": {
+   "get": {
+    "operationId": "get_spoolman_filament_presets_api_v1_spoolman_inventory_spools__spool_id__filament_presets_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "put": {
+    "operationId": "save_spoolman_filament_presets_api_v1_spoolman_inventory_spools__spool_id__filament_presets_put",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/k-profiles": {
+   "get": {
+    "operationId": "get_spoolman_k_profiles_api_v1_spoolman_inventory_spools__spool_id__k_profiles_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "put": {
+    "operationId": "save_spoolman_k_profiles_api_v1_spoolman_inventory_spools__spool_id__k_profiles_put",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/reset-consumed-counter": {
+   "post": {
+    "operationId": "reset_spool_consumed_counter_api_v1_spoolman_inventory_spools__spool_id__reset_consumed_counter_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/restore": {
+   "post": {
+    "operationId": "restore_spool_api_v1_spoolman_inventory_spools__spool_id__restore_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/suppliers": {
+   "get": {
+    "operationId": "get_spoolman_spool_suppliers_api_v1_spoolman_inventory_spools__spool_id__suppliers_get",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   },
+   "put": {
+    "operationId": "save_spoolman_spool_suppliers_api_v1_spoolman_inventory_spools__spool_id__suppliers_put",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/tag": {
+   "patch": {
+    "operationId": "link_tag_to_spoolman_spool_api_v1_spoolman_inventory_spools__spool_id__tag_patch",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/spools/{spool_id}/weight": {
+   "patch": {
+    "operationId": "sync_spool_weight_api_v1_spoolman_inventory_spools__spool_id__weight_patch",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/inventory/sync-ams-weights": {
+   "post": {
+    "operationId": "sync_spoolman_ams_weights_api_v1_spoolman_inventory_sync_ams_weights_post",
+    "tags": [
+     "spoolman-inventory"
+    ]
+   }
+  },
+  "/api/v1/spoolman/labels": {
+   "post": {
+    "operationId": "render_spoolman_labels_api_v1_spoolman_labels_post",
+    "tags": [
+     "labels"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools": {
+   "get": {
+    "operationId": "get_spools_api_v1_spoolman_spools_get",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools/from-slot": {
+   "post": {
+    "operationId": "create_spool_from_slot_api_v1_spoolman_spools_from_slot_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools/linked": {
+   "get": {
+    "operationId": "get_linked_spools_api_v1_spoolman_spools_linked_get",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools/unlinked": {
+   "get": {
+    "operationId": "get_unlinked_spools_api_v1_spoolman_spools_unlinked_get",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools/{spool_id}/link": {
+   "post": {
+    "operationId": "link_spool_api_v1_spoolman_spools__spool_id__link_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/spools/{spool_id}/unlink": {
+   "post": {
+    "operationId": "unlink_spool_api_v1_spoolman_spools__spool_id__unlink_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/status": {
+   "get": {
+    "operationId": "get_spoolman_status_api_v1_spoolman_status_get",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/sync-all": {
+   "post": {
+    "operationId": "sync_all_printers_api_v1_spoolman_sync_all_post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/spoolman/sync/{printer_id}": {
+   "post": {
+    "operationId": "sync_printer_ams_api_v1_spoolman_sync__printer_id__post",
+    "tags": [
+     "spoolman"
+    ]
+   }
+  },
+  "/api/v1/support/bundle": {
+   "get": {
+    "operationId": "generate_support_bundle_api_v1_support_bundle_get",
+    "tags": [
+     "support"
+    ]
+   }
+  },
+  "/api/v1/support/debug-logging": {
+   "get": {
+    "operationId": "get_debug_logging_state_api_v1_support_debug_logging_get",
+    "tags": [
+     "support"
+    ]
+   },
+   "post": {
+    "operationId": "toggle_debug_logging_api_v1_support_debug_logging_post",
+    "tags": [
+     "support"
+    ]
+   }
+  },
+  "/api/v1/support/logs": {
+   "delete": {
+    "operationId": "clear_logs_api_v1_support_logs_delete",
+    "tags": [
+     "support"
+    ]
+   },
+   "get": {
+    "operationId": "get_logs_api_v1_support_logs_get",
+    "tags": [
+     "support"
+    ]
+   }
+  },
+  "/api/v1/system/appliance": {
+   "get": {
+    "operationId": "get_appliance_defaults_api_v1_system_appliance_get",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/v1/system/db-pool": {
+   "get": {
+    "operationId": "get_db_pool_api_v1_system_db_pool_get",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/v1/system/health": {
+   "get": {
+    "operationId": "get_system_health_api_v1_system_health_get",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/v1/system/info": {
+   "get": {
+    "operationId": "get_system_info_api_v1_system_info_get",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/v1/system/storage-usage": {
+   "get": {
+    "operationId": "get_storage_usage_api_v1_system_storage_usage_get",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/v1/updates/apply": {
+   "post": {
+    "operationId": "apply_update_api_v1_updates_apply_post",
+    "tags": [
+     "updates"
+    ]
+   }
+  },
+  "/api/v1/updates/check": {
+   "get": {
+    "operationId": "check_for_updates_api_v1_updates_check_get",
+    "tags": [
+     "updates"
+    ]
+   }
+  },
+  "/api/v1/updates/status": {
+   "get": {
+    "operationId": "get_update_status_api_v1_updates_status_get",
+    "tags": [
+     "updates"
+    ]
+   }
+  },
+  "/api/v1/updates/version": {
+   "get": {
+    "operationId": "get_version_api_v1_updates_version_get",
+    "tags": [
+     "updates"
+    ]
+   }
+  },
+  "/api/v1/user-notifications/preferences": {
+   "get": {
+    "operationId": "get_user_email_preferences_api_v1_user_notifications_preferences_get",
+    "tags": [
+     "user-notifications"
+    ]
+   },
+   "put": {
+    "operationId": "update_user_email_preferences_api_v1_user_notifications_preferences_put",
+    "tags": [
+     "user-notifications"
+    ]
+   }
+  },
+  "/api/v1/users": {
+   "get": {
+    "operationId": "list_users_api_v1_users_get",
+    "tags": [
+     "users"
+    ]
+   },
+   "post": {
+    "operationId": "create_user_api_v1_users_post",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/users/": {
+   "get": {
+    "operationId": "list_users_api_v1_users__get",
+    "tags": [
+     "users"
+    ]
+   },
+   "post": {
+    "operationId": "create_user_api_v1_users__post",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/users/me/change-password": {
+   "post": {
+    "operationId": "change_own_password_api_v1_users_me_change_password_post",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/users/slim": {
+   "get": {
+    "operationId": "list_users_slim_api_v1_users_slim_get",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/users/{user_id}": {
+   "delete": {
+    "operationId": "delete_user_api_v1_users__user_id__delete",
+    "tags": [
+     "users"
+    ]
+   },
+   "get": {
+    "operationId": "get_user_api_v1_users__user_id__get",
+    "tags": [
+     "users"
+    ]
+   },
+   "patch": {
+    "operationId": "update_user_api_v1_users__user_id__patch",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/users/{user_id}/items-count": {
+   "get": {
+    "operationId": "get_user_items_count_api_v1_users__user_id__items_count_get",
+    "tags": [
+     "users"
+    ]
+   }
+  },
+  "/api/v1/virtual-printers": {
+   "get": {
+    "operationId": "list_virtual_printers_api_v1_virtual_printers_get",
+    "tags": [
+     "virtual-printers"
+    ]
+   },
+   "post": {
+    "operationId": "create_virtual_printer_api_v1_virtual_printers_post",
+    "tags": [
+     "virtual-printers"
+    ]
+   }
+  },
+  "/api/v1/virtual-printers/ca-certificate": {
+   "get": {
+    "operationId": "get_ca_certificate_api_v1_virtual_printers_ca_certificate_get",
+    "tags": [
+     "virtual-printers"
+    ]
+   }
+  },
+  "/api/v1/virtual-printers/tailscale-status": {
+   "get": {
+    "operationId": "get_tailscale_status_api_v1_virtual_printers_tailscale_status_get",
+    "tags": [
+     "virtual-printers"
+    ]
+   }
+  },
+  "/api/v1/virtual-printers/{vp_id}": {
+   "delete": {
+    "operationId": "delete_virtual_printer_api_v1_virtual_printers__vp_id__delete",
+    "tags": [
+     "virtual-printers"
+    ]
+   },
+   "get": {
+    "operationId": "get_virtual_printer_api_v1_virtual_printers__vp_id__get",
+    "tags": [
+     "virtual-printers"
+    ]
+   },
+   "put": {
+    "operationId": "update_virtual_printer_api_v1_virtual_printers__vp_id__put",
+    "tags": [
+     "virtual-printers"
+    ]
+   }
+  },
+  "/api/v1/virtual-printers/{vp_id}/diagnostic": {
+   "get": {
+    "operationId": "diagnose_virtual_printer_api_v1_virtual_printers__vp_id__diagnostic_get",
+    "tags": [
+     "virtual-printers"
+    ]
+   }
+  },
+  "/api/v1/webhook/printer/{printer_id}/cancel": {
+   "post": {
+    "operationId": "webhook_cancel_print_api_v1_webhook_printer__printer_id__cancel_post",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/api/v1/webhook/printer/{printer_id}/start": {
+   "post": {
+    "operationId": "webhook_start_print_api_v1_webhook_printer__printer_id__start_post",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/api/v1/webhook/printer/{printer_id}/status": {
+   "get": {
+    "operationId": "webhook_get_printer_status_api_v1_webhook_printer__printer_id__status_get",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/api/v1/webhook/printer/{printer_id}/stop": {
+   "post": {
+    "operationId": "webhook_stop_print_api_v1_webhook_printer__printer_id__stop_post",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/api/v1/webhook/queue": {
+   "get": {
+    "operationId": "webhook_get_queue_status_api_v1_webhook_queue_get",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/api/v1/webhook/queue/add": {
+   "post": {
+    "operationId": "webhook_add_to_queue_api_v1_webhook_queue_add_post",
+    "tags": [
+     "webhook"
+    ]
+   }
+  },
+  "/health": {
+   "get": {
+    "operationId": "health_check_health_get",
+    "tags": []
+   }
+  },
+  "/manifest.json": {
+   "get": {
+    "operationId": "serve_manifest_manifest_json_head",
+    "tags": []
+   }
+  },
+  "/sw-register.js": {
+   "get": {
+    "operationId": "serve_sw_register_sw_register_js_head",
+    "tags": []
+   }
+  },
+  "/sw.js": {
+   "get": {
+    "operationId": "serve_service_worker_sw_js_head",
+    "tags": []
+   }
+  },
+  "/{full_path}": {
+   "get": {
+    "operationId": "serve_spa__full_path__get",
+    "tags": []
+   }
+  }
+ }
+}

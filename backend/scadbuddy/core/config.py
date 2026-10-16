@@ -41,6 +41,11 @@ DEFAULT_TEMPORAL_TASK_QUEUE_RENDER = "render"
 # tunes (§3.4): the subprocess is killed at render_timeout, and Temporal gives up on
 # the attempt this much later, so the two can never invert.
 ACTIVITY_TIMEOUT_MARGIN = 60.0
+#: The longest a template's own activity (`ctx.activity`, §5.2) may ask to run.
+DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT = 1800.0
+#: A pipeline's whole run (§5.2): this many of the longest template activity. Bounds
+#: a `pipeline.py` that never yields, which the SDK would otherwise retry forever.
+PIPELINE_TIMEOUT_FACTOR = 4
 
 #: Library clones at once, in the API and the render worker alike.
 INSTALL_CONCURRENCY = 2
@@ -88,12 +93,32 @@ DEFAULT_STORE_MAX_TOTAL_BYTES = 50 * 1024**3
 DEFAULT_STORE_MAX_COUNT = 200_000
 #: A worker's local copy of pieces it fetched or rendered; least recently used goes first.
 DEFAULT_WORKER_CACHE_MAX_BYTES = 10 * 1024**3
+#: The shared cache of Bambuddy downloads (#2788): least recently used goes first.
+DEFAULT_DOWNLOAD_CACHE_MAX_BYTES = 4 * 1024**3
 # How old a duplicate's staging folder must be before a sweep treats it as a crashed
 # copy rather than another replica's copy in flight (#212).
 DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
 # The largest template video (#274) or print attachment (#309) one upload may carry.
 # SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES sets it; the upload route streams it to disk.
 DEFAULT_MEDIA_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
+# The budgets one read of a library 3MF spends (#2087, `render/read_budget.py`):
+# SCADBUDDY_READ_MAX_<BUDGET> sets each, and one request may override it, never past its
+# ceiling. A ceiling is what the API pod's memory can hold, not a preference; a default
+# is about what a real file at the archive cap reaches.
+DEFAULT_READ_MAX_OBJECTS = 200
+DEFAULT_READ_MAX_VISITS = 20_000
+#: 0 is no limit: a file of any size is read (its memory is then the pod's to give).
+DEFAULT_READ_MAX_TRIANGLES = 0
+DEFAULT_READ_MAX_PAINT_DIGITS = 20_000_000
+#: Distinct objects: an Arrange lays out at most 2000 copies a request.
+READ_MAX_OBJECTS_CEILING = 2000
+#: Objects visited, components included: each visit is a little XML and a matrix.
+READ_MAX_VISITS_CEILING = 200_000
+# Triangles have no ceiling (`read_budget.CEILINGS`): 0, the default, is no limit, and
+# any other value is one an operator chose. Every instance's faces and vertices are
+# held at once, then joined per colour; some 10,000,000 is what a 4 GiB pod holds.
+#: Paint digits: each placed copy of a painted mesh carries its codes as strings.
+READ_MAX_PAINT_DIGITS_CEILING = 50_000_000
 
 
 @dataclass(frozen=True)
@@ -101,6 +126,7 @@ class Config:
     openscad: str = DEFAULT_OPENSCAD
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
+    template_activity_max_timeout: float = DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
@@ -134,11 +160,22 @@ class Config:
     store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
     store_max_count: int = DEFAULT_STORE_MAX_COUNT
     worker_cache_max_bytes: int = DEFAULT_WORKER_CACHE_MAX_BYTES
+    #: #2788: the directory of whole Bambuddy downloads by sha256. Unset, the API keeps
+    #: it under its data volume's ``cache/downloads`` and a render worker keeps none.
+    #: A worker runs template code: never point one at a directory the API reads.
+    download_cache_dir: Path | None = None
+    #: Its cap; 0 keeps no downloads at all.
+    download_cache_max_bytes: int = DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
 
     @property
     def activity_timeout(self) -> float:
         """start_to_close for the openscad activities: `render_timeout` plus the margin."""
         return self.render_timeout + ACTIVITY_TIMEOUT_MARGIN
+
+    @property
+    def pipeline_timeout(self) -> float:
+        """`TemplatePipeline`'s execution timeout."""
+        return PIPELINE_TIMEOUT_FACTOR * self.template_activity_max_timeout
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
@@ -151,6 +188,7 @@ class Config:
         for name, value in (
             ("SCADBUDDY_RENDER_TIMEOUT", self.render_timeout),
             ("SCADBUDDY_JOB_TTL", self.job_ttl),
+            ("SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT", self.template_activity_max_timeout),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be more than 0, not {value}")
@@ -170,6 +208,10 @@ class Config:
             ("SCADBUDDY_ASSET_MAX_TOTAL_BYTES", self.asset_max_total_bytes),
             ("SCADBUDDY_ASSET_MAX_COUNT", self.asset_max_count),
             ("SCADBUDDY_ASSET_SWEEP_INTERVAL", self.asset_sweep_interval),
+            # #2348: 0 is no limit for the store's caps; below it is no cap at all.
+            ("SCADBUDDY_STORE_MAX_TOTAL_BYTES", self.store_max_total_bytes),
+            ("SCADBUDDY_STORE_MAX_COUNT", self.store_max_count),
+            ("SCADBUDDY_WORKER_CACHE_MAX_BYTES", self.worker_cache_max_bytes),
         ):
             if value < 0:
                 raise ValueError(f"{name} must be at least 0, not {value}")
@@ -282,6 +324,7 @@ def available_cpus(cgroup_root: Path = CGROUP_ROOT) -> int:
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     source: Mapping[str, str] = os.environ if env is None else env
     data_dir = source.get("SCADBUDDY_DATA_DIR")
+    downloads_dir = source.get("SCADBUDDY_DOWNLOAD_CACHE_DIR")
     return Config(
         openscad=source.get("SCADBUDDY_OPENSCAD") or DEFAULT_OPENSCAD,
         data_dir=Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
@@ -339,6 +382,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         store_max_count=_int_or(source.get("SCADBUDDY_STORE_MAX_COUNT"), DEFAULT_STORE_MAX_COUNT),
         worker_cache_max_bytes=_int_or(
             source.get("SCADBUDDY_WORKER_CACHE_MAX_BYTES"), DEFAULT_WORKER_CACHE_MAX_BYTES
+        ),
+        download_cache_dir=Path(downloads_dir) if downloads_dir else None,
+        download_cache_max_bytes=_int_or(
+            source.get("SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES"), DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
         ),
     )
 

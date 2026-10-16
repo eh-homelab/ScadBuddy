@@ -9,12 +9,12 @@ import {
   type PooledCredential,
   runWithFallback,
 } from '../src/harness/fallback.js'
-import { DEFAULT_COOLDOWN_MS, type ProbeVerdict } from '../src/harness/credentialErrors.js'
+import { DEFAULT_COOLDOWN_MS, type FailureEvidence, type ProbeVerdict } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 
 // runWithFallback with scripted queries standing in for Claude Code (the real
 // binary against the fake endpoint is test/fallback.e2e.test.ts). The
-// messages are shaped as Claude Code 2.1.283 sends them.
+// messages are shaped as Claude Code 2.1.283 and 2.1.287 send them.
 
 const SESSION = '00000000-0000-4000-8000-0000000000aa'
 
@@ -62,6 +62,11 @@ function harness(script: Script) {
   const runs: HarnessRun[] = []
   const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
   const probes: (Credential & { model: string | undefined; signal: AbortSignal | undefined })[] = []
+  const refusals: { failure: FailureEvidence; probe?: ProbeVerdict['verdict'] }[] = []
+  /** The order of `onRefused` calls and yielded results. */
+  const order: string[] = []
+  /** How many messages the caller had seen when each fallback attempt started (`onAttempt`). */
+  const attempts: number[] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -78,6 +83,9 @@ function harness(script: Script) {
     runs,
     reports,
     probes,
+    refusals,
+    order,
+    attempts,
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
@@ -102,9 +110,15 @@ function harness(script: Script) {
               return typeof probeVerdict === 'function' ? probeVerdict() : Promise.resolve(probeVerdict)
             },
             ...(priorCostUsd === undefined ? {} : { priorCostUsd }),
+            onRefused: (failure, judged) => {
+              refusals.push({ failure, ...judged })
+              order.push('onRefused')
+            },
+            onAttempt: () => attempts.push(messages.length),
           },
         )) {
           messages.push(m)
+          if (m.type === 'result') order.push('result')
         }
       } catch (err) {
         error = err
@@ -250,6 +264,22 @@ describe('runWithFallback (#1093)', () => {
     expect(h.reports[0]).toEqual({ id: 'a', outcome: { class: 'transient', reason: 'API Error: 529 Overloaded' }, next: 'b' })
   })
 
+  // #1666: the session manager forgets the requests an earlier attempt left open (unpricedSpend.ts).
+  it('says when a fallback attempt starts, after every message of the attempt before it', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? [init(), text('partial'), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded')]
+        : n === 1
+          ? [init(), apiError('API Error: 529 Overloaded', 'server_error'), errorResult(529, 'API Error: 529 Overloaded')]
+          : [init(), success('ok')],
+    )
+    const { error } = await h.collect([A, B, C])
+    expect(error).toBeUndefined()
+    expect(h.runs).toHaveLength(3)
+    // The first attempt's init and text, then nothing more of the second's (its init is not passed on).
+    expect(h.attempts).toEqual([2, 2])
+  })
+
   it('does not fall back when the failure is not the credential’s: a bad request, or a turn limit', async () => {
     const bad = harness(() => ({
       messages: [init(), apiError('API Error: 400 messages: bad', 'unknown'), errorResult(400, 'API Error: 400 messages: bad')],
@@ -279,10 +309,11 @@ describe('runWithFallback (#1093)', () => {
     )
     const { messages } = await h.collect([A, B], { maxTurns: 10, maxBudgetUsd: 1 })
     expect(kinds(messages)).toEqual(['system/init', 'assistant', 'user', 'assistant', 'result/success'])
-    // The cost is not added again; the turns are, since num_turns is the query's own.
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.04, num_turns: 3 })
+    // The cost is not added again; the turns are, since num_turns is the query's own,
+    // less A's refused request, which is not a turn (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.04, num_turns: 2 })
     // The budget check is the query's own spend, so the next attempt gets what is left.
-    expect(h.runs[1]).toMatchObject({ resume: SESSION, prompt: CONTINUE_PROMPT, maxTurns: 8, maxBudgetUsd: 0.97 })
+    expect(h.runs[1]).toMatchObject({ resume: SESSION, prompt: CONTINUE_PROMPT, maxTurns: 9, maxBudgetUsd: 0.97 })
   })
 
   it('counts what the session spent before this turn once, on a turn that itself resumed', async () => {
@@ -293,8 +324,25 @@ describe('runWithFallback (#1093)', () => {
         : [init(), success('done', 0.54, 1)],
     )
     const { messages } = await h.collect([A, B], { resume: SESSION, sessionId: undefined, maxBudgetUsd: 0.5 }, undefined, 0.5)
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.54, num_turns: 3 })
+    // A's tool call and B's reply; A's refused request is not a turn (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.54, num_turns: 2 })
     expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.47, 10)
+  })
+
+  it('reads a restored total an ulp below the prior it was given as restored (#991)', async () => {
+    // The manager passes cost_usd - unpriced_cost_usd, a float difference that
+    // can land above the transcript's total: (0.1 + 0.2) - 0.2 > 0.1.
+    const prior = 0.1 + 0.2 - 0.2
+    expect(prior).toBeGreaterThan(0.1)
+    // A restores 0.1 and spends nothing more before it fails; B then spends 0.05.
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.1, 1)], throws: new Error('x') }
+        : [init(), success('done', 0.15, 1)],
+    )
+    const { messages } = await h.collect([A, B], { resume: SESSION, sessionId: undefined, maxBudgetUsd: 0.5 }, undefined, prior)
+    expect((messages.at(-1) as { total_cost_usd: number }).total_cost_usd).toBeCloseTo(0.15, 10)
+    expect(h.runs[1]?.maxBudgetUsd).toBeCloseTo(0.5, 10)
   })
 
   it('leaves the last credential’s failed result as it came: its cost and turns count themselves once', async () => {
@@ -315,8 +363,79 @@ describe('runWithFallback (#1093)', () => {
         : { messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', 0.05, 1)], throws: new Error('x') },
     )
     const { messages } = await h.collect([A, B])
-    // B resumed: its 0.05 already holds A's 0.03.
-    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 3 })
+    // B resumed: its 0.05 already holds A's 0.03. A adds its tool call, not its refused request (#1101).
+    expect(messages.at(-1)).toMatchObject({ total_cost_usd: 0.05, num_turns: 2 })
+  })
+
+  it('says what the turn ended on, and counts no earlier attempt’s refused request as a turn (#1101)', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), retry(529, 'server_error'), apiError('API Error: 429 slow down', 'rate_limit'), errorResult(429, 'API Error: 429 slow down', 0.03, 2)], throws: new Error('x') }
+        : { messages: [init(), apiError('API Error: 400 bad', 'invalid_request'), errorResult(null, 'API Error: 400 bad', 0.03, 1)], throws: new Error('x') },
+    )
+    const { messages } = await h.collect([A, B], {}, { verdict: 'unknown', until: new Date(Date.now() + 60_000) })
+    // B's own evidence: neither A's 529 retry nor its rate_limit category.
+    expect(h.refusals).toEqual([
+      { failure: { status: null, category: 'invalid_request', message: 'API Error: 400 bad' } },
+    ])
+    // Before the result: the caller must know it is not a reply when it sees it.
+    expect(h.order).toEqual(['onRefused', 'result'])
+    // A's tool call (1 turn), and B's own refused request, which the manager takes off.
+    expect(messages.at(-1)).toMatchObject({ type: 'result', num_turns: 2 })
+    expect(kinds(messages).slice(-2)).toEqual(['assistant', 'result/success'])
+  })
+
+  it('says the credential works when the probe answers after a refusal (#1101)', async () => {
+    const h = harness(() => ({
+      messages: [init(), apiError('API Error: 403 blocked by policy', 'unknown'), errorResult(403, 'API Error: 403 blocked by policy')],
+      throws: new Error('x'),
+    }))
+    await h.collect([A, B], {}, { verdict: 'answered', until: new Date() })
+    // No fallback: the request, not the key, was refused.
+    expect(h.runs).toHaveLength(1)
+    expect(h.refusals).toEqual([{ failure: expect.objectContaining({ status: 403 }), probe: 'answered' }])
+  })
+
+  it('passes on what an inconclusive probe said, so a refusal is not blamed on the key (#1101)', async () => {
+    const h = harness(() => ({
+      messages: [init(), apiError('API Error: 403 forbidden', 'unknown'), errorResult(403, 'API Error: 403 forbidden')],
+      throws: new Error('x'),
+    }))
+    await h.collect([A], {}, { verdict: 'unknown', until: new Date() })
+    expect(h.refusals).toEqual([{ failure: expect.objectContaining({ status: 403 }), probe: 'unknown' }])
+  })
+
+  it('reports no refusal for a turn the caller stopped (#1101)', async () => {
+    const stop = new AbortController()
+    const h = harness(() => ({
+      messages: [init(), apiError('API Error: 403 forbidden', 'unknown'), errorResult(403, 'API Error: 403 forbidden')],
+      throws: new Error('x'),
+    }))
+    // Stopped while the refusal's probe is out.
+    await h.collect([A], { signal: stop.signal }, () => {
+      stop.abort()
+      return Promise.resolve({ verdict: 'refused', reason: 'HTTP 403 again' })
+    })
+    expect(h.refusals).toEqual([])
+  })
+
+  it('falls back when the request that reached maxTurns was the refused one, which is not a turn (#1101)', async () => {
+    const h = harness((_r, n) =>
+      n === 0
+        ? { messages: [init(), toolUse(), toolResult(), apiError('API Error: 429', 'rate_limit'), errorResult(429, 'API Error: 429', 0.01, 3)], throws: new Error('x') }
+        : [init(), text('done'), success('done', 0.02, 1)],
+    )
+    const { messages } = await h.collect([A, B], { maxTurns: 3 }, { verdict: 'unknown', until: new Date(Date.now() + 60_000) })
+    expect(h.runs).toHaveLength(2)
+    expect(h.runs[1]?.maxTurns).toBe(1)
+    expect(messages.at(-1)).toMatchObject({ type: 'result', subtype: 'success', num_turns: 3 })
+  })
+
+  it('reports no refusal when the turn ends on a reply, or on a synthetic message it went on from (#1101)', async () => {
+    const h = harness(() => [init(), apiError('API Error: 529', 'server_error'), text('Carried on.'), success('Carried on.')])
+    const { messages } = await h.collect([A])
+    expect(kinds(messages)).toEqual(['system/init', 'assistant', 'assistant', 'result/success'])
+    expect(h.refusals).toEqual([])
   })
 
   it('disables a rate-limited credential the probe finds refused outright', async () => {
@@ -369,9 +488,9 @@ describe('runWithFallback (#1093)', () => {
     })
     // A probe that only ends when its signal does.
     const never = () => new Promise<ProbeVerdict>(() => {})
-    const started = Date.now()
+    const started = performance.now()
     const { error } = await h.collect([A, B], { signal: stop.signal }, never)
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
     expect(error).toBeInstanceOf(Error)
     expect(h.probes[0]?.signal).toBe(stop.signal)
   })
@@ -394,10 +513,11 @@ describe('runWithFallback (#1093)', () => {
       messages: [init(), toolUse(), toolResult(), apiError('API Error: 529', 'server_error'), errorResult(529, 'API Error: 529', cost, turns)],
       throws: new Error('x'),
     })
-    const byTurns = harness(() => failing(0.01, 3))
+    // Three turns, then the refused request, which is not one (#1101).
+    const byTurns = harness(() => failing(0.01, 4))
     const r1 = await byTurns.collect([A, B], { maxTurns: 3 })
     expect(byTurns.runs).toHaveLength(1)
-    expect(r1.messages.at(-1)).toMatchObject({ type: 'result', num_turns: 3, total_cost_usd: 0.01 })
+    expect(r1.messages.at(-1)).toMatchObject({ type: 'result', num_turns: 4, total_cost_usd: 0.01 })
     expect(byTurns.reports).toEqual([{ id: 'a', outcome: { class: 'transient', reason: 'API Error: 529' }, next: undefined }])
 
     const byBudget = harness(() => failing(0.5, 1))
@@ -455,6 +575,20 @@ describe('runWithFallback (#1093)', () => {
     await h.collect([A, B])
     expect(h.runs[1]).toMatchObject({ prompt: 'Make a box', sessionId: SESSION })
     expect(h.runs[1]?.resume).toBeUndefined()
+  })
+
+  it('resumes without the memory hooks’ UserPromptSubmit, which fired for the user’s message already (#1896)', async () => {
+    const hook = () => Promise.resolve({})
+    const memoryHooks = { UserPromptSubmit: [{ hooks: [hook] }], Stop: [{ hooks: [hook] }] }
+    const fresh = harness((_r, n) => (n === 0 ? [retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await fresh.collect([A, B], { memoryHooks })
+    // Never reported a session: the message runs again as it was, with its hooks.
+    expect(fresh.runs[1]?.memoryHooks).toBe(memoryHooks)
+    const resumed = harness((_r, n) => (n === 0 ? [init(), retry(401, 'authentication_failed')] : [init(), success('ok')]))
+    await resumed.collect([A, B], { memoryHooks })
+    expect(resumed.runs[0]?.memoryHooks).toBe(memoryHooks)
+    expect(resumed.runs[1]).toMatchObject({ prompt: CONTINUE_PROMPT, memoryHooks: { Stop: memoryHooks.Stop } })
+    expect(resumed.runs[1]?.memoryHooks).not.toHaveProperty('UserPromptSubmit')
   })
 
   it('stops everything when the caller aborts, and never falls back', async () => {

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, Literal, cast
 from unittest import mock
 
 import pytest
@@ -15,6 +17,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from trimesh.creation import box
 
+from scadbuddy.bambuddy.client import DEFAULT_UPLOAD_TIMEOUT
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.assets import AssetStore
@@ -26,15 +29,21 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import snapshots as snapshots_module
-from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content import ContentStore, StoreFullError
 from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError, snapshot_key
+from scadbuddy.store.snapshots import (
+    SnapshotPendingError,
+    SnapshotStore,
+    SnapshotUnavailableError,
+    snapshot_key,
+)
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.models import PieceRequest, piece_key
+from scadbuddy.workflows.models import PieceRequest, PrepareResult, piece_key
 from tests.conftest import write_openscad_3mf
+from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -101,7 +110,8 @@ async def test_prepare_on_a_worker_without_history_uses_the_materialized_snapsho
     await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
     worker_paths = DataPaths(tmp_path / "worker")
     deps = WorkerDeps(
-        config=Config(data_dir=tmp_path / "worker"),
+        # `prepare` derives the schema (phase 4): the fake openscad answers for it.
+        config=install_fake_openscad(tmp_path, worker_paths),
         paths=worker_paths,
         assets=AssetStore(tmp_path / "worker" / "assets"),
         blobs=LocalBlobStore(tmp_path / "worker" / "blobs"),
@@ -132,6 +142,22 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"ttf"
     assert await mirror.sync() == []
     assert content.index.get(font_key(family.name)) is not None
+
+
+async def test_a_stopped_font_backfill_publishes_nothing_more(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2128: the boot's font backfill ends once the shutdown sets ``stop``."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    mirror = FontMirror(content, api_fonts)
+    stop = threading.Event()
+    stop.set()
+    assert await mirror.backfill(stop=stop) == 0
+    assert content.index.get(font_key(family.name)) is None
+    assert await mirror.backfill() == 1
 
 
 async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
@@ -286,7 +312,7 @@ async def test_a_worker_without_the_volume_renders_a_preview_from_the_stored_sna
     async def one_box(*args: object, **kwargs: object) -> object:
         rendered.append(cast(Path, args[0]))
         write_openscad_3mf(cast(Path, args[3]), [("Color 1", "#0047BB00", box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def no_parameters(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()
@@ -378,6 +404,300 @@ async def test_concurrent_ensures_of_a_new_revision_store_it_once(
     assert calls == 1
 
 
+def _gated(content: ContentStore) -> asyncio.Event:
+    """Hold every `put` until the returned event is set: a Bambuddy taking its time."""
+    put = content.put
+    gate = asyncio.Event()
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    return gate
+
+
+def _export(paths: DataPaths, rev: str) -> None:
+    export = paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+
+
+async def test_a_slow_first_pin_stops_the_request_waiting_and_stores_behind_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: a revision's first pin exports, packs and uploads inside the submit. Past
+    `pin_timeout` the request stops waiting (a 503 with Retry-After) instead of hanging
+    for the upload's own 180 s, and the store it started finishes behind it, so the
+    retry finds the snapshot stored."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "7" * 40
+    _export(api_paths, rev)
+    gate = _gated(content)
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1)
+    with pytest.raises(SnapshotPendingError) as raised:
+        await asyncio.wait_for(api.pin("demo", rev), 5)
+    assert raised.value.retry_after >= 1
+    assert content.index.get(snapshot_key("demo", rev)) is None
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert not api._storing  # the done-callback let it go
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+    # The retry only has to find the stored snapshot, but on a loaded runner that alone
+    # can outlast 0.1 s and read as pending again; what it checks is that it is stored.
+    api.pin_timeout = 5
+    assert await asyncio.wait_for(api.pin("demo", rev), 5) == rev
+
+
+async def test_a_store_done_as_the_pin_times_out_reports_its_own_outcome(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1419 review: `wait_for` can time out after the store finished. A store that
+    succeeded is the revision, not a 503; one that failed is its own error (a full
+    store's 507), not a retryable "pending"."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "a1" * 20
+    _export(api_paths, rev)
+    real_wait_for = asyncio.wait_for
+
+    async def late(awaitable: Any, timeout: float | None) -> Any:
+        await real_wait_for(awaitable, 5)  # the store finishes...
+        raise TimeoutError  # ...and the wait reports a timeout anyway
+
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.1, wait=late)
+    assert await api.pin("demo", rev) == rev
+
+    async def full(*args: object, **kwargs: object) -> object:
+        raise StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (1)")
+
+    content.put = full  # type: ignore[method-assign,assignment]
+    _export(api_paths, "b2" * 20)
+    with pytest.raises(StoreFullError):
+        await api.pin("demo", "b2" * 20)
+
+
+async def _gives_up(awaitable: Any, timeout: float | None) -> Any:
+    """A pin's wait that runs out at once, as `wait_for` does: the shield is cancelled."""
+    asyncio.ensure_future(awaitable).cancel()
+    raise TimeoutError
+
+
+async def test_pins_of_a_revision_still_storing_join_its_one_store(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1435: each timed-out pin used to start one more store, queued on the key's lock
+    behind the stalled one. A retry joins the store already running instead."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "c3" * 20
+    _export(api_paths, rev)
+    gate = _gated(content)
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    for _ in range(3):
+        with pytest.raises(SnapshotPendingError):
+            await api.pin("demo", rev)
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+
+
+async def test_retry_after_grows_with_the_time_a_store_has_taken(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1436: an upload can take far longer than `pin_timeout`, so a fixed hint sends
+    the client back for one 503 after another. The hint is as long as the store has
+    run, at least `pin_timeout` and at most the upload's own timeout."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "d4" * 20
+    _export(api_paths, rev)
+    gate = _gated(content)
+    now = [1000.0]
+    api = SnapshotStore(
+        content, api_paths, history=None, pin_timeout=30, wait=_gives_up, clock=lambda: now[0]
+    )
+    hints = []
+    for later in (0, 100, 10_000):
+        now[0] = 1000.0 + later
+        with pytest.raises(SnapshotPendingError) as raised:
+            await api.pin("demo", rev)
+        hints.append(raised.value.retry_after)
+    assert hints == [30, 100, math.ceil(DEFAULT_UPLOAD_TIMEOUT)]
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+
+
+async def test_stores_of_different_revisions_run_a_few_at_a_time(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1436: a pin that stops waiting leaves its store running, so the preview pass
+    could otherwise have every template uploading to Bambuddy at once."""
+    api_paths = DataPaths(tmp_path / "api")
+    revs = ["e5" * 20, "f6" * 20]
+    for rev in revs:
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    entered: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+    uploading = 0
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        nonlocal uploading
+        entered[uploading].set()
+        uploading += 1
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up, max_stores=1)
+    queued = asyncio.Event()
+    acquire = api._stores.acquire
+
+    async def acquiring() -> Literal[True]:
+        if api._stores.locked():
+            queued.set()  # this store waits its turn
+        return await acquire()
+
+    api._stores.acquire = acquiring  # type: ignore[method-assign]
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[0])
+    await asyncio.wait_for(entered[0].wait(), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[1])
+    second = asyncio.ensure_future(entered[1].wait())
+    turn = asyncio.ensure_future(queued.wait())
+    await asyncio.wait_for(asyncio.wait({second, turn}, return_when="FIRST_COMPLETED"), 5)
+    assert queued.is_set()
+    assert not entered[1].is_set()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+    second.cancel()
+    assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
+
+
+async def test_background_stores_leave_the_interactive_slots_free(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#1773 1: the preview pass's stores are bounded on their own. Stalled ones
+    used to hold every slot, so a render someone waits for got 503s for as long as
+    their uploads took."""
+    api_paths = DataPaths(tmp_path / "api")
+    revs = ["c1" * 20, "c2" * 20, "c3" * 20, "c4" * 20]
+    for rev in revs:
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    uploading: dict[str, asyncio.Event] = {rev: asyncio.Event() for rev in revs}
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        uploading[next(r for r in revs if str(kwargs["name"]) == f"src-{r[:12]}.zip")].set()
+        await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    for rev in revs[:3]:
+        with pytest.raises(SnapshotPendingError):
+            await api.pin("demo", rev, background=True)
+    background = [asyncio.ensure_future(uploading[rev].wait()) for rev in revs[:3]]
+    await asyncio.wait_for(asyncio.wait(background, return_when="FIRST_COMPLETED"), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", revs[3])
+    await asyncio.wait_for(uploading[revs[3]].wait(), 5)
+    # The background bound is lower than the interactive one, and its own.
+    assert (
+        snapshots_module.MAX_CONCURRENT_BACKGROUND_STORES < snapshots_module.MAX_CONCURRENT_STORES
+    )
+    assert sum(uploading[rev].is_set() for rev in revs[:3]) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing, *background), 5)
+    assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
+
+
+async def test_an_interactive_pin_lifts_a_background_store_still_queued(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2140: a render right after an edit joins the preview pass's store of that
+    revision. Still queued behind a stalled background upload, it moves to an
+    interactive slot instead of waiting there."""
+    api_paths = DataPaths(tmp_path / "api")
+    stalled, wanted = "d1" * 20, "d2" * 20
+    for rev in (stalled, wanted):
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    uploading = {rev: asyncio.Event() for rev in (stalled, wanted)}
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        rev = stalled if str(kwargs["name"]) == f"src-{stalled[:12]}.zip" else wanted
+        uploading[rev].set()
+        if rev == stalled:
+            await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", stalled, background=True)
+    await asyncio.wait_for(uploading[stalled].wait(), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", wanted, background=True)
+    await asyncio.sleep(0.05)
+    assert not uploading[wanted].is_set()  # queued for the one background slot
+
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", wanted)
+
+    await asyncio.wait_for(uploading[wanted].wait(), 5)
+    assert not gate.is_set()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+    assert content.index.get(snapshot_key("demo", wanted)) is not None
+    # Every slot is back.
+    assert not api._stores.locked() and not api._background_stores.locked()
+
+
+async def test_a_caller_gone_mid_pin_leaves_the_store_running(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: a client that disconnects cancels its request; the shielded store carries
+    on, so the next submit finds the snapshot."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "8" * 40
+    _export(api_paths, rev)
+    gate = _gated(content)
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=30)
+    request = asyncio.create_task(api.pin("demo", rev))
+    await asyncio.sleep(0.1)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    behind = set(api._storing)
+    assert len(behind) == 1
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*behind), 5)
+    assert content.index.get(snapshot_key("demo", rev)) is not None
+
+
+async def test_shutdown_cancels_a_store_still_running_past_its_grace(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686 review: a store no request waits for is not left pending on a closed loop."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "9" * 40
+    _export(api_paths, rev)
+    _gated(content)  # never opens
+    api = SnapshotStore(content, api_paths, history=None, pin_timeout=0.05)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", rev)
+    behind = set(api._storing)
+    await asyncio.wait_for(api.aclose(grace=0.05), 5)
+    assert all(task.cancelled() for task in behind)
+    assert not api._storing
+
+
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
     """The prune takes the export between `materialize`'s `is_dir` and its touch."""
     left = [times]
@@ -421,3 +741,160 @@ async def test_an_export_lost_to_the_prune_on_a_worker_without_git_fails_clearly
 ) -> None:
     with pytest.raises(SnapshotUnavailableError, match="demo@"):
         await resolve_source("demo", "8" * 40, paths=DataPaths(tmp_path / "worker"), history=None)
+
+
+async def test_every_piece_activity_brings_the_source_back_when_the_export_is_gone(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """#1884: `prepare` materializes the snapshot, but the next activity may run on
+    another worker (its own emptyDir) or after the prune took the export. Each one
+    reads `prepared.scad`, so each one brings the source in again."""
+    rev = "e" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    deps = replace(
+        _worker_deps(tmp_path, pool, SnapshotStore(content, worker_paths, history=None)),
+        config=install_fake_openscad(tmp_path, worker_paths),
+    )
+    activities = RenderActivities(deps)
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    export = worker_paths.model_revision_dir("demo", rev)
+    prepared = await activities.prepare(req)
+    shutil.rmtree(export)
+    main = await activities.render_main(req, prepared)
+    shutil.rmtree(export)
+    await activities.render_solids(req, prepared, main)
+    shutil.rmtree(export)
+    await activities.finish_piece(req, prepared, main)
+    assert (export / "model.scad").read_text() == "cube(4);"
+
+
+@pytest.mark.parametrize("stored", [True, pytest.param(False, marks=pytest.mark.requires_git)])
+async def test_every_piece_activity_on_another_worker_brings_the_source_in(
+    tmp_path: Path, content: ContentStore, pool: Pool, stored: bool
+) -> None:
+    """#2130: each piece activity may run on a worker that never had the export (its own
+    emptyDir). With a stored snapshot it is unpacked; with none but git history, it is
+    exported from git, as `prepare` does, rather than left missing for OpenSCAD."""
+    history: ModelHistory | None = None
+    if stored:
+        rev = "f" * 40
+        await _stored(tmp_path, content, rev)
+    else:
+        repo = DataPaths(tmp_path / "repo")
+        repo.ensure()
+        history = ModelHistory(repo.models, wrapper_prefix=WRAPPER_PREFIX)
+        history.ensure_repo()
+        source = repo.model_source("demo")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("cube(4);")
+        history.commit("add demo", model_path("demo"))
+        rev = subprocess.run(
+            ["git", "-C", str(repo.models), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        # A later commit, so `rev` is an old revision: it renders from an export.
+        source.write_text("cube(5);")
+        history.commit("edit demo", model_path("demo"))
+    # Shared by every worker, on the last one's volume: `finish_piece` names its outputs
+    # relative to that.
+    blobs = LocalBlobStore(DataPaths(tmp_path / "worker-d").blobs)
+    openscad = install_fake_openscad(tmp_path, DataPaths(tmp_path / "repo")).openscad
+
+    def worker(name: str) -> tuple[RenderActivities, Path]:
+        paths = DataPaths(tmp_path / name)
+        deps = replace(
+            _worker_deps(tmp_path, pool, SnapshotStore(content, paths, history=None)),
+            paths=paths,
+            config=Config(openscad=openscad, data_dir=paths.root),
+            blobs=blobs,
+            history=history,
+        )
+        return RenderActivities(deps), paths.model_revision_dir("demo", rev) / "model.scad"
+
+    def on(scad: Path, prepared: PrepareResult) -> PrepareResult:
+        """`prepared` as another worker reads it: the same path on its own volume."""
+        return prepared.model_copy(update={"scad": str(scad)})
+
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    first, scad = worker("worker-a")
+    env = ActivityEnvironment()  # a slow step heartbeats
+    prepared = await env.run(first.prepare, req)
+    assert Path(prepared.scad) == scad and scad.read_text() == "cube(4);"
+
+    second, scad = worker("worker-b")
+    main = await env.run(second.render_main, req, on(scad, prepared))
+    assert scad.read_text() == "cube(4);"
+
+    third, scad = worker("worker-c")
+    await env.run(third.render_solids, req, on(scad, prepared), main)
+    assert scad.read_text() == "cube(4);"
+
+    fourth, scad = worker("worker-d")
+    await env.run(fourth.finish_piece, req, on(scad, prepared), main)
+    assert scad.read_text() == "cube(4);"
+
+
+async def test_every_openscad_activity_brings_the_templates_fonts_to_its_worker(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """#2012: `prepare` synced the template's fonts on its own worker only. A later
+    activity on another worker rendered with DejaVu instead (spec §3)."""
+    rev = "d" * 40
+    api_paths = DataPaths(tmp_path / "api")
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text('text("hi", font = "Lobster Two");')
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    await FontMirror(content, api_fonts).publish("Lobster Two")
+
+    # Shared by every worker, as the store shares pieces. It sits on the last
+    # worker's volume because `finish_piece` names its outputs relative to that.
+    blobs = LocalBlobStore(DataPaths(tmp_path / "worker-d").blobs)
+    openscad = install_fake_openscad(tmp_path, api_paths).openscad
+
+    def worker(name: str) -> tuple[RenderActivities, Path, DataPaths]:
+        paths = DataPaths(tmp_path / name)
+        fonts = FontService(tmp_path / name)
+        deps = replace(
+            _worker_deps(tmp_path, pool, SnapshotStore(content, paths, history=None)),
+            paths=paths,
+            config=Config(openscad=openscad, data_dir=paths.root),
+            blobs=blobs,
+            fonts_mirror=FontMirror(content, fonts),
+        )
+        return RenderActivities(deps), fonts.root / family.name / "LobsterTwo-Regular.ttf", paths
+
+    def on(paths: DataPaths, prepared: PrepareResult) -> PrepareResult:
+        """`prepared` as another worker reads it: the same path on its own volume."""
+        scad = paths.model_revision_dir("demo", rev) / "model.scad"
+        return prepared.model_copy(update={"scad": str(scad)})
+
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    first, font, _ = worker("worker-a")
+    prepared = await first.prepare(req)
+    assert font.read_bytes() == b"ttf"
+
+    second, font, paths = worker("worker-b")
+    main = await second.render_main(req, on(paths, prepared))
+    assert font.read_bytes() == b"ttf"
+
+    third, font, paths = worker("worker-c")
+    await third.render_solids(req, on(paths, prepared), main)
+    assert font.read_bytes() == b"ttf"
+
+    fourth, font, paths = worker("worker-d")
+    await fourth.finish_piece(req, on(paths, prepared), main)
+    assert font.read_bytes() == b"ttf"

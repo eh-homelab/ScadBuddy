@@ -46,6 +46,19 @@ piece, which the weld in the model exists to guarantee) and `euler_number`
 `hole=false` base is 2 because it has no hole). Those are invariants of the
 shape, not of how it was triangulated.
 
+### Re-baselines that moved the magnitudes
+
+A regeneration records the drift of the nightly it ran on as well as the change
+that asked for it, so the next OpenSCAD bump should compare against these
+numbers, not an older golden's.
+
+| When | Why | Reagan `part1.volume_mm3` | `hole=false` `part1.volume_mm3` |
+|---|---|---|---|
+| #1442 (2026-10) | the base's spine (#920) | 7902.984 -> 7994.314: +0.55% nightly drift (7946.208 on main before it) and +0.61% from the spine | unchanged |
+| #1450, #1453 | every glyph drawn to the spine, counters cut back out, the spine keyed on geometry | 7994.314 -> 8025.979 (+0.40%) on 2026.10.05 | 4644.441 -> 4715.141 (+1.52%) on 2026.10.05 |
+
+Neither changed a part's `bodies` or `euler_number`.
+
 ## The cover images are pinned by name, not by bytes
 
 `Metadata/plate_1.png` and its three companions appear in `archive_entries`, so

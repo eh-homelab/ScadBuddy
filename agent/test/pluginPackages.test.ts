@@ -7,14 +7,16 @@ import { diffFiles, hashTree, PackageContentError } from '../src/plugins/package
 import {
   loadPackagesForRun,
   marketplaceTarget,
+  BuiltInPluginError,
   PackageInstaller,
   PackageRefusedError,
 } from '../src/plugins/packages/install.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
-import { frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
+import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
@@ -128,9 +130,24 @@ describe('vetting a package', () => {
     expect(v.endpoints).toEqual([{ what: 'MCP server "mem"', url: 'https://mcp.example/mcp/' }])
   })
 
+  it('reads an http server with a null command as the forwarder does: remote, and fine (#2621)', () => {
+    const v = vetPackage(
+      tree({
+        ...GREETER,
+        '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', command: null } } }),
+      }),
+    )
+    expect(v.problems).toEqual([])
+    expect(v.review?.mcp_servers).toEqual([{ name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }])
+  })
+
   const FORM = /YAML form a plugin package may not use/
   const refused: [string, Files, RegExp][] = [
     ['a command hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }, /command/],
+    ['a hooks module beside allowed hooks', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }, /hooks module/],
+    ['a hooks-file key Claude Code may read as a loader', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }, loaders: ['./x.js'] }) }, /a hooks file may not set "loaders"/],
+    ['an unknown hooks-file key beside a hooks array', { 'hooks/hooks.json': JSON.stringify({ hooks: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }], loaders: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] }) }, /a hooks file may not set "loaders"/],
+    ['a hooks file whose hooks are null', { 'hooks/hooks.json': JSON.stringify({ hooks: null }) }, /hooks are not an object/],
     ['dynamic context injection inline', { 'skills/x/SKILL.md': 'Status: !`cat ~/.claude/.credentials.json`\n' }, /dynamic context injection/],
     ['dynamic context injection in a block', { 'commands/c.md': '```!\nenv\n```\n' }, /dynamic context injection/],
     ['dynamic context injection in a block mid-line', { 'skills/x/SKILL.md': 'Context: ```!\ncat /proc/self/environ\n```\n' }, /dynamic context injection/],
@@ -176,6 +193,8 @@ describe('vetting a package', () => {
     ['a $ in an http hook header', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'http', url: 'https://h.example/', headers: { A: '$X' } }] }] } }) }, /Stop http hook references a variable \(\$\) in headers\.A$/m],
     ['an MCP headersHelper', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'http', url: 'https://m.example/', headersHelper: 'id' } } }) }, /headersHelper/],
     ['a legacy SSE MCP server', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'sse', url: 'https://m.example/sse' } } }) }, /only Streamable HTTP/],
+    // #2621: a null command is no command, as the forwarder reads it (mcp.ts), so it is still SSE.
+    ['a legacy SSE MCP server with a null command', { '.mcp.json': JSON.stringify({ mcpServers: { m: { type: 'sse', url: 'https://m.example/sse', command: null } } }) }, /only Streamable HTTP/],
     ['a stdio MCP server', { '.mcp.json': JSON.stringify({ mcpServers: { m: { command: 'node', args: ['x.js'] } } }) }, /stdio/],
     ['dependencies', { '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', dependencies: ['other'] }) }, /dependencies/],
     ['userConfig', { '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', userConfig: {} }) }, /userConfig/],
@@ -187,6 +206,52 @@ describe('vetting a package', () => {
   it.each(refused)('refuses %s', (_what, files, problem) => {
     const v = vetPackage(tree({ ...GREETER, ...files }))
     expect(v.problems.join('\n')).toMatch(problem)
+  })
+
+  it('lists every refusal in the review, uncapped, though a refusal is capped', () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    const v = vetPackage(tree({ ...GREETER, ...many }))
+    expect(v.problems).toHaveLength(60)
+    expect(capProblems(v.problems)).toHaveLength(51)
+    expect(capProblems(v.problems).at(-1)).toMatch(/^and \d+ more$/)
+    expect(v.review?.refused).toHaveLength(60)
+    expect(v.review?.refused?.some((p) => /more$/.test(p))).toBe(false)
+  })
+
+  it.each(['remote-devices', 'claude-device', 'webagent', 'claude-code-remote'])(
+    'refuses a package named %s, a server name Claude Code reserves (#2017)',
+    (name) => {
+      const v = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name }) }))
+      expect(v.review?.refused).toEqual([expect.stringMatching(new RegExp(`plugin name "${name}" is reserved`))])
+    },
+  )
+
+  it('lists what an admin may allow in the review, and keeps unsafe names and escaping paths fatal', () => {
+    const hook = { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }) }
+    const allowable = vetPackage(tree({ ...GREETER, ...hook }))
+    expect(allowable.fatal).toEqual([])
+    expect(allowable.review?.refused).toEqual(allowable.problems)
+    expect(allowable.problems).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
+    expect(vetPackage(tree(GREETER)).review?.refused).toEqual([])
+
+    // A reserved or non-kebab name is allowable; one that is not a safe path segment is not.
+    const reserved = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'scadbuddy' }) }))
+    expect(reserved.fatal).toEqual([])
+    expect(reserved.review?.refused).toEqual([expect.stringMatching(/plugin name "scadbuddy" is reserved/)])
+    expect(vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'My_Plugin.v2' }) })).review?.refused).toEqual([
+      expect.stringMatching(/is not 2–32 lower-case/),
+    ])
+    const unsafe = vetPackage(tree({ ...GREETER, ...hook, '.claude-plugin/plugin.json': JSON.stringify({ name: '../up' }) }))
+    expect(unsafe.fatal).toEqual([expect.stringMatching(/plugin name "\.\.\/up" is not 1–64/)])
+    expect(unsafe.review).toBeUndefined()
+    const escaping = vetPackage(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', mcpServers: '../x.json' }) }))
+    expect(escaping.fatal).toEqual(['../x.json is outside the plugin'])
+    expect(escaping.review?.refused).toEqual([])
+  })
+
+  it('reports a hooks file of only a module as that, not as a "modules" event', () => {
+    const v = vetPackage(tree({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ modules: ['./register.js'] }), 'hooks/register.js': 'export function register(on) {}\n' }))
+    expect(v.problems).toEqual(['hooks/hooks.json: names a hooks module, which runs JavaScript inside Claude Code'])
   })
 
   it('does not mistake prose for injection', () => {
@@ -357,15 +422,47 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect((err as PackageRefusedError).problems.join()).toMatch(/skills\/leak\/SKILL\.md \(symlink\)/)
   })
 
-  it('refuses a package that fails vetting, with every problem', async () => {
+  it('installs a package the rules refuse with every refusal in its review, and loads it only when allowed', async () => {
     repos.greeter = gitRepo({
       ...GREETER,
       'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'curl x' }] }] } }),
       'skills/x/SKILL.md': '!`env`\n',
     })
-    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
+    expect(prepared.review.refused).toEqual([
+      expect.stringMatching(/hooks\/hooks\.json: Stop has a "command" hook/),
+      expect.stringMatching(/skills\/x\/SKILL\.md: runs a shell command/),
+    ])
+    const pin = pinOf(prepared)
+    await expect(installer.materialise(pin)).rejects.toBeInstanceOf(PackageRefusedError)
+    const refused = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+    expect(refused).toMatchObject({ paths: [], allowedPaths: [] })
+    expect(refused.problems.join()).toMatch(/greeter was not loaded: .*command/)
+
+    const allowed = await loadPackagesForRun({ enabledPins: () => Promise.resolve([{ ...pin, allowRefused: true }]) }, installer)
+    expect(allowed).toMatchObject({ paths: [], allowedPaths: [installer.cacheDir(pin)], problems: [] })
+  })
+
+  it('refuses outright what no approval can allow', async () => {
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', hooks: '../../outside.json' }),
+    })
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    const err = await installer.prepare(source).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(PackageRefusedError)
-    expect((err as PackageRefusedError).problems).toHaveLength(2)
+    expect((err as PackageRefusedError).problems).toEqual(['../../outside.json is outside the plugin'])
+
+    repos.greeter = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'bad name' }) })
+    await expect(installer.prepare(source)).rejects.toThrow(/is not 1–64/)
+
+    // An allowed pin still goes through the egress check at every load.
+    repos.greeter = gitRepo(GREETER)
+    const pin = { ...pinOf(await installer.prepare(source)), allowRefused: true }
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, later)
+    expect(loaded).toMatchObject({ paths: [], allowedPaths: [] })
+    expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
   })
 
   it('puts the source and every declared endpoint through the egress check', async () => {
@@ -388,6 +485,67 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     await expect(plainHttp.prepare(validateSource({ kind: 'git', url: 'http://git.test/greeter.git' }))).rejects.toThrow(
       /https/,
     )
+  })
+
+  it('reviews each built-in plugin from its own files', () => {
+    // A symlink or layout change in agent/plugins would quietly empty the review.
+    for (const b of BUILT_INS) {
+      const v = vetPackage(b.dir, b.name)
+      expect(v.fatal, b.name).toEqual([])
+      expect(v.review?.name).toBe(b.name)
+    }
+    const own = vetPackage(BUILT_INS[0]!.dir, BUILT_INS[0]!.name).review!
+    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'])
+    expect(own.agents).toEqual(['scadbuddy:model-author', 'scadbuddy:print-analyst'])
+  })
+
+  it('answers that a built-in plugin is built in, not that it is refused', async () => {
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    // plugins/scadbuddy, for Claude Code outside ScadBuddy: its placeholder URL
+    // would fail the egress check, but the name answers first.
+    repos.greeter = gitRepo({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({
+        name: 'scadbuddy',
+        userConfig: { scadbuddy_url: { type: 'string', title: 'ScadBuddy URL' } },
+      }),
+      '.mcp.json': JSON.stringify({
+        mcpServers: { scadbuddy: { type: 'http', url: '${user_config.scadbuddy_url}/mcp' } },
+      }),
+    })
+    const own = await installer.prepare(source).catch((e: unknown) => e)
+    expect(own).toBeInstanceOf(BuiltInPluginError)
+    expect((own as Error).message).toMatch(/ScadBuddy's own plugin is built in.*nothing to install/)
+
+  })
+
+  it('lists a fatal problem before the cap cuts the allowable ones', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({
+      ...GREETER,
+      ...many,
+      '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'not a url' } } }),
+    })
+    const err = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem": not a url is not a valid URL/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
+  })
+
+  it('lists a fatal problem first when a load is refused, too', async () => {
+    const many = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`skills/s${i}/SKILL.md`, '!`env`\n']))
+    repos.greeter = gitRepo({ ...GREETER, ...many })
+    const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    // The MCP server's host now resolves to a refused address: fatal at load.
+    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver({ 'mcp.example': ['169.254.169.254'] }) })
+    const err = await later.materialise(pin).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(PackageRefusedError)
+    const problems = (err as PackageRefusedError).problems
+    expect(problems).toHaveLength(51)
+    expect(problems[0]).toMatch(/MCP server "mem".*169\.254\.169\.254/)
+    expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
   it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {

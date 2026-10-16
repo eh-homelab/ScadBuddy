@@ -1,0 +1,4 @@
+[
+  {"v": 1, "params": {"wallpaper": "stripes"}, "house": {"cols": 1, "rows": 1, "storeys": 1, "windows": 1}},
+  {"v": 1, "params": {"wallpaper": "stars", "exterior": "brick"}, "house": {"cols": 2, "rows": 1, "storeys": 2, "windows": 3}}
+]

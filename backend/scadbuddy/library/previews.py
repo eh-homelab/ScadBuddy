@@ -12,8 +12,7 @@ whose default render fails is not retried until its source changes.
 
 They live in Postgres (#454): one ``model_previews`` row per model id (``builtin:``
 ids included), the record and the PNG together, so the two can never disagree, and
-they survive a restart, so only the first boot renders anything. Without a database
-there are no previews at all (the database becomes required with #401).
+they survive a restart, so only the first boot renders anything.
 """
 
 from __future__ import annotations
@@ -140,6 +139,15 @@ class PreviewStore:
                 (slug,),
             ).fetchone()
         return _record(row) if row is not None else None
+
+    def records(self) -> dict[str, PreviewRecord]:
+        """Every model's record, in ONE query: the backfill's listing reads them all
+        rather than one round trip per model (#2353)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model_id, source_key, ok, error, rendered_at FROM model_previews"
+            ).fetchall()
+        return {row["model_id"]: _record(row) for row in rows}
 
     def image(self, slug: str) -> bytes | None:
         with self._connect() as conn:

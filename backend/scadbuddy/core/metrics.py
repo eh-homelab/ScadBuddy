@@ -23,17 +23,45 @@ from prometheus_client import (
 )
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-__all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "RenderStage"]
+__all__ = [
+    "CONTENT_TYPE_LATEST",
+    "HttpMetrics",
+    "Metrics",
+    "RenderOutcome",
+    "RenderStage",
+    "SettlePass",
+    "TraceRelayOutcome",
+]
 
 #: How a job settled; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "superseded"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
+
+#: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
+#: §7): spelled out here, not imported, so the metrics never load the render stack.
+RenderKind = Literal["render", "arrange"]
+RenderStage = Literal[
+    "source", "render", "split", "solids", "paint", "thumbnail", "write", "recolour"
+]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
-#: queue gauges, or starting a submitted job's workflow or cancelling a superseded one.
+#: queue gauges, a render's start (Temporal unavailable, or the start refused or
+#: unstartable; one still accepting is `render_accept_pending`), or releasing or
+#: cancelling a superseded job.
 StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
+#: Which settle pass failed a row nothing would settle: ``closed``, a row whose
+#: ``render-<render_key>`` run closed without settling it (terminated, timed out);
+#: ``legacy``, a row an older release inserted that no workflow will run.
+SettlePass = Literal["closed", "legacy"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]
+#: What became of a browser trace batch the relay received from a page (spec 2026-10-01
+#: §5.2): posted to the collector, refused or unreachable there (or the forwarder had
+#: died), dropped because the queue was full, refused or still queued once the process
+#: was stopping, over a rate limit (429), or refused as malformed, too large or not
+#: OTLP/JSON (400, 413, 415). Every outcome but ``forwarded`` is a lost batch (#1161).
+TraceRelayOutcome = Literal[
+    "forwarded", "failed", "queue_full", "shutdown", "rate_limited", "rejected"
+]
 
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
@@ -57,11 +85,20 @@ class Metrics:
         self.render_submitted = Counter(
             "scadbuddy_render_jobs_submitted",
             "Render requests accepted onto the queue as a new job.",
+            ["kind"],
             registry=r,
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
             "Render requests answered with an identical job already waiting.",
+            ["kind"],
+            registry=r,
+        )
+        self.render_accept_pending = Counter(
+            "scadbuddy_render_accept_pending",
+            "Render requests answered 503 command-still-accepting: their job was not"
+            " answered in time, and the client sends the same request again; by kind.",
+            ["kind"],
             registry=r,
         )
         self.store_info = Gauge(
@@ -81,6 +118,20 @@ class Metrics:
             "scadbuddy_render_store_errors",
             "render_jobs calls that failed, by what they were doing.",
             ["operation"],
+            registry=r,
+        )
+        self.settle_failed = Counter(
+            "scadbuddy_render_settle_failed",
+            "Render jobs a settle pass failed because nothing would settle them, by pass."
+            " Each one also counts as a failed job.",
+            ["pass"],
+            registry=r,
+        )
+        self.settle_errors = Counter(
+            "scadbuddy_render_settle_errors",
+            "Settle passes that stopped before judging every row (Temporal did not"
+            " answer, or the pass raised), by pass: their rows wait for the next one.",
+            ["pass"],
             registry=r,
         )
         self.listener_connected = Gauge(
@@ -107,6 +158,11 @@ class Metrics:
             ["reason"],
             registry=r,
         )
+        self.activity_write_failures = Counter(
+            "scadbuddy_activity_write_failures",
+            "Activity rows a source could not write; the repair pass restores them.",
+            registry=r,
+        )
         self.events_received = Counter(
             "scadbuddy_events_received",
             "Events this process heard on scadbuddy_events and delivered to its subscribers.",
@@ -125,8 +181,19 @@ class Metrics:
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            ["kind"],
             registry=r,
         )
+        # `kind` is "render" or "arrange" (spec 2026-09-27 §7): an arrange shares the
+        # queue but is no render, so the render rate leaves it out.
+        for kind in get_args(RenderKind):
+            for counter in (
+                self.render_submitted,
+                self.render_coalesced,
+                self.render_rejected,
+                self.render_accept_pending,
+            ):
+                counter.labels(kind)
         self.render_retried = Counter(
             "scadbuddy_render_jobs_retried",
             "Running jobs requeued because their worker stopped heartbeating.",
@@ -134,8 +201,8 @@ class Metrics:
         )
         self.render_finished = Counter(
             "scadbuddy_render_jobs_finished",
-            "Render jobs that left the queue, by outcome.",
-            ["outcome"],
+            "Render jobs that left the queue, by kind and outcome.",
+            ["kind", "outcome"],
             registry=r,
         )
         self.queue_depth = Gauge(
@@ -174,23 +241,38 @@ class Metrics:
             "SCADBUDDY_RENDER_CONCURRENCY: render workers in this process.",
             registry=r,
         )
+        self.print_follows_running = Gauge(
+            "scadbuddy_print_follows_running",
+            "Prints this process is following (FollowPrint attempts); at FOLLOW_SLOTS "
+            "the next prints wait on the follow queue, unfollowed.",
+            registry=r,
+        )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
-            "Time from submit until a worker took the job (or expired it).",
+            "Time from submit until its workflow began the render, by kind.",
+            ["kind"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+        self.project_retries = Counter(
+            "scadbuddy_render_project_retries_total",
+            "Retried writes of a render job's row (the `project` activity), which retries "
+            "without limit: counted as each retry starts, so one per failed write. A "
+            "steady rise is a write that never lands (#857). Alert on this, not the log: "
+            "the warning is logged only at the 12th attempt and every 100th after.",
             registry=r,
         )
         self.render_duration = Histogram(
             "scadbuddy_render_duration_seconds",
-            "Time a worker spent on a job, by outcome.",
-            ["outcome"],
+            "Time a worker spent on a job, by kind and outcome.",
+            ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
             registry=r,
         )
         self.job_latency = Histogram(
             "scadbuddy_render_job_latency_seconds",
-            "Time from submit to a settled job, by outcome: what the user waits for.",
-            ["outcome"],
+            "Time from submit to a settled job, by kind and outcome: what the user waits for.",
+            ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
             registry=r,
         )
@@ -238,6 +320,12 @@ class Metrics:
         self.worker_cache_bytes = Gauge(
             "scadbuddy_worker_cache_bytes", "Bytes in this process's local piece cache.", registry=r
         )
+        self.render_data_bytes = Gauge(
+            "scadbuddy_render_data_bytes",
+            "Bytes allocated under the render worker's data directory, as kubelet counts an"
+            " emptyDir against its sizeLimit.",
+            registry=r,
+        )
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the render queue's from the projection.
@@ -274,6 +362,15 @@ class Metrics:
             registry=r,
         )
 
+        # The browser trace relay (spec 2026-10-01 §5.2): it watches the tracing path
+        # itself, and is the one metric the tracing design adds.
+        self.trace_relay_batches = Counter(
+            "scadbuddy_trace_relay_batches_total",
+            "Browser trace batches the relay received from a page, by what became of them.",
+            ["outcome"],
+            registry=r,
+        )
+
         self.http_requests = Counter(
             "scadbuddy_http_requests",
             "HTTP requests served, by method, route template and status.",
@@ -290,17 +387,25 @@ class Metrics:
 
         # Every series a dashboard or alert divides by exists from the first scrape,
         # at zero, rather than appearing with the first job to reach it.
-        for outcome in get_args(RenderOutcome):
-            self.render_finished.labels(outcome)
-            self.job_latency.labels(outcome)
-        for outcome in ("done", "failed"):
-            self.render_duration.labels(outcome)
+        # `kind` is the job's (spec 2026-09-27 §7), so Arrange is charted apart (#2294).
+        for kind in get_args(RenderKind):
+            self.queue_wait.labels(kind)
+            for outcome in get_args(RenderOutcome):
+                self.render_finished.labels(kind, outcome)
+                self.job_latency.labels(kind, outcome)
+            for outcome in ("done", "failed"):
+                self.render_duration.labels(kind, outcome)
         for stage in get_args(RenderStage):
             self.stage_duration.labels(stage)
         for operation in get_args(StoreOperation):
             self.store_errors.labels(operation)
+        for settle_pass in get_args(SettlePass):
+            self.settle_failed.labels(settle_pass)
+            self.settle_errors.labels(settle_pass)
         for reason in get_args(EventDropReason):
             self.events_dropped.labels(reason)
+        for outcome in get_args(TraceRelayOutcome):
+            self.trace_relay_batches.labels(outcome)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:

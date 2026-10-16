@@ -1,8 +1,11 @@
 import { useId, useState } from 'react'
+import { ApiError, api } from '../../api/client'
 import type { FontFamily, InstalledFamily, Param } from '../../api/types'
 import { cssFontFamily, formatFontValue, parseFontValue, preferredStyle } from '../../lib/fonts'
+import { forgetGlyphAnswers, useMissingGlyphs } from '../../lib/useMissingGlyphs'
 import { Field } from './Field'
 import { FontPicker } from './FontPicker'
+import { paramLabel } from '../../lib/params'
 
 /**
  * OpenSCAD font values look like `Liberation Sans:style=Bold`. Browse opens the Google
@@ -18,21 +21,45 @@ export function FontWidget({
   value,
   fonts,
   sampleText = '',
+  missing = [],
+  refusal,
+  onInstalled,
   onChange,
 }: {
   param: Param
   value: string
   fonts: FontFamily[]
   sampleText?: string
+  /** #1286 — families this value names that the last render was refused for: not installed. */
+  missing?: string[]
+  /**
+   * The refusal `missing` answers, by identity (#2215): an install error belongs to
+   * it, so a later refusal of the same families starts clean. Without one, the
+   * error is kept with the families themselves.
+   */
+  refusal?: object
+  /** After one of `missing` is installed here, so the caller can render again. */
+  onInstalled?: (installed: InstalledFamily) => void
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
   const listId = useId()
   const [open, setOpen] = useState(false)
   const [justInstalled, setJustInstalled] = useState<Record<string, string[]>>({})
+  const [installing, setInstalling] = useState<string | null>(null)
+  // Kept with the refusal it answered, so a later refusal starts clean (#2215).
+  const [installError, setInstallError] = useState<{
+    refusal: object | undefined
+    missing: string
+    message: string
+  } | null>(null)
 
-  const label = param.caption ?? param.name
+  const label = paramLabel(param)
   const { family, style } = parseFontValue(value)
+  // #2358 — characters of the model's text this font has no glyph for: the render
+  // leaves them out without a word. Not asked while the family is not installed, which
+  // the error above says instead.
+  const lacking = useMissingGlyphs(value, sampleText, missing.length === 0)
 
   const choices = fonts.flatMap((font) =>
     font.styles.length > 0
@@ -43,13 +70,46 @@ export function FontWidget({
     justInstalled[family] ?? fonts.find((font) => font.family === family)?.styles ?? []
 
   function onPicked(installed: InstalledFamily): void {
+    forgetGlyphAnswers()
     const names = installed.styles ?? []
     setJustInstalled((current) => ({ ...current, [installed.family]: names }))
     onChange(formatFontValue(installed.family, preferredStyle(names)))
   }
 
+  const missingKey = missing.join('\n')
+  const shownInstallError =
+    installError && installError.refusal === refusal && installError.missing === missingKey ? installError.message : null
+
+  // The same install the picker makes; the value stays as it is, since it already
+  // names the family.
+  async function install(missingFamily: string): Promise<void> {
+    const refused = missingKey
+    const answering = refusal
+    setInstalling(missingFamily)
+    setInstallError(null)
+    try {
+      const installed = await api.installFont(missingFamily)
+      setJustInstalled((current) => ({ ...current, [installed.family]: installed.styles ?? [] }))
+      forgetGlyphAnswers()
+      onInstalled?.(installed)
+    } catch (cause) {
+      setInstallError({
+        refusal: answering,
+        missing: refused,
+        message: cause instanceof ApiError ? cause.detail : `${missingFamily} could not be installed. Check the connection.`,
+      })
+    } finally {
+      setInstalling(null)
+    }
+  }
+
+  const error =
+    missing.length === 0
+      ? null
+      : `${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not installed, so this would render in the default font.`
+
   return (
-    <Field id={id} label={label} name={param.name}>
+    <Field id={id} label={label} name={param.name} error={error}>
       <div className="flex items-center gap-2">
         <input
           id={id}
@@ -58,6 +118,8 @@ export function FontWidget({
           value={value}
           spellCheck={false}
           placeholder="Family:style=Bold"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : lacking.length > 0 ? `${id}-glyphs` : undefined}
           style={{ fontFamily: cssFontFamily(family) }}
           onChange={(event) => onChange(event.target.value)}
           className="sb-field"
@@ -70,6 +132,35 @@ export function FontWidget({
           Browse
         </button>
       </div>
+
+      {lacking.length > 0 && (
+        <p id={`${id}-glyphs`} role="status" data-testid="font-lacks" className="mt-1 text-[12px] text-warn">
+          {family} has no glyph for {lacking.join(' ')}; {lacking.length === 1 ? 'it is' : 'they are'} left out
+          of the print.
+        </p>
+      )}
+
+      {missing.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {missing.map((missingFamily) => (
+            <button
+              key={missingFamily}
+              type="button"
+              disabled={installing !== null}
+              aria-busy={installing === missingFamily}
+              onClick={() => void install(missingFamily)}
+              className="h-7 rounded-[6px] border border-line bg-surface-2 px-2.5 text-[12px] text-ink hover:border-line-strong disabled:opacity-60"
+            >
+              {installing === missingFamily ? `Installing ${missingFamily}…` : `Install ${missingFamily}`}
+            </button>
+          ))}
+          {shownInstallError && (
+            <p role="alert" className="text-[12px] text-warn">
+              {shownInstallError}
+            </p>
+          )}
+        </div>
+      )}
 
       {styles.length > 1 && (
         <select

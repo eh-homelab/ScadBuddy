@@ -6,14 +6,17 @@ import { describe, expect, it } from 'vitest'
 import type { PrintOptions } from '../api/types'
 import { printOptions as printOptionsFixture } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import type { OptionsSubject } from '../lib/printSource'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 
-function Harness({ printerId }: { printerId?: number | null } = {}) {
+const MODEL: OptionsSubject = { key: 'name-keychain', noun: 'model' }
+
+function Harness({ printerId, subject = MODEL }: { printerId?: number | null; subject?: OptionsSubject } = {}) {
   const [value, setValue] = useState<PrintOptions>({})
   return (
     <>
       <PrintOptionsDisclosure
-        slug="name-keychain"
+        subject={subject}
         printerId={printerId}
         value={value}
         onChange={setValue}
@@ -72,7 +75,7 @@ describe('PrintOptionsDisclosure', () => {
     expect(screen.getByTestId('non-default-timelapse')).toBeInTheDocument()
     // layer_inspect is remembered as false, which is exactly Bambuddy's default.
     expect(screen.queryByTestId('non-default-layer_inspect')).not.toBeInTheDocument()
-    expect(screen.getByText('1 change')).toBeInTheDocument()
+    expect(screen.getByTestId('print-options-summary')).toHaveTextContent('Timelapse (remembered)')
   })
 
   it('resolves per-printer over global and per-model over both', async () => {
@@ -144,6 +147,42 @@ describe('PrintOptionsDisclosure', () => {
 
     await waitFor(() => expect(screen.getByText('Remembered for this model.')).toBeInTheDocument())
     expect(within(row('Timelapse')).getByText(/On · from this model/)).toBeInTheDocument()
+  })
+
+  it("offers a library file its own scope and remembers under the file's key (#1754)", async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({
+          ...printOptionsFixture,
+          models: { 'library:89': { quantity: 2 }, 'name-keychain': { quantity: 4 } },
+        }),
+      ),
+    )
+    const puts: unknown[] = []
+    server.use(
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        const body = (await request.json()) as { options: PrintOptions }
+        puts.push(body)
+        return HttpResponse.json({
+          defaults: printOptionsFixture.defaults,
+          global_options: {},
+          printers: {},
+          models: { 'library:89': body.options },
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<Harness subject={{ key: 'library:89', noun: 'file' }} />)
+    await open(user)
+
+    expect(within(row('Quantity')).getByText(/2 · from this file/)).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'This model' })).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await user.selectOptions(screen.getByLabelText('Remember for'), 'This file')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() => expect(screen.getByText('Remembered for this file.')).toBeInTheDocument())
+    expect(puts).toEqual([{ scope: 'model', key: 'library:89', options: { quantity: 2, timelapse: true } }])
   })
 
   it('keeps what a scope already remembered when a second option is saved to it', async () => {
@@ -339,6 +378,104 @@ describe('PrintOptionsDisclosure', () => {
     expect(puts).toEqual([
       { scope: 'model', key: 'name-keychain', options: { timelapse: true } },
     ])
+  })
+
+  describe('remembered options in plain sight (#3635)', () => {
+    const remembered = () =>
+      server.use(
+        http.get('/api/v1/settings/print-options', () =>
+          HttpResponse.json({
+            ...printOptionsFixture,
+            global_options: { manual_start: true, timelapse: true, use_ams: true },
+          }),
+        ),
+      )
+
+    it('names the changed options and says which were remembered, collapsed', async () => {
+      remembered()
+      const user = userEvent.setup()
+      render(<Harness />)
+      await waitFor(() =>
+        expect(screen.getByTestId('print-options-summary')).toHaveTextContent(
+          'Timelapse (remembered), Wait for a manual start (remembered)',
+        ),
+      )
+      await open(user)
+      await user.selectOptions(screen.getByLabelText('Bed levelling'), 'off')
+      expect(screen.getByTestId('print-options-summary')).toHaveTextContent(
+        'Bed levelling: Off, Timelapse (remembered), Wait for a manual start (remembered)',
+      )
+    })
+
+    it('shows a held job outside the collapsed options, and turns it off for this print', async () => {
+      remembered()
+      const user = userEvent.setup()
+      render(<Harness />)
+      const held = await screen.findByTestId('holding-manual_start')
+      expect(screen.getByText('Options').closest('details')).not.toHaveAttribute('open')
+      expect(held).toHaveTextContent('Waits for a manual start.')
+      expect(held).toHaveTextContent('Remembered for every print.')
+
+      await user.click(within(held).getByRole('button', { name: 'Not this time' }))
+
+      expect(screen.getByTestId('sent')).toHaveTextContent('{"manual_start":false}')
+      expect(screen.queryByTestId('holding-manual_start')).not.toBeInTheDocument()
+      expect(screen.getByTestId('print-options-summary')).toHaveTextContent(/^Timelapse \(remembered\)$/)
+    })
+
+    it('stops remembering one option and keeps the rest of its scope', async () => {
+      remembered()
+      const puts: unknown[] = []
+      server.use(
+        http.put('/api/v1/settings/print-options', async ({ request }) => {
+          const body = (await request.json()) as { options: PrintOptions }
+          puts.push(body)
+          return HttpResponse.json({
+            defaults: printOptionsFixture.defaults,
+            global_options: body.options,
+            printers: {},
+            models: {},
+          })
+        }),
+      )
+      const user = userEvent.setup()
+      render(<Harness />)
+      const held = await screen.findByTestId('holding-manual_start')
+
+      await user.click(within(held).getByRole('button', { name: 'Stop remembering' }))
+
+      await waitFor(() => expect(screen.queryByTestId('holding-manual_start')).not.toBeInTheDocument())
+      expect(puts).toEqual([{ scope: 'global', key: null, options: { timelapse: true, use_ams: true } }])
+      expect(screen.getByTestId('sent')).toHaveTextContent('{}')
+    })
+
+    it('shows only the held job in Simple mode, which has no Options', async () => {
+      const reads: string[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.url.includes('/settings/print-options')) reads.push(request.method)
+      })
+      const known = { ...printOptionsFixture, global_options: { manual_start: true } }
+      render(<PrintOptionsDisclosure subject={MODEL} value={{}} onChange={() => {}} heldOnly known={known} />)
+      expect(await screen.findByTestId('holding-manual_start')).toHaveTextContent('Waits for a manual start.')
+      expect(screen.queryByText('Options')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('print-options-summary')).not.toBeInTheDocument()
+      // The dialog's own read is used: one read per open (#2361).
+      expect(reads).toEqual([])
+      server.events.removeAllListeners()
+    })
+
+    it("sets every changed option back to Bambuddy's default for this print", async () => {
+      remembered()
+      const user = userEvent.setup()
+      render(<Harness />)
+      await open(user)
+
+      await user.click(screen.getByRole('button', { name: "Use Bambuddy's defaults for this print" }))
+
+      expect(screen.getByTestId('sent')).toHaveTextContent('{"timelapse":false,"manual_start":false}')
+      expect(screen.getByTestId('print-options-summary')).toHaveTextContent("Bambuddy's defaults")
+      expect(screen.queryByTestId('holding-manual_start')).not.toBeInTheDocument()
+    })
   })
 
   it('reports a failure to read the remembered options instead of pretending', async () => {

@@ -2,33 +2,51 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 import respx
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import SETTLE_TIMEOUT
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore, record_settled, settle_hook
+from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.rack import usage
+from scadbuddy.rack.usage import (
+    RACK_SETTLE_CUT_OFF,
+    RACK_SETTLE_FALLBACK,
+    RACK_SETTLE_SETTINGS_DROPPED,
+    SETTINGS_READ_TIMEOUT,
+    PickedHotend,
+    RackUsageStore,
+    record_settled,
+    settle_hook,
+)
 from tests.bambuddy.conftest import BASE_URL, recording
-from tests.bambuddy.test_watcher import kinds, until_idle, watcher_for, write_output
-from tests.conftest import PgPool, open_pg_pool
+from tests.bambuddy.test_follow import NOW, Script, follower_for, kinds, progress, write_output
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool, open_pg_pool
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
 
 OUTPUT = "c" * 32
+SUBJECT = PrintSubject.output(OUTPUT)
 AT = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 A = serial(19)
 API = f"{BASE_URL}/api/v1"
@@ -38,18 +56,26 @@ class Links:
     def __init__(self, *links: PrintLink) -> None:
         self.links = list(links)
 
-    async def for_output(self, output_id: str) -> list[PrintLink]:
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
         return self.links
 
 
 class Archives:
-    def __init__(self, *archives: ArchiveDetail, failing: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        *archives: ArchiveDetail,
+        failing: set[int] | None = None,
+        hanging: set[int] | None = None,
+    ) -> None:
         self.by_id = {archive.id: archive for archive in archives}
         self.failing = failing or set()
+        self.hanging = hanging or set()
         self.reads: list[int] = []
 
     async def archive(self, archive_id: int) -> ArchiveDetail:
         self.reads.append(archive_id)
+        if archive_id in self.hanging:
+            await asyncio.Event().wait()
         if archive_id in self.failing:
             raise ApiError(503, f"archive {archive_id} unreadable near {A}")
         return self.by_id[archive_id]
@@ -72,7 +98,7 @@ async def store(pg_conninfo: str) -> AsyncIterator[RackUsageStore]:
 
 
 async def settle(store: RackUsageStore, links: Links, archives: Archives) -> int:
-    return await record_settled(OUTPUT, client=archives, links=links, store=store, now=lambda: AT)
+    return await record_settled(SUBJECT, client=archives, links=links, store=store, now=lambda: AT)
 
 
 async def test_each_linked_archive_of_a_picked_item_is_one_print(store: RackUsageStore) -> None:
@@ -179,18 +205,146 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
     with caplog.at_level(logging.DEBUG):
         assert await settle(store, Links(link(101, 51), link(102, 51)), archives) == 1
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert record.getMessage() == "could not record a rack nozzle's print"
+    assert record.getMessage() == RACK_SETTLE_FALLBACK
     assert (
-        getattr(record, "output_id", None),
+        getattr(record, "subject", None),
         getattr(record, "archive_id", None),
         getattr(record, "error", None),
-    ) == (OUTPUT, 101, "ApiError")
+    ) == (SUBJECT.key, 101, "ApiError")
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 
+async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113: a settle cut off by the follow's timeout is not retried (spec §4), so it
+    logs, by id only, the archives it had not recorded, the one in flight included."""
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
+    )
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(
+                SUBJECT,
+                client=archives,
+                links=Links(link(101, 51), link(102, 51)),
+                store=store,
+                now=lambda: AT,
+                archive_timeout=10,
+            )
+        )
+        async with asyncio.timeout(5):
+            while 101 not in archives.reads:
+                await asyncio.sleep(0.01)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "subject", None) == SUBJECT.key
+    assert getattr(record, "archive_ids", None) == [101, 102]
+    assert getattr(record, "stage", None) == "archives"
+    assert A not in repr(record.__dict__) and record.exc_info is None
+    assert await store.recorded_archives([101, 102]) == set()
+
+
+class HangingLinks(Links):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
+        self.started.set()
+        await asyncio.Event().wait()
+        return self.links
+
+
+async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1113 review: a cut-off before the loop still leaves a record, marked as the
+    read stage: its ids are the links read so far, candidates not yet filtered to the
+    unrecorded ones."""
+    links = HangingLinks()
+    with caplog.at_level(logging.DEBUG):
+        hook = asyncio.ensure_future(
+            record_settled(SUBJECT, client=Archives(), links=links, store=store, now=lambda: AT)
+        )
+        await asyncio.wait_for(links.started.wait(), 5)
+        hook.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hook
+
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
+    assert getattr(record, "subject", None) == SUBJECT.key
+    assert getattr(record, "archive_ids", None) == []
+    assert getattr(record, "stage", None) == "read"
+    assert A not in repr(record.__dict__) and record.exc_info is None
+
+
+async def test_an_archive_that_stalls_costs_only_itself(
+    store: RackUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1086 review: a stall on one archive must not use up the follow's whole-hook
+    timeout and lose the archives after it."""
+    archives = Archives(
+        ArchiveDetail(id=102, status="completed", actual_time_seconds=40), hanging={101}
+    )
+    with caplog.at_level(logging.DEBUG):
+        written = await record_settled(
+            SUBJECT,
+            client=archives,
+            links=Links(link(101, 51), link(102, 51)),
+            store=store,
+            now=lambda: AT,
+            archive_timeout=0.1,
+        )
+    assert written == 1
+    assert archives.reads == [101, 102]
+    [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
+    assert (getattr(record, "archive_id", None), getattr(record, "error", None)) == (
+        101,
+        "TimeoutError",
+    )
+
+
+async def test_a_settle_cut_off_mid_write_still_records_that_archive(
+    store: RackUsageStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1086 review: the follow's timeout cancels the hook, not the write already
+    running in its thread. That archive is recorded anyway, as SETTLE_TIMEOUT says."""
+    writing = threading.Event()
+    cancelled = threading.Event()
+    written = threading.Event()
+    write = store._record_prints
+
+    def held_write(*args: object, **kwargs: object) -> int:
+        # The write starts, then waits until the hook has been cancelled, so the cut-off
+        # happens strictly while it is running.
+        writing.set()
+        cancelled.wait(10)
+        try:
+            return write(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            written.set()
+
+    monkeypatch.setattr(store, "_record_prints", held_write)
+    archives = Archives(ArchiveDetail(id=101, status="completed", actual_time_seconds=40))
+    hook = asyncio.ensure_future(settle(store, Links(link(101, 51)), archives))
+    assert await asyncio.to_thread(writing.wait, 10)
+    hook.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hook
+    cancelled.set()
+
+    assert await asyncio.to_thread(written.wait, 10)
+    assert await store.recorded_archives([101]) == {101}
+    assert (await store.usage([A]))[A].prints == 1
+
+
 class FailingLinks:
-    async def for_output(self, output_id: str) -> list[PrintLink]:
-        raise RuntimeError(f"connection lost near {A}")
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
+        raise psycopg.OperationalError(f"connection lost near {A}")
 
 
 async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
@@ -198,11 +352,11 @@ async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
 ) -> None:
     with caplog.at_level(logging.DEBUG):
         written = await record_settled(
-            OUTPUT, client=Archives(), links=FailingLinks(), store=store, now=lambda: AT
+            SUBJECT, client=Archives(), links=FailingLinks(), store=store, now=lambda: AT
         )
     assert written == 0
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
-    assert getattr(record, "error", None) == "RuntimeError"
+    assert getattr(record, "error", None) == "OperationalError"
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 
@@ -229,7 +383,7 @@ def paths(tmp_path: Path) -> DataPaths:
 async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
     store: RackUsageStore, pool: PgPool, paths: DataPaths
 ) -> None:
-    """The first read the watcher makes finds the item already finished. That read is
+    """The first read the follow makes finds the item already finished. That read is
     also the one that links its archive: ``progress_for`` records the queue item's
     ``archive_id`` before it returns the settled progress, so the hook, which runs after,
     finds the link though nothing linked the print before."""
@@ -264,12 +418,108 @@ async def test_a_print_that_dispatches_and_settles_in_one_poll_is_counted(
             return await progress_for(client, meta, uploads=uploads, links=links)
 
     write_output(paths)
-    assert await links.for_output(OUTPUT) == []
-    watcher, seen = watcher_for(paths, read)
-    watcher.on_settled.append(settle_hook(store, links, lambda: settings))
-    watcher.watch(OUTPUT)
-    await until_idle(watcher)
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
+    follower, seen = follower_for(paths, read)
+    follower.on_settled.append(settle_hook(store, links, lambda _timeout: settings))
+    assert await follower.follow(OUTPUT, NOW, read_now=True) == "settled"
 
     assert kinds(seen) == ["print.progress", "print.settled"]
     usage = (await store.usage([A]))[A]
     assert (usage.prints, usage.print_seconds, usage.grams) == (1, 75, 1.5)
+
+
+async def test_the_hook_passes_its_read_timeout(store: RackUsageStore, pool: PgPool) -> None:
+    """#1111: the hook passes ``SETTINGS_READ_TIMEOUT`` to its settings read. The stub
+    cannot show the bound ends a read; ``test_a_real_stuck_settings_read_gives_its_thread_back``
+    does. (The hook holds no state between settles, so nothing here could show a failed
+    read sparing the next one; #1269 dropped that half.)"""
+    asked: list[float] = []
+
+    def load(timeout: float) -> StoredSettings:
+        asked.append(timeout)
+        return StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+
+    hook = settle_hook(store, PrintLinkStore(pool), load)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False):
+        await hook(SUBJECT)
+    assert asked == [SETTINGS_READ_TIMEOUT]
+    assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
+
+
+async def test_a_failed_settings_read_says_the_settles_usage_was_dropped(
+    store: RackUsageStore, pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1262: a read cut off at its bound records nothing for that settle, and nothing
+    retries it; the warning names that loss, by the error's type only."""
+
+    def load(timeout: float) -> StoredSettings:
+        raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    hook = settle_hook(store, PrintLinkStore(pool), load)
+    with caplog.at_level(logging.DEBUG), pytest.raises(psycopg.errors.QueryCanceled):
+        await hook(SUBJECT)
+    [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_SETTINGS_DROPPED]
+    assert record.levelno == logging.WARNING
+    assert (record.subject, record.error) == (SUBJECT.key, "QueryCanceled")  # type: ignore[attr-defined]
+    assert "statement timeout" not in str(record.__dict__)
+
+
+async def test_a_real_stuck_settings_read_gives_its_thread_back(
+    store: RackUsageStore,
+    pool: PgPool,
+    tmp_path: Path,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1111, end to end: the hook's read through the real settings store, held on a
+    locked table, ends within the bound, so its thread returns to the executor."""
+    monkeypatch.setattr(usage, "SETTINGS_READ_TIMEOUT", 0.2)
+    settings_store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
+    settings_store.open()
+    try:
+        hook = settle_hook(store, PrintLinkStore(pool), settings_store.load)
+        with psycopg.connect(pg_conninfo) as holder, holder.transaction():
+            holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
+            started = time.monotonic()
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                await asyncio.wait_for(hook(SUBJECT), timeout=30)
+            elapsed = time.monotonic() - started
+    finally:
+        settings_store.close()
+    # Ended at the hook's bound, not the real SETTINGS_READ_TIMEOUT or the wait_for.
+    assert elapsed < 2
+
+
+async def test_a_settings_read_that_blocks_is_cut_off_with_the_hook(
+    store: RackUsageStore, pool: PgPool, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1083: the hook's settings read is a blocking database read. Run on the event
+    loop it would freeze the follow, and the follow's timeout could never fire."""
+    release, returned = threading.Event(), threading.Event()
+    settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="bb_test")
+
+    def load(timeout: float) -> StoredSettings:
+        release.wait(timeout=10)
+        returned.set()
+        return settings
+
+    write_output(paths)
+    follower, seen = follower_for(
+        paths, Script(progress("done", settled=True, done=1)), settle_timeout=0.1
+    )
+    follower.on_settled.append(settle_hook(store, PrintLinkStore(pool), load))
+    try:
+        with caplog.at_level(logging.DEBUG):
+            assert await follower.follow(OUTPUT, NOW, read_now=True) == "settled"
+            # The follow finished while the read was still blocked: it never froze the loop.
+            assert not returned.is_set()
+    finally:
+        release.set()
+
+    assert kinds(seen) == ["print.progress", "print.settled"]
+    [record] = [r for r in caplog.records if r.getMessage() == "a settled-print hook failed"]
+    assert getattr(record, "error", None) == "TimeoutError"

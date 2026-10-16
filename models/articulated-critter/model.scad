@@ -50,7 +50,7 @@ pose = "wave"; // [straight:Straight, wave:Wave, curl:Curl]
 // Name along the back, one letter per body segment; segments are added, and the critter lengthened if need be, to fit it (leave empty for none)
 name = ""; // 12
 
-// Typeface for the name (the app fills this dropdown from the fonts installed in the image)
+// Typeface for the name
 font = "DejaVu Sans:style=Bold"; // font
 
 /* [Hinges] */
@@ -192,9 +192,12 @@ function w_at(j) = let(q = (j - 1) / N) max(wmin,
 
 wave_a = 360 / (N + 1);
 wave_amp = min(28, pose_bend / (2 * sin(wave_a / 2)));
-function theta(k) = pose == "wave" ? wave_amp * sin(wave_a * k) : 0;
-function pose_psi(k) = pose == "curl" ? min(pose_bend, 270 / (N + 1))
-                     : pose == "wave" ? theta(k) - theta(k - 1) : 0;
+function theta(k) = wave_amp * sin(wave_a * k);
+// Joint k's turn in pose ps. The pose actually used (POSE, below the plate-fit
+// bound) can differ from the one asked, so everything takes it as an argument.
+function psi_in(ps, k) = ps == "curl" ? min(pose_bend, 270 / (N + 1))
+                       : ps == "wave" ? theta(k) - theta(k - 1) : 0;
+function pose_psi(k) = psi_in(POSE, k);
 
 module posed(k) {
     if (k <= 0) children();
@@ -562,23 +565,41 @@ cap_lip = bulge - c;                                           // pin vs ring li
 // inside theirs.
 bed_w = 300;
 bed_d = 320;
-function phi(k) = k <= 0 ? 0 : phi(k - 1) + pose_psi(k);        // heading of segment k
-function jp(k) = k <= 1 ? [J[1], 0]
-               : jp(k - 1) + (J[k] - J[k - 1]) * [cos(phi(k - 1)), sin(phi(k - 1))];
-tail_tip = jp(N + 1) - J[N + 1] * [cos(phi(N + 1)), sin(phi(N + 1))];
 // Furthest anything reaches from the spine: wings (1.4 wmax past the body, a
 // 3 mm tip) bound the legs, fins and tails; the head adds horns or antennae.
 reach = max(hw + 6.5, 2.4 * wmax + 3);
-function seg_ends(k) = k == 0 ? [[L, 0], jp(1)] : k == N + 1 ? [jp(N + 1), tail_tip]
-                     : [jp(k), jp(k + 1)];
-corners = [for (k = [0:N + 1]) let(e = seg_ends(k), nrm = reach * [-sin(phi(k)), cos(phi(k))])
-               for (pt = [e[0] + nrm, e[0] - nrm, e[1] + nrm, e[1] - nrm]) pt];
-bound_x = max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]);
-bound_y = max([for (q = corners) q[1]]) - min([for (q = corners) q[1]]);
-assert(bound_x <= bed_w && bound_y <= bed_d,
-       str("the critter could be ", bound_x, " x ", bound_y, " mm, more than the ", bed_w, " x ",
-           bed_d, " mm plate: ", name_grew ? "shorten the name, curl it, or make it narrower"
-                                          : "shorten it or make it narrower"));
+function phi(ps, k) = k <= 0 ? 0 : phi(ps, k - 1) + psi_in(ps, k);   // heading of segment k
+function jp(ps, k) = k <= 1 ? [J[1], 0]
+                   : jp(ps, k - 1) + (J[k] - J[k - 1]) * [cos(phi(ps, k - 1)), sin(phi(ps, k - 1))];
+function bound_in(ps) =
+    let(tail_tip = jp(ps, N + 1) - J[N + 1] * [cos(phi(ps, N + 1)), sin(phi(ps, N + 1))],
+        corners = [for (k = [0:N + 1])
+                       let(e = k == 0 ? [[L, 0], jp(ps, 1)] : k == N + 1 ? [jp(ps, N + 1), tail_tip]
+                                      : [jp(ps, k), jp(ps, k + 1)],
+                           nrm = reach * [-sin(phi(ps, k)), cos(phi(ps, k))])
+                       for (pt = [e[0] + nrm, e[0] - nrm, e[1] + nrm, e[1] - nrm]) pt])
+    [max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]),
+     max([for (q = corners) q[1]]) - min([for (q = corners) q[1]])];
+function on_plate(b) = b[0] <= bed_w && b[1] <= bed_d;
+function laid(ps) = ps == "straight" ? "laid straight" : ps == "wave" ? "in a wave" : "curled";
+// A critter too long for the plate in the pose asked (a long name grows it)
+// lies in the next more compact pose that fits: straight, then wave, then curl.
+// Only when even the curl does not fit does the render fail.
+fallbacks = [for (ps = pose == "straight" ? ["wave", "curl"] : pose == "wave" ? ["curl"] : [])
+                 if (on_plate(bound_in(ps))) ps];
+POSE = on_plate(bound_in(pose)) || len(fallbacks) == 0 ? pose : fallbacks[0];
+bound = bound_in(POSE);
+bound_x = bound[0];
+bound_y = bound[1];
+if (POSE != pose)
+    echo(str("NOTE: pose changed from ", pose, " to ", POSE, ": the ", round(L), " mm ", animal,
+             " would not fit the ", bed_w, " x ", bed_d, " mm plate ", laid(pose)));
+curled = bound_in("curl");
+assert(on_plate(bound),
+       str("the critter could be ", bound_x, " x ", bound_y, " mm ", laid(pose), pose == "curl" ? ""
+           : str(" and ", curled[0], " x ", curled[1], " mm curled"), ", more than the ", bed_w,
+           " x ", bed_d, " mm plate: ", name_grew ? "shorten the name or make it narrower"
+                                                 : "shorten it or make it narrower"));
 
 echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 * neck_hw,
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,

@@ -17,7 +17,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api import outputs as outputs_api
+from scadbuddy.bambuddy import commits, project_file
 from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import META_NAME
@@ -26,6 +26,7 @@ from tests.api.conftest import set_fake_env
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import _uploaded_colours, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -48,7 +49,11 @@ def project_folder_routes(files: list[dict[str, Any]] | None = None) -> respx.Ro
 
 
 def uploads(*ids: int) -> respx.Route:
-    """One upload per id, each then readable (the reuse check reads it back)."""
+    """One upload per id, each then readable (the reuse check reads it back). The inbox
+    a print uploads into is listed first, for a copy an attempt left (#1145): empty."""
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
     for file_id in ids:
         respx.get(f"{API}/library/files/{file_id}").mock(
             return_value=httpx.Response(
@@ -72,7 +77,7 @@ def uploaded_name(route: respx.Route, index: int = -1) -> str:
 
 def file_into_project(client: TestClient, output_id: str) -> httpx.Response:
     response: httpx.Response = client.post(
-        f"/api/v1/outputs/{output_id}/project-file", json={"project_id": PROJECT}
+        f"/api/v1/outputs/{output_id}/project-file", json={"project_id": PROJECT}, headers=press()
     )
     return response
 
@@ -137,6 +142,48 @@ def test_generate_with_a_project_uploads_once_into_its_folder(
     # The name is the one the existence read returned, not the one uploaded.
     assert again["filename"] == "renamed-in-bambuddy.3mf"
     assert uploaded.call_count == 1
+
+
+@respx.mock
+def test_a_folder_made_for_the_project_moments_ago_is_waited_for_not_failed(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2263: a project with no folder gets one on its first file, and Bambuddy answers
+    that create before committing it, so the upload straight after is refused "Folder
+    not found". The folder is read back until it is visible and the upload sent again,
+    rather than the Generate failing."""
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+    configure(client)
+    output_id = make_output(client, model)
+    respx.get(f"{API}/library/folders/by-project/{PROJECT}").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(f"{API}/projects/{PROJECT}").mock(
+        return_value=httpx.Response(200, json={"id": PROJECT, "name": "Fidget", "status": "active"})
+    )
+    made = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(
+            200, json={"id": FOLDER, "name": "Fidget", "project_id": PROJECT}
+        )
+    )
+    gone = httpx.Response(404, json={"detail": "Folder not found"})
+    respx.get(f"{API}/library/files", params={"folder_id": str(FOLDER)}).mock(return_value=gone)
+    read = respx.get(f"{API}/library/folders/{FOLDER}").mock(
+        side_effect=[gone, httpx.Response(200, json={"id": FOLDER, "name": "Fidget"})]
+    )
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(200, json={"id": 41, "filename": "f.3mf", "notes": None})
+    )
+    uploaded = respx.post(f"{API}/library/files").mock(
+        side_effect=[gone, httpx.Response(200, json={"id": 41, "filename": "f.3mf"})]
+    )
+
+    response = file_into_project(client, output_id)
+    assert response.status_code == 200, response.text
+    assert (response.json()["folder_id"], response.json()["library_file_id"]) == (FOLDER, 41)
+    assert made.call_count == 1
+    assert [c.request.url.params["folder_id"] for c in uploaded.calls] == [str(FOLDER)] * 2
+    assert read.call_count == 2
 
 
 @respx.mock
@@ -240,7 +287,7 @@ def test_naming_the_file_never_fails_the_print(
     def broken(*args: object) -> str:
         raise RuntimeError("the library checkout is gone")
 
-    monkeypatch.setattr(outputs_api, "_output_stem", broken)
+    monkeypatch.setattr(project_file, "_output_stem", broken)
     ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert uploaded_name(uploaded) == f"{project_stem(model, {}, {}, name='Elan')}.3mf"
@@ -377,9 +424,10 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     in_spool_nines_colour(paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
-    # The recorded printer has its 0.2 on the right only, which the file states (#834).
+    # The recorded printer has its 0.2 on the right only, which the file states (#834),
+    # and the last print's nozzle plan put the filament there (#2166).
     assert [copy["target_key"] for copy in detail["library_files"]] == [
-        "Bambu Lab H2C@0.2^Standard#0,Standard#1"
+        "Bambu Lab H2C@0.2^Standard#0,Standard#1>2:0"
     ]
 
     again = run_print(client, fresh, json=run_request(project_id=PROJECT))
@@ -415,11 +463,13 @@ def test_generate_with_the_printer_status_unreadable_states_no_sides(
 
 
 @respx.mock
-def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
+def test_a_print_on_a_different_printer_replaces_the_copy_nothing_printed_from(
     client: TestClient, model: str
 ) -> None:
-    """The project keeps the Generate copy; the second printer model gets its own,
-    named after that model so the two are told apart in the folder."""
+    """#2476: the project kept Generate's copy and the print added one named for its
+    printer, so the folder had two files and the print's slice, with no telling which
+    printed. Generate's copy was only a guess nothing printed from: it is deleted, and
+    the print's copy takes its name and its "Edit in ScadBuddy" note."""
     configure(client)
     output_id = named_output(client, model)
     project_folder_routes().side_effect = [
@@ -427,15 +477,52 @@ def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
         httpx.Response(200, json=[{"id": 41, "folder_id": FOLDER, "filename": "Demo — 12.3mf"}]),
     ]
     uploaded = uploads(41, 42)
+    deleted = respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    renamed = respx.put(f"{API}/library/files/42").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"id": 42, **json.loads(request.content)}
+        )
+    )
     run_routes()
     slice_routes()
     queue_route()
 
     file_into_project(client, output_id)  # no printer known: the fallback plate
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 41, "filename": "Demo — 12.3mf", "notes": "Edit in ScadBuddy: x"},
+        )
+    )
     ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
+
     assert ran.json()["library_file_id"] == 42
     assert uploaded_name(uploaded) == "Demo — 12 (H2C).3mf"
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+    assert deleted.call_count == 1
+    assert [json.loads(call.request.content) for call in renamed.calls] == [
+        {"filename": "Demo — 12.3mf"},
+        {"notes": "Edit in ScadBuddy: x"},
+    ]
+
+
+@respx.mock
+def test_an_identical_generate_takes_the_file_already_filed(client: TestClient, model: str) -> None:
+    """#2476: the same parameters generated twice save two outputs; the second filing
+    takes the first one's file rather than adding "Demo — 12 (2).3mf"."""
+    configure(client)
+    first_id = named_output(client, model)
+    second_id = named_output(client, model)
+    project_folder_routes()
+    uploaded = uploads(41)
+
+    first = file_into_project(client, first_id).json()
+    second = file_into_project(client, second_id).json()
+
+    assert uploaded.call_count == 1
+    assert (second["library_file_id"], second["created"]) == (first["library_file_id"], False)
 
 
 @respx.mock
@@ -450,7 +537,7 @@ def test_generate_with_no_project_uploads_nothing(client: TestClient, model: str
 def test_filing_needs_a_project(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
-    response = client.post(f"/api/v1/outputs/{output_id}/project-file", json={})
+    response = client.post(f"/api/v1/outputs/{output_id}/project-file", json={}, headers=press())
     assert response.status_code == 422
 
 
@@ -580,6 +667,7 @@ def test_attaching_with_an_explicit_no_project_files_nothing(
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": None, "queue_item_ids": [71]},
+        headers=press(),
     )
 
     assert response.status_code == 409, response.text

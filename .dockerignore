@@ -11,6 +11,9 @@
 .claude
 .claude-worktrees
 docs
+# Real 3MFs from MakerWorld (Git LFS, ~290 MB): CI mounts them into the test
+# container read-only, so no image carries them (backend/tests/support/fixtures.py).
+test-fixtures
 
 # Build output that MUST come from the Node stage, never from the host — a
 # stale local dist silently shipping instead of a fresh build is the whole
@@ -49,3 +52,7 @@ Dockerfile
 .dockerignore
 LICENSE
 README.md
+
+# pytest-split's timings (#1167): CI mounts the file into each shard, so a
+# refresh does not invalidate the test image's `COPY backend/` layer.
+backend/.test_durations

@@ -39,13 +39,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import (
+    FilamentRequirements,
     NozzleInfo,
     Printer,
     SlotChoice,
@@ -53,14 +58,18 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
-#: How far apart two colours may be, as a plain RGB distance, and still be pre-selected.
-#: The whole cube's diagonal is ~441, so this is "recognisably the same colour" — a
-#: navy and a royal blue match, a blue and a pink do not. It only seeds the picker's
+#: How far apart two colours may be, as a CIEDE2000 colour difference, and still be
+#: pre-selected. About 2 is "just noticeable" and 100 is black against white, so this
+#: is "recognisably the same colour": `#FF0000` matches an opaque red filament
+#: (10-12), a navy matches a royal blue (12), and a royal blue does not match a
+#: greyish Misty Blue (20) or a blue a pink (37). Kept this tight because a loaded
+#: spool inside it beats an exact match on the shelf. It only seeds the picker's
 #: opening selection; every slot stays editable and nothing is decided by it.
-COLOUR_MATCH_DISTANCE = 48.0
+COLOUR_MATCH_DISTANCE = 15.0
 
 WarningKind = Literal[
     "not-loaded",
@@ -72,11 +81,31 @@ WarningKind = Literal[
     "no-process",
     "not-installed",
     "plate-differs",
+    "plate-not-listed",
+    # No longer given since the slice states its flow (#484), but kept so a run recorded
+    # with one still reads back.
     "hf-unsupported",
     "hf-mounted",
     "rack-unsafe-material",
     "rack-left-to-bambuddy",
     "rack-manual-partial",
+    # A by-object print whose objects the toolhead or the gantry would hit (#956).
+    "sequence-clearance",
+    # #717: a filament profile left on that could not apply; the print goes ahead.
+    "profile-not-applied",
+    # #1899: a support setting left out because the preset's shape for it is unknown:
+    # its values could not be read, or it has no value (or an empty one) for that key.
+    "supports-not-applied",
+    # #3628: a prime tower setting the process preset has no value for, sent anyway.
+    "prime-tower-unconfirmed",
+    # #3628: a prime tower chosen for an already-sliced file, which queues as it is.
+    "prime-tower-not-applied",
+    # A sliced file queued as it is (#2671), never refused: what to set right first.
+    "sliced-other-model",
+    "sliced-nozzle-missing",
+    "sliced-plate-missing",
+    # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
+    "slice-reused",
 ]
 
 
@@ -116,6 +145,31 @@ class SpoolOption(BaseModel):
     #: printer does not say. A label only: the run checks no spool against a nozzle (#768).
     extruder: int | None = None
     side: Literal["L", "R"] | None = None
+    #: The spool's label weight in grams, for "about half full" (#2164); None unknown.
+    label_weight_g: int | None = None
+    #: Not a spool: what is in a filled tray Bambuddy has no spool for (#2164,
+    #: ``trays.tray_option``), under a negative id, with no weight tracked.
+    tray_only: bool | None = None
+
+
+class UnknownTray(BaseModel):
+    """A filled tray with no spool assigned, and the spools it may hold."""
+
+    ams_id: int
+    tray_id: int
+    #: "AMS-D slot 4".
+    label: str
+    material: str
+    colour: str | None = None
+    #: "black", for "black PLA".
+    colour_word: str | None = None
+    #: What the tray is now, so a "no" is remembered only until it changes.
+    fingerprint: str
+    #: The :func:`tray_spool_id` it is offered under.
+    spool_id: int
+    #: Spools of the same material with a close colour that are not loaded anywhere,
+    #: most filament first and empty ones last.
+    candidates: list[int] = Field(default_factory=list)
 
 
 class SlotNeed(BaseModel):
@@ -127,6 +181,9 @@ class SlotNeed(BaseModel):
     #: Grams this slot needs for one copy, or ``None`` when the 3MF carries no slice
     #: info — which is every ScadBuddy upload before it has been sliced.
     used_grams: float | None = None
+    #: The spools whose colour still fits this slot's (`colours_match`): only these
+    #: may keep a remembered choice for it (#933). Filled in by `build_options`.
+    colour_matches: list[int] = Field(default_factory=list)
 
 
 class FilamentWarning(BaseModel):
@@ -161,7 +218,9 @@ class FilamentOptions(BaseModel):
     doing it in the browser would mean shipping every spool's history to do it.
     """
 
-    library_file_id: int
+    #: The library file the slots were read from; ``None`` for an output read from its
+    #: own 3MF, with no copy in Bambuddy yet (#2720).
+    library_file_id: int | None
     printer_id: int | None = None
     printer_name: str | None = None
     slots: list[SlotNeed] = Field(default_factory=list)
@@ -176,6 +235,9 @@ class FilamentOptions(BaseModel):
     #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False
+    #: The chosen printer's filled trays with no spool assigned (#2164): the dialog
+    #: asks which spool each holds. Each is also offered in ``spools`` as itself.
+    trays: list[UnknownTray] = Field(default_factory=list)
 
 
 class QueueFilaments(BaseModel):
@@ -211,7 +273,8 @@ def normalise_colour(raw: str | None) -> str | None:
 
 
 def colour_distance(left: str | None, right: str | None) -> float | None:
-    """Plain RGB distance, or ``None`` when either side has no colour.
+    """The CIEDE2000 difference of two sRGB colours, or ``None`` when either side
+    has no colour (#943: plain RGB distance put every real red over the cut-off).
 
     ``None`` rather than ``0.0``: "no colour on either side" is not a perfect match,
     and returning zero would make every unpainted slot claim every spool.
@@ -219,13 +282,110 @@ def colour_distance(left: str | None, right: str | None) -> float | None:
     first, second = normalise_colour(left), normalise_colour(right)
     if first is None or second is None:
         return None
-    pairs = [(int(first[i : i + 2], 16), int(second[i : i + 2], 16)) for i in (1, 3, 5)]
-    return float(float(sum((a - b) ** 2 for a, b in pairs)) ** 0.5)
+    return ciede2000(_lab(first), _lab(second))
+
+
+Lab = tuple[float, float, float]
+
+
+def _lab(colour: str) -> Lab:
+    """A ``#RRGGBB`` sRGB colour in CIE L*a*b*, against the D65 white."""
+    srgb = [int(colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    red, green, blue = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb)
+    x = (0.4124564 * red + 0.3575761 * green + 0.1804375 * blue) / 0.95047
+    y = 0.2126729 * red + 0.7151522 * green + 0.0721750 * blue
+    z = (0.0193339 * red + 0.1191920 * green + 0.9503041 * blue) / 1.08883
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 216 / 24389 else (24389 / 27 * t + 16) / 116
+
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def ciede2000(first: Lab, second: Lab) -> float:
+    """The CIEDE2000 colour difference (Sharma, Wu and Dalal, 2005), kL = kC = kH = 1."""
+    l1, a1, b1 = first
+    l2, a2, b2 = second
+    c_mean = (math.hypot(a1, b1) + math.hypot(a2, b2)) / 2
+    g = 0.5 * (1 - math.sqrt(c_mean**7 / (c_mean**7 + 25**7)))
+    a1p, a2p = a1 * (1 + g), a2 * (1 + g)
+    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+    h1p = math.degrees(math.atan2(b1, a1p)) % 360 if c1p else 0.0
+    h2p = math.degrees(math.atan2(b2, a2p)) % 360 if c2p else 0.0
+
+    delta_l = l2 - l1
+    delta_c = c2p - c1p
+    if c1p * c2p == 0:
+        delta_h = 0.0
+    elif abs(h2p - h1p) <= 180:
+        delta_h = h2p - h1p
+    elif h2p - h1p > 180:
+        delta_h = h2p - h1p - 360
+    else:
+        delta_h = h2p - h1p + 360
+    delta_big_h = 2 * math.sqrt(c1p * c2p) * math.sin(math.radians(delta_h / 2))
+
+    l_mean = (l1 + l2) / 2
+    cp_mean = (c1p + c2p) / 2
+    if c1p * c2p == 0:
+        h_mean = h1p + h2p
+    elif abs(h1p - h2p) <= 180:
+        h_mean = (h1p + h2p) / 2
+    elif h1p + h2p < 360:
+        h_mean = (h1p + h2p + 360) / 2
+    else:
+        h_mean = (h1p + h2p - 360) / 2
+    t = (
+        1
+        - 0.17 * math.cos(math.radians(h_mean - 30))
+        + 0.24 * math.cos(math.radians(2 * h_mean))
+        + 0.32 * math.cos(math.radians(3 * h_mean + 6))
+        - 0.20 * math.cos(math.radians(4 * h_mean - 63))
+    )
+    delta_theta = 30 * math.exp(-(((h_mean - 275) / 25) ** 2))
+    r_c = 2 * math.sqrt(cp_mean**7 / (cp_mean**7 + 25**7))
+    s_l = 1 + 0.015 * (l_mean - 50) ** 2 / math.sqrt(20 + (l_mean - 50) ** 2)
+    s_c = 1 + 0.045 * cp_mean
+    s_h = 1 + 0.015 * cp_mean * t
+    r_t = -math.sin(math.radians(2 * delta_theta)) * r_c
+    lightness, chroma, hue = delta_l / s_l, delta_c / s_c, delta_big_h / s_h
+    return math.sqrt(lightness**2 + chroma**2 + hue**2 + r_t * chroma * hue)
+
+
+def colours_match(slot_colour: str | None, spool_colour: str | None) -> bool:
+    """Whether a spool's colour is close enough to a slot's for a remembered choice of
+    it to be kept: within ``COLOUR_MATCH_DISTANCE``, the cut-off the auto-match uses,
+    or with no colour on either side to tell them apart (#933)."""
+    distance = colour_distance(slot_colour, spool_colour)
+    return distance is None or distance <= COLOUR_MATCH_DISTANCE
+
+
+def seed_plan(options: FilamentOptions, remembered: Sequence[SlotChoice]) -> FilamentPlan:
+    """The picker's opening plan: a slot's remembered spool while it is still in the
+    inventory and its colour still fits the slot (#933), the auto-match otherwise.
+
+    The dialog seeds itself the same way (``seedPlan`` in ``frontend/src/lib/filaments.ts``),
+    reading each slot's ``colour_matches``.
+    """
+    chosen = {choice.slot_id: choice for choice in options.suggested}
+    for slot in options.slots:
+        kept = next(
+            (
+                choice
+                for choice in remembered
+                if choice.slot_id == slot.slot_id and choice.spool_id in slot.colour_matches
+            ),
+            None,
+        )
+        if kept is not None:
+            chosen[slot.slot_id] = kept
+    return FilamentPlan(slots=[chosen[slot_id] for slot_id in sorted(chosen)])
 
 
 def build_options(
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     spools: list[Spool],
     assignments: list[SpoolAssignment],
     requirements: list[SlotNeed],
@@ -269,6 +429,7 @@ def build_options(
                 slicer_filament_name=spool.slicer_filament_name,
                 remaining_g=remaining,
                 storage_location=spool.storage_location,
+                label_weight_g=spool.label_weight or None,
                 loaded=(
                     LoadedAt(
                         printer_id=assignment.printer_id,
@@ -288,7 +449,18 @@ def build_options(
         library_file_id=library_file_id,
         printer_id=printer.id if printer else None,
         printer_name=printer.name if printer else None,
-        slots=requirements,
+        slots=[
+            slot.model_copy(
+                update={
+                    "colour_matches": [
+                        option.spool_id
+                        for option in options
+                        if colours_match(slot.colour, option.colour)
+                    ]
+                }
+            )
+            for slot in requirements
+        ],
         spools=options,
     )
     built.suggested = suggested
@@ -316,6 +488,16 @@ def _display_order(printer_id: int | None) -> Callable[[SpoolOption], tuple[int,
     return key
 
 
+_SPLIT = re.compile(r"[-\s_]+")
+
+
+def family(material: str | None) -> str:
+    """What can share a hotend (#2166): the material's first word (PLA, PETG, ABS,
+    TPU ...), so ``PLA Basic``, ``PLA-Matte`` and ``PLA-CF`` are one family."""
+    words = [word for word in _SPLIT.split((material or "").upper()) if word]
+    return words[0] if words else ""
+
+
 def suggest(
     slots: list[SlotNeed], spools: list[SpoolOption], *, printer_id: int | None = None
 ) -> list[SlotChoice]:
@@ -323,24 +505,91 @@ def suggest(
 
     This only fills the picker in so the common case needs no clicks; it decides
     nothing. A spool already taken by an earlier slot is not offered again, because a
-    two-colour plate opening with the same spool in both slots reads as a bug.
+    two-colour plate opening with the same spool in both slots reads as a bug, except
+    as below for a slot that declares no material.
+
+    A slot that declares no material (every generated template's) stays in the plate's
+    material family (#2461): the declared ones, else the family that matches the most
+    slots with a loaded spool, then the most slots at all, then the best match (#2850).
+    One PETG loaded beside the PLA does not make a mostly-PLA plate a PETG one because
+    it is the closest colour for a single slot. Opening a PLA print with an unloaded
+    TPU in one slot looks deliberate, for the reason :func:`_match_score` gives for PETG
+    in a PLA slot. Such a slot with no free spool of that family shares a loaded one
+    already chosen whose colour fits, and is otherwise left for the user.
     """
+    scored = [
+        (score, index, option)
+        for index, slot in enumerate(slots)
+        for option in spools
+        if (score := _match_score(slot, option, printer_id=printer_id)) is not None
+    ]
+    declared = {family(slot.material) for slot in slots if slot.material}
+    families = declared or _anchor_family(scored, printer_id)
     taken: set[int] = set()
     chosen: list[SlotChoice] = []
     for slot in slots:
         best: tuple[float, int] | None = None
+        shared: tuple[float, int] | None = None
         for option in spools:
-            if option.spool_id in taken:
-                continue
             score = _match_score(slot, option, printer_id=printer_id)
             if score is None:
                 continue
-            if best is None or score < best[0]:
-                best = (score, option.spool_id)
+            if not slot.material and family(option.material) not in families:
+                continue
+            if option.spool_id not in taken:
+                if best is None or score < best[0]:
+                    best = (score, option.spool_id)
+            elif (
+                not slot.material
+                and _loaded_here(option, printer_id)
+                and (shared is None or score < shared[0])
+            ):
+                shared = (score, option.spool_id)
         if best is not None:
             taken.add(best[1])
             chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=best[1]))
+        elif shared is not None:
+            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
     return chosen
+
+
+def _anchor_family(
+    scored: list[tuple[float, int, SpoolOption]], printer_id: int | None
+) -> set[str]:
+    """The family an all-undeclared plate is suggested in (#2850): the one whose
+    spools match the most slots with a loaded spool, then the most slots at all, then
+    the best single match.
+
+    It counts slots, not spools: one loaded spool whose colour fits three slots beats
+    two loaded spools that fit two, since an undeclared slot can share a loaded spool.
+    A spool with no material is the family ``""``; if that wins, only material-less
+    spools are suggested for the undeclared slots."""
+    loaded: dict[str, set[int]] = {}
+    matched: dict[str, set[int]] = {}
+    best: dict[str, tuple[float, int]] = {}
+    for score, index, option in scored:
+        kind = family(option.material)
+        matched.setdefault(kind, set()).add(index)
+        loaded.setdefault(kind, set())
+        if _loaded_here(option, printer_id):
+            loaded[kind].add(index)
+        best[kind] = min(best.get(kind, (score, index)), (score, index))
+    if not matched:
+        return set()
+    return {
+        min(
+            matched,
+            key=lambda kind: (-len(loaded[kind]), -len(matched[kind]), best[kind]),
+        )
+    }
+
+
+def _loaded_here(option: SpoolOption, printer_id: int | None) -> bool:
+    return (
+        option.loaded is not None
+        and printer_id is not None
+        and option.loaded.printer_id == printer_id
+    )
 
 
 def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None) -> float | None:
@@ -353,19 +602,18 @@ def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None)
     if slot.material and option.material.upper() != slot.material.upper():
         return None
     distance = colour_distance(slot.colour, option.colour)
+    if distance is None and normalise_colour(slot.colour) is not None:
+        # A spool with no colour says nothing about a slot that has one: opening with
+        # it reads as a match (#943). The slot is left for the user instead.
+        return None
     if distance is None:
-        # No colour to go on either side: material alone is a weak but real match, and
-        # it is ranked behind every colour match rather than competing with them.
+        # No colour to go on in the slot: material alone is a weak but real match.
         base = 1_000.0
     elif distance > COLOUR_MATCH_DISTANCE:
         return None
     else:
         base = distance
-    loaded_here = (
-        option.loaded is not None
-        and printer_id is not None
-        and option.loaded.printer_id == printer_id
-    )
+    loaded_here = _loaded_here(option, printer_id)
     # A loaded spool wins every tie and beats a marginally closer shelf spool: the
     # point of the picker is that the common case needs no clicks *and* no reloading.
     return base + (0.0 if loaded_here else COLOUR_MATCH_DISTANCE + 1.0)
@@ -383,6 +631,13 @@ def check(
     """
     by_id = {option.spool_id: option for option in options.spools}
     warnings: list[FilamentWarning] = []
+    # What every slot on one spool needs together (#2851): a spool shared by two slots,
+    # which `suggest` can pick as well as a hand pick, has to cover both.
+    sharing: dict[int, list[SlotNeed]] = {}
+    for slot in options.slots:
+        spool_id = plan.spool_for(slot.slot_id)
+        if spool_id is not None and slot.used_grams is not None:
+            sharing.setdefault(spool_id, []).append(slot)
 
     for slot in options.slots:
         spool_id = plan.spool_for(slot.slot_id)
@@ -396,7 +651,8 @@ def check(
                 )
             )
             continue
-        warnings.extend(_slot_warnings(options, slot, option, copies=copies))
+        shared = tuple(other for other in sharing.get(option.spool_id, []) if other is not slot)
+        warnings.extend(_slot_warnings(options, slot, option, copies=copies, shared=shared))
 
     return warnings
 
@@ -439,10 +695,16 @@ def every_plate(plates: list[FilamentOptions]) -> FilamentOptions:
 
 
 def _slot_warnings(
-    options: FilamentOptions, slot: SlotNeed, option: SpoolOption, *, copies: int
+    options: FilamentOptions,
+    slot: SlotNeed,
+    option: SpoolOption,
+    *,
+    copies: int,
+    shared: tuple[SlotNeed, ...] = (),
 ) -> list[FilamentWarning]:
+    """``shared``: the other slots with known grams printing from ``option``."""
     found: list[FilamentWarning] = []
-    label = _label(option)
+    label = spool_label(option)
 
     if option.loaded is None:
         found.append(
@@ -484,11 +746,27 @@ def _slot_warnings(
                 ),
             )
         )
+    elif needed is not None and option.remaining_g is not None and shared:
+        together = needed + sum((other.used_grams or 0.0) * copies for other in shared)
+        if option.remaining_g < together:
+            ids = sorted([slot.slot_id, *(other.slot_id for other in shared)])
+            names = ", ".join(str(i) for i in ids[:-1]) + f" and {ids[-1]}"
+            found.append(
+                FilamentWarning(
+                    kind="low-filament",
+                    slot_id=slot.slot_id,
+                    message=(
+                        f"{label} has about {option.remaining_g:.0f} g left and slots "
+                        f"{names} need {together:.0f} g of it between them."
+                    ),
+                )
+            )
 
     return found
 
 
-def _label(option: SpoolOption) -> str:
+def spool_label(option: SpoolOption) -> str:
+    """``Bambu Lab PLA Basic Black``: brand, material, subtype and colour name."""
     parts = [part for part in (option.brand, option.material, option.subtype) if part]
     name = " ".join(parts)
     return f"{name} {option.color_name}".strip() if option.color_name else name or "this spool"
@@ -528,7 +806,7 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
 async def gather_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
@@ -550,14 +828,29 @@ async def gather_options(
     return options
 
 
+#: The spools and where each is loaded, read together (#2166 reuses one read).
+Inventory = tuple[list[Spool], list[SpoolAssignment]]
+
+
+async def read_inventory(client: BambuddyClient) -> Inventory:
+    """The spools and their assignments, read together (#2354); a failure surfaces in
+    the order every reader once read them in, the spools' first."""
+    spools, assignments = await asyncio.gather(
+        client.spools(), client.spool_assignments(), return_exceptions=True
+    )
+    return settled(spools), settled(assignments)
+
+
 async def gather_plate_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
+    inventory: Inventory | None = None,
+    known: Callable[[int | None], FilamentRequirements] | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -565,28 +858,32 @@ async def gather_plate_options(
     once (#480); only each plate's slots are read per plate, concurrently. The reads
     keep the single-plate order, spools, assignments, the plates, then the printer and
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
-    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
-    spools = await client.spools()
-    assignments = await client.spool_assignments()
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins.
+    ``inventory`` is the spools and assignments when the caller has read them already.
+    ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
+    when they were read from the file itself (#2550)."""
+    spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
         *(
-            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
             for plate in plate_ids
+        ),
+        *(
+            (client.printer(printer_id), client.inventory_remain(printer_id))
+            if printer_id is not None
+            else ()
         ),
         return_exceptions=True,
     )
-    per_plate: list[list[SlotNeed]] = []
-    for answer in answers:
-        if isinstance(answer, BaseException):
-            raise answer
-        per_plate.append(answer)
+    per_plate: list[list[SlotNeed]] = [settled(answer) for answer in answers[: len(plate_ids)]]
 
     printer = None
     slot_materials: list[SlotMaterial] = []
     if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+        # Read beside the plates (#2354), and still failing after them.
+        printer = settled(answers[len(plate_ids)])
+        slot_materials = settled(answers[len(plate_ids) + 1]).slot_materials
 
     return [
         build_options(
@@ -603,10 +900,11 @@ async def gather_plate_options(
 
 async def _requirements(
     client: BambuddyClient,
-    library_file_id: int,
+    library_file_id: int | None,
     plate_id: int | None,
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
+    known: Callable[[int | None], FilamentRequirements] | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -614,7 +912,18 @@ async def _requirements(
     ScadBuddy generated does carry. If it ever does not, the output's colour list is
     the same information in the same order, so the picker still opens.
     """
-    answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
+    if known is not None:
+        answer = known(plate_id)
+    else:
+        if library_file_id is None:
+            # Only a source that answered ReadFile(None) without reading its own slots
+            # reaches here; say so rather than fail on an assert.
+            raise ApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"plate {plate_id}'s slots were neither read from the file nor named by a"
+                " library file",
+            )
+        answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,

@@ -1,0 +1,100 @@
+"""What crosses an ``Operation``'s history (#1053). No secret: each activity loads the
+stored settings itself."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel
+
+from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.operations.store import Operation
+
+OPERATION_WORKFLOW = "Operation"
+INSERT_ACTIVITY = "op_insert"
+FINISH_ACTIVITY = "op_finish"
+#: Guards the prelude step (#1060), so a history from before it replays unchanged.
+PRELUDE_PATCH = "op-prelude"
+#: Set in the request of an operation started with a prelude: its run knows the prelude's
+#: part is done. A request without it came from an API from before the prelude (#1060).
+PRELUDE_REQUESTED = "_prelude"
+
+
+def check_activity(kind: str) -> str:
+    return f"op.{kind}.check"
+
+
+def run_activity(kind: str) -> str:
+    return f"op.{kind}.run"
+
+
+class OperationAuthor(BaseModel):
+    """The agent the request was made on behalf of (``core/authorship.py``), so the
+    run's commits are authored as it."""
+
+    principal: str | None = None
+    session: str | None = None
+    #: The agent tool that made the call, for activity.
+    tool: str | None = None
+
+
+class PreludeStep(BaseModel):
+    """A kind whose run goes first, on its own task queue (#1060)."""
+
+    kind: str
+    task_queue: str
+    run_attempts: int = 1
+    #: The prelude kind's ``where`` (#1174): what to check when the prelude may have
+    #: done its part, which is not where the outer kind's run writes.
+    where: str | None = None
+
+
+class OperationInput(BaseModel):
+    kind: str
+    subject: str
+    #: ``operation_key(...)``; the workflow ID is ``op-<kind>-<key>``.
+    key: str
+    #: The route's request, as JSON: what the kind's check and run read.
+    request: dict[str, Any]
+    #: The kind's: 1 for an effect Bambuddy does not dedupe (§4.2).
+    run_attempts: int = 1
+    #: The kind's run timeout in seconds; the workflow's ``RUN_TIMEOUT`` when None.
+    run_timeout_s: float | None = None
+    #: Upsert the Scadbuddy* Search Attributes (``SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES``).
+    search_attributes: bool = False
+    #: The request's agent author, when an agent made it.
+    author: OperationAuthor | None = None
+    #: The kind's prelude, when the request needs it (``OperationKind.prelude``).
+    prelude: PreludeStep | None = None
+    #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
+    idempotency_key: str | None = None
+    #: The kind's ``answers_running`` (#2462): the Update answers with the running
+    #: record, not the finished one.
+    answer_running: bool = False
+    #: The kind's ``where`` (#1174): what to check when it may have been done.
+    where: str = "Bambuddy"
+
+
+class OperationAnswer(BaseModel):
+    """The ``accepted`` Update's answer: the finished operation, or the refusal."""
+
+    operation: Operation | None = None
+    refusal: PrintRunError | None = None
+    repeated: bool = False
+
+
+class InsertOp(BaseModel):
+    input: OperationInput
+
+
+class RunOp(BaseModel):
+    request: dict[str, Any]
+    #: What the check returned.
+    checked: dict[str, Any]
+    author: OperationAuthor | None = None
+
+
+class FinishOp(BaseModel):
+    operation_id: str
+    result: dict[str, Any] | None = None
+    error: PrintRunError | None = None

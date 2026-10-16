@@ -100,18 +100,27 @@ export function inBlockList(list: BlockList, address: string | undefined): boole
   return list.check(plain, family === 4 ? 'ipv4' : 'ipv6')
 }
 
+export type Cidr = { address: string; prefix: number; family: 4 | 6 }
+
+/** One `10.0.0.0/8`, `fd00::/8` or `192.168.1.10` (a bare address is a /32 or /128), or undefined. */
+export function parseCidr(entry: string): Cidr | undefined {
+  const [address = '', prefixText, extra] = entry.split('/')
+  const family = isIP(address)
+  const max = family === 4 ? 32 : 128
+  // Digits only: Number() reads '' as 0, so `10.0.0.0/` would trust every peer (#1087),
+  // and it also takes ' 8', '+8', '0x8' and '1e1'.
+  const prefix = prefixText === undefined ? max : /^\d+$/.test(prefixText) ? Number(prefixText) : Number.NaN
+  if (family === 0 || extra !== undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > max) return undefined
+  return { address, prefix, family: family as 4 | 6 }
+}
+
 /** Parses `10.0.0.0/8, fd00::/8, 192.168.1.10` (a bare address is a /32 or /128). */
 export function parseCidrList(raw: string | undefined, name = 'SCADBUDDY_AGENT_TRUSTED_PROXIES'): BlockList {
   const list = new BlockList()
   for (const entry of (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
-    const [address = '', prefixText, extra] = entry.split('/')
-    const family = isIP(address)
-    const max = family === 4 ? 32 : 128
-    const prefix = prefixText === undefined ? max : Number(prefixText)
-    if (family === 0 || extra !== undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > max) {
-      throw new OriginConfigError(`${name}: "${entry}" is not an IP address or CIDR range`)
-    }
-    list.addSubnet(address, prefix, family === 4 ? 'ipv4' : 'ipv6')
+    const cidr = parseCidr(entry)
+    if (!cidr) throw new OriginConfigError(`${name}: "${entry}" is not an IP address or CIDR range`)
+    list.addSubnet(cidr.address, cidr.prefix, cidr.family === 4 ? 'ipv4' : 'ipv6')
   }
   return list
 }

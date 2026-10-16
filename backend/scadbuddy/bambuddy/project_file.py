@@ -13,6 +13,7 @@ the Settings printer or pipeline, else the fallback plate.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping
@@ -20,14 +21,23 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.extruders import slicer_nozzle_stats
+from scadbuddy.bambuddy.extruders import (
+    _offered_sides,
+    nozzle_stats_for,
+    slicer_volume_types,
+)
+from scadbuddy.bambuddy.models import NozzleChoice
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, one_side_map
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
+from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 
 logger = logging.getLogger(__name__)
 
@@ -125,30 +135,59 @@ async def generate_target(
 
     With a printer and nozzle it also states which of the printer's sides has that
     nozzle now (#834), as the print does, so a print on the same printer and nozzles
-    reuses this file. An unreadable status states nothing, as the print's does."""
+    reuses this file. An unreadable status states nothing, as the print's does.
+
+    It states each side's flow too (#484): the model's remembered flows, else Standard,
+    since a project remembers only the printer, the size and the nozzle plan its last
+    print used. That plan (#2166), when there was one, also gives the sides offered and
+    the Manual map, so a print in the same spools reuses this file."""
     remembered = await uploads.project_target(project_id)
+    nozzles: list[NozzleChoice] = []
     if remembered is not None:
         printer_id: int | None = remembered.printer_id
         nozzle = remembered.nozzle_diameter
+        if nozzle is not None:
+            nozzles = [NozzleChoice.model_validate({"size": nozzle})]
     else:
         choices = settings.model_print_choices.get(meta.slug)
         printer_id = (choices.printer_id if choices else None) or settings.printer_id
-        nozzle = choices.nozzles[0].size if choices and choices.nozzles else None
+        nozzles = list(choices.nozzles) if choices else []
+        nozzle = nozzles[0].size if nozzles else None
     stats = None
-    if printer_id is not None and nozzle is not None:
+    plan = (
+        NozzlePlan.model_validate(remembered.nozzle_plan)
+        if remembered is not None and remembered.nozzle_plan is not None
+        else None
+    )
+    filament_map = None
+    if printer_id is not None and nozzles:
         try:
-            stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzle)
+            status = await client.printer_status(printer_id)
+            filaments = len(meta.colors)
+            if plan is not None:
+                stats = plan.nozzle_stats(nozzles)
+                filament_map = plan.stated_map(filaments)
+            else:
+                sides = _offered_sides(status, nozzles)
+                stats = nozzle_stats_for(sides, nozzles) if sides is not None else None
+                filament_map = one_side_map(sides, nozzles, filaments)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; no nozzle is known")
-            stats = None
+            stats, filament_map = None, None
     return await target_for(
-        client, settings, printer_id=printer_id, nozzle_diameter=nozzle, nozzle_stats=stats
+        client,
+        settings,
+        printer_id=printer_id,
+        nozzle_diameter=nozzle,
+        nozzle_stats=stats,
+        nozzle_volume_type=slicer_volume_types(nozzles) if nozzles else None,
+        filament_map=filament_map,
     )
 
 
 async def file_into_project(
     client: BambuddyClient,
-    store: OutputStore,
+    store: OutputFiles,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
@@ -180,3 +219,50 @@ async def file_into_project(
         bambuddy_url=client.config.web_url(f"/projects/{project_id}"),
         edit_url=link,
     )
+
+
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
+
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
+        return {}
+    if schema is None:
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
+    """
+    try:
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)

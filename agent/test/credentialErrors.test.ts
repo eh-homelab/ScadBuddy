@@ -4,10 +4,12 @@ import {
   classifyFailure,
   cooldownUntil,
   DEFAULT_COOLDOWN_MS,
+  describeApiFailure,
   type FailureClass,
   type FailureEvidence,
   MAX_COOLDOWN_MS,
   PROBE_FALLBACK_MODEL,
+  type ProbeVerdict,
   probeCredential,
   rateLimitResetFromHeaders,
   refusesTheKey,
@@ -15,7 +17,7 @@ import {
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 describe('classifyFailure (#1093)', () => {
-  // What Claude Code 2.1.283 reports for each response, measured against the
+  // What Claude Code 2.1.283 and 2.1.287 report for each response, measured against the
   // fake endpoint (test/fallback.e2e.test.ts covers the same end to end).
   const cases: [string, FailureEvidence, FailureClass][] = [
     ['401 retried', { status: 401, category: 'authentication_failed' }, 'permanent'],
@@ -42,6 +44,49 @@ describe('classifyFailure (#1093)', () => {
   ]
   it.each(cases)('%s', (_name, evidence, expected) => {
     expect(classifyFailure(evidence)).toBe(expected)
+  })
+})
+
+describe('describeApiFailure (#1101)', () => {
+  it.each<[FailureEvidence, string]>([
+    [
+      { status: 403, message: 'API Error: 403 forbidden' },
+      'the Claude credential was rejected (HTTP 403); check it under Settings → AI: API Error: 403 forbidden',
+    ],
+    [
+      { status: 400, message: 'Your credit balance is too low' },
+      'the Claude credential was rejected (HTTP 400); check it under Settings → AI: Your credit balance is too low',
+    ],
+    // The category decides over a status that would say otherwise.
+    [
+      { status: 400, category: 'billing_error', message: 'API Error' },
+      'the Claude credential was rejected (HTTP 400); check it under Settings → AI: API Error',
+    ],
+    [{ status: 429, message: 'slow down' }, 'the Claude credential is rate limited (HTTP 429); try again later: slow down'],
+    [{ status: 529, message: 'Overloaded' }, 'the model endpoint failed (HTTP 529); try again: Overloaded'],
+    [{ status: null, message: 'Connection error.' }, 'the model endpoint failed (no response); try again: Connection error.'],
+    [{ status: 400, message: 'bad request' }, 'the model API refused the request (HTTP 400): bad request'],
+    [{ status: 400, message: '  ' }, 'the model API refused the request (HTTP 400)'],
+  ])('%j', (evidence, said) => {
+    // A refusal confirmed by the probe; the other classes take no probe.
+    expect(describeApiFailure(evidence, { probe: 'refused' })).toBe(said)
+  })
+
+  it.each<[ProbeVerdict['verdict'] | undefined, string]>([
+    ['answered', 'the model endpoint refused this request (HTTP 403); the credential itself works: blocked'],
+    ['rate_limited', 'the Claude credential is rate limited (HTTP 403); try again later: blocked'],
+    [
+      'unknown',
+      'the model endpoint refused this request (HTTP 403), and the credential could not be checked; try again, then check it under Settings → AI: blocked',
+    ],
+    ['refused', 'the Claude credential was rejected (HTTP 403); check it under Settings → AI: blocked'],
+    // No probe confirmed it: not blamed on the key.
+    [
+      undefined,
+      'the model endpoint refused this request (HTTP 403), and the credential could not be checked; try again, then check it under Settings → AI: blocked',
+    ],
+  ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
+    expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
   })
 })
 
@@ -151,6 +196,20 @@ describe('probeCredential', () => {
     expect(JSON.parse(seen[0]!.body)).toMatchObject({ model: PROBE_FALLBACK_MODEL })
   })
 
+  it('never asks about an OAuth token: unknown, so a 429 or refusal cools down and never disables it', async () => {
+    // How Claude Code presents the token to the Messages API is not measured here; sent as
+    // x-api-key it is a 401, which would read as the token's own refusal.
+    let calls = 0
+    const counting: typeof fetch = () => {
+      calls += 1
+      return Promise.resolve(new Response('{}', { status: 401 }))
+    }
+    expect(
+      await probeCredential({ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-probe' }, { model: undefined, fetch: counting, now }),
+    ).toEqual({ verdict: 'unknown', until: new Date(now() + DEFAULT_COOLDOWN_MS) })
+    expect(calls).toBe(0)
+  })
+
   it('falls back to the default cooldown when the endpoint cannot be asked or names no time', async () => {
     const failing: typeof fetch = () => Promise.reject(new Error('connection refused'))
     expect(await probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: failing, now })).toEqual({
@@ -223,11 +282,11 @@ describe('probeCredential', () => {
     const stop = new AbortController()
     const hanging: typeof fetch = (_input, init) =>
       new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))
-    const started = Date.now()
+    const started = performance.now()
     const verdict = probeCredential({ kind: 'anthropic_api_key', secret: 'k' }, { model: undefined, fetch: hanging, now, signal: stop.signal })
     stop.abort()
     expect((await verdict).verdict).toBe('unknown')
-    expect(Date.now() - started).toBeLessThan(1000)
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   it.each([401, 402, 403])('reports a probe answered %i as refused outright', async (status) => {

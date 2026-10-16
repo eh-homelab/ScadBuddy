@@ -1,0 +1,4 @@
+{
+  "name": "hooks-module",
+  "hooks": ["./config/more-hooks.json"]
+}

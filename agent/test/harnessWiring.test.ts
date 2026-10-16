@@ -12,6 +12,7 @@ import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
+import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -155,7 +156,8 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(result.subtype).toBe('success')
     expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
     expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
-    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283).
+    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283;
+    // `cc-plugin-agents-md@builtin` and `cc-plugin-plugin-authoring@builtin` on 2.1.287).
     expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([])
     expect(init.skills.filter((s) => s.startsWith('scadbuddy:'))).toEqual([])
     expect(init.mcp_servers.map((s) => [s.name, s.status])).toEqual([['scadbuddy', 'connected']])
@@ -213,7 +215,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
       )
       expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
-      // `Agent` is listed by its older name (measured on Claude Code 2.1.283).
+      // `Agent` is listed by its older name (measured on Claude Code 2.1.283 and 2.1.287).
       expect([...init.tools].sort()).toEqual(['Skill', 'Task', ...registry].sort())
       // No server of its own: its tools are the in-process `scadbuddy` server.
       expect(init.mcp_servers.map((s) => s.name)).toEqual(['scadbuddy'])
@@ -245,12 +247,13 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     }, 60_000)
 
     // #946: a subagent asked to run in the background runs inside the turn.
-    // Backgrounded, it outlived its parent's turn: the SDK closes Claude Code's
-    // input at a string prompt's first result, and from then on Claude Code
+    // Backgrounded, it outlived its parent's turn: SDK 0.3.283 closed Claude
+    // Code's input at a string prompt's first result, and from then on Claude Code
     // refused every permission request itself ("The user doesn't want to take
     // this action right now"), asking neither canUseTool nor the user. That hit
     // the subagent's own calls and those of the turn Claude Code starts when it
-    // reports back, read tools included (measured on Claude Code 2.1.283).
+    // reports back, read tools included (measured on Claude Code 2.1.283; SDK
+    // 0.3.287 keeps the input open until the session reports idle, #1540).
     describe('a subagent asked to run in the background (#946)', () => {
       /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
       function backgroundScript(tool: string, input: Record<string, unknown>) {
@@ -301,6 +304,101 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         expect(asked).toEqual(['mcp__scadbuddy__delete_model'])
         expect(deletes).toBe(1)
         expect(parent.join('')).toContain('BG-DONE')
+      }, 60_000)
+    })
+
+    // #940: a subagent asks the user too. Claude Code refuses AskUserQuestion
+    // inside a subagent ("AskUserQuestion is not available inside subagents",
+    // measured on Claude Code 2.1.283 and 2.1.287) and never hands the call to canUseTool,
+    // so a session with a question gate also gets ASK_USER_TOOL, an in-process
+    // MCP tool that parks on the same gate; a subagent's MCP calls reach the
+    // host like any other.
+    describe("a subagent's question (#940)", () => {
+      const QUESTIONS = [
+        {
+          question: 'Which colour should the base be?',
+          header: 'Colour',
+          multiSelect: false,
+          options: [
+            { label: 'Red', description: 'PLA Basic red' },
+            { label: 'Blue', description: 'PLA Basic blue' },
+          ],
+        },
+      ]
+
+      /** The subagent calls `tool` once; returns what the parent and the subagent got back. */
+      function subagentAsks(tool: string) {
+        const parent: string[] = []
+        const subagent: string[] = []
+        script = (r) => {
+          const last = lastContent(r)
+          if (JSON.stringify(r.body?.messages?.[0] ?? '').includes('ASK-TASK')) {
+            if (!last.includes('tool_result')) return { toolUse: { name: tool, input: { questions: QUESTIONS } } }
+            subagent.push(last)
+            return { text: 'SUB-DONE' }
+          }
+          if (last.includes('tool_result')) {
+            parent.push(last)
+            return { text: 'done' }
+          }
+          return {
+            toolUse: { name: 'Agent', input: { subagent_type: 'scadbuddy:model-author', description: 'Ask', prompt: 'ASK-TASK' } },
+          }
+        }
+        return { parent, subagent }
+      }
+
+      function recordingGate(verdict: Awaited<ReturnType<QuestionGate>>) {
+        const asked: QuestionRequest[] = []
+        const gate: QuestionGate = (request) => {
+          asked.push(request)
+          return Promise.resolve(verdict)
+        }
+        return { asked, gate }
+      }
+
+      it('Claude Code refuses AskUserQuestion in a subagent before the gate sees it', async () => {
+        const { subagent, parent } = subagentAsks(ASK_USER_QUESTION)
+        const { asked, gate } = recordingGate({ answered: true, answers: { 'Which colour should the base be?': 'Blue' } })
+        const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(asked).toEqual([])
+        expect(decisions).toEqual([])
+        expect(subagent.join('')).toContain('AskUserQuestion is not available inside subagents')
+        expect(parent.join('')).toContain('SUB-DONE')
+      }, 60_000)
+
+      it("parks the subagent's ask_user call on the gate and hands it the answer", async () => {
+        const { subagent, parent } = subagentAsks(ASK_USER_TOOL)
+        const { asked, gate } = recordingGate({ answered: true, answers: { 'Which colour should the base be?': 'Blue' } })
+        const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(init.tools).toContain(ASK_USER_TOOL)
+        expect(decisions).toEqual([[ASK_USER_TOOL, 'allow']])
+        expect(asked).toHaveLength(1)
+        expect(asked[0]?.questions).toEqual(QUESTIONS)
+        // The tool_use block's id, as for AskUserQuestion: the panel's tool.call id.
+        expect(asked[0]?.toolUseId).toMatch(/^toolu_/)
+        const got = subagent.join('')
+        expect(got).toContain('Which colour should the base be?')
+        expect(got).toContain('Blue')
+        expect(got).not.toMatch(/"is_error":true/)
+        expect(parent.join('')).toContain('SUB-DONE')
+      }, 60_000)
+
+      it('an unanswered question reaches the subagent as the tool error, never as an answer', async () => {
+        const { subagent } = subagentAsks(ASK_USER_TOOL)
+        const { gate } = recordingGate({ answered: false, message: 'The user did not answer: the turn stopped first.' })
+        const { result } = await collect({ ownPlugin: OWN_PLUGIN_DIR, questionGate: gate })
+        expect(result.subtype).toBe('success')
+        expect(subagent.join('')).toContain('The user did not answer')
+        expect(subagent.join('')).toMatch(/"is_error":true/)
+      }, 60_000)
+
+      it('is not offered without a gate', async () => {
+        script = () => ({ text: 'Nothing to ask.' })
+        const { init } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+        expect(init.tools).not.toContain(ASK_USER_TOOL)
       }, 60_000)
     })
 

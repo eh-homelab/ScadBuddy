@@ -61,11 +61,13 @@ class InvalidMergeBaseError(ValueError):
 
 
 class MergeConflictError(Exception):
-    """The merge left conflicts: nothing was written."""
+    """The merge left conflicts: nothing was written. ``state`` is where the template
+    stood against its upstream when the merge was worked out."""
 
-    def __init__(self, plan: MergePlan) -> None:
+    def __init__(self, plan: MergePlan, state: UpstreamState) -> None:
         super().__init__(f"{plan.conflicts} conflicting hunk(s)")
         self.plan = plan
+        self.state = state
 
 
 def state_of(upstream: Upstream, *, exists: bool, revision: str | None) -> UpstreamState:

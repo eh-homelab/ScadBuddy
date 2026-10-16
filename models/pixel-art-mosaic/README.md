@@ -74,7 +74,7 @@ resampling.
 | `mount` | `hanger` | `none`, `hanger` (tab at the top centre), `keyring` (loop at the top-left corner) or `magnet` (pockets in the back). The tab is joined to the middle of the backing, so it holds on even when the art is cut away. |
 | `hole_diameter` | `5` | Hole in the tab. |
 | `magnet_diameter` / `magnet_thickness` | `10` / `3` | Magnet size; the pocket is `+ magnet_clearance` wide and 0.2 mm deeper. |
-| `magnet_count` | `1` | 1 in the middle, 2 side by side, or 4 in a square. Each pocket sits in a pad of backing at least 1.6 mm wide all round, so it holds even where the art is cut away. |
+| `magnet_count` | `1` | 1 in the middle, 2 side by side, or 4 in a square. Each pocket sits in a pad of backing at least 1.6 mm wide all round, so it holds even where the art is cut away. Each pocket needs its diameter plus 3.2 mm of its share of the mosaic (half the width, and half the height for 4); when they would run into each other, it drops to 2, then 1, with a `NOTE:`. A single magnet bigger than the plaque keeps its pad, past the plaque's edge, with a `NOTE:`. |
 | `magnet_clearance` | `0.2` | Extra pocket diameter. |
 
 ## Colours and extruders
@@ -108,13 +108,16 @@ Defaults: `color_1` black, `color_2` red, `color_3` white, `color_4` beige,
 ./verify.sh
 ```
 
-Renders 26 cases:
+Renders 30 cases:
 
 - the defaults and every built-in pattern
 - the sample PNGs with 3, 5 and 8 bands, threshold mode, inverted, and the
   lightest or darkest band as background
 - a resampled picture with grooves
 - every mount, a mosaic too big for the plate
+- magnets that do not fit as asked: 4 pockets on a 16 mm mosaic (down to 1),
+  2 × 25 mm on 40 mm (down to 1), 4 × 20 mm on a 120 × 40 mm strip (down
+  to 2), and one 20 mm magnet on a 16 mm plaque (pad past the edge)
 - a missing file and refused names
 
 Each 3MF is checked for:
@@ -131,6 +134,10 @@ Each 3MF is checked for:
   centre, the first material is its roof, and there is backing all round
   its rim. Each pocket gets a 1.6 mm pad of backing, so this holds even
   when the art is cut away (the heart's empty corners)
+- the pocket count drops (with its `NOTE:`) exactly when the pockets would
+  not fit as asked, the pockets left keep a wall between them, and a pad
+  only reaches past the plaque's outline when one magnet is bigger than the
+  plaque, with its `NOTE:`
 - refused names never reach `surface()`
 - the legacy `image_threshold` value renders the same parts as `png_threshold`
 

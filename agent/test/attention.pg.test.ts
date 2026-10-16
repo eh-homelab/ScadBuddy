@@ -1,0 +1,1888 @@
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp } from '../src/app.js'
+import { AuditLog } from '../src/audit/log.js'
+import { TabHub } from '../src/bridge/hub.js'
+import type { Database } from '../src/db.js'
+import { attentionCard, type AttentionSpec, parseAttention, timedOutText } from '../src/harness/attention.js'
+import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionVerdict } from '../src/harness/questions.js'
+import type { HarnessRun } from '../src/harness/run.js'
+import { originPolicy } from '../src/http/origins.js'
+import { loadDoneSummary } from '../src/questions/doneSummary.js'
+import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
+import { pendingInput } from '../src/routes/pendingInput.js'
+import { CLAIMED_AT, resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
+import { browserTools } from '../src/tools/browser.js'
+import { harnessTools } from '../src/tools/harness.js'
+import { SERVER_NAME } from '../src/tools/projections.js'
+import type { TabWait, WaitForTab } from '../src/tools/registry.js'
+import { type Owner, PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
+import { services } from './helpers/mcp.js'
+import { expectPanelAccepts } from './support/frontendProtocol.js'
+import { MemoryCredentials } from './support/memoryCredentials.js'
+import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { agentA, browser, manager, tempPaths } from './support/sessions.js'
+
+// Attention requests (#815) at the question gate, in Postgres: parked as an
+// `ai_questions` row of kind 'attention', answered like a question, and timed
+// out by #815's rule, which never answers. The SDK side is
+// test/attention.sdk.test.ts.
+
+const input = (over: Record<string, unknown> = {}) => {
+  const parsed = parseAttention({ reason: 'tab_disconnected', message: 'The ScadBuddy tab closed; reopen it?', ...over })
+  if (!parsed.ok) throw new Error(parsed.error)
+  return parsed.input
+}
+
+const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
+
+const answer = (sessionId: string, id: string, answers: string[]) =>
+  ({ v: PROTOCOL_VERSION, type: 'question.answer', sessionId, id, answers }) as const
+
+describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  let db: Database
+  let drop: () => Promise<void>
+  let verdicts: QuestionVerdict[]
+
+  beforeEach(async () => {
+    ;({ db, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+    verdicts = []
+  })
+  afterEach(async () => {
+    await drop()
+  })
+
+  /** A turn that raises each request in `requests` through its gate, one after another, then ends. */
+  const raising = (...requests: { spec: AttentionSpec; message?: string }[]) => (run: HarnessRun): AsyncIterable<SDKMessage> =>
+    (async function* () {
+      await Promise.resolve()
+      for (const [i, r] of requests.entries()) {
+        const card = attentionCard(input({ message: r.message ?? 'The ScadBuddy tab closed; reopen it?' }))
+        verdicts.push(
+          await run.questionGate!({
+            tool: ATTENTION_TOOL,
+            questions: [card],
+            toolUseId: `toolu_a${i}`,
+            signal: new AbortController().signal,
+            attention: r.spec,
+          }),
+        )
+      }
+      // As the SDK does: an aborted query ends without a result.
+      if (run.signal?.aborted) return
+      yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+    })()
+
+  const spec = (over: Partial<AttentionSpec> = {}): AttentionSpec => ({ reason: 'tab_disconnected', onTimeout: 'proceed', timeoutS: 300, ...over })
+
+  async function events(m: SessionManager, sessionId: string): Promise<ServerEvent[]> {
+    return (await m.events.read(sessionId)).map((e) => e.event)
+  }
+
+  async function pending(sessionId: string): Promise<string> {
+    let id: string | undefined
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL`
+      id = row?.id
+      return id
+    }).toBeDefined()
+    return id!
+  }
+
+  it('parks the turn in waiting_input as an attention card, and the user acknowledges it with a reply', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it in my tab' })
+    const id = await pending(session.id)
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
+
+    const [row] = await db.sql`
+      SELECT kind, attention_reason, on_timeout, tool, extract(epoch FROM expires_at - created_at)::int AS window
+      FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', on_timeout: 'proceed', tool: ATTENTION_TOOL, window: 300 })
+
+    await m.questions.answer(browser, answer(session.id, id, ["I'm here"]))
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: true, answers: { 'The ScadBuddy tab closed; reopen it?': "I'm here" } }])
+
+    const log = await events(m, session.id)
+    const asked = log.find((e) => e.type === 'question.asked')
+    expect(asked).toMatchObject({
+      id,
+      tool: 'toolu_a0',
+      questions: [{ question: 'The ScadBuddy tab closed; reopen it?', header: 'Tab disconnected', options: [{ label: "I'm here" }, { label: 'Carry on without me' }] }],
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: expect.any(String) },
+    })
+    await expectPanelAccepts(log)
+  })
+
+  it("is listed as pending for the badge while it waits, with its timer, and not once it is answered", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    expect((await m.questions.listPending(browser)).questions).toEqual([
+      expect.objectContaining({ id, sessionId: session.id, kind: 'attention', attentionReason: 'blocked', onTimeout: 'proceed', expiresAt: expect.any(String) }),
+    ])
+    await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
+    await turn!.done
+    expect((await m.questions.listPending(browser)).questions).toEqual([])
+  })
+
+  // #1218: only a browser-owned session parks a request, and a handoff cancels
+  // its pending ones; a row that outlives an ownership change anyway (here the
+  // owner is moved behind the manager's back) is still not listed for the user.
+  it("lists only the requests of the principal's own sessions", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const mine = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const theirs = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const myId = await pending(mine.session.id)
+    await pending(theirs.session.id)
+    await db.sql`UPDATE ai_sessions SET owner_kind = ${agentA.kind}, owner_id = ${agentA.id}, owner_label = ${agentA.label}
+                 WHERE id = ${theirs.session.id}`
+    expect((await m.questions.listPending(browser)).questions.map((q) => q.id)).toEqual([myId])
+    expect(await m.interrupt(mine.session.id, browser)).toBe(true)
+    expect(await m.interrupt(theirs.session.id, agentA)).toBe(true)
+    await Promise.all([mine.turn!.done, theirs.turn!.done])
+  })
+
+  // #815 §4: the timer never answers for the user, and never approves.
+  it("on_timeout 'proceed': the timer resolves it as timed_out, never answered, and the turn goes on", async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3 }) }), approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    await turn!.done
+
+    expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
+    const [row] = await db.sql`SELECT outcome, answers, answered_by_kind FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ outcome: 'timed_out', answers: null, answered_by_kind: null })
+    const log = await events(m, session.id)
+    const resolved = log.find((e) => e.type === 'question.resolved')
+    expect(resolved).toMatchObject({ id, answered: false, reason: expect.stringMatching(/proceed/) })
+    expect(resolved).not.toHaveProperty('answers')
+    expect(resolved).not.toHaveProperty('by')
+    // The turn finished on its own: not interrupted.
+    expect(log.filter((e) => e.type === 'error')).toEqual([])
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+    await expectPanelAccepts(log)
+    expect(await db.sql`SELECT action, surface, principal_kind, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { action: 'timed_out', surface: 'system', principal_kind: 'system', outcome: 'refused' },
+    ])
+  })
+
+  it("on_timeout 'stop': the timer ends the turn as an interrupt does", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onTimeout: 'stop', timeoutS: 0.3 }) }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    await turn!.done
+
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not reply.*on_timeout: stop.*turn ends/) }])
+    const [row] = await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ outcome: 'timed_out' })
+    const log = await events(m, session.id)
+    expect(log.find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false, reason: expect.stringMatching(/on_timeout: stop/) })
+    // #1206: the panel is told the timer ended it, not that the user stopped it.
+    expect(log.find((e) => e.type === 'error')).toMatchObject({
+      code: 'interrupted',
+      message: expect.stringMatching(/^the turn ended: nobody replied to the attention request in 0\.3 s \(on_timeout: stop\)$/),
+    })
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+  })
+
+  // #1352: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
+  it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3, onParked: hangs }) }), approvalPollMs: 20 })
+    const first = await timed.start(browser, { origin: 'chat', prompt: 'go' })
+    await first.turn!.done
+    expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
+
+    verdicts = []
+    const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }), approvalPollMs: 20 })
+    const second = await stopped.start(browser, { origin: 'chat', prompt: 'go' })
+    await pending(second.session.id)
+    expect(await stopped.interrupt(second.session.id, browser)).toBe(true)
+    await second.turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+  })
+
+  // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
+  it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
+    const hangs = () => new Promise<void>(() => undefined)
+    const started = performance.now()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: raising({ spec: spec({ onParked: hangs }) }, { spec: spec({ onParked: hangs }) }),
+      approvalPollMs: 5_000,
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const first = await pending(session.id)
+    await m.questions.answer(browser, answer(session.id, first, ['Done']))
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`).length).toBe(1)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: true, answers: { [attentionCard(input()).question]: 'Done' } },
+      { answered: false, reconnected: true, message: expect.any(String) },
+    ])
+    // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
+    expect(performance.now() - started).toBeLessThan(5_000)
+  })
+
+  // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit
+  // sends must not be lost while that read is in flight, or the wait sleeps a whole poll (here an hour).
+  it('a wake that lands while the wait reads its row ends the wait at once, not after a poll', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 3_600_000 })
+    const service = m.questions as unknown as { row(id: string): Promise<unknown> }
+    const real = service.row.bind(service)
+    let reading!: () => void
+    const inRead = new Promise<void>((resolve) => (reading = resolve))
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let first = true
+    vi.spyOn(service, 'row').mockImplementation(async (id) => {
+      const row = await real(id)
+      // Hold only the wait's read of its still-pending row (#1410): any other row() call
+      // that came first would otherwise take the hold and leave the test proving nothing.
+      if (first && (row as { outcome: unknown } | undefined)?.outcome === null) {
+        // The row as read before the answer commits: still pending.
+        first = false
+        reading()
+        await held
+      }
+      return row
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await inRead
+    await m.questions.answer(browser, answer(session.id, await pending(session.id), ['Done']))
+    release()
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: true, answers: { [attentionCard(input()).question]: 'Done' } }])
+  })
+
+  it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    expect(await m.interrupt(session.id, browser)).toBe(true)
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
+    expect((await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]).toEqual({ outcome: 'cancelled' })
+  })
+
+  // #815 §5: one open request per session per reason; a new one replaces the last.
+  it('a second request for the same reason supersedes the open one; another reason does not', async () => {
+    const supersedes = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string, s: AttentionSpec) =>
+          run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
+        const first = ask('toolu_1', spec())
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+        const other = ask('toolu_2', spec({ reason: 'blocked', timeoutS: 0.3 }))
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+        const second = ask('toolu_3', spec({ timeoutS: 0.3 }))
+        verdicts.push(await first, await other, await second)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: supersedes, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: false, message: expect.stringMatching(/replaced by a newer request/) },
+      { answered: false, timedOut: true, message: expect.any(String) },
+      { answered: false, timedOut: true, message: expect.any(String) },
+    ])
+    const rows = await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY created_at`
+    expect(rows).toEqual([
+      { tool_use_id: 'toolu_1', outcome: 'cancelled' },
+      { tool_use_id: 'toolu_2', outcome: 'timed_out' },
+      { tool_use_id: 'toolu_3', outcome: 'timed_out' },
+    ])
+  })
+
+  // #815 §4: the done summary is posted, never waited on, and outlives its turn.
+  const DONE = 'Rendered the sign headlessly; the plate still needs your tab.'
+  const touch = (sessionId: string, id: string) => db.sql`
+    INSERT INTO ai_session_resources (session_id, tool, resource_type, resource_id, action, model_slug)
+    VALUES (${sessionId}, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
+  const postDone = (run: HarnessRun, toolUseId = 'toolu_done') =>
+    run.questionGate!({
+      tool: ATTENTION_TOOL,
+      questions: [attentionCard(input({ reason: 'done', message: DONE }))],
+      toolUseId,
+      signal: new AbortController().signal,
+      attention: { reason: 'done' },
+    })
+  const result = (run: HarnessRun) =>
+    ({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume }) as unknown as SDKMessage
+
+  it('a done summary returns at once, outlives its turn on the badge with what the turn touched, and is dismissed', async () => {
+    const working = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await touch(run.sessionId ?? run.resume!, 'preset-1')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+    const { session: earlier } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    // Another session's touch is not this turn's.
+    await touch(earlier.id, 'not-mine')
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
+    await turn!.done
+
+    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
+    const [row] = await db.sql`SELECT id, kind, attention_reason, on_timeout, expires_at, outcome, summary FROM ai_questions WHERE session_id = ${session.id}`
+    expect(row).toMatchObject({ kind: 'attention', attention_reason: 'done', on_timeout: null, expires_at: null, outcome: null })
+    const summary = '**What this turn changed**\n- created preset `preset-1` of `sign` (`save_preset`)'
+    expect(row!.summary).toBe(summary)
+    // Nothing waits on it: the session is idle, not waiting_input.
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+    const log = await events(m, session.id)
+    expect(log.find((e) => e.type === 'question.asked')).toMatchObject({ attention: { reason: 'done', summary } })
+    expect(log.filter((e) => e.type === 'question.resolved')).toEqual([])
+    await expectPanelAccepts(log)
+
+    expect((await pendingInput(m)).entries).toEqual([
+      expect.objectContaining({ id: `question:${row!.id}`, kind: 'answer', prompt: DONE, expires_at: null, attention: { reason: 'done', on_timeout: null, summary } }),
+    ])
+    await m.questions.answer(browser, answer(session.id, row!.id as string, ['Dismiss']))
+    expect((await pendingInput(m)).entries).toEqual([])
+    expect((await m.get(session.id, browser)).status).toBe('idle')
+  })
+
+  it("a done summary lists what was done while a request went unanswered first, apart from what came before", async () => {
+    const away = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const sessionId = run.sessionId ?? run.resume!
+        await touch(sessionId, 'before')
+        const card = attentionCard(input())
+        verdicts.push(
+          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [card], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+        )
+        await touch(sessionId, 'unattended')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: away, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.any(String) }, { answered: false, posted: true, message: 'posted' }])
+    const [timedOut] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out'`
+    const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+    expect(done!.summary).toBe(
+      `**While nobody answered (attention request ${timedOut!.id.slice(0, 8)} timed out)**\n- created preset \`unattended\` of \`sign\` (\`save_preset\`)` +
+        '\n\n**Before you were asked**\n- created preset `before` of `sign` (`save_preset`)',
+    )
+  })
+
+  it('a second timeout after the user replied opens a second unattended window', async () => {
+    const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string, s: AttentionSpec) =>
+          run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
+        verdicts.push(await ask('toolu_a', spec({ timeoutS: 0.3 })))
+        verdicts.push(await ask('toolu_b', spec())) // the user answers this one
+        verdicts.push(await ask('toolu_c', spec({ timeoutS: 0.3 })))
+        await touch(run.sessionId ?? run.resume!, 'unattended')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    let b: string | undefined
+    await expect.poll(async () => {
+      const [row] = await db.sql<{ id: string }[]>`
+        SELECT id FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_b' AND outcome IS NULL`
+      b = row?.id
+      return b
+    }).toBeDefined()
+    await m.questions.answer(browser, answer(session.id, b!, ["I'm here"]))
+    await turn!.done
+    const timedOut = await db.sql<{ id: string }[]>`
+      SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out' ORDER BY created_at`
+    expect(timedOut).toHaveLength(2)
+    const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+    expect(done!.summary).toBe(
+      `**While nobody answered (attention requests ${timedOut[0]!.id.slice(0, 8)}, ${timedOut[1]!.id.slice(0, 8)} timed out)**\n` +
+        '- created preset `unattended` of `sign` (`save_preset`)',
+    )
+  })
+
+  it("the summary's turn start is the database's clock, not the agent's", async () => {
+    // The agent's clock runs an hour ahead of Postgres's: a touch Postgres stamps during the turn is still this turn's.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 3_600_000, shouldAdvanceTime: true })
+    try {
+      const working = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          await Promise.resolve()
+          await touch(run.sessionId ?? run.resume!, 'preset-1')
+          verdicts.push(await postDone(run))
+          yield result(run)
+        })()
+      const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
+      await turn!.done
+      const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+      expect(done!.summary).toBe('**What this turn changed**\n- created preset `preset-1` of `sign` (`save_preset`)')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Rows stamped `s` seconds after a fixed base, so the windows below are exact.
+  const T0 = '2026-10-05T12:00:00Z'
+  const ts = (s: number) => new Date(Date.parse(T0) + s * 1000)
+  const timedOut = (sessionId: string, turnId: string, s: number) => db.sql<{ id: string }[]>`
+    INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at,
+                              outcome, reason, resolved_at, created_at)
+    VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_tab', '[]', 'attention', 'tab_disconnected', 'proceed',
+            ${ts(s + 1)}, 'timed_out', 'nobody replied', ${ts(s + 1)}, ${ts(s)})
+    RETURNING id`
+  const touchedAt = (sessionId: string, id: string, s: number) => db.sql`
+    INSERT INTO ai_session_resources (session_id, at, tool, resource_type, resource_id, action, model_slug)
+    VALUES (${sessionId}, ${ts(s)}, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
+  const approvedAt = (sessionId: string, turnId: string, s: number, resumeTurnId: string | null = null, by: Owner = browser) => db.sql`
+    INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                              requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at,
+                              decision, decided_by_kind, decided_by_id, decided_by_label, decided_at, usable_until, resume_turn_id)
+    VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
+            'browser', 'browser', 'you', ${ts(s - 1)}, ${ts(s + 600)},
+            'approved', ${by.kind}, ${by.id}, ${by.label}, ${ts(s)}, ${ts(s + 600)}, ${resumeTurnId})`
+  const answeredAt = (sessionId: string, turnId: string, s: number) => db.sql`
+    INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, answers,
+                              answered_by_kind, answered_by_id, answered_by_label, resolved_at, created_at)
+    VALUES (gen_random_uuid(), ${sessionId}, ${turnId}, 'AskUserQuestion', 'toolu_ans', '[]', 'answered', '["yes"]',
+            'browser', 'browser', 'you', ${ts(s)}, ${ts(s - 1)})`
+  const summaryOf = (sessionId: string, turnId: string, since: number) =>
+    db.sql.begin((tx) => loadDoneSummary(tx, sessionId, turnId, ts(since).toISOString(), []))
+
+  it('a touch made in the same millisecond as the claim, but before it, is not the turn\'s (#1383)', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000c1'
+    const touch = (id: string, at: string) => db.sql`
+      INSERT INTO ai_session_resources (session_id, at, tool, resource_type, resource_id, action, model_slug)
+      VALUES (${session.id}, ${at}::text::timestamptz, 'mcp__scadbuddy__save_preset', 'preset', ${id}, 'created', 'sign')`
+    // The previous turn's last touch, 300us before this turn's claim: a JS Date of the claim's
+    // time reads 12:00:00.000, which is earlier than both.
+    await touch('before', '2026-10-05T12:00:00.000200Z')
+    await touch('during', '2026-10-05T12:00:00.000700Z')
+    const done = await db.sql.begin((tx) => loadDoneSummary(tx, session.id, turn, '2026-10-05T12:00:00.000500Z', []))
+    expect(done.summary).toContain('`during`')
+    expect(done.summary).not.toContain('`before`')
+  })
+
+  it("another turn's approval decision does not close this turn's unattended window", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000a1'
+    const other = '00000000-0000-4000-8000-0000000000a2'
+    await timedOut(session.id, turn, 10)
+    // The user decides an approval some other turn parked on: not a reply to this turn's request.
+    await approvedAt(session.id, other, 20)
+    await touchedAt(session.id, 'unattended', 30)
+    const done = await summaryOf(session.id, turn, 0)
+    expect(done.unattended).toBe(true)
+    expect(done.summary).toMatch(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended`/)
+  })
+
+  it('a turn resumed after an approval keeps the unattended record of the turn that parked on it', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000b1'
+    const b = '00000000-0000-4000-8000-0000000000b2'
+    // Turn A: its request times out, it works unattended, parks an outward call and ends without a done.
+    await touchedAt(session.id, 'before', 5)
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    // The user approves at 40; turn B is resumed for it at 41, makes the call and posts done.
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  it("a resumed turn carries over only the parked turn's unattended touches, not its attended ones", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000c1'
+    const b = '00000000-0000-4000-8000-0000000000c2'
+    // Turn A: its request times out at 10, it works unattended, the user answers at 15 and A works on while they are there.
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 12)
+    await answeredAt(session.id, a, 15)
+    await touchedAt(session.id, 'attended', 20)
+    // A parks an outward call; the user approves at 40 and B is resumed for it at 41.
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  // #1415: only the user's own decision, in the panel, is the user coming back.
+  it('an approval a token decided in the same turn does not close its unattended window', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turn = '00000000-0000-4000-8000-0000000000d1'
+    await timedOut(session.id, turn, 10)
+    await approvedAt(session.id, turn, 20, null, agentA)
+    await touchedAt(session.id, 'unattended', 30)
+    const done = await summaryOf(session.id, turn, 0)
+    expect(done.unattended).toBe(true)
+    expect(done.summary).toMatch(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/)
+  })
+
+  // #1416: the same rule across a resume. A token's approval re-runs the call, but nobody in the panel has
+  // replied, so the resumed turn's work is listed as unattended too (and the card is kept until dismissed).
+  it('a turn resumed for an approval a token decided keeps the parked turn\'s window open', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000e1'
+    const b = '00000000-0000-4000-8000-0000000000e2'
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b, agentA)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)\n- created preset `resumed` of `sign` \(`save_preset`\)$/),
+    ])
+  })
+
+  // #1411: the walk is recursive, not one join deep.
+  it('a chain resumed twice (A -> B -> C) carries the first turn\'s unattended touches into the last', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-0000000000f1'
+    const b = '00000000-0000-4000-8000-0000000000f2'
+    const c = '00000000-0000-4000-8000-0000000000f3'
+    // A times out, works unattended and parks; the user approves at 40 and B is resumed for it.
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await approvedAt(session.id, a, 40, b)
+    // B works while the user is there and parks on a second approval; the user approves at 60 and C is resumed.
+    await touchedAt(session.id, 'attended', 50)
+    await approvedAt(session.id, b, 60, c)
+    await touchedAt(session.id, 'resumed', 70)
+    const done = await summaryOf(session.id, c, 61)
+    expect(done.unattended).toBe(true)
+    expect(done.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  it('a resumed turn whose chain timed nothing out lists only its own touches', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-000000000101'
+    const b = '00000000-0000-4000-8000-000000000102'
+    await touchedAt(session.id, 'parked', 5)
+    await approvedAt(session.id, a, 40, b)
+    await touchedAt(session.id, 'resumed', 50)
+    const done = await summaryOf(session.id, b, 41)
+    expect(done.unattended).toBe(false)
+    expect(done.summary).toBe('**What this turn changed**\n- created preset `resumed` of `sign` (`save_preset`)')
+  })
+
+  /** A session whose turn A timed out a request, worked unattended, and parked an outward call before it was lost. */
+  async function parkedOrphan(m: SessionManager) {
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const a = '00000000-0000-4000-8000-000000000201'
+    await timedOut(session.id, a, 10)
+    await touchedAt(session.id, 'unattended', 20)
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+    const approval = await m.approvals.create({
+      sessionId: session.id,
+      turnId: a,
+      toolUseId: 'toolu_out',
+      tool: 'mcp__stub__print',
+      input: { job: 'box.3mf' },
+      tier: 'outward',
+      requestedBy: browser,
+    })
+    return { session, approval }
+  }
+
+  // #1416: the real path, not a hand-made resume_turn_id: the user approves the orphan, resumeApproved
+  // starts turn B, and B's done summary carries A's unattended record.
+  it("approving a parked turn's orphan resumes a turn whose done summary keeps the parked turn's unattended record", async () => {
+    const resumed = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await touch(run.sessionId ?? run.resume!, 'resumed')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: resumed, approvalPollMs: 20 })
+    const { session, approval } = await parkedOrphan(m)
+    await m.approvals.decide(browser, approval.id, true)
+    let done: { summary: string; unattended: boolean; turn_id: string } | undefined
+    await expect.poll(async () => {
+      ;[done] = await db.sql<{ summary: string; unattended: boolean; turn_id: string }[]>`
+        SELECT summary, unattended, turn_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
+      return done
+    }).toBeDefined()
+    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('idle')
+    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
+    const [bound] = await db.sql<{ resume_turn_id: string }[]>`SELECT resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
+    expect(done!.turn_id).toBe(bound!.resume_turn_id)
+    expect(done!.unattended).toBe(true)
+    expect(done!.summary.split('\n\n')).toEqual([
+      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
+      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
+    ])
+  })
+
+  // #1409: the resumed summary reads touches from the parked turn's first window on, by time. That is sound
+  // only because no other turn can run between the parked turn's end and its resume: a new turn cancels the
+  // orphan, so the approval can no longer be decided and nothing is resumed.
+  it("a turn started before the orphan is decided cancels it, so no resumed turn reports that turn's work", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20 })
+    const { session, approval } = await parkedOrphan(m)
+    const between = await m.send(session.id, browser, 'never mind, do something else')
+    await between.done
+    await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'conflict' })
+    const [row] = await db.sql`SELECT decision, reason, resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
+    expect(row).toEqual({ decision: 'cancelled', reason: 'superseded by a new turn', resume_turn_id: null })
+    expect((await events(m, session.id)).filter((e) => e.type === 'user.turn')).toHaveLength(1)
+  })
+
+  it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
+    const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, created_at)
+      SELECT gen_random_uuid(), ${old.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_d' || i, '[]', 'attention', 'done', 'x',
+             now() - interval '1 day' + i * interval '1 second'
+      FROM generate_series(1, ${PENDING_CAP}) AS i`
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    const listed = (await m.questions.listPending(browser)).questions
+    expect(listed[0]).toMatchObject({ id, attentionReason: 'blocked' })
+    expect(listed.filter((q) => q.attentionReason === 'done')).toHaveLength(PENDING_CAP)
+    await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
+    await turn!.done
+  })
+
+  it('says when more done summaries are pending than it lists, and not at exactly the cap', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'old' })
+    const insert = (n: number, from: number) => db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, created_at)
+      SELECT gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_d' || i, '[]', 'attention', 'done', 'x',
+             now() - interval '1 day' + i * interval '1 second'
+      FROM generate_series(${from}::int, ${from + n - 1}::int) AS i`
+    await insert(PENDING_CAP, 1)
+    expect(await pendingInput(m)).toMatchObject({ summaries_truncated: false })
+    await insert(1, PENDING_CAP + 1)
+    const page = await pendingInput(m)
+    expect(page.summaries_truncated).toBe(true)
+    expect(page.entries).toHaveLength(PENDING_CAP)
+  })
+
+  it('a timed done row (a replica on an older image) is cancelled when its turn ends; an untimed one is not', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    const turnId = '00000000-0000-4000-8000-0000000000aa'
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_old', '[]', 'attention', 'done', 'proceed', now() + interval '5 minutes')`
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
+      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_new', '[]', 'attention', 'done', 'x')`
+    expect(await m.questions.cancelPending(session.id, 'the turn ended', { turnId })).toBe(1)
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY tool_use_id`).toEqual([
+      { tool_use_id: 'toolu_new', outcome: null },
+      { tool_use_id: 'toolu_old', outcome: 'cancelled' },
+    ])
+  })
+
+  it("a later turn's done summary does not replace one that recorded unattended actions", async () => {
+    let n = 0
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        if (n === 0) {
+          verdicts.push(
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          )
+          await touch(run.sessionId ?? run.resume!, 'unattended')
+        }
+        verdicts.push(await postDone(run, `toolu_done${n++}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    await (await m.send(session.id, browser, 'two')).done
+    const done = (await m.questions.listPending(browser)).questions.filter((q) => q.attentionReason === 'done')
+    expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done1', 'toolu_done0'])
+    expect(done[1]!.summary).toContain('created preset `unattended`')
+    expect(await db.sql`SELECT unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`).toEqual([{ unattended: true }])
+  })
+
+  it("one turn's repeated done posts keep only its latest, unattended record or not", async () => {
+    const repeat = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(
+          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+        )
+        await touch(run.sessionId ?? run.resume!, 'unattended')
+        for (let i = 0; i < 3; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: repeat, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
+      { tool_use_id: 'toolu_done2' },
+    ])
+  })
+
+  // #1383: a handoff cancels the session's waiting rows, not its done summary. The
+  // badge lists only the owner's sessions (#1218), so it is off the browser's list
+  // while another principal owns the session, and back when it is handed back.
+  it('a done summary survives a handoff to another principal, and is listed again once the session is back', async () => {
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    const listed = async () => (await m.questions.listPending(browser)).questions.map((q) => q.attentionReason)
+    expect(await listed()).toEqual(['done'])
+
+    await m.handoff(session.id, browser, agentA)
+    await m.acceptHandoff(session.id, agentA)
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`).toEqual([{ outcome: null }])
+    expect(await listed()).toEqual([])
+
+    // The browser takes the session back itself: it needs no offer.
+    await m.handoff(session.id, browser, browser)
+    expect(await listed()).toEqual(['done'])
+  })
+
+  // #1383: the turn's start reaches the done summary as text, so its form must not
+  // depend on the connection's settings.
+  it("gives a claim's time as UTC ISO 8601 at microseconds, whatever DateStyle and TimeZone say", async () => {
+    await db.sql.begin(async (tx) => {
+      await tx`SET LOCAL DateStyle = 'SQL, DMY'`
+      await tx`SET LOCAL TimeZone = 'Asia/Kolkata'`
+      const [row] = await tx.unsafe<{ claimed_at: string }[]>(
+        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS updated_at) AS t`,
+      )
+      expect(row?.claimed_at).toBe('2026-10-13T21:00:00.123456Z')
+    })
+  })
+
+  // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
+  // before it scans the turn's touches or writes anything.
+  it(`refuses a turn's done posts past ${DONE_POSTS_PER_TURN}, and keeps the last one it took`, async () => {
+    const looping = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        for (let i = 0; i <= DONE_POSTS_PER_TURN; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
+        yield result(run)
+      })()
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    // #1205: the refused post is audited as the rate limit's refusal is.
+    expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question' AND action = 'rate_limited'`).toEqual([
+      { action: 'rate_limited', outcome: 'refused', session_id: session.id },
+    ])
+    expect(verdicts.slice(0, DONE_POSTS_PER_TURN)).toEqual(Array(DONE_POSTS_PER_TURN).fill({ answered: false, posted: true, message: 'posted' }))
+    expect(verdicts[DONE_POSTS_PER_TURN]).toEqual({
+      answered: false,
+      message: `The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.`,
+    })
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' ORDER BY created_at`).toEqual([
+      ...Array.from({ length: DONE_POSTS_PER_TURN - 1 }, (_, i) => ({ tool_use_id: `toolu_done${i}`, outcome: 'cancelled' })),
+      { tool_use_id: `toolu_done${DONE_POSTS_PER_TURN - 1}`, outcome: null },
+    ])
+  })
+
+  it("a later turn's done replaces one whose unattended window recorded nothing", async () => {
+    let n = 0
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        if (n === 0) {
+          // A request times out, but nothing is touched while nobody answers.
+          await touch(run.sessionId ?? run.resume!, 'before')
+          verdicts.push(
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          )
+        }
+        verdicts.push(await postDone(run, `toolu_done${n++}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    const [first] = await db.sql<{ summary: string; unattended: boolean }[]>`
+      SELECT summary, unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`
+    expect(first).toMatchObject({ unattended: false, summary: expect.stringContaining('While nobody answered') })
+    await (await m.send(session.id, browser, 'two')).done
+    const pendingDone = (await m.questions.listPending(browser)).questions.filter((q) => q.attentionReason === 'done')
+    expect(pendingDone.map((q) => q.toolUseId)).toEqual(['toolu_done1'])
+  })
+
+  it('whether an earlier done is kept follows its unattended flag, never its summary text', async () => {
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run, 'toolu_new'))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    // One reads like an unattended record but is not flagged; the other is flagged under any heading.
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, unattended, created_at)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_text', '[]', 'attention', 'done',
+              '**While nobody answered (attention request 01234567 timed out)**\n- created preset x', false, now() - interval '2 minutes'),
+             (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_flag', '[]', 'attention', 'done',
+              '**Some other heading**\n- created preset y', true, now() - interval '1 minute')`
+    await (await m.send(session.id, browser, 'go')).done
+    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY created_at`).toEqual([
+      { tool_use_id: 'toolu_text', outcome: 'cancelled' },
+      { tool_use_id: 'toolu_flag', outcome: null },
+      { tool_use_id: 'toolu_new', outcome: null },
+    ])
+  })
+
+  it('a done summary is neither refused by nor counted in the attention rate limit', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at,
+                                outcome, reason, resolved_at)
+      SELECT gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_t' || i, '[]', 'attention', 'blocked', 'proceed', now(),
+             'timed_out', 'old', now()
+      FROM generate_series(1, ${ATTENTION_RATE_LIMIT}) AS i`
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const p = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await p.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`).toEqual([{ outcome: null }])
+  })
+
+  it("a later turn's done summary replaces the earlier one; neither is cancelled by its turn ending", async () => {
+    let n = 0
+    const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run, `toolu_done${n++}`))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    const second = await m.send(session.id, browser, 'two')
+    await second.done
+    const rows = await db.sql`SELECT tool_use_id, outcome, reason FROM ai_questions WHERE session_id = ${session.id} ORDER BY created_at`
+    expect(rows).toEqual([
+      { tool_use_id: 'toolu_done0', outcome: 'cancelled', reason: 'replaced by a newer request for the same reason' },
+      { tool_use_id: 'toolu_done1', outcome: null, reason: null },
+    ])
+  })
+
+  it('the schema allows a done request without a timer, and no other attention request', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    await expect(db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_b', '[]', 'attention', 'blocked')`).rejects.toThrow(
+      /ai_questions_attention_check/,
+    )
+    await expect(db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at, summary)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_s', '[]', 'attention', 'blocked', 'proceed', now(), 'x')`).rejects.toThrow(
+      /ai_questions_summary_check/,
+    )
+  })
+
+  it('the schema refuses a summary or the unattended flag on a plain question, whose attention_reason is NULL', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    await expect(db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, summary)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), 'AskUserQuestion', 'toolu_qs', '[]', 'x')`).rejects.toThrow(
+      /ai_questions_summary_check/,
+    )
+    await expect(db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, unattended)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), 'AskUserQuestion', 'toolu_qu', '[]', true)`).rejects.toThrow(
+      /ai_questions_unattended_check/,
+    )
+  })
+
+  it('refuses past the per-user rate limit without parking, and audits the refusal (#1205)', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20, audit })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    for (let i = 0; i < ATTENTION_RATE_LIMIT; i++) {
+      await db.sql`
+        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                  expires_at, outcome, reason, resolved_at)
+        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
+                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+    }
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/at most 10 attention requests/) }])
+    expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    expect(await db.sql`SELECT action, surface, principal_kind, outcome, session_id FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { action: 'rate_limited', surface: 'system', principal_kind: 'system', outcome: 'refused', session_id: session.id },
+    ])
+  })
+
+  it('holds the rate limit across sessions raising at once: one parks, the other is refused', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3 }) }), approvalPollMs: 20 })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
+      await db.sql`
+        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                  expires_at, outcome, reason, resolved_at)
+        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
+                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+    }
+    const [a, b] = await Promise.all([
+      m.start(browser, { origin: 'chat', prompt: 'one' }),
+      m.start(browser, { origin: 'chat', prompt: 'two' }),
+    ])
+    await Promise.all([a.turn!.done, b.turn!.done])
+    expect(verdicts.filter((v) => !v.answered && 'timedOut' in v && v.timedOut)).toHaveLength(1)
+    expect(verdicts.filter((v) => !v.answered && /at most 10/.test(v.message))).toHaveLength(1)
+    const parked = await db.sql`SELECT 1 FROM ai_questions WHERE session_id IN (${a.session.id}, ${b.session.id})`
+    expect(parked).toHaveLength(1)
+  })
+
+  it('a question cannot be timed out, by the schema itself', async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
+    await expect(db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, outcome, reason, resolved_at)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), 'AskUserQuestion', 'toolu_q', '[]', 'timed_out', 'x', now())`).rejects.toThrow(
+      /ai_questions_outcome_check/,
+    )
+  })
+
+  // Spec §6.6's aggregate read, for the badge: every kind in one shape.
+  it('GET /api/v1/ai/pending-input lists the parked approval, question and attention request, and only for the UI', async () => {
+    const all = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const card = attentionCard(input({ reason: 'blocked', message: 'Load the PETG, please' }))
+        const att = run.questionGate!({ tool: ATTENTION_TOOL, questions: [card], toolUseId: 'toolu_a', signal, attention: spec({ reason: 'blocked' }) })
+        const approved = run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_p', tier: 'outward', signal })
+        verdicts.push(await att)
+        await approved
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: all, approvalPollMs: 20 })
+    const app = createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'unused' },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      approvals: m.approvals,
+      sessions: m,
+    })
+    const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
+    const attId = await pending(session.id)
+    // A question parked in another of the user's sessions: also counted.
+    const asker = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await run.questionGate!({
+          tool: 'AskUserQuestion',
+          questions: [{ question: 'Which colour?', header: 'Colour', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] }],
+          toolUseId: 'toolu_q',
+          signal: new AbortController().signal,
+        })
+        if (run.signal?.aborted) return
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m2 = manager({ sql: db.sql, paths: await tempPaths(), run: asker, approvalPollMs: 20 })
+    const { session: s2, turn: t2 } = await m2.start(browser, { origin: 'chat', prompt: 'ask' })
+    const qId = await pending(s2.id)
+
+    expect((await app.request('/api/v1/ai/pending-input')).status).toBe(403)
+    const response = await app.request('/api/v1/ai/pending-input', { headers: UI_READ })
+    expect(response.status).toBe(200)
+    const { entries } = (await response.json()) as { entries: Record<string, unknown>[] }
+    expect(entries).toEqual([
+      expect.objectContaining({ id: `question:${attId}`, kind: 'answer', session_id: session.id, tool: ATTENTION_TOOL, prompt: 'Load the PETG, please', responders: ['browser'], expires_at: expect.any(String), attention: { reason: 'blocked', on_timeout: 'proceed' } }),
+      expect.objectContaining({ kind: 'approval', session_id: session.id, tool: 'mcp__stub__print', prompt: '', input_hash: expect.stringMatching(/^[0-9a-f]{64}$/), responders: ['browser', 'grant'] }),
+      expect.objectContaining({ id: `question:${qId}`, kind: 'answer', session_id: s2.id, tool: 'AskUserQuestion', prompt: 'Which colour?', expires_at: expect.any(String) }),
+    ])
+    expect(entries[1]).not.toHaveProperty('attention')
+    // Never the outward call's raw input.
+    expect(JSON.stringify(entries)).not.toContain('"job"')
+
+    await m.questions.answer(browser, answer(session.id, attId, ['Done, loaded']))
+    const approvalId = (await m.approvals.list(browser, { pending: true }))[0]!.id
+    await m.approvals.decide(browser, approvalId, false)
+    await turn!.done
+    await m2.interrupt(s2.id, browser)
+    await t2!.done
+    const after = (await (await app.request('/api/v1/ai/pending-input', { headers: UI_READ })).json()) as { entries: unknown[] }
+    expect(after.entries).toEqual([])
+  })
+
+  // #815 §2: the session's tab coming back resolves its tab_disconnected request.
+  it("reconnected() resolves only the session's tab_disconnected requests, as the system, never as an answer", async () => {
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const ask = (toolUseId: string, s: AttentionSpec) =>
+          run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
+        const tab = ask('toolu_tab', spec())
+        const blocked = ask('toolu_blk', spec({ reason: 'blocked', timeoutS: 0.5 }))
+        verdicts.push(await tab, await blocked)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20, audit })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    expect(await m.questions.reconnected(session.id)).toBe(0)
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: false, reconnected: true, message: 'the ScadBuddy tab is connected again' },
+      { answered: false, timedOut: true, message: expect.any(String) },
+    ])
+    const rows = await db.sql`SELECT tool_use_id, outcome, answers FROM ai_questions WHERE session_id = ${session.id} ORDER BY tool_use_id`
+    expect(rows).toEqual([
+      { tool_use_id: 'toolu_blk', outcome: 'timed_out', answers: null },
+      { tool_use_id: 'toolu_tab', outcome: 'reconnected', answers: null },
+    ])
+    const log = await events(m, session.id)
+    expect(log.find((e) => e.type === 'question.resolved' && e.reconnected)).toMatchObject({ answered: false, reconnected: true })
+    await expectPanelAccepts(log)
+    expect(await db.sql`SELECT action, principal_kind, outcome FROM ai_audit WHERE kind = 'question' AND action = 'reconnected'`).toEqual([
+      { action: 'reconnected', principal_kind: 'system', outcome: 'ok' },
+    ])
+    // Only a tab_disconnected attention request can end this way, by the schema itself.
+    await expect(db.sql`UPDATE ai_questions SET outcome = 'reconnected' WHERE tool_use_id = 'toolu_blk'`).rejects.toThrow(/ai_questions_outcome_check/)
+  })
+
+  // #1380: the hub calls reconnected() on every attach and pairing, almost always with nothing waiting.
+  it('reconnected() with no open tab_disconnected request returns 0 and writes no event, audit row or status', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20, audit })
+    const { session } = await m.start(browser, { origin: 'chat', title: 'idle' })
+    // A resolved tab wait, and a status no pending row explains: a refreshStatus would move it to idle.
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                expires_at, outcome, reason, resolved_at)
+      VALUES (gen_random_uuid(), ${session.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_old', '[]',
+              'attention', 'tab_disconnected', 'proceed', now(), 'timed_out', 'old', now())`
+    await db.sql`UPDATE ai_sessions SET status = 'waiting_input' WHERE id = ${session.id}`
+    const before = await events(m, session.id)
+    expect(await m.questions.reconnected(session.id)).toBe(0)
+    expect(await events(m, session.id)).toEqual(before)
+    expect(await db.sql`SELECT 1 FROM ai_audit WHERE kind = 'question'`).toEqual([])
+    expect(await db.sql`SELECT status FROM ai_sessions WHERE id = ${session.id}`).toEqual([{ status: 'waiting_input' }])
+  })
+
+  // #815 §2: reloading the tab and clicking "I'm back" race; whichever loses, the user sees no error.
+  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op, before or after its check; other replies do not", async () => {
+    let racing: (() => Promise<unknown>) | undefined
+    // reconnected() lands between answer()'s check and its update: the check saw the row open.
+    const sql = new Proxy(db.sql, {
+      apply(target, thisArg, args: unknown[]) {
+        const query = Reflect.apply(target, thisArg, args) as Promise<unknown>
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join('') : ''
+        const race = racing
+        if (!race || !text.includes('SELECT questions, outcome,')) return query
+        racing = undefined
+        return query.then(async (rows) => {
+          await race()
+          return rows
+        })
+      },
+    })
+    const m = manager({ sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const next = async (...seen: string[]) => {
+      let id: string | undefined
+      await expect.poll(async () => {
+        const [row] = await db.sql<{ id: string }[]>`
+          SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND NOT (id = ANY(${seen}::uuid[]))`
+        id = row?.id
+        return id
+      }).toBeDefined()
+      return id!
+    }
+
+    const first = await pending(session.id)
+    racing = () => m.questions.reconnected(session.id)
+    await expect(m.questions.answer(browser, answer(session.id, first, ["I'm back"]))).resolves.toBeUndefined()
+    expect(racing).toBeUndefined()
+
+    // reconnected() won outright: the check itself sees the row resolved.
+    const second = await next(first)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await expect(m.questions.answer(browser, answer(session.id, second, ["I'm back"]))).resolves.toBeUndefined()
+
+    // Typed words that lose the race would be dropped unread: the user is told, not quietly ignored.
+    const third = await next(first, second)
+    racing = () => m.questions.reconnected(session.id)
+    await expect(m.questions.answer(browser, answer(session.id, third, ["never mind, don't print it"]))).rejects.toMatchObject({ code: 'conflict' })
+    await expect(m.questions.answer(browser, answer(session.id, third, ['Carry on without me']))).rejects.toMatchObject({ code: 'conflict' })
+
+    await turn!.done
+    expect(verdicts).toEqual([
+      { answered: false, reconnected: true, message: expect.any(String) },
+      { answered: false, reconnected: true, message: expect.any(String) },
+      { answered: false, reconnected: true, message: expect.any(String) },
+    ])
+    expect(await db.sql`SELECT outcome, answers FROM ai_questions WHERE session_id = ${session.id}`).toEqual([
+      { outcome: 'reconnected', answers: null },
+      { outcome: 'reconnected', answers: null },
+      { outcome: 'reconnected', answers: null },
+    ])
+    expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved' && e.answered)).toEqual([])
+    // Any other resolved row is still a conflict.
+    await db.sql`UPDATE ai_questions SET outcome = 'cancelled' WHERE id = ${first}`
+    await expect(m.questions.answer(browser, answer(session.id, first, ['late']))).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  it("a turn's browser_* calls that find no tab wait on one tab_disconnected request, and both go on when the tab is back", async () => {
+    let wait: WaitForTab | undefined
+    const results: TabWait[] = []
+    const calls = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const signal = new AbortController().signal
+        const gone = () => Promise.resolve(false)
+        const a = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal, isBack: gone })
+        const b = wait!({ tool: 'browser_select_plate', toolUseId: 'toolu_p', signal, isBack: gone })
+        results.push(...(await Promise.all([a, b])))
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: calls,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'select the plate' })
+    const id = await pending(session.id)
+    const [row] = await db.sql`SELECT kind, attention_reason, tool, tool_use_id FROM ai_questions WHERE id = ${id}`
+    expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', tool: 'mcp__scadbuddy__browser_snapshot', tool_use_id: 'toolu_s' })
+    expect((await m.questions.listPending(browser)).questions).toHaveLength(1)
+    await m.questions.reconnected(session.id)
+    await turn!.done
+    expect(results).toEqual([{ back: true, why: 'reconnected' }, { back: true, why: 'reconnected' }])
+  })
+
+  // The tab came back after the call failed but before the request was recorded: nothing was waiting then.
+  it('a tab already back when the wait is recorded ends it at once, not after five minutes', async () => {
+    let wait: WaitForTab | undefined
+    const results: TabWait[] = []
+    const calls = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        results.push(await wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(true) }))
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: calls,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(results).toEqual([{ back: true, why: 'reconnected' }])
+    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ outcome: 'reconnected' }])
+  })
+
+  // #1308: one card per disconnected tab (#815 §5), whichever side asked first.
+  it("a tab wait joins the model's own tab_disconnected request, one card, and does not count against the model's rate limit", async () => {
+    let wait: WaitForTab | undefined
+    const results: unknown[] = []
+    let joined!: () => void
+    const parked = new Promise<void>((resolve) => (joined = resolve))
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const own = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_own', signal: new AbortController().signal, attention: spec() })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        // The reconnect check runs once the wait is recorded, joined or not.
+        const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => (joined(), Promise.resolve(false)) })
+        results.push(...(await Promise.all([own, auto])))
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: both,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    // The model's limit is all but used up: its own request is the last it may make.
+    for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
+      await db.sql`
+        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                  expires_at, outcome, reason, resolved_at)
+        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
+                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+    }
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await parked
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_own' }])
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn!.done
+    expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true, why: 'reconnected' }])
+    expect((await events(m, session.id)).filter((e) => e.type === 'question.asked')).toHaveLength(1)
+  })
+
+  it("the model's own tab_disconnected request joins a tab wait's card, and the user's reply answers both", async () => {
+    let wait: WaitForTab | undefined
+    const results: unknown[] = []
+    let joined!: () => void
+    const parked = new Promise<void>((resolve) => (joined = resolve))
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        const card = attentionCard(input())
+        // onParked runs once the gate has recorded the wait, joined or not.
+        const own = run.questionGate!({
+          tool: ATTENTION_TOOL,
+          questions: [card],
+          toolUseId: 'toolu_own',
+          signal: new AbortController().signal,
+          attention: spec({ onParked: () => (joined(), Promise.resolve()) }),
+        })
+        results.push(...(await Promise.all([auto, own])), card.question)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: both,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const id = await pending(session.id)
+    await parked
+    // The model's request joined rather than opening a card: still one row.
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_s' }])
+    await m.questions.answer(browser, answer(session.id, id, ["I'm back"]))
+    await turn!.done
+    expect(results).toEqual([{ back: true, why: 'user_back' }, { answered: true, answers: { [results[2] as string]: "I'm back" } }, expect.any(String)])
+    expect((await events(m, session.id)).filter((e) => e.type === 'question.asked')).toHaveLength(1)
+  })
+
+  // A joiner's wait is its own: the joined card ending without the user (the other side's timer, or its
+  // withdrawal) does not end it. It asks on a card of its own, to its own deadline.
+  it("the other side's timer on a joined card does not end the model's request, which asks on its own card", async () => {
+    const results: unknown[] = []
+    const card = attentionCard(input())
+    let joined!: () => void
+    const parked = new Promise<void>((resolve) => (joined = resolve))
+    let tabDone!: (verdict: unknown) => void
+    const tab = new Promise<unknown>((resolve) => (tabDone = resolve))
+    const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const auto = run.questionGate!({
+          tool: 'mcp__scadbuddy__browser_snapshot',
+          questions: [attentionCard(input())],
+          toolUseId: 'toolu_s',
+          signal: new AbortController().signal,
+          attention: spec({ timeoutS: 3 }),
+        })
+        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        const own = run.questionGate!({
+          tool: ATTENTION_TOOL,
+          questions: [card],
+          toolUseId: 'toolu_own',
+          signal: new AbortController().signal,
+          attention: spec({ onTimeout: 'wait', timeoutS: 86_400, onParked: () => (joined(), Promise.resolve()) }),
+        })
+        tabDone(await auto)
+        results.push(await own)
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await parked
+    // Joined, before the tab wait's timer: still one row.
+    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_s' }])
+    expect(await tab).toMatchObject({ answered: false, timedOut: true })
+    // The model's call still waits (its turn was not stopped), now on a card of its own.
+    await expect
+      .poll(async () => await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`, { timeout: 10_000 })
+      .toEqual([{ tool_use_id: 'toolu_own' }])
+    expect(results).toEqual([])
+    await m.questions.answer(browser, answer(session.id, await pending(session.id), ["I'm here"]))
+    await turn!.done
+    expect(results).toEqual([{ answered: true, answers: { [card.question]: "I'm here" } }])
+  }, 30_000)
+
+  // #1344: TAB_WAITS_PER_TURN bounds one turn; this bounds the user's sessions together.
+  it(`opens at most ${TAB_WAIT_RATE_LIMIT} tab waits in ${ATTENTION_RATE_WINDOW_S / 60} minutes across sessions`, async () => {
+    let wait: WaitForTab | undefined
+    const results: TabWait[] = []
+    const run = (r: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        results.push(await wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_lim', signal: new AbortController().signal, isBack: () => Promise.resolve(false) }))
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
+      })()
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run,
+      approvalPollMs: 20,
+      audit,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
+    for (let i = 0; i < TAB_WAIT_RATE_LIMIT; i++) {
+      await db.sql`
+        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
+                                  expires_at, outcome, reason, resolved_at)
+        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), 'mcp__scadbuddy__browser_snapshot', ${`toolu_old${i}`}, '[]',
+                'attention', 'tab_disconnected', 'proceed', now(), 'timed_out', 'old', now())`
+    }
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    await turn!.done
+    expect(results).toEqual([
+      {
+        back: false,
+        message: `The user was not asked for the tab: at most ${TAB_WAIT_RATE_LIMIT} tab waits are opened in ${ATTENTION_RATE_WINDOW_S / 60} minutes. Carry on without the tab.`,
+      },
+    ])
+    expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    // #1205: audited as the model's own rate limit is.
+    expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { action: 'rate_limited', outcome: 'refused', session_id: session.id },
+    ])
+  })
+
+  /** A turn that runs `body` with its waitForTab, its manager and its session id, then ends. */
+  async function withTabWait(body: (wait: WaitForTab, turn: { m: SessionManager; sessionId: string }) => Promise<void>) {
+    let wait: WaitForTab | undefined
+    const run = (r: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await body(wait!, { m, sessionId: (r.sessionId ?? r.resume)! })
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
+      })()
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run,
+      approvalPollMs: 20,
+      mcpServers: (_session, _turn, extras) => {
+        wait = extras?.waitForTab
+        return {}
+      },
+    })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    return { m, session, turn: turn! }
+  }
+
+  it('when the last call sharing a wait stops, its card is withdrawn, not left pending on the badge', async () => {
+    const results: TabWait[] = []
+    const call = new AbortController()
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      const pendingCall = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_w', signal: call.signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      call.abort()
+      results.push(await pendingCall)
+      await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_questions`)[0]?.outcome).toBe('cancelled')
+    })
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }])
+    expect((await m.questions.listPending(browser)).questions).toEqual([])
+    const [row] = await db.sql`SELECT reason FROM ai_questions WHERE session_id = ${session.id}`
+    expect(row).toEqual({ reason: 'the call was withdrawn' })
+  })
+
+  it('a failed check for an early reconnect leaves the wait waiting, and the tab coming back still ends it', async () => {
+    const results: TabWait[] = []
+    const { m, session, turn } = await withTabWait(async (wait) => {
+      results.push(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_e', signal: new AbortController().signal, isBack: () => Promise.reject(new Error('hub gone')) }))
+    })
+    await pending(session.id)
+    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await turn.done
+    expect(results).toEqual([{ back: true, why: 'reconnected' }])
+  })
+
+  /** Resolves on the next `wake` of question `id` after it is called: an event, not a sleep. */
+  function nextWake(m: SessionManager, id: string): () => Promise<void> {
+    const questions = m.questions as unknown as { wake(id: string): void }
+    const wake = questions.wake.bind(questions)
+    let woken: (() => void) | undefined
+    vi.spyOn(questions, 'wake').mockImplementation((woke) => {
+      wake(woke)
+      if (woke === id) woken?.()
+    })
+    return () => new Promise<void>((resolve) => (woken = resolve))
+  }
+
+  const openRows = async () => db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`
+
+  // #1352: a reconnect check that outlives its wait must not end the wait opened after it.
+  it("a reconnect check that returns after its wait ended does not end a later wait's request", async () => {
+    let late: (back: boolean) => void = () => undefined
+    const first = new AbortController()
+    const results: TabWait[] = []
+    const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
+      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (late = resolve)) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      const [rowA] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE tool_use_id = 'toolu_a'`
+      first.abort()
+      results.push(await a)
+      await expect.poll(async () => (await openRows()).length).toBe(0)
+      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      // The first wait's check settling wakes its row (questions/service.ts gate): wait for that, not a clock.
+      const settled = nextWake(m, rowA!.id)()
+      late(true)
+      await settled
+      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
+      await m.questions.reconnected(sessionId)
+      results.push(await b)
+    })
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
+  })
+
+  // #1360: the check passed `parked.aborted` but its reconnect was held up (a lock, the pool) until a later wait opened.
+  it("a reconnect check held up past its wait's end resolves only its own row, never a later wait's", async () => {
+    let back: (back: boolean) => void = () => undefined
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const first = new AbortController()
+    const results: TabWait[] = []
+    const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
+      const reconnected = m.questions.reconnected.bind(m.questions)
+      let entered: () => void = () => undefined
+      const reconnecting = new Promise<void>((resolve) => (entered = resolve))
+      let finished: Promise<number> | undefined
+      vi.spyOn(m.questions, 'reconnected').mockImplementationOnce((...args) => {
+        entered()
+        finished = held.then(() => reconnected(...args))
+        return finished
+      })
+      const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (back = resolve)) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      back(true)
+      await reconnecting
+      first.abort()
+      results.push(await a)
+      await expect.poll(async () => (await openRows()).length).toBe(0)
+      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
+      await expect.poll(async () => (await openRows()).length).toBe(1)
+      release()
+      expect(await finished).toBe(0)
+      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
+      await m.questions.reconnected(sessionId)
+      results.push(await b)
+    })
+    await turn.done
+    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
+  })
+
+  it('a session another principal owns gets no wait: its browser_* calls fail at once', async () => {
+    let extrasSeen: unknown = 'unset'
+    const m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: raising(),
+      mcpServers: (_session, _turn, extras) => {
+        extrasSeen = extras
+        return {}
+      },
+    })
+    const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
+    await turn!.done
+    expect(extrasSeen).toEqual({ turnContext: expect.any(Function), secrets: expect.any(Function) })
+  })
+
+  // #1333: the hub, the manager and the harness tools wired as main.ts wires them. A
+  // dropped or misrouted wire would leave every tab wait to its five-minute timer.
+  it('a browser_* call that finds no tab parks, and a tab paired with the session ends the wait and the read runs', async () => {
+    const hub = new TabHub()
+    const tools = harnessTools(services({ browser: hub }), browserTools)
+    const results: unknown[] = []
+    const run = (r: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+        await r.mcpServers![SERVER_NAME]!.instance.connect(serverSide)
+        const client = new McpClient({ name: 'tab-wait-test', version: '0' })
+        await client.connect(clientSide)
+        results.push(await client.callTool({ name: 'browser_snapshot', arguments: {}, _meta: { 'claudecode/toolUseId': 'toolu_snap' } }))
+        await client.close()
+        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run, approvalPollMs: 20, ...tools })
+    resolveTabWaits(hub, m)
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'look at the page' })
+    const id = await pending(session.id)
+    expect(await db.sql`SELECT attention_reason, tool_use_id FROM ai_questions WHERE id = ${id}`).toEqual([
+      { attention_reason: 'tab_disconnected', tool_use_id: 'toolu_snap' },
+    ])
+    // The user sends from a tab (routes/chat.ts pairs it), and the tab connects.
+    hub.pairSession(session.id, TAB)
+    const calls: string[] = []
+    const conn = hub.open((frame) => {
+      if (frame.type !== 'call') return
+      calls.push(frame.tool)
+      queueMicrotask(() => void conn.receive(JSON.stringify({ v: 1, type: 'result', id: frame.id, outcome: { ok: true, result: { snapped: true } } })))
+    })
+    await conn.receive(JSON.stringify({ v: 1, type: 'hello', tabId: TAB, route: '/', live: ['snapshot'] }))
+    await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]?.outcome, { timeout: 10_000 }).toBe('reconnected')
+    await turn!.done
+    expect(calls).toEqual(['snapshot'])
+    expect(results).toMatchObject([{ content: [{ type: 'text', text: expect.stringContaining('"snapped": true') }] }])
+    expect(results[0]).not.toHaveProperty('isError', true)
+    conn.close()
+  }, 30_000)
+})
+
+describe('waitForTab: what each way the wait ends means for the call (#815)', () => {
+  const gateOf = (verdict: QuestionVerdict) => {
+    const asked: QuestionRequest[] = []
+    const gate: QuestionGate = (request) => {
+      asked.push(request)
+      return Promise.resolve(verdict)
+    }
+    return { asked, gate }
+  }
+  const never = new AbortController().signal
+  const noop = () => Promise.resolve()
+  const gone = () => Promise.resolve(false)
+  /** The tab is attached on this replica (when asked after the wait has ended). */
+  const here = () => Promise.resolve(true)
+  const call = (gate: QuestionGate) =>
+    waitForTab(gate, never, noop)({ tool: 'browser_snapshot', toolUseId: 'toolu_1', signal: never, isBack: gone })
+
+  it("parks a tab_disconnected request with a five-minute proceed timer and the I'm back / carry on replies", async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    expect(await call(gate)).toEqual({ back: true, why: 'reconnected' })
+    expect(asked[0]).toMatchObject({
+      tool: 'mcp__scadbuddy__browser_snapshot',
+      toolUseId: 'toolu_1',
+      attention: { reason: 'tab_disconnected', onTimeout: 'proceed', timeoutS: TAB_WAIT_S },
+      questions: [{ header: 'Tab disconnected', options: [{ label: "I'm back" }, { label: 'Carry on without the tab' }] }],
+    })
+  })
+
+  it('only "I\'m back" tries again; typed words reach the model unrun, and carry on or a timeout never retries', async () => {
+    const answered = (text: string) =>
+      waitForTab((request) => Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: text } }), never, noop)({
+        tool: 'browser_snapshot',
+        toolUseId: undefined,
+        signal: never,
+        isBack: gone,
+      })
+    expect(await answered("I'm back")).toEqual({ back: true, why: 'user_back' })
+    // The user's own words are not "I'm back": the call is not run, and the model reads them.
+    expect(await answered("never mind, don't print it")).toEqual({
+      back: false,
+      message: 'The user replied "never mind, don\'t print it" instead; the call was not run. Act on their reply.',
+    })
+    expect(await answered('Carry on without the tab')).toEqual({ back: false, message: expect.stringMatching(/carry on without the tab/) })
+    expect(await call(gateOf({ answered: false, timedOut: true, message: 'x' }).gate)).toEqual({ back: false, message: timedOutText(TAB_WAIT_S) })
+    expect(await call(gateOf({ answered: false, message: 'The user did not answer: the turn stopped first.' }).gate)).toEqual({
+      back: false,
+      message: 'The user did not answer: the turn stopped first.',
+    })
+  })
+
+  it('after "carry on" or a timeout, the rest of the turn does not ask again: later calls fail at once', async () => {
+    for (const verdict of [
+      (q: string): QuestionVerdict => ({ answered: true, answers: { [q]: 'Carry on without the tab' } }),
+      (): QuestionVerdict => ({ answered: false, timedOut: true, message: 'x' }),
+    ]) {
+      let asked = 0
+      const wait = waitForTab((request) => {
+        asked += 1
+        return Promise.resolve(verdict(request.questions[0]!.question))
+      }, never, noop)
+      const first = await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })
+      const later = await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })
+      expect(first.back).toBe(false)
+      expect(later).toEqual(first)
+      expect(asked).toBe(1)
+    }
+  })
+
+  // #1345: a typed reply ends the turn's tab waits too, so a later call cannot ask again before the model acted on it.
+  it('after a typed reply, a later call that finds no tab fails at once and does not ask again', async () => {
+    let asked = 0
+    const wait = waitForTab((request) => {
+      asked += 1
+      return Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'use the other printer' } })
+    }, never, noop)
+    const first = await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })
+    const later = await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })
+    expect(first).toEqual({ back: false, message: expect.stringMatching(/^The user replied "use the other printer" instead/) })
+    expect(later).toEqual({ back: false, message: expect.stringMatching(/already replied "use the other printer".*not asked for again/) })
+    expect(asked).toBe(1)
+  })
+
+  // #1394: the typed-reply latch lasts for the rest of the turn, and later calls say that; they do not tell the
+  // model to act on a reply it already acted on (the call that carried the reply did).
+  it('after a typed reply, every later call that turn says the latch lasts for the rest of the turn', async () => {
+    let asked = 0
+    const wait = waitForTab((request) => {
+      asked += 1
+      return Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'reloaded, try now' } })
+    }, never, noop)
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })).toEqual({
+      back: false,
+      message: expect.stringMatching(/Act on their reply\.$/),
+    })
+    for (const toolUseId of ['t2', 't3', 't4']) {
+      const later = await wait({ tool: 'browser_click', toolUseId, signal: never, isBack: gone })
+      expect(later).toEqual({ back: false, message: expect.stringMatching(/for the rest of this turn\.$/) })
+      expect(later).not.toEqual({ back: false, message: expect.stringMatching(/Act on their reply/) })
+    }
+    expect(asked).toBe(1)
+  })
+
+  it('a call that comes after every waiter withdrew opens a wait of its own, not the withdrawn one', async () => {
+    const requests: QuestionRequest[] = []
+    const gate: QuestionGate = (request) => {
+      requests.push(request)
+      // As the real gate does: a withdrawn request ends as not answered.
+      return new Promise((resolve) => {
+        if (requests.length === 1) {
+          request.signal.addEventListener('abort', () => resolve({ answered: false, message: 'The user did not answer: the turn stopped first.' }), { once: true })
+        } else {
+          resolve({ answered: false, reconnected: true, message: 'x' })
+        }
+      })
+    }
+    const wait = waitForTab(gate, never, noop)
+    const first = new AbortController()
+    const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: gone })
+    first.abort()
+    // At once, before the withdrawn wait has settled.
+    const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: never, isBack: gone })
+    expect(await a).toEqual({ back: false, message: expect.stringMatching(/stopped while it waited/) })
+    expect(await b).toEqual({ back: true, why: 'reconnected' })
+    expect(requests.map((r) => r.toolUseId)).toEqual(['toolu_a', 'toolu_b'])
+    expect(requests[0]!.signal.aborted).toBe(true)
+  })
+
+  // A reconnect that left no tab here ends the turn's waits at once (#1308, below); this is a tab
+  // that is back here when the wait ends and gone again by the next call.
+  it(`opens at most ${TAB_WAITS_PER_TURN} tab waits a turn: a tab that keeps dropping cannot keep it waiting`, async () => {
+    let asked = 0
+    const wait = waitForTab(() => {
+      asked += 1
+      return Promise.resolve({ answered: false, reconnected: true, message: 'x' })
+    }, never, noop)
+    const results: TabWait[] = []
+    for (let i = 0; i < TAB_WAITS_PER_TURN + 2; i++) {
+      results.push(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: here }))
+    }
+    expect(asked).toBe(TAB_WAITS_PER_TURN)
+    expect(results.slice(0, TAB_WAITS_PER_TURN)).toEqual(Array(TAB_WAITS_PER_TURN).fill({ back: true, why: 'reconnected' }))
+    expect(results.slice(TAB_WAITS_PER_TURN)).toEqual([
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) },
+      { back: false, message: expect.stringMatching(/waited for 3 times this turn/) },
+    ])
+  })
+
+  // #1393: the cap counts every wait of the turn however it ended, and this replica cannot tell whether a reconnect
+  // was to it or to another, so the cap names no cause: never a replica story.
+  it('words the per-turn cap neutrally, whatever ended the earlier waits', async () => {
+    const wait = waitForTab(() => Promise.resolve({ answered: false, message: 'The user did not answer: the turn stopped first.' }), never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `t${i}`, signal: never, isBack: gone })).toMatchObject({ back: false })
+    }
+    const capped = await wait({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
+    expect(capped).toEqual({ back: false, message: expect.stringMatching(/waited for 3 times this turn and is not attached here now/) })
+    expect(capped).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
+
+    let n = 0
+    const mixed = waitForTab(() => {
+      n += 1
+      return Promise.resolve(n === 2 ? { answered: false, reconnected: true, message: 'x' } : { answered: false, message: 'x' })
+    }, never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await mixed({ tool: 'browser_snapshot', toolUseId: `m${i}`, signal: never, isBack: here })
+    const mixedCap = await mixed({ tool: 'browser_snapshot', toolUseId: 'late', signal: never, isBack: gone })
+    // Positively the cap (#1410), not merely "not a replica story": a cap that never fired would pass that.
+    expect(mixedCap).toEqual({
+      back: false,
+      message: expect.stringContaining(`waited for ${TAB_WAITS_PER_TURN} times this turn and is not attached here now`),
+    })
+    expect(mixedCap).not.toEqual({ back: false, message: expect.stringMatching(/replica/) })
+    expect(n).toBe(TAB_WAITS_PER_TURN)
+  })
+
+  // #1308: the tab came back on another replica. This one cannot reach it, and no
+  // pairing event will fire here again, so a second wait could only time out.
+  it('after a reconnect that left no tab here, the rest of the turn does not wait again', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    const wait = waitForTab(gate, never, noop)
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack: gone })).toEqual({ back: true, why: 'reconnected' })
+    expect(await wait({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack: gone })).toEqual({
+      back: false,
+      message: 'The tab reconnected, but it cannot be reached from this agent replica now. Carry on without the tab for the rest of this turn.',
+    })
+    expect(asked).toHaveLength(1)
+    // A tab back here (or a check that failed) leaves later calls free to wait.
+    for (const isBack of [() => Promise.resolve(true), () => Promise.reject(new Error('hub gone'))]) {
+      const again = gateOf({ answered: false, reconnected: true, message: 'x' })
+      const w = waitForTab(again.gate, never, noop)
+      await w({ tool: 'browser_snapshot', toolUseId: 't1', signal: never, isBack })
+      await w({ tool: 'browser_click', toolUseId: 't2', signal: never, isBack })
+      expect(again.asked).toHaveLength(2)
+    }
+  })
+
+  // #1341: calls share the card, and the one that opened it may stop waiting first.
+  it("words the card for the turn's browser calls, not the one call that opened it", async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    await call(gate)
+    expect(asked[0]!.questions[0]!.question).not.toContain('browser_snapshot')
+    expect(asked[0]!.questions[0]!.question).toMatch(/^I need your ScadBuddy tab, but it is not connected\./)
+    // #1356, #1382: says what is guaranteed, and that a reply of the user's own ends the turn's tab waits.
+    expect(asked[0]!.questions[0]!.question).toContain('A change that was waiting is not made on its own')
+    expect(asked[0]!.questions[0]!.question).toContain('a reply of your own words ends my waits for the tab this turn')
+  })
+
+  // #1308: a tab wait that joined the model's own card gets its replies.
+  it("reads the model's own card's replies as its own: \"I'm here\" tries again, \"Carry on without me\" carries on", async () => {
+    const answered = (text: string) =>
+      waitForTab((request) => Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: text } }), never, noop)({
+        tool: 'browser_snapshot',
+        toolUseId: 't1',
+        signal: never,
+        isBack: gone,
+      })
+    expect(await answered("I'm here")).toEqual({ back: true, why: 'user_back' })
+    expect(await answered('Carry on without me')).toEqual({ back: false, message: 'The user replied "Carry on without me": carry on without the tab for the rest of this turn.' })
+  })
+
+  // #1394: the reconnect check is handed the wait's signal, so a check that hangs is cancelled when the wait ends.
+  it('hands the reconnect check the signal that aborts once the wait stops waiting for it', async () => {
+    const seen: AbortSignal[] = []
+    const parked = new AbortController()
+    const gate: QuestionGate = async (request) => {
+      const attention = request.attention!
+      if (attention.reason === 'done') throw new Error('a tab wait is never a done summary')
+      void attention.onParked!(parked.signal, 'question-1')
+      parked.abort()
+      return { answered: false, timedOut: true, message: 'x' }
+    }
+    await waitForTab(gate, never, noop)({
+      tool: 'browser_snapshot',
+      toolUseId: 'toolu_1',
+      signal: never,
+      isBack: (signal) => {
+        seen.push(signal)
+        return new Promise<boolean>(() => undefined)
+      },
+    })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toBe(parked.signal)
+    expect(seen[0]!.aborted).toBe(true)
+  })
+
+  it('a call already stopped opens no wait: no card, and none of the turn\'s waits used', async () => {
+    let asked = 0
+    const wait = waitForTab(() => {
+      asked += 1
+      return Promise.resolve({ answered: false, reconnected: true, message: 'x' })
+    }, never, noop)
+    const stopped = new AbortController()
+    stopped.abort()
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `s${i}`, signal: stopped.signal, isBack: gone })).toEqual({
+        back: false,
+        message: 'The call stopped before it waited for the tab.',
+      })
+    }
+    expect(asked).toBe(0)
+    // The turn's waits are all still there.
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'live', signal: never, isBack: gone })).toEqual({ back: true, why: 'reconnected' })
+    expect(asked).toBe(1)
+  })
+
+  it('a call that stops waiting leaves the others sharing the wait still waiting', async () => {
+    let release: ((v: QuestionVerdict) => void) | undefined
+    const gate: QuestionGate = () => new Promise((resolve) => (release = resolve))
+    const wait = waitForTab(gate, never, noop)
+    const first = new AbortController()
+    const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: gone })
+    const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: never, isBack: gone })
+    first.abort()
+    expect(await a).toEqual({ back: false, message: expect.stringMatching(/stopped while it waited/) })
+    release!({ answered: false, reconnected: true, message: 'x' })
+    expect(await b).toEqual({ back: true, why: 'reconnected' })
+  })
+})

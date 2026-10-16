@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Principal } from '../auth/principal.js'
+import type { WorkspaceRef } from '../workspace/store.js'
 
 // Pending outward actions: spec §8.2's two-step flow for external MCP clients.
 // An outward tool call (the `prepare`) records what it would do and returns
@@ -35,6 +36,8 @@ export type PrepareCall = {
   input: Record<string, unknown>
   /** The tool's own human-readable line. */
   summary: string
+  /** The workspace the call would run in (workspaceOf), for a workspace upload's size on the card. */
+  workspace?: WorkspaceRef
 }
 
 export interface OutwardActions {
@@ -71,7 +74,8 @@ export class PendingStoreFullError extends Error {
 export const PENDING_STORE_FULL =
   'too many actions are waiting for approval right now; try again once some are approved or expire'
 
-type MemoryAction = PreparedAction & { principalId: string }
+/** `deadline` is on the monotonic clock (#1485); `expiresAt` is what callers are shown. */
+type MemoryAction = PreparedAction & { principalId: string; deadline: number }
 
 /** The no-database store: prepares and lists, and never confirms. */
 export class PendingActionStore implements OutwardActions {
@@ -101,6 +105,7 @@ export class PendingActionStore implements OutwardActions {
       summary: call.summary,
       principalId: principal.id,
       expiresAt: new Date(Date.now() + this.#ttlMs),
+      deadline: performance.now() + this.#ttlMs,
     }
     this.#actions.set(action.id, action)
     return strip(action)
@@ -128,13 +133,13 @@ export class PendingActionStore implements OutwardActions {
     }
   }
 
-  #sweep(now = Date.now()): void {
+  #sweep(now = performance.now()): void {
     for (const [id, action] of this.#actions) {
-      if (action.expiresAt.getTime() <= now) this.#actions.delete(id)
+      if (action.deadline <= now) this.#actions.delete(id)
     }
   }
 }
 
-function strip({ principalId: _p, ...action }: MemoryAction): PreparedAction {
+function strip({ principalId: _p, deadline: _d, ...action }: MemoryAction): PreparedAction {
   return action
 }

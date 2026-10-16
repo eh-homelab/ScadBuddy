@@ -31,7 +31,13 @@ from typing import TYPE_CHECKING
 
 from scadbuddy.render.job_models import JobResult
 from scadbuddy.store import BlobStore, PieceStateLostError
-from scadbuddy.store.archive import clear_marker, pack_dir, read_marker, unpack_dir, write_marker
+from scadbuddy.store.archive import (
+    clear_marker,
+    read_marker,
+    staged_pack,
+    unpack_dir,
+    write_marker,
+)
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobMissingError,
@@ -175,10 +181,10 @@ class CachedBlobStore:
 
     async def _publish(self, key: str, scope: BlobScope, *, expected: str | None) -> None:
         directory = self.local.dir_for(key)
-        data = await asyncio.to_thread(pack_dir, directory)
-        ref = await self.content.replace(
-            key, "piece", data, name=f"piece-{key}.zip", scope=scope, expected=expected
-        )
+        async with staged_pack(directory) as data:
+            ref = await self.content.replace(
+                key, "piece", data, name=f"piece-{key}.zip", scope=scope, expected=expected
+            )
         if ref is None:
             raise StaleBlobError(f"piece {key} was published by a later attempt")
         await asyncio.to_thread(write_marker, directory, ref.sha256)
@@ -236,6 +242,8 @@ class CachedBlobStore:
             except FileNotFoundError:
                 total -= size  # gone already
                 continue
+            # #1271: the marker goes first, so a removal cut short is never a hit.
+            clear_marker(self.local.root / key)
             self.local.remove(key)
             total -= size
             removed.append(key)

@@ -11,17 +11,20 @@ The spec's original plan of a ScadBuddy-authored printer preset was dropped (spe
 2026-09-27 §4.1, after §5's live tests): Bambuddy rejects every ``source: "local"``
 printer preset with 400 "The selected printer is not compatible with the process
 preset in the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
-nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size``, adds a
-``hf-unsupported`` warning when High Flow was asked for, and refuses mixed sizes
-outright rather than offering an override.
+nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size`` and refuses
+mixed sizes outright rather than offering an override. High Flow needs no preset: the
+print run states each side's flow in the 3MF, as Bambu Studio does (#484,
+:func:`scadbuddy.bambuddy.extruders.slicer_volume_types`).
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
-from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning, _label
+from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning, spool_label
 from scadbuddy.bambuddy.models import (
     FlowType,
     NozzleChoice,
@@ -82,11 +85,17 @@ _SOURCE_ORDER = {"cloud": 0, "local": 1, "standard": 2, "orca_cloud": 3}
 
 
 class PrintChoices(BaseModel):
+    #: The left side first and the right second, as the dialog's nozzle step lists them;
+    #: one entry is both sides'. The flow each side is sliced for is read in this order
+    #: (``extruders._flows``, #484), so it must not change.
     nozzles: list[NozzleChoice] = Field(min_length=1, max_length=2)
     tier: Tier | None = "standard"
     process_name: str | None = None
     bed_type: str = Field(default=DEFAULT_BED, max_length=64)
     filament_overrides: dict[int, PresetRef] = Field(default_factory=dict)
+    #: Advanced (#2166): a slot printed on the side chosen by hand, "L" or "R", in place
+    #: of the side ScadBuddy plans for it (``nozzle_plan``). A slot not named is planned.
+    sides: dict[int, Literal["L", "R"]] = Field(default_factory=dict)
 
 
 class Resolved(BaseModel):
@@ -109,8 +118,8 @@ def printer_preset_name(nozzles: list[NozzleChoice]) -> str:
 
     Spec §4.1: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
     no ScadBuddy-authored name for High Flow or mixed sizes — every flow combination
-    resolves to the same Bambu preset name, and ``resolve`` is what adds the
-    ``hf-unsupported`` warning or the ``mixed-sizes`` error instead.
+    resolves to the same Bambu preset name (the flow goes in the 3MF, #484), and
+    ``resolve`` is what adds the ``mixed-sizes`` error.
     """
     return _bambu_printer(nozzles[0].size)
 
@@ -193,15 +202,6 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
             )
         )
 
-    if any(nozzle.flow == "high_flow" for nozzle in choices.nozzles):
-        warnings.append(
-            FilamentWarning(
-                kind="hf-unsupported",
-                message="Bambuddy slices this as Standard flow; High Flow presets "
-                "aren't supported by Bambuddy yet.",
-            )
-        )
-
     printer = _bambu_printer(size)
     process_name = choices.process_name or TIERS[size][choices.tier or "standard"]
     process_ref = _named(catalogue.process, process_name, printer)
@@ -219,6 +219,12 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
         warnings=warnings,
         errors=errors,
     )
+
+
+def process_preset_for(choices: PrintChoices, catalogue: _Catalogue) -> PresetRef | None:
+    """The process preset the choices resolve to, or ``None`` (which :func:`resolve`
+    reports as an error)."""
+    return _resolve_choices(choices, catalogue).process_preset
 
 
 def choice_errors(choices: PrintChoices, catalogue: _Catalogue) -> list[FilamentWarning]:
@@ -252,7 +258,9 @@ def resolve(
     colours: list[str | None] = [None] * width
     for slot in options.slots:
         idx = slot.slot_id - 1
-        option = by_id.get(plan.spool_for(slot.slot_id) or -1)
+        spool_id = plan.spool_for(slot.slot_id)
+        # Not ``or -1``: a negative id is a tray chosen for itself (#2164).
+        option = by_id.get(spool_id) if spool_id is not None else None
         colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
         if option is None:
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.
@@ -305,7 +313,7 @@ def resolve(
                             kind="no-preset",
                             slot_id=slot.slot_id,
                             message=(
-                                f"{_label(option)} has no {size} mm preset of its own, so "
+                                f"{spool_label(option)} has no {size} mm preset of its own, so "
                                 f"Bambu's Generic {option.material} is used."
                             ),
                         )
@@ -316,7 +324,7 @@ def resolve(
                     kind="no-preset",
                     slot_id=slot.slot_id,
                     message=(
-                        f"{_label(option)} has no slicer preset for a {size} mm nozzle. "
+                        f"{spool_label(option)} has no slicer preset for a {size} mm nozzle. "
                         "Pick one under Advanced."
                     ),
                 )

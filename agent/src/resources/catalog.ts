@@ -225,6 +225,15 @@ export const RESOURCES: readonly ResourceDef[] = [
     tool: 'get_print_progress',
   },
   {
+    template: 'scadbuddy://print/library/{file_id}/progress',
+    name: 'library-print-progress',
+    title: 'Library print progress',
+    description: "The progress of a Bambuddy library file's latest print (#1756).",
+    mimeType: JSON_TYPE,
+    tool: 'get_print_progress',
+    args: ({ file_id }) => ({ library_file_id: /^\d+$/.test(file_id ?? '') ? Number(file_id) : file_id }),
+  },
+  {
     template: 'scadbuddy://plates',
     name: 'plates',
     title: 'Plate profiles',

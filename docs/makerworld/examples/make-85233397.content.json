@@ -1,0 +1,85 @@
+{
+  "data": [
+    {
+      "type": "BackdropElement",
+      "group": {
+        "mainObj": {
+          "top": -247.5,
+          "fill": "#FFFFFF",
+          "left": -247.5,
+          "type": "circle",
+          "angle": 0,
+          "flipX": false,
+          "flipY": false,
+          "skewX": 0,
+          "skewY": 0,
+          "width": 495,
+          "height": 495,
+          "radius": 247.5,
+          "scaleX": 1,
+          "scaleY": 1,
+          "shadow": null,
+          "stroke": null,
+          "opacity": 1,
+          "originX": "left",
+          "originY": "top",
+          "version": "5.3.0",
+          "visible": true,
+          "endAngle": 360,
+          "fillRule": "nonzero",
+          "paintFirst": "fill",
+          "startAngle": 0,
+          "strokeWidth": 0,
+          "strokeLineCap": "butt",
+          "strokeUniform": false,
+          "strokeLineJoin": "miter",
+          "backgroundColor": "",
+          "strokeDashArray": null,
+          "strokeDashOffset": 0,
+          "strokeMiterLimit": 4,
+          "globalCompositeOperation": "source-over"
+        },
+        "borderColor": "#000000",
+        "borderWidth": 10,
+        "borderOffset": 0,
+        "backdropColor": "#FFFFFF",
+        "outlineEnabled": true
+      },
+      "shape": 0,
+      "version": "1.0"
+    },
+    {
+      "type": "VectorizeElement",
+      "props": {
+        "top": -165.94565052480988,
+        "data": {
+          "depth": 1
+        },
+        "left": -206.65856024462195,
+        "angle": 0,
+        "flipX": false,
+        "flipY": false,
+        "width": 905.2547238295178,
+        "height": 604.1752116779763,
+        "scaleX": 0.4565754915266058,
+        "scaleY": 0.4844337765826035,
+        "vectorizeContent": "{\"defaultSetting\":{\"depth\":1},\"globalResult\":{\"angle\":0,\"scale\":0.5529415405014426,\"left\":82.05566203827584,\"top\":213.66074673781367},\"pathResults\":[{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"},{\"colorKey\":\"\"}],\"paletteMap\":{\"{ red: 0.31765, green: 0.31765, blue: 0.31765 }\":{\"colorKey\":\"{ red: 0.31765, green: 0.31765, blue: 0.31765 }\",\"index\":1,\"children\":[],\"fill\":\"rgb(81, 81, 81)\",\"red\":0.3176470588235294,\"green\":0.3176470588235294,\"blue\":0.3176470588235294,\"isOrigin\":true,\"parent\":\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\",\"deleted\":true},\"{ red: 0.90196, green: 0.35294, blue: 0.27843 }\":{\"colorKey\":\"{ red: 0.90196, green: 0.35294, blue: 0.27843 }\",\"index\":2,\"children\":[],\"fill\":\"rgb(230, 90, 71)\",\"red\":0.9019607843137255,\"green\":0.35294117647058826,\"blue\":0.2784313725490196,\"isOrigin\":true,\"parent\":\"{ red: 0.90588, green: 0.13725, blue: 0.17255 }\",\"deleted\":true},\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\":{\"colorKey\":\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\",\"index\":3,\"children\":[\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\",\"{ red: 0.31765, green: 0.31765, blue: 0.31765 }\"],\"fill\":\"rgb(5, 5, 4)\",\"red\":0.0196078431372549,\"green\":0.0196078431372549,\"blue\":0.01568627450980392,\"isOrigin\":true},\"{ red: 0.39216, green: 0.67451, blue: 0.4 }\":{\"colorKey\":\"{ red: 0.39216, green: 0.67451, blue: 0.4 }\",\"index\":4,\"children\":[],\"fill\":\"rgb(100, 172, 102)\",\"red\":0.39215686274509803,\"green\":0.6745098039215687,\"blue\":0.4,\"isOrigin\":true,\"parent\":\"{ red: 0.20392, green: 0.64706, blue: 0.3098 }\",\"deleted\":true},\"{ red: 0.20392, green: 0.64706, blue: 0.3098 }\":{\"colorKey\":\"{ red: 0.20392, green: 0.64706, blue: 0.3098 }\",\"index\":5,\"children\":[\"{ red: 0.20392, green: 0.64706, blue: 0.3098 }\",\"{ red: 0.39216, green: 0.67451, blue: 0.4 }\"],\"fill\":\"rgb(52, 165, 79)\",\"red\":0.20392156862745098,\"green\":0.6470588235294118,\"blue\":0.30980392156862746,\"isOrigin\":true},\"{ red: 0.09412, green: 0.37647, blue: 0.68235 }\":{\"colorKey\":\"{ red: 0.09412, green: 0.37647, blue: 0.68235 }\",\"index\":6,\"children\":[\"{ red: 0.09412, green: 0.37647, blue: 0.68235 }\"],\"fill\":\"rgb(24, 96, 174)\",\"red\":0.09411764705882353,\"green\":0.3764705882352941,\"blue\":0.6823529411764706,\"isOrigin\":true},\"{ red: 0.90588, green: 0.13725, blue: 0.17255 }\":{\"colorKey\":\"{ red: 0.90588, green: 0.13725, blue: 0.17255 }\",\"index\":7,\"children\":[\"{ red: 0.90588, green: 0.13725, blue: 0.17255 }\",\"{ red: 0.90196, green: 0.35294, blue: 0.27843 }\"],\"fill\":\"rgb(231, 35, 44)\",\"red\":0.9058823529411765,\"green\":0.13725490196078433,\"blue\":0.17254901960784313,\"isOrigin\":true},\"transparent\":{\"colorKey\":\"transparent\",\"children\":[],\"fill\":\"transparent\",\"red\":0,\"green\":0,\"blue\":0,\"alpha\":0,\"isOrigin\":false,\"isPaletteHidden\":true}},\"colorPathMap\":{\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18],\"{ red: 0.90588, green: 0.13725, blue: 0.17255 }\":[19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34],\"{ red: 0.90196, green: 0.35294, blue: 0.27843 }\":[35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53],\"{ red: 0.20392, green: 0.64706, blue: 0.3098 }\":[54,55,56,57,58,59,60,61,62,63,64,65,66],\"{ red: 0.31765, green: 0.31765, blue: 0.31765 }\":[67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105],\"{ red: 0.39216, green: 0.67451, blue: 0.4 }\":[106,107,108,109,110,111,112,113,114,115,116,117,118,119],\"{ red: 0.09412, green: 0.37647, blue: 0.68235 }\":[120,121,122,123,124,125,126,127,128]},\"secondaryEditColorReplaceMap\":{},\"backdropInfo\":{\"type\":\"default\",\"thickness\":3,\"isAttachmentAdded\":false,\"holeOffset\":0,\"isBoundaryAdded\":false,\"boundaryOffset\":0,\"facedownMode\":true,\"colorKey\":\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\",\"boundaryColorKey\":\"{ red: 0.01961, green: 0.01961, blue: 0.01569 }\"},\"groupSelector\":[{\"indexes\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128],\"groupName\":\"Ungrouped\",\"order\":0}],\"date\":1774223420891,\"version\":\"Vectorize V1.0\"}"
+      },
+      "keyName": "Keychain Draft_1774223447148",
+      "version": "1.0"
+    }
+  ],
+  "date": 1791989406304,
+  "version": "NamePlate V1.1",
+  "thickness": {
+    "svgHeight": 0.4,
+    "holeHeight": 1,
+    "textHeight": 0.6,
+    "shapeHeight": 0.4,
+    "backdropHeight": 3
+  },
+  "globalStatus": {
+    "flatMode": true,
+    "nonePlateMode": false
+  }
+}

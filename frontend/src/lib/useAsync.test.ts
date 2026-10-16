@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRealtime, resetRealtime, type RealtimeSignal } from './realtime'
-import { useAsync } from './useAsync'
+import { RESYNC_WAIT_MS, useAsync } from './useAsync'
 
 let signals: ((signal: RealtimeSignal) => void)[] = []
 
@@ -137,4 +137,197 @@ it('never asks accept about an answer a newer read has overtaken', async () => {
   })
   expect(result.current.data).toBe('newest')
   expect(asked).toEqual([])
+})
+
+it('never lets a read in flight overwrite data set since', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.setData('set', { supersede: true }))
+  await act(async () => resolvers[1]?.('stale'))
+  expect(result.current.data).toBe('set')
+})
+
+it('lets a read in flight replace data set without supersede', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.setData('set'))
+  await act(async () => resolvers[1]?.('newer'))
+  expect(result.current.data).toBe('newer')
+})
+
+it('never settles a new key, or cancels its load, with data set after the deps changed', async () => {
+  const reads: Record<string, ((value: string) => void)[]> = { a: [], b: [] }
+  const { result, rerender } = renderHook(
+    ({ slug }) => useAsync(() => new Promise<string>((resolve) => reads[slug]!.push(resolve)), [slug]),
+    { initialProps: { slug: 'a' } },
+  )
+  await act(async () => reads.a![0]?.('a data'))
+  const fromA = result.current.setData
+  rerender({ slug: 'b' })
+  await waitFor(() => expect(reads.b).toHaveLength(1))
+  act(() => fromA('a edited', { supersede: true }))
+  expect(result.current).toMatchObject({ data: undefined, loading: true })
+  await act(async () => reads.b![0]?.('b data'))
+  expect(result.current).toMatchObject({ data: 'b data', loading: false })
+})
+
+it('tells refresh when its read fails', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const failed = vi.fn()
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(failed).toHaveBeenCalledOnce())
+  expect(result.current.data).toBe(1)
+})
+
+it('tells every caller merged into one read that it failed', async () => {
+  let fail = false
+  const { result } = renderHook(() => useAsync(() => (fail ? Promise.reject(new Error('no')) : Promise.resolve(1)), []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  fail = true
+  const first = vi.fn()
+  const second = vi.fn()
+  act(() => {
+    result.current.refresh(undefined, first)
+    result.current.refresh()
+    result.current.refresh(undefined, second)
+  })
+  await waitFor(() => expect(second).toHaveBeenCalledOnce())
+  expect(first).toHaveBeenCalledOnce()
+})
+
+// A background read that lands after its component is gone must touch nothing: no
+// state, no caller's `accept` or `failed`. A test file's environment may be torn down by
+// then, and React's setState reads `window` (the unhandled "window is not defined" that
+// failed whole CI runs after every test had passed).
+it('does nothing with a background read that lands after unmount', async () => {
+  let fail: (cause: Error) => void = () => {}
+  let pass: (value: string) => void = () => {}
+  let reads = 0
+  const load = () => {
+    reads += 1
+    if (reads === 1) return Promise.resolve('first')
+    return new Promise<string>((resolve, reject) => {
+      if (reads === 2) fail = reject
+      else pass = resolve
+    })
+  }
+  // No state update either: React would warn (an act() or unmounted-update warning).
+  const errors = vi.spyOn(console, 'error')
+  const { result, unmount } = renderHook(() => useAsync(load, [], ['m']))
+  await waitFor(() => expect(result.current.data).toBe('first'))
+  const failed = vi.fn()
+  const accept = vi.fn(() => true)
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(reads).toBe(2))
+  unmount()
+  await act(async () => fail(new Error('the agent went away')))
+  expect(failed).not.toHaveBeenCalled()
+
+  const second = renderHook(() => useAsync(load, [], ['m']))
+  await waitFor(() => expect(reads).toBe(3))
+  await act(async () => pass('second'))
+  act(() => second.result.current.refresh(accept))
+  await waitFor(() => expect(reads).toBe(4))
+  second.unmount()
+  await act(async () => pass('late'))
+  expect(accept).not.toHaveBeenCalled()
+  expect(errors).not.toHaveBeenCalled()
+  errors.mockRestore()
+})
+
+describe('with the socket already open (#1039)', () => {
+  beforeEach(() => {
+    vi.spyOn(getRealtime(), 'willResync', 'get').mockReturnValue(true)
+  })
+
+  it("leaves the first read to the subscription's resync, reading once", async () => {
+    let reads = 0
+    const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+    expect(result.current.loading).toBe(true)
+    await act(async () => {})
+    expect(reads).toBe(0)
+
+    act(() => signals[0]?.('resync'))
+
+    await waitFor(() => expect(result.current).toMatchObject({ data: 1, loading: false }))
+    expect(reads).toBe(1)
+  })
+
+  it('reads anyway when the resync does not come', async () => {
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+      await act(async () => vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS - 1))
+      expect(reads).toBe(0)
+      await act(async () => vi.advanceTimersByTimeAsync(1))
+      expect(reads).toBe(1)
+      expect(result.current.data).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never reads again at the fallback once the resync has read', async () => {
+    vi.useFakeTimers()
+    try {
+      let reads = 0
+      renderHook(() => useAsync(() => Promise.resolve(++reads), [], ['models']))
+      await act(async () => {
+        signals[0]?.('resync')
+        await vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS * 2)
+      })
+      expect(reads).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads at once when only the deps change, since nothing is subscribed anew', async () => {
+    let reads = 0
+    const { result, rerender } = renderHook(
+      ({ id }) => useAsync(() => Promise.resolve(`${id}:${++reads}`), [id], ['models']),
+      { initialProps: { id: 'a' } },
+    )
+    act(() => signals[0]?.('resync'))
+    await waitFor(() => expect(result.current.data).toBe('a:1'))
+
+    rerender({ id: 'b' })
+
+    await waitFor(() => expect(result.current.data).toBe('b:2'))
+    expect(signals).toHaveLength(1)
+  })
+
+  it('reads once when the deps and the topic change together', async () => {
+    let reads = 0
+    const { result, rerender } = renderHook(
+      ({ id }) => useAsync(() => Promise.resolve(`${id}:${++reads}`), [id], [`model:${id}`]),
+      { initialProps: { id: 'a' } },
+    )
+    act(() => signals[0]?.('resync'))
+    await waitFor(() => expect(result.current.data).toBe('a:1'))
+
+    rerender({ id: 'b' })
+    await act(async () => {})
+    expect(reads).toBe(1)
+    act(() => signals[1]?.('resync'))
+
+    await waitFor(() => expect(result.current.data).toBe('b:2'))
+    expect(reads).toBe(2)
+  })
+
+  it('reads at once with no topics', async () => {
+    let reads = 0
+    const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), []))
+    await waitFor(() => expect(result.current.data).toBe(1))
+  })
 })

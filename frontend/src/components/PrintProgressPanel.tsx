@@ -1,6 +1,7 @@
-import type { CopyProgress, PrintProgress } from '../api/types'
+import type { CopyProgress, OutputPlate, PrintProgress } from '../api/types'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
+import { plateLabel } from '../lib/plate'
 
 /**
  * Where a print got to (#89): the slice, then the queue entries it produced.
@@ -25,6 +26,8 @@ interface Props {
   /** `null` when this output has never been printed — there is nothing to show. */
   progress: PrintProgress | null
   polling: boolean
+  /** #986 — the printed source's plates, so a copy is named by what its plate holds. */
+  plates?: readonly OutputPlate[]
 }
 
 /**
@@ -44,6 +47,9 @@ function queuedCount(progress: PrintProgress): number {
 }
 
 function headline(progress: PrintProgress): string {
+  // #1049 — the run failed before it queued anything: there is no slice or queue entry,
+  // only its reason, in `error_message`.
+  if (progress.route === 'run') return 'Print failed before it was queued'
   // The slice-and-queue route has no run: the queue item is the whole print, and until
   // a plate has sliced it does not exist yet. An all-plates print is still slicing until
   // one of its plates has an entry (#295).
@@ -71,15 +77,15 @@ function headline(progress: PrintProgress): string {
   return `Queue entry #${progress.queue_item_id}`
 }
 
-function copyLabel(copy: CopyProgress): string {
-  if (copy.plate_id !== null && copy.plate_id !== undefined) return `Plate ${copy.plate_id}`
+function copyLabel(copy: CopyProgress, plates: readonly OutputPlate[]): string {
+  if (copy.plate_id !== null && copy.plate_id !== undefined) return plateLabel(plates, copy.plate_id)
   // The queue route repeats through `quantity` and carries no `copy_index`, so there is
   // nothing to number: the entry itself is the identity.
   if (copy.copy_index === null || copy.copy_index === undefined) return 'Copy'
   return `Copy ${copy.copy_index + 1}`
 }
 
-export function PrintProgressPanel({ progress, polling }: Props) {
+export function PrintProgressPanel({ progress, polling, plates = [] }: Props) {
   if (!progress) return null
 
   const copies = progress.copies_detail ?? []
@@ -96,7 +102,7 @@ export function PrintProgressPanel({ progress, polling }: Props) {
           {copies.map((copy, index) => (
             <li key={index} data-testid={`print-progress-copy-${index}`}>
               <span>
-                {copyLabel(copy)} on {copy.printer_name ?? 'a printer Bambuddy picks'}
+                {copyLabel(copy, plates)} on {copy.printer_name ?? 'a printer Bambuddy picks'}
               </span>
               {copy.queue_entry_id ? (
                 <>

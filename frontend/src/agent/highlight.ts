@@ -47,11 +47,11 @@ export async function waitFor<T>(
   read: () => T | undefined,
   { timeout, what, interval = 50 }: { timeout: number; what: string; interval?: number },
 ): Promise<T> {
-  const started = Date.now()
+  const started = performance.now()
   for (;;) {
     const value = read()
     if (value !== undefined) return value
-    if (Date.now() - started >= timeout) {
+    if (performance.now() - started >= timeout) {
       throw new AgentToolError('timeout', `Gave up after ${timeout} ms waiting for ${what}.`)
     }
     await new Promise((resolve) => setTimeout(resolve, interval))

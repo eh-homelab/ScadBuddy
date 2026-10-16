@@ -3,9 +3,7 @@
 Postgres only: the ``analyzer_decisions`` table, a backend migration file in
 ``backend/scadbuddy/migrations/`` in the ``scadbuddy_migrations`` ledger (not an ``ai_*`` one:
 script analyzers run with AI off, and so must their decisions). There is no file
-fallback. Until the database is required everywhere (#401), a ScadBuddy without
-``SCADBUDDY_DATABASE_URL`` has no store; the routes that persist answer 503 saying
-so, and a run reports that no decisions could be read.
+fallback.
 
 Resolution: of the decisions matching a diagnostic at the scopes a print falls in,
 the narrowest scope wins, and at one scope a decision about this instance wins over
@@ -37,6 +35,7 @@ from scadbuddy.render.pg_store import migrate
 logger = logging.getLogger(__name__)
 
 _SLUG = MODEL_ID_PATTERN.removeprefix("^").removesuffix("$")
+_OUTPUT_ID = OUTPUT_ID_PATTERN.removeprefix("^").removesuffix("$")
 #: What a key must look like for each scope. Loose where the value is someone else's
 #: (a printer model, a model version) and exact where it is ScadBuddy's own.
 SCOPE_KEY_PATTERNS: dict[ScopeKind, re.Pattern[str]] = {
@@ -46,7 +45,8 @@ SCOPE_KEY_PATTERNS: dict[ScopeKind, re.Pattern[str]] = {
     "template": re.compile(rf"^{_SLUG}$"),
     "template_version": re.compile(rf"^{_SLUG}@[0-9A-Za-z._:-]+$"),
     "configuration": re.compile(rf"^{_SLUG}#[0-9a-f]{{16}}$"),
-    "print": re.compile(OUTPUT_ID_PATTERN),
+    # An output's id, or ``library:<file id>`` for a library file's prints (#1753).
+    "print": re.compile(rf"^({_OUTPUT_ID}|library:[0-9]+)$"),
 }
 
 

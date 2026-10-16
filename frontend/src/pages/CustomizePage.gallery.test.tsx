@@ -39,12 +39,10 @@ describe('template page gallery (#280)', () => {
       slides.map((slide) => `Open ${slide.alt}`),
     )
     const pictures = [...list.querySelectorAll('img')]
-    expect(pictures.map((picture) => picture.getAttribute('src'))).toEqual([
-      slides[0]!.src,
-      slides[1]!.src,
-      slides[2]!.src,
-      slides[3]!.poster,
-    ])
+    // Small copies, not the originals (#624).
+    expect(pictures.map((picture) => picture.getAttribute('src'))).toEqual(
+      slides.map((slide) => slide.thumbnail),
+    )
     expect(within(list).getByTestId(`play-badge-${slides[3]!.key}`)).toBeInTheDocument()
 
     expect(await screen.findByTestId('preview')).toBeInTheDocument()

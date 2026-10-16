@@ -6,25 +6,46 @@ recordings of the live 1.2.5.6; the links are in Postgres."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
-from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.api.print_history import FINISHED_STATUSES, UNFINISHED_STATUSES
+from scadbuddy.bambuddy import linking
+from scadbuddy.bambuddy.component import ARCHIVE_CACHE
+from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import MODEL_NAME
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
 pytestmark = pytest.mark.requires_postgres
 
 OTHER_SLUG = "other"
+
+
+@pytest.fixture(autouse=True)
+def _no_recent_library_scans() -> Iterator[None]:
+    """Each test starts with no library file scanned by hash lately (#1755)."""
+    linking._last_library_scan.clear()
+    yield
+    linking._last_library_scan.clear()
 
 
 def state(client: TestClient) -> AppState:
@@ -35,7 +56,8 @@ def state(client: TestClient) -> AppState:
 def link(client: TestClient, output_id: str, archive_id: int, **fields: Any) -> None:
     asyncio.run(
         state(client).print_links.record(
-            output_id, PrintLink(archive_id=archive_id, matched_by="queue_item", **fields)
+            PrintSubject.output(output_id),
+            PrintLink(archive_id=archive_id, matched_by="queue_item", **fields),
         )
     )
 
@@ -46,14 +68,32 @@ def archive(archive_id: int, **fields: Any) -> dict[str, Any]:
     return {**recording("archive-detail.json"), "id": archive_id, **fields}
 
 
+def mock_bambuddy_lists(*archives: dict[str, Any]) -> respx.Route:
+    """Bambuddy's printers (#2363: printer 1 is ``3DP-31B-598``), and its archive list
+    (#2359) holding ``archives``, by default none: each print is then read singly."""
+    respx.get(f"{API}/printers/", name="printers").mock(
+        return_value=httpx.Response(200, json=recording("printers.json"))
+    )
+    return respx.get(f"{API}/archives/", name="archive-list").mock(
+        return_value=httpx.Response(200, json=list(archives))
+    )
+
+
 def mock_archive(archive_id: int, **fields: Any) -> respx.Route:
-    """The archive, and its runs (named ``runs-<id>``): the printer's name is theirs."""
+    """The archive, and its runs (named ``runs-<id>``), with Bambuddy's lists."""
+    mock_bambuddy_lists()
     respx.get(f"{API}/archives/{archive_id}/runs", name=f"runs-{archive_id}").mock(
         return_value=httpx.Response(200, json=recording("archive-runs.json"))
     )
     return respx.get(f"{API}/archives/{archive_id}").mock(
         return_value=httpx.Response(200, json=archive(archive_id, **fields))
     )
+
+
+def still_version(path: str | None = None) -> str:
+    """The ``v`` a still's URL carries: its timelapse's path, hashed (#2903)."""
+    timelapse = path or recording("archive-detail.json")["timelapse_path"]
+    return hashlib.sha256(timelapse.encode()).hexdigest()[:12]
 
 
 def other_model(paths: DataPaths) -> str:
@@ -83,6 +123,9 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "archive_id": 35,
         "output_id": output_id,
         "slug": model,
+        "library_file_id": None,
+        "library_file_name": None,
+        "queue_item_id": None,
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,
@@ -91,9 +134,11 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "completed_at": "2026-09-27T05:56:53.660315",
         "actual_time_seconds": 6437,
         "filament_used_grams": 16.36,
+        # #2355: the card's cover is the photo shrunk; the lightbox has it whole.
         "cover": {
             "kind": "photo",
-            "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
+            "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg?size=card&v=1",
+            "full_url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
         },
         "has_timelapse": True,
         "attachment_count": 0,
@@ -112,7 +157,11 @@ def test_without_photos_the_cover_is_the_thumbnail(client: TestClient, model: st
 
     [summary] = client.get("/api/v1/prints").json()["items"]
 
-    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/35/thumbnail"}
+    assert summary["cover"] == {
+        "kind": "thumbnail",
+        "url": "/api/v1/prints/35/thumbnail",
+        "full_url": "/api/v1/prints/35/thumbnail",
+    }
     assert summary["has_timelapse"] is False
 
 
@@ -126,9 +175,11 @@ def test_a_deleted_archive_is_listed_not_dropped(client: TestClient, model: str)
     )
     runs = respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
 
+    mock_bambuddy_lists()
+
     [summary] = client.get("/api/v1/prints").json()["items"]
 
-    assert summary["printer_name"] is None
+    assert summary["printer_name"] == "3DP-31B-598", "the printer the link knew, by name"
     assert not runs.called
 
     assert summary["archive_id"] == 35
@@ -174,21 +225,171 @@ def test_the_list_pages_by_cursor_newest_archive_first(client: TestClient, model
 
 
 @respx.mock
-def test_the_printer_name_is_read_only_for_the_prints_on_the_page(
+def test_printers_are_named_from_one_printers_read_not_each_prints_runs(
     client: TestClient, model: str
 ) -> None:
+    """#2359, #2363: the runs read per print was half the page's Bambuddy reads, and a
+    print still printing has no run, so it was named "Printer 1" beside one named
+    "3DP-31B-598". One printers read names every print by the printer's name now."""
     configure(client)
     output_id = make_output(client, model)
     link(client, output_id, 35)
     link(client, output_id, 36)
     mock_archive(35)
-    mock_archive(36, status="failed")
+    mock_archive(36, status="printing", run_count=0)
+    respx.get(f"{API}/archives/36/runs", name="runs-36").mock(
+        return_value=httpx.Response(200, json={"items": [], "total": 0})
+    )
 
-    [summary] = client.get("/api/v1/prints", params={"status": "failed"}).json()["items"]
+    items = client.get("/api/v1/prints").json()["items"]
 
-    assert summary["printer_name"] == "3DP-31B-598"
-    assert respx.routes["runs-36"].called
-    assert not respx.routes["runs-35"].called, "a print the filter dropped"
+    assert [(item["archive_id"], item["printer_name"]) for item in items] == [
+        (36, "3DP-31B-598"),
+        (35, "3DP-31B-598"),
+    ]
+    assert respx.routes["printers"].call_count == 1
+    assert not respx.routes["runs-35"].called
+    assert not respx.routes["runs-36"].called
+
+
+@respx.mock
+def test_a_printer_bambuddy_has_no_longer_is_unnamed(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=7)
+
+    [summary] = client.get("/api/v1/prints").json()["items"]
+
+    assert summary["printer_id"] == 7
+    assert summary["printer_name"] is None
+
+
+@respx.mock
+def test_a_failed_printers_read_leaves_the_list_unnamed_not_failed(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35)
+    respx.get(f"{API}/printers/", name="printers").mock(return_value=httpx.Response(500))
+
+    response = client.get("/api/v1/prints")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["items"][0]["printer_name"] is None
+
+
+@respx.mock
+def test_a_printer_whose_id_is_0_is_named(client: TestClient, model: str) -> None:
+    """#2819: an id of 0 is a printer, as the frontend's ``printer_id !== null`` has it."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=0)
+    [printer] = recording("printers.json")[:1]
+    respx.get(f"{API}/printers/", name="printers").mock(
+        return_value=httpx.Response(200, json=[{**printer, "id": 0, "name": "Zero"}])
+    )
+
+    [summary] = client.get("/api/v1/prints").json()["items"]
+    detail = client.get("/api/v1/prints/35").json()
+
+    assert (summary["printer_id"], summary["printer_name"]) == (0, "Zero")
+    assert detail["printer_name"] == "Zero"
+
+
+@respx.mock
+def test_a_page_reads_its_archives_in_one_list_read(
+    client: TestClient, model: str, spans: InMemorySpanExporter
+) -> None:
+    """#2359: 24 single reads, 8 at a time, were a third of the page's time. Bambuddy's
+    list filters only by day, so it is read over the days the page's links were seen."""
+    configure(client)
+    output_id = make_output(client, model)
+    singles = {}
+    for archive_id in (16, 17, 23):
+        link(client, output_id, archive_id)
+        singles[archive_id] = mock_archive(archive_id)
+    listed = mock_bambuddy_lists(archive(16), archive(17), archive(23), archive(99))
+
+    items = client.get("/api/v1/prints").json()["items"]
+
+    assert [item["archive_id"] for item in items] == [23, 17, 16]
+    assert items[0]["status"] == "completed"
+    assert listed.call_count == 1
+    assert not any(route.called for route in singles.values())
+    params = listed.calls.last.request.url.params
+    today = datetime.now(UTC).date()
+    assert params["date_from"] == (today - timedelta(days=1)).isoformat()
+    assert params["date_to"] == (today + timedelta(days=1)).isoformat()
+    assert params["limit"] == "12", "four rows per linked print"
+    # #2819: how many of the batch the list read held, so a trace shows its hit rate.
+    [window] = [held for held in spans.get_finished_spans() if held.name == "prints.archive_window"]
+    assert window.attributes is not None
+    assert (
+        window.attributes["scadbuddy.archives"],
+        window.attributes["scadbuddy.archives_missing"],
+        window.attributes["scadbuddy.archives_listed"],
+    ) == (3, 3, 3)
+
+
+@respx.mock
+def test_the_archives_the_list_read_misses_are_read_singly(client: TestClient, model: str) -> None:
+    """Past the list's limit, outside its days, or deleted: each is read on its own."""
+    configure(client)
+    output_id = make_output(client, model)
+    for archive_id in (16, 17):
+        link(client, output_id, archive_id)
+    mock_archive(16)
+    single_17 = mock_archive(17)
+    mock_bambuddy_lists(archive(16))
+    gone = respx.get(f"{API}/archives/16").mock(return_value=httpx.Response(404))
+
+    items = client.get("/api/v1/prints").json()["items"]
+
+    assert [(item["archive_id"], item["status"]) for item in items] == [
+        (17, "completed"),
+        (16, "completed"),
+    ]
+    assert single_17.call_count == 1
+    assert not gone.called
+
+
+@respx.mock
+def test_a_page_reads_its_template_revisions_defaults_at_once(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2359: each template revision's defaults can take a schema export, and the page
+    read them one after another (0.6-1.4 s each in production)."""
+    configure(client)
+    other = other_model(paths)
+    for archive_id, slug in ((35, model), (36, other)):
+        link(client, make_output(client, slug), archive_id)
+        mock_archive(archive_id)
+    arrived = 0
+    both: asyncio.Event | None = None
+
+    async def barrier_schema_of(*args: Any, **kwargs: Any) -> Any:
+        # #2820: each read waits for the other, so a page that read them one after
+        # another times out here rather than passing on a lucky overlap.
+        nonlocal arrived, both
+        both = both or asyncio.Event()
+        arrived += 1
+        if arrived == 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), timeout=5)
+        return await schema_of(*args, **kwargs)
+
+    monkeypatch.setattr(print_history, "schema_of", barrier_schema_of)
+
+    items = client.get("/api/v1/prints").json()["items"]
+
+    assert [item["params_diff"] is not None for item in items] == [True, True], (
+        f"{arrived} defaults read(s) reached the barrier, which waits for two at once: "
+        "a page reading them one after another times out there and shows no diff"
+    )
 
 
 @respx.mock
@@ -419,16 +620,17 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
         "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
     }
     assert media["photos"] == []
-    timelapse = media["timelapse"]
-    assert timelapse["url"] == "/api/v1/prints/35/timelapse"
-    assert timelapse["info"]["duration"] == pytest.approx(5.208256)
-    frames = recording("timelapse-thumbnails.json")
-    assert timelapse["poster_frames"][0] == {
-        "timestamp": frames["timestamps"][0],
-        "data_url": "data:image/jpeg;base64," + frames["thumbnails"][0],
+    # #2360: the stills and the probe are read after the detail, never by it.
+    assert media["timelapse"] == {
+        "url": "/api/v1/prints/35/timelapse",
+        "poster_url": f"/api/v1/prints/35/timelapse/frames/0?v={still_version()}",
+        "frames_url": "/api/v1/prints/35/timelapse/frames",
     }
+    assert not routes["info"].called
+    assert not routes["thumbnails"].called
+    # #2055: named by what the output's plate holds, as the print dialog names it.
     assert media["plate_thumbnails"] == [
-        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail"}
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": "demo"}
     ]
     assert media["attachments"] == []
 
@@ -507,6 +709,151 @@ def test_without_a_finish_photo_every_photo_is_a_photo(client: TestClient, model
 
 
 @respx.mock
+def test_an_archive_of_an_odd_extra_data_shape_reads_as_having_none(
+    client: TestClient, model: str
+) -> None:
+    """Review on #2760: ``extra_data`` is free-form in Bambuddy. One archive whose slots
+    or objects are not the shape ScadBuddy reads must not fail its detail."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(
+        35,
+        timelapse_path=None,
+        extra_data={"filament_slots": [{"slot_id": None}], "printable_objects": {"1": 2}},
+    )
+
+    answer = client.get("/api/v1/prints/35")
+
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["slicing"]["filament_slots"] == []
+
+
+@respx.mock
+def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
+    client: TestClient, model: str
+) -> None:
+    """#1860: the slicing, the per-slot filament and Bambuddy's bookkeeping, and any
+    field ScadBuddy does not map yet, by its own name; never a server path."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(
+        35,
+        timelapse_path=None,
+        brand_new_field="kept",
+        nested_field={"a": 1},
+        upload_token="t0ken",
+        storage_dir="/data/archive",
+        printer_ip="10.0.0.5",
+        created_by_username="elan",
+        access_code="12345678",
+        printer_serial="0948AB",
+        shipping_description="kept too",
+        currency_code="EUR",
+        webhook_uri="https://hooks.example/x",
+        cloud_apikey="k",
+        printer_mac="aa:bb:cc:dd:ee:ff",
+        mqtt_credentials="u:p",
+    )
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["slicing"] == {
+        "sliced_for_model": "H2C",
+        "bed_type": "Textured PEI Plate",
+        "layer_height_mm": 0.08,
+        "total_layers": 86,
+        "nozzle_diameter_mm": 0.4,
+        "nozzle_temperature_c": 230,
+        "bed_temperature_c": 70,
+        "objects": ["name-keychain"],
+        "filament_used_mm": 3572.29,
+        "filament_slots": [
+            {"slot_id": 1, "used_grams": 11.34, "filament_type": "PLA", "color": "#00629B"},
+            {"slot_id": 2, "used_grams": 5.02, "filament_type": "PLA", "color": "#FF9425"},
+        ],
+    }
+    record = body["record"]
+    assert record["project_name"] == "3 keychains"
+    assert record["designer"] == "ScadBuddy"
+    assert record["time_accuracy_percent"] == 87.7
+    assert record["filament_actual_grams"] == 16.3
+    assert record["successful_run_count"] == 1
+    assert record["created_at"] == "2026-09-27T03:45:32.515537"
+    other = record["other"]
+    assert other["brand_new_field"] == "kept"
+    assert other["shipping_description"] == "kept too", "a word that merely contains one"
+    assert other["currency_code"] == "EUR", "a currency is no access code"
+    assert "nested_field" not in other, "only scalars"
+    assert not any(name.endswith("_path") for name in other)
+    for private in (
+        "upload_token",
+        "storage_dir",
+        "printer_ip",
+        "created_by_username",
+        "access_code",
+        "printer_serial",
+        "webhook_uri",
+        "cloud_apikey",
+        "printer_mac",
+        "mqtt_credentials",
+    ):
+        assert private not in other, private
+    assert "source_ip" not in json.dumps(body), "the sender's address stays in Bambuddy"
+
+
+@respx.mock
+def test_a_deleted_archive_has_no_slicing_or_record(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_bambuddy_lists()
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["slicing"] is None and body["record"] is None
+
+
+@respx.mock
+def test_the_timelapse_stills_are_jpegs_by_url_with_the_probe(
+    client: TestClient, model: str
+) -> None:
+    """#2512: each still is served as a JPEG from its own URL, not base64 in JSON."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35)
+    routes = mock_detail_reads()
+    recorded = recording("timelapse-thumbnails.json")
+
+    body = client.get("/api/v1/prints/35/timelapse/frames").json()
+
+    assert body["info"]["duration"] == pytest.approx(5.208256)
+    assert body["frames"][0] == {
+        "timestamp": recorded["timestamps"][0],
+        "url": f"/api/v1/prints/35/timelapse/frames/0?v={still_version()}",
+    }
+    assert len(body["frames"]) == len(recorded["thumbnails"])
+    assert "base64" not in json.dumps(body)
+
+    still = client.get("/api/v1/prints/35/timelapse/frames/1")
+
+    assert still.status_code == 200
+    assert still.headers["content-type"] == "image/jpeg"
+    assert still.headers["cache-control"] == "private, max-age=86400"
+    assert still.content == base64.b64decode(recorded["thumbnails"][1])
+    assert still.content.startswith(b"\xff\xd8"), "a JPEG"
+    assert (
+        client.get(f"/api/v1/prints/35/timelapse/frames/{len(body['frames'])}").status_code == 404
+    )
+    # Bambuddy extracted them once for the list and every still.
+    assert routes["thumbnails"].call_count == 1
+
+
+@respx.mock
 def test_a_timelapse_bambuddy_cannot_describe_still_plays(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
@@ -516,14 +863,79 @@ def test_a_timelapse_bambuddy_cannot_describe_still_plays(client: TestClient, mo
     routes["info"].mock(return_value=httpx.Response(500, json={"detail": "ffprobe failed"}))
     routes["thumbnails"].mock(return_value=httpx.Response(500, json={"detail": "ffmpeg failed"}))
 
-    response = client.get("/api/v1/prints/35")
+    response = client.get("/api/v1/prints/35/timelapse/frames")
 
     assert response.status_code == 200
-    assert response.json()["media"]["timelapse"] == {
-        "url": "/api/v1/prints/35/timelapse",
-        "info": None,
-        "poster_frames": [],
-    }
+    assert response.json() == {"info": None, "frames": []}
+    # #2903: the failure is kept a minute, so the poster's request (and the next view)
+    # answer at once rather than having Bambuddy run ffmpeg again.
+    assert client.get("/api/v1/prints/35/timelapse/frames/0").status_code == 404
+    assert routes["thumbnails"].call_count == 1
+
+
+@respx.mock
+def test_a_replaced_timelapse_gives_its_stills_new_urls(client: TestClient, model: str) -> None:
+    """#2903: the browser keeps a still a day, so a new timelapse's stills (and poster)
+    are at new URLs, not the old ones'."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    route = mock_archive(35)
+    mock_detail_reads()
+    before = client.get("/api/v1/prints/35").json()["media"]["timelapse"]["poster_url"]
+    route.mock(
+        return_value=httpx.Response(200, json=archive(35, timelapse_path="archive/35/redone.mp4"))
+    )
+    # As a changed archive is, once the cache's 30 s is up.
+    state(client).components.get(ARCHIVE_CACHE)._entries.clear()
+
+    after = client.get("/api/v1/prints/35").json()["media"]["timelapse"]["poster_url"]
+
+    assert before != after
+    assert (
+        after == f"/api/v1/prints/35/timelapse/frames/0?v={still_version('archive/35/redone.mp4')}"
+    )
+
+
+@respx.mock
+def test_a_print_without_a_timelapse_has_no_stills(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, timelapse_path=None)
+
+    assert client.get("/api/v1/prints/35/timelapse/frames").status_code == 404
+    assert client.get("/api/v1/prints/35/timelapse/frames/0").status_code == 404
+    assert client.get("/api/v1/prints/99/timelapse/frames").status_code == 404, "not a print"
+
+
+@respx.mock
+def test_a_print_still_printing_has_not_finished(client: TestClient, model: str) -> None:
+    """#2362: Bambuddy fills completed_at on a print still printing, about when it
+    created the archive, so the detail read "Finished" 6 s before "Started"."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 152)
+    link(client, output_id, 153)
+    mock_archive(
+        152,
+        status="printing",
+        started_at="2026-10-11T15:12:07.95",
+        completed_at="2026-10-11T15:12:01.99",
+    )
+    mock_archive(
+        153,
+        status="completed",
+        started_at="2026-10-11T15:12:07.95",
+        completed_at="2026-10-11T15:12:01.99",
+    )
+
+    items = {item["archive_id"]: item for item in client.get("/api/v1/prints").json()["items"]}
+
+    assert items[152]["completed_at"] is None
+    assert items[153]["completed_at"] is None, "never before it started"
+    assert items[152]["started_at"] == "2026-10-11T15:12:07.950000"
+    assert client.get("/api/v1/prints/152").json()["completed_at"] is None
 
 
 @respx.mock
@@ -535,6 +947,7 @@ def test_the_detail_of_a_deleted_archive_keeps_scadbuddys_half(
     link(client, output_id, 35, printer_id=1)
     respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
     runs = respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+    mock_bambuddy_lists()
 
     response = client.get("/api/v1/prints/35")
 
@@ -547,6 +960,39 @@ def test_the_detail_of_a_deleted_archive_keeps_scadbuddys_half(
     assert {file["kind"] for file in body["files"]} == {"output_3mf", "preview_glb"}
     assert body["media"]["photos"] == [] and body["media"]["timelapse"] is None
     assert not runs.called
+
+
+@respx.mock
+def test_the_detail_names_a_running_print_s_printer_as_the_list_does(
+    client: TestClient, model: str
+) -> None:
+    """#2363: a print still printing has no run, and the detail showed "#1"."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 36)
+    mock_archive(36, status="printing", run_count=0, timelapse_path=None)
+    respx.get(f"{API}/archives/36/runs").mock(
+        return_value=httpx.Response(200, json={"items": [], "total": 0})
+    )
+
+    body = client.get("/api/v1/prints/36").json()
+
+    assert body["printer_name"] == "3DP-31B-598"
+    assert body["outcome"]["printer_name"] == "3DP-31B-598"
+
+
+@respx.mock
+def test_the_detail_of_a_print_on_a_removed_printer_keeps_the_runs_name(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=7, timelapse_path=None)
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["outcome"]["printer_name"] == "3DP-31B-598", "as its run recorded it"
 
 
 @respx.mock
@@ -580,7 +1026,13 @@ def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
 
     perth = timezone(timedelta(hours=8))
     seen = datetime(2026, 9, 27, 2, 0, tzinfo=perth)  # 2026-09-26 18:00 UTC
-    link = LinkedPrint(output_id="a" * 32, archive_id=35, matched_by="queue_item", first_seen=seen)
+    link = LinkedPrint(
+        subject="output:" + "a" * 32,
+        output_id="a" * 32,
+        archive_id=35,
+        matched_by="queue_item",
+        first_seen=seen,
+    )
 
     def dated(started_at: datetime | None) -> ArchiveDetail:
         return ArchiveDetail(id=35, started_at=started_at)
@@ -589,3 +1041,375 @@ def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
     assert _day(link, dated(datetime(2026, 9, 27, 2, 0, tzinfo=perth))) == date(2026, 9, 26)
     assert _day(link, dated(datetime(2026, 9, 26, 23, 30, tzinfo=UTC))) == date(2026, 9, 26)
     assert _day(link, None) == date(2026, 9, 26)
+
+
+def _print_89(*runs: ArchiveRun) -> print_history.PrintOutcome:
+    """#950's /prints/89: a 15.01 g archive whose one run read a whole spool."""
+    summary = print_history.PrintSummary.model_construct(
+        status="completed", printer_id=1, printer_name=None
+    )
+    archive = ArchiveDetail(id=89, status="completed", filament_used_grams=15.01, cost=13.91)
+    return print_history._outcome(summary, archive, list(runs))
+
+
+def _run(run_id: int, grams: float | None, cost: float | None) -> ArchiveRun:
+    return ArchiveRun(id=run_id, status="completed", filament_used_grams=grams, cost=cost)
+
+
+def test_a_run_reading_far_over_the_archive_is_flagged_and_does_not_set_the_cost() -> None:
+    outcome = _print_89(_run(1, 1004.2, 13.91))
+
+    (run,) = outcome.runs
+    assert run.filament_used_grams == 1004.2, "what Bambuddy recorded is still shown"
+    assert run.filament_reading_suspect
+    # The run's own price per gram, at the archive's 15.01 g.
+    assert run.cost == pytest.approx(0.21)
+    assert outcome.cost == pytest.approx(0.21)
+    assert outcome.filament_used_grams == 15.01
+
+
+def test_runs_that_agree_with_the_archive_are_taken_as_they_are() -> None:
+    outcome = _print_89(_run(1, 14.9, 13.91), _run(2, 6.0, 0.1))
+
+    assert [run.filament_reading_suspect for run in outcome.runs] == [False, False]
+    assert [run.cost for run in outcome.runs] == [13.91, 0.1]
+    assert outcome.cost == 13.91
+
+
+def record_library(client: TestClient, queue_item_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record_sends(
+            PrintSubject.library(89),
+            [PrintSend(queue_item_id=queue_item_id, plate_id=1, printer_id=1)],
+        )
+    )
+
+
+@respx.mock
+def test_library_prints_are_linked_only_for_the_first_unfiltered_page(
+    client: TestClient, model: str
+) -> None:
+    """#1663: a later page or a slug filter cannot show a print linked now."""
+    configure(client)
+    record_library(client, 51)
+    item = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "pending"})
+    )
+    mock_bambuddy_lists()
+
+    later = client.get("/api/v1/prints", params={"cursor": "100"})
+    filtered = client.get("/api/v1/prints", params={"slug": model})
+
+    assert later.status_code == 200, later.text
+    assert filtered.status_code == 200, filtered.text
+    assert not item.called
+
+    first = client.get("/api/v1/prints")
+
+    assert first.status_code == 200, first.text
+    assert item.call_count == 1
+
+
+@respx.mock
+def test_the_list_answers_when_linking_a_library_print_fails_on_the_database(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1662: the link is logged and retried on the next list, never a 500."""
+    configure(client)
+    record_library(client, 51)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing", "archive_id": 90})
+    )
+
+    async def failing(self: PrintLinkStore, *args: object) -> None:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(PrintLinkStore, "link_library", failing)
+    mock_bambuddy_lists()
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["items"] == []
+
+
+def link_library(client: TestClient, file_id: int, archive_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record(
+            PrintSubject.library(file_id),
+            PrintLink(archive_id=archive_id, matched_by="queue_item", plate_id=2),
+        )
+    )
+
+
+def library_file_route(
+    file_id: int, *, deleted: bool = False, filename: str = "bracket.3mf"
+) -> respx.Route:
+    # The detail names the printed plate from the file's plates (#2055); none by default.
+    respx.get(f"{API}/library/files/{file_id}/plates").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(200, json={"file_id": file_id, "plates": []})
+        )
+    )
+    return respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(
+                200,
+                json={
+                    "id": file_id,
+                    "filename": filename,
+                    "file_type": "3mf",
+                    "file_size": 1234,
+                },
+            )
+        )
+    )
+
+
+@respx.mock
+def test_a_library_prints_files_name_the_file_and_its_preview(client: TestClient) -> None:
+    """#1753 (H5, F8): the file printed, and a preview of the plate printed, as an
+    output's print lists its 3MF and preview."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    files = {file["kind"]: file for file in detail.json()["files"]}
+    assert files["library_file"] == {
+        "kind": "library_file",
+        "name": "bracket.3mf",
+        "size": 1234,
+        "url": "/api/v1/print/library/89/file",
+    }
+    assert files["preview_glb"] == {
+        "kind": "preview_glb",
+        "name": "bracket.glb",
+        "size": None,
+        "url": "/api/v1/print/library/89/preview.glb?plate=2",
+    }
+    assert {"sliced", "source"} <= files.keys()
+
+
+@respx.mock
+def test_a_library_prints_plate_is_named_by_what_it_holds(client: TestClient) -> None:
+    """#2055: the plate the archive printed, named from the library file's plates."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": 89,
+                "filename": "bracket.3mf",
+                "plates": [
+                    {"index": 1, "name": "Base", "has_thumbnail": True},
+                    {"index": 2, "name": "Lid", "has_thumbnail": True},
+                ],
+            },
+        )
+    )
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": "Lid"}
+    ]
+
+
+@pytest.mark.parametrize("damage", ["deleted", "not-a-zip"])
+@respx.mock
+def test_an_output_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient, model: str, damage: str
+) -> None:
+    """#2097: an output whose model.3mf is gone or damaged still answers, unnamed."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, plate_id=1)
+    mock_archive(35)
+    mock_detail_reads()
+    model_3mf = state(client).outputs.directory(output_id) / MODEL_NAME
+    if damage == "deleted":
+        model_3mf.unlink()
+    else:
+        model_3mf.write_bytes(b"not a zip")
+
+    detail = client.get("/api/v1/prints/35")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": None}
+    ]
+
+
+@respx.mock
+def test_a_library_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient,
+) -> None:
+    """#2055: the name is advisory; the detail still answers, unnamed."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": None}
+    ]
+
+
+@respx.mock
+def test_a_library_print_whose_file_is_gone_lists_bambuddys_files_alone(
+    client: TestClient,
+) -> None:
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    library_file_route(89, deleted=True)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+
+
+@respx.mock
+def test_a_library_print_whose_file_cannot_be_read_still_has_its_detail(
+    client: TestClient,
+) -> None:
+    """#1755: the print is Bambuddy's archive; the file only names it and lists its files."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["library_file_name"] is None
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+
+
+# --- one library file's history (#1755) ------------------------------------------
+
+
+@respx.mock
+def test_the_list_filters_by_library_file_and_names_each_print_by_its_file(
+    client: TestClient, model: str
+) -> None:
+    """H4 and F9: one file's prints, each named by the file as Bambuddy has it now; an
+    output's print names no file."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(35)
+    mock_archive(90)
+    unasked = mock_archive(91)
+    library_file_route(89)
+    library_file_route(77, filename="hook.stl")
+
+    listed = client.get("/api/v1/prints", params={"library_file_id": 89})
+
+    assert listed.status_code == 200, listed.text
+    [item] = listed.json()["items"]
+    assert (item["archive_id"], item["library_file_id"]) == (90, 89)
+    assert item["library_file_name"] == "bracket.3mf"
+    assert not unasked.called, "another file's prints are not read from Bambuddy"
+    everything = client.get("/api/v1/prints").json()["items"]
+    names = {item["archive_id"]: item["library_file_name"] for item in everything}
+    assert names == {91: "hook.stl", 90: "bracket.3mf", 35: None}
+
+
+@respx.mock
+def test_a_library_print_whose_file_is_gone_or_unreadable_is_still_listed(
+    client: TestClient,
+) -> None:
+    """The name is a label: a file deleted in Bambuddy, or a read that fails, leaves it
+    out rather than the print."""
+    configure(client)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(90)
+    mock_archive(91)
+    library_file_route(89, deleted=True)
+    respx.get(f"{API}/library/files/77").mock(return_value=httpx.Response(500))
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert [(item["archive_id"], item["library_file_name"]) for item in listed.json()["items"]] == [
+        (91, None),
+        (90, None),
+    ]
+
+
+@respx.mock
+def test_the_text_filter_matches_a_library_prints_file_name(client: TestClient) -> None:
+    configure(client)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(90, print_name="plate 1")
+    mock_archive(91, print_name="plate 1")
+    library_file_route(89)
+    library_file_route(77, filename="hook.stl")
+
+    items = client.get("/api/v1/prints", params={"q": "HOOK"}).json()["items"]
+
+    assert [item["archive_id"] for item in items] == [91]
+
+
+def test_a_template_and_a_library_file_cannot_both_filter(client: TestClient, model: str) -> None:
+    configure(client)
+
+    response = client.get("/api/v1/prints", params={"slug": model, "library_file_id": 89})
+
+    assert response.status_code == 422, response.text
+
+
+@respx.mock
+def test_one_library_files_history_finds_its_reprints_made_inside_bambuddy(
+    client: TestClient,
+) -> None:
+    """H3: a reprint of the file's slice from Bambuddy's own library has no queue item
+    of ScadBuddy's; its hash names it, as an output's reprint is found."""
+    configure(client)
+    uploads = state(client).uploads
+    subject = PrintSubject.library(89).run_subject
+    asyncio.run(uploads.record(subject, LibraryCopy(id=12, folder_id=None, target_key="H2C")))
+    asyncio.run(uploads.record_sliced(subject, 12, SlicedCopy(id=81)))
+    asyncio.run(uploads.record_slice_hash(subject, 81, "f0" * 32))
+    mock_archive(92)
+    mock_bambuddy_lists(
+        {"id": 92, "printer_id": 1, "status": "completed", "content_hash": "f0" * 32},
+        {"id": 93, "printer_id": 1, "status": "completed", "content_hash": "other"},
+    )
+    library_file_route(89)
+
+    listed = client.get("/api/v1/prints", params={"library_file_id": 89})
+
+    assert listed.status_code == 200, listed.text
+    assert [item["archive_id"] for item in listed.json()["items"]] == [92]
+
+
+def test_every_recorded_archive_status_is_known() -> None:
+    """#2904: a status Bambuddy starts writing that is in neither list fails here, rather
+    than a running print quietly reading "Finished"."""
+    statuses = {row["status"] for row in recording("archives-full.json")}
+    assert statuses <= UNFINISHED_STATUSES | FINISHED_STATUSES, statuses
+    assert "printing" in statuses & UNFINISHED_STATUSES

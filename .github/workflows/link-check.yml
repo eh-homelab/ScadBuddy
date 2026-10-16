@@ -1,0 +1,66 @@
+# Markdown links in docs/, README.md, CLAUDE.md and every SKILL.md must resolve
+# (#1926, from #259). Weekly and on demand only, never on a PR, so an external
+# site going down never blocks a merge; it is not a required check. A failure
+# opens (or leaves open) one issue. Fix the link, or exclude it in the args
+# below with a comment saying why.
+name: Link check
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # v2.9.0, which runs lychee v0.24.2. --include-fragments also checks
+      # #anchors, in-repo ones included. 429 is a rate limit, not a dead link.
+      # Excluded, each a live page that answers a bot with an error (#2622):
+      #   npmjs.com and makerworld.com answer 403 to any client without a
+      #   browser's cookies (bot protection), whatever the page. Nothing checks
+      #   those links now, so a renamed package or a removed MakerWorld model
+      #   goes unflagged: check them by hand when editing a file that has one,
+      #   in docs/ (docs/user-guide.md and the AI integration spec today) or
+      #   elsewhere;
+      #   github.com/eh-homelab/clusters is a private repository, a 404 to an
+      #   unauthenticated request. Only that repository: the pattern ends at a
+      #   path, query or fragment, so an eh-homelab/clusters-* one is checked;
+      #   *.internal.nullreference.io are the homelab's LAN-only hosts, which a
+      #   GitHub runner cannot reach (every one times out).
+      - name: lychee
+        id: lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --include-fragments
+            --max-concurrency 16
+            --accept '100..=103,200..=299,429'
+            --exclude '^https://www\.npmjs\.com/'
+            --exclude '^https://makerworld\.com/'
+            --exclude '^https://github\.com/eh-homelab/clusters([/?#]|$)'
+            --exclude '^https?://[^/]*\.internal\.nullreference\.io'
+            'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
+          fail: true
+      - name: Open an issue
+        if: failure() && steps.lychee.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Link check: broken Markdown links"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number' | grep -q .; then
+            echo "already open"; exit 0
+          fi
+          gh issue create --title "$title" --label documentation --body \
+            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason."

@@ -16,6 +16,15 @@ from pydantic import BaseModel
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import Archive, PrinterStatus
 from scadbuddy.bambuddy.resolver import FlowType
+from scadbuddy.render.plate import bed_types_for
+from scadbuddy.render.plate_profiles import BED_TYPE_LABELS
+
+#: Spellings Bambuddy's ``SliceRequest.bed_type`` also takes, by the ``curr_bed_type``
+#: they name (#2366): the menu once offered both, so a remembered choice may be either.
+BED_TYPE_ALIASES: dict[str, str] = {
+    "Cool Plate (SuperTack)": "Supertack Plate",
+    "Smooth PEI Plate": "High Temp Plate",
+}
 
 _RAN = {"completed", "cancelled", "failed"}
 _OLDEST = datetime.min.replace(tzinfo=UTC)
@@ -73,6 +82,37 @@ def plate_warning(
         message=(
             f"The {printer_name or 'printer'}'s last print used {last}. "
             f"Swap to {chosen} before this starts."
+        ),
+    )
+
+
+def canonical_bed_type(name: str) -> str:
+    """The ``curr_bed_type`` ``name`` spells."""
+    return BED_TYPE_ALIASES.get(name, name)
+
+
+def bed_type_labels(types: list[str]) -> dict[str, str]:
+    """The label Bambu Studio shows for each of ``types`` it names."""
+    return {name: BED_TYPE_LABELS[name] for name in types if name in BED_TYPE_LABELS}
+
+
+def plate_unlisted_warning(
+    chosen: str, model: str | None, printer_name: str | None
+) -> FilamentWarning | None:
+    """A plate the printer's model does not take (#2366): it sets the bed temperature,
+    so a wrong one is a print problem. Nothing is said of a model the profiles do not
+    know, which is offered every plate."""
+    listed = bed_types_for(model)
+    if canonical_bed_type(chosen) in listed:
+        return None
+    named = ", ".join(BED_TYPE_LABELS.get(name, name) for name in listed)
+    # Named as the plate menu names it, like the plates it lists (#2857).
+    label = BED_TYPE_LABELS.get(canonical_bed_type(chosen), chosen)
+    return FilamentWarning(
+        kind="plate-not-listed",
+        message=(
+            f"The {printer_name or 'printer'} does not list {label} among its plates "
+            f"({named}). Pick one of those."
         ),
     )
 

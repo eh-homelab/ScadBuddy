@@ -5,23 +5,29 @@ import json
 import shutil
 import threading
 import zipfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 import psycopg
 import pytest
 import trimesh
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import GLYPH_CHECK_TIMEOUT
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
+from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import plates_of, single_plate
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
@@ -36,6 +42,7 @@ from scadbuddy.render.jobs import (
     Job,
     JobResult,
     PartInfo,
+    PartSource,
     PlateLayout,
     Prepared,
     extruder_order,
@@ -47,11 +54,14 @@ from scadbuddy.render.jobs import (
     solid_parts,
     unreadable_colour_warnings,
 )
+from scadbuddy.render.objects3mf import ReadObject, read_objects
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
-from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender, solid_file, solid_mesh
+from scadbuddy.render.split import ColourPart, Paint, split_by_material
 from tests.conftest import PgPool, write_openscad_3mf
+from tests.meshmodel.test_paint import GREEN, ORANGE, painted_box, rendered, written
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -289,6 +299,7 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -336,6 +347,7 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -449,6 +461,7 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -522,6 +535,7 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -563,6 +577,7 @@ async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> 
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -621,6 +636,7 @@ async def test_a_render_holds_the_checkouts_it_resolved(paths: DataPaths) -> Non
             diagnostics_dropped=0,
             notes=(),
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -725,6 +741,7 @@ async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -
             diagnostics=(),
             diagnostics_dropped=0,
             plates=None,
+            objects=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -804,6 +821,51 @@ async def test_a_render_that_drew_nothing_says_which_file_it_could_not_open(
     assert error.warnings[0] == MISSING_FILE_FAILED_WARNING.format(name="pic.svg")
 
 
+def _plate_two(fails: bool) -> object:
+    """A two-plate render whose plate 2 could not open pic.svg: OpenSCAD fails on it
+    (``fails``), or it renders and draws nothing (#451)."""
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        plate = _plate_of(kwargs.get("extra_defines"))
+        missing = ("pic.svg",) if plate == 2 else ()
+        if plate == 2 and fails:
+            raise OpenSCADError("openscad exited with 1", ["boom"], 1, missing_files=missing)
+        write_openscad_3mf(out, [] if plate == 2 else [TRAY])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=missing,
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=2,
+            objects=None,
+        )
+
+    return render
+
+
+@pytest.mark.parametrize("fails", [True, False], ids=["openscad-failed", "no-geometry"])
+async def test_a_failed_plate_keeps_its_warnings_and_missing_files(
+    paths: DataPaths, fails: bool
+) -> None:
+    async def no_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    error = await _failed_render(paths, _plate_two(fails), render_solids=no_solids)
+
+    assert str(error).startswith("plate 2 of 2")
+    assert error.missing_files == ("pic.svg",)
+    assert error.warnings == [
+        MISSING_FILE_FAILED_WARNING.format(name="pic.svg"),
+        *unreadable_colour_warnings(
+            _colour_schema(("base_color", "#0047BB"), ("text_color", "#0047BB")),
+            {"text_color": "not-a-colour"},
+        ),
+    ]
+
+
 # ── #289: a template that asks for more than one plate ────────────────────────
 
 TRAY = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))
@@ -839,6 +901,7 @@ def _plated_render(
             diagnostics_dropped=0,
             notes=(),
             plates=plates,
+            objects=None,
         )
 
     return render, asked
@@ -849,10 +912,12 @@ async def _render_plated(
     drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
     plates: int | None,
     solids: object | None = None,
+    render: object | None = None,
 ) -> tuple[JobResult, list[int]]:
     paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    render, asked = _plated_render(drawn, plates)
+    plated, asked = _plated_render(drawn, plates)
+    render = render or plated
     schema = _colour_schema(
         ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
     )
@@ -944,6 +1009,30 @@ async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
 async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
     with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
         await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)
+
+
+async def test_a_plate_openscad_refuses_as_empty_fails_naming_it(paths: DataPaths) -> None:
+    """#1328: OpenSCAD will not export an empty plate at all; it logs "Current top
+    level object is empty." and exits 1 before there is a 3MF to split."""
+    render, _ = _plated_render({0: [TRAY, LID], 1: [TRAY]}, plates=2)
+
+    async def refuse_plate_two(*args: object, **kwargs: object) -> object:
+        if _plate_of(kwargs.get("extra_defines")) == 2:
+            raise OpenSCADError(
+                "openscad exited with 1",
+                ["ECHO: plates = 2", "Current top level object is empty."],
+                1,
+            )
+        return await render(*args, **kwargs)  # type: ignore[operator]
+
+    with pytest.raises(OpenSCADError) as raised:
+        await _render_plated(paths, {}, plates=2, render=refuse_plate_two)
+
+    message = str(raised.value)
+    assert message.startswith("plate 2 of 2 rendered no geometry")
+    assert "echo(plates = 2)" in message
+    assert raised.value.log_tail == ["ECHO: plates = 2", "Current top level object is empty."]
+    assert raised.value.returncode == 1
 
 
 # ── #424: the stages the render activities run, each from what is on disk ─────
@@ -1162,6 +1251,58 @@ async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
     assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
 
 
+async def test_the_last_stage_warns_of_a_glyph_the_font_lacks(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2358: ``finish_piece_stage`` gives the missing-glyph warning, asking fontconfig
+    with the short advisory timeout."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="word", type="string", initial="Hi 😀"),
+            Parameter(name="font", type="font", initial="Lobster Two"),
+        ]
+    )
+    asked: list[tuple[str, float]] = []
+
+    def coverage(font: str, env: object, timeout: float) -> tuple[str, list[tuple[int, int]]]:
+        asked.append((font, timeout))
+        return "Lobster Two", [(0x20, 0x7E)]
+
+    monkeypatch.setattr(jobs, "font_coverage", coverage)
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, {}, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        await render_solids_stage(
+            prepared, {}, work, output, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        result = await finish_piece_stage(
+            prepared,
+            {},
+            work,
+            output,
+            config=config,
+            paths=paths,
+            slug="demo",
+            thumbnail_executor=None,
+            schema=schema,
+        )
+
+    assert "font 'Lobster Two' has no glyph for 😀; the text leaves them out" in result.warnings
+    # What is left of the one shared wait, which starts at the short advisory timeout.
+    [(font, timeout)] = asked
+    assert font == "Lobster Two"
+    assert 0 < timeout <= GLYPH_CHECK_TIMEOUT
+
+
 async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:
     """The colour warnings come from the schema the render used, derived while the
     checkouts were held (#253), not from a second read once the lease is gone."""
@@ -1219,3 +1360,351 @@ def test_a_result_stored_before_the_pins_were_recorded_still_loads() -> None:
     stored = _result().model_dump(mode="json")
     del stored["libraries"]
     assert JobResult.model_validate(stored).libraries == []
+
+
+async def test_a_colour_fallback_leaves_no_span_in_error(
+    paths: DataPaths, tmp_path: Path, spans: InMemorySpanExporter
+) -> None:
+    """Spec 2026-10-01 §6: spans end ERROR exactly when the job fails. One colour's
+    wrapper render failing is that colour's fallback (spec 09-22 §6.3), not a failure."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    solid = write_openscad_3mf(tmp_path / "solid.3mf", [TRAY])
+    binary = tmp_path / "fake-openscad"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *"#FF1493"*) exit 3;; esac\n'
+        f'prev=; for a; do [ "$prev" = -o ] && cp "{solid}" "$a"; prev=$a; done\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    schema = _colour_schema(("floor_color", "#0047BB"), ("wall_color", "#FF1493"))
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    with (
+        mock.patch.object(jobs, "render_3mf", _stage_openscad({0: [TRAY, WALL]}, None)),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+    ):
+        result, _ = await jobs.render_job(
+            _job("j"),
+            config=replace(CONFIG, openscad=str(binary)),
+            paths=paths,
+            assets=AssetStore(paths.assets),
+        )
+
+    assert any(w.startswith("#FF1493: no closed solid") for w in result.warnings)
+    finished = spans.get_finished_spans()
+    assert [s.name for s in finished if s.status.status_code is StatusCode.ERROR] == []
+    fallbacks = [
+        s
+        for s in finished
+        if s.name == "render.solid" and (s.attributes or {}).get("scadbuddy.solid.fallback")
+    ]
+    assert len(fallbacks) == 1
+    # The exit code is the export's, recorded once (review 5 of #1064).
+    assert "scadbuddy.openscad.exit_code" not in (fallbacks[0].attributes or {})
+    exports = [s for s in finished if s.name == "openscad.export"]
+    assert sorted(
+        cast(int, (s.attributes or {})["scadbuddy.openscad.exit_code"]) for s in exports
+    ) == [0, 3]
+
+
+# ── #956: a template declares its objects with `echo(objects = N)` ────────────
+
+
+def _define_of(extra_defines: object, name: str) -> int | None:
+    defines = list(extra_defines) if isinstance(extra_defines, list | tuple) else []
+    for define in defines:
+        if isinstance(define, str) and define.startswith(f"${name}="):
+            return int(define.removeprefix(f"${name}="))
+    return None
+
+
+async def _object_layout(
+    tmp_path: Path,
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]],
+    *,
+    plates: int = 1,
+    objects: int,
+) -> tuple[PlateLayout, list[tuple[int | None, int | None]], list[object]]:
+    """`plate_layout` with a stand-in OpenSCAD drawing ``drawn[($plate, $object)]``;
+    a key missing from ``drawn`` draws nothing, as OpenSCAD refuses to export it."""
+    asked: list[tuple[int | None, int | None]] = []
+    solid_defines: list[object] = []
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        key = (
+            _define_of(kwargs.get("extra_defines"), "plate"),
+            _define_of(kwargs.get("extra_defines"), "object"),
+        )
+        asked.append(key)
+        if not drawn.get(key):
+            raise OpenSCADError("openscad exited with 1", ["Current top level object is empty."], 1)
+        write_openscad_3mf(out, drawn[key])
+        return mock.Mock(log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0)
+
+    async def solids(*args: object, **kwargs: object) -> SolidRender:
+        solid_defines.append(kwargs.get("extra_defines"))
+        return SolidRender()
+
+    preview = tmp_path / "preview.3mf"
+    write_openscad_3mf(preview, drawn[(None, None)])
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "render_solids", solids),
+    ):
+        layout = await jobs.plate_layout(
+            tmp_path / "model.scad",
+            _colour_schema(("floor_color", "#0047BB"), ("lid_color", "#FFFFFF")),
+            {},
+            split_by_material(preview),
+            plates,
+            tmp_path,
+            config=CONFIG,
+            objects=objects,
+        )
+    return layout, asked, solid_defines
+
+
+async def test_each_declared_object_is_its_own_render_and_its_own_parts(tmp_path: Path) -> None:
+    layout, asked, solid_defines = await _object_layout(
+        tmp_path, {(None, None): [TRAY, LID], (None, 1): [TRAY], (None, 2): [LID]}, objects=2
+    )
+
+    assert asked == [(None, 1), (None, 2)]
+    # The per-colour solids are drawn per object too.
+    assert [_define_of(defines, "object") for defines in solid_defines] == [1, 2]
+    [plate] = layout.plates
+    assert [part.colour for part in plate.parts] == ["#0047BB", "#FFFFFF"]
+    assert plate.objects == (1, 2)
+    assert plate.extruders == (1, 2)
+    assert layout.warnings == []
+
+
+async def test_an_object_on_some_plates_only_is_on_those(tmp_path: Path) -> None:
+    layout, asked, _ = await _object_layout(
+        tmp_path,
+        {(None, None): [TRAY, LID], (1, 1): [TRAY], (2, 2): [LID]},
+        plates=2,
+        objects=2,
+    )
+
+    assert asked == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    assert [plate.objects for plate in layout.plates] == [(1,), (1,)]
+    assert [[part.colour for part in plate.parts] for plate in layout.plates] == [
+        ["#0047BB"],
+        ["#FFFFFF"],
+    ]
+
+
+async def test_an_object_drawn_on_no_plate_fails_naming_it(tmp_path: Path) -> None:
+    with pytest.raises(OpenSCADError, match=r"object 2 of 2 rendered no geometry.*\$object = 2"):
+        await _object_layout(tmp_path, {(None, None): [TRAY], (None, 1): [TRAY]}, objects=2)
+
+
+async def test_a_plate_that_draws_no_object_still_fails_as_an_empty_plate(
+    tmp_path: Path,
+) -> None:
+    """#956 review: with plates and objects both declared, a plate that draws none of
+    its objects is the empty plate it always was, named as one."""
+    with pytest.raises(OpenSCADError, match=r"plate 2 of 2 rendered no geometry.*\$plate = 2"):
+        await _object_layout(
+            tmp_path,
+            {(None, None): [TRAY, LID], (1, 1): [TRAY], (1, 2): [LID]},
+            plates=2,
+            objects=2,
+        )
+
+
+async def test_a_colour_only_one_object_draws_is_named_by_plate_and_object(
+    tmp_path: Path,
+) -> None:
+    """#956 review: the warning's short label came from str.replace, which garbled
+    "object 3 of 12" on a one-plate layout; it is built from the numbers now."""
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]] = {
+        (None, n): [TRAY] for n in range(1, 13)
+    }
+    drawn[(None, None)] = [TRAY]
+    drawn[(None, 3)] = [TRAY, LID]
+    layout, _, _ = await _object_layout(tmp_path, drawn, objects=12)
+
+    assert layout.warnings == [
+        "object 3: #FFFFFF is not in the everything-at-once render; it gets extruder 2"
+    ]
+
+
+async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
+    with pytest.raises(OpenSCADError, match="asks for 17 objects"):
+        await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=jobs.MAX_OBJECTS + 1)
+
+
+async def test_plates_times_objects_past_the_render_cap_fails_before_rendering(
+    tmp_path: Path,
+) -> None:
+    """#3250: each count was capped on its own, so 16 plates of 16 objects ran 256
+    OpenSCAD renders in one job. The renders a job runs are capped as a whole."""
+    plates, objects = 2, jobs.MAX_RENDERS // 2 + 1
+    assert plates <= jobs.MAX_PLATES and objects <= jobs.MAX_OBJECTS
+    # Every plate draws every object, so nothing but the cap stops the layout.
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]] = {
+        (p, o): [TRAY] for p in range(1, plates + 1) for o in range(1, objects + 1)
+    }
+    drawn[(None, None)] = [TRAY]
+    with pytest.raises(OpenSCADError, match=f"{plates} plates of {objects} objects"):
+        await _object_layout(tmp_path, drawn, plates=plates, objects=objects)
+
+
+async def test_a_layouts_objects_survive_saving_it(tmp_path: Path) -> None:
+    layout, _, _ = await _object_layout(
+        tmp_path, {(None, None): [TRAY, LID], (None, 1): [TRAY], (None, 2): [LID]}, objects=2
+    )
+    layout.save(tmp_path / "layout.json")
+
+    loaded = PlateLayout.load(tmp_path / "layout.json")
+
+    assert loaded.plates[0].objects == (1, 2)
+    # One object is written as before, with no object numbers at all.
+    single = json.loads((tmp_path / "layout.json").read_text())["plates"][0]["parts"]
+    assert "object" not in single[0] and single[1]["object"] == 2
+
+
+async def _render_painted(
+    paths: DataPaths, sabotage: Callable[[Path], None] | None = None
+) -> tuple[JobResult, tuple[str, ...]]:
+    """A one-box mesh model with a painted part, rendered through `render_job` with the
+    OpenSCAD calls faked; ``sabotage`` damages the model's directory first."""
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    mesh, codes = painted_box()
+    read = [
+        ReadObject("Box", 1, [ColourPart(0, "Body", ORANGE, mesh, Paint(codes, (ORANGE, GREEN)))])
+    ]
+    scene = written(model_dir, read)
+    world = rendered(model_dir, scene, ORANGE)
+    if sabotage is not None:
+        sabotage(model_dir)
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Body", f"{ORANGE}00", world)])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
+            objects=None,
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        colours, work_dir = args[3], args[4]
+        assert isinstance(colours, list) and isinstance(work_dir, Path)
+        meshes = {}
+        for index, colour in enumerate(colours, start=1):
+            path = solid_file(work_dir, index)
+            write_openscad_3mf(path, [("Body", f"{colour}00", world)])
+            found = solid_mesh(path)
+            assert found is not None
+            meshes[colour] = found
+        return SolidRender(meshes=meshes)
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+    return result, codes
+
+
+async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
+    """Spec 2026-10-11 §7: the solid of a painted part's colour carries the part's codes
+    into model.3mf, through the layout that `finish_piece` and an output re-read; the
+    colours the painting uses get filaments."""
+    result, codes = await _render_painted(paths)
+    assert result.colors == [ORANGE, GREEN]
+    assert [(p.colour, p.extruder) for p in result.parts] == [(ORANGE, 1), (GREEN, 2)]
+    [obj] = read_objects((paths.root / result.model_3mf).read_bytes(), ReadBudget())
+    [part] = obj.parts
+    assert part.paint is not None and part.paint.codes == codes
+    layout = PlateLayout.load(paths.cache / "render-job" / "p" / LAYOUT_NAME)
+    [loaded] = layout.plates[0].parts
+    assert loaded.paint == Paint(codes, (ORANGE, GREEN))
+    assert layout.sources[0][0].paint == "paint-1-1.json"
+
+
+def _delete_meshes(model_dir: Path) -> None:
+    for file in model_dir.rglob("*.3mf"):
+        file.unlink()
+
+
+def _garble_meshes(model_dir: Path) -> None:
+    for file in model_dir.rglob("*.3mf"):
+        file.write_bytes(b"not a zip")
+
+
+def _break_scene(model_dir: Path) -> None:
+    (model_dir / SCENE_NAME).write_text('{"objects": 3', encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "sabotage",
+    [_delete_meshes, _garble_meshes, _break_scene],
+    ids=["no-mesh-file", "garbled-mesh", "bad-scene"],
+)
+async def test_an_unreadable_painting_costs_the_painting_not_the_render(
+    paths: DataPaths, sabotage: Callable[[Path], None]
+) -> None:
+    result, _ = await _render_painted(paths, sabotage)
+    assert result.colors == [ORANGE]
+    assert jobs.PAINT_NOT_CARRIED in result.warnings
+    layout = PlateLayout.load(paths.cache / "render-job" / "p" / LAYOUT_NAME)
+    assert layout.plates[0].parts[0].paint is None
+    assert layout.sources[0][0].paint is None
+
+
+def test_a_non_mesh_layout_comes_back_identical_with_no_warnings(tmp_path: Path) -> None:
+    mesh = trimesh.creation.box((1, 1, 1))
+    part = ColourPart(1, "Color 1", "#FF0000", mesh)
+    layout = PlateLayout(
+        [single_plate([part])],
+        ["#FF0000"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    painted = jobs.paint_layout(layout, tmp_path / "model.scad", {}, tmp_path)
+    assert painted is layout
+    assert painted.warnings == []
+
+
+def test_a_layout_part_without_paint_is_saved_as_before(tmp_path: Path) -> None:
+    """Regression guard: no "paint" key unless a part carries paint, and a layout
+    written before still loads."""
+    mesh = trimesh.creation.box((1, 1, 1))
+    raw = tmp_path / RAW_RENDER_NAME
+    write_openscad_3mf(raw, [("Color 1", "#FF000000", mesh)])
+    part = ColourPart(1, "Color 1", "#FF0000", mesh)
+    layout = PlateLayout(
+        [single_plate([part])],
+        ["#FF0000"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    layout.save(tmp_path / LAYOUT_NAME)
+    entry = json.loads((tmp_path / LAYOUT_NAME).read_text())["plates"][0]["parts"][0]
+    assert "paint" not in entry
+    assert PlateLayout.load(tmp_path / LAYOUT_NAME).plates[0].parts[0].paint is None

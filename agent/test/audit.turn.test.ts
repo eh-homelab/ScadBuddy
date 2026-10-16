@@ -85,10 +85,10 @@ describe('TurnAuditor', () => {
       await turn.observe(call(id))
       void gate({ toolName: 'mcp__scadbuddy__print_output', input: {}, toolUseId: id, tier: 'outward', signal: new AbortController().signal })
     }
-    const started = Date.now()
+    const started = performance.now()
     await turn.finish('the turn was interrupted')
     // One after another would be 4 × 200 ms.
-    expect(Date.now() - started).toBeLessThan(500)
+    expect(performance.now() - started).toBeLessThan(500)
     expect(entries.map((e) => e.toolUseId).sort()).toEqual(ids)
     expect(entries.every((e) => e.outcome === 'error' && e.detail === 'no result: the turn was interrupted')).toBe(true)
   })
@@ -105,5 +105,26 @@ describe('TurnAuditor', () => {
     await turn.observe(call('r1'))
     await turn.observe(event({ type: 'tool.result', sessionId: 's', id: 'r1', ok: true, summary: 'x' }))
     expect(entries).toEqual([expect.objectContaining({ toolUseId: 'r1', outcome: 'ok' })])
+  })
+
+  it("never records a workspace_size the model put in an upload's input (#2530)", async () => {
+    const { log, entries } = stubLog()
+    const summarised: Record<string, unknown>[] = []
+    log.summarise = (_tool, input) => {
+      summarised.push(input)
+      return JSON.stringify(input)
+    }
+    const turn = new TurnAuditor(log, {
+      sessionId: 's',
+      turnId: 't',
+      actor: { kind: 'browser', id: 'browser', label: 'You' },
+      tierOf: () => 'write',
+      secrets: () => [],
+    })
+    const input = { workspace_path: 'box.scad', workspace_sha256: 'a'.repeat(64), workspace_size: '1 byte' }
+    await turn.observe(event({ type: 'tool.call', sessionId: 's', id: 'u1', name: 'mcp__scadbuddy__import_model', input, risk: 'write' }))
+    await turn.observe(event({ type: 'tool.result', sessionId: 's', id: 'u1', ok: true, summary: 'x' }))
+    expect(summarised).toEqual([{ workspace_path: 'box.scad', workspace_sha256: 'a'.repeat(64) }])
+    expect(entries).toEqual([expect.objectContaining({ toolUseId: 'u1', inputSummary: expect.not.stringContaining('workspace_size') })])
   })
 })

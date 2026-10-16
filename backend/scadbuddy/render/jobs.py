@@ -6,14 +6,15 @@ import logging
 import os
 import secrets
 import shutil
-import threading
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
+    contextmanager,
     nullcontext,
     suppress,
 )
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.metrics import Metrics, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -31,7 +33,14 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
+from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.fonts import (
+    GLYPH_CHECK_TIMEOUT,
+    font_coverage,
+    font_families,
+    missing_glyphs,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
@@ -42,6 +51,8 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.meshmodel.paint import carry_paint, read_carried, turned, write_carried
+from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
@@ -78,6 +89,12 @@ MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
 #: The most plates a template may ask for with `echo(plates = N)`. Each plate is a
 #: render plus a solid render per colour of its own, so this bounds a job's cost.
 MAX_PLATES = 16
+#: Most objects a template may declare with `echo(objects = N)` (#956): each is a render.
+MAX_OBJECTS = 16
+#: Most OpenSCAD renders one layout runs, plates times objects (#3250), each with a solid
+#: render per colour: the bound a job had before objects, so 16 plates of 16 objects
+#: cannot run 256.
+MAX_RENDERS = 16
 
 
 def unreadable_colour_warnings(
@@ -94,6 +111,45 @@ def unreadable_colour_warnings(
             warnings.append(
                 f"colour parameter {parameter.name!r} is {value!r}, not a colour; "
                 "it gets no extruder"
+            )
+    return warnings
+
+
+def missing_glyph_warnings(
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    coverage: Callable[[str, float], tuple[str, list[tuple[int, int]]] | None],
+    budget: float = GLYPH_CHECK_TIMEOUT,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[str]:
+    """A warning for each font parameter whose family has no glyph for characters in
+    the model's text parameters (#2358): OpenSCAD's ``text()`` leaves those out without
+    a word, so an emoji renders as a gap. Every text parameter is checked against every
+    font parameter, as nothing says which text a font draws: a string that never
+    reaches ``text()`` (a label, a file name, a mode) can raise a warning too.
+    docs/user-guide.md says so. ``coverage`` is given what is left of ``budget``, one
+    wait shared by every font, so a wedged fontconfig costs the render ``budget`` once,
+    not per font; a font past it gets no check."""
+    texts = "".join(
+        str(params.get(p.name, p.initial) or "") for p in schema.parameters if p.type == "string"
+    )
+    if not texts:
+        return []
+    warnings: list[str] = []
+    deadline = clock() + budget
+    for parameter in schema.parameters:
+        if parameter.type != "font":
+            continue
+        font = str(params.get(parameter.name, parameter.initial) or "")
+        if not font_families(font):
+            continue
+        left = deadline - clock()
+        if left <= 0:
+            break
+        missing = missing_glyphs(font, texts, coverage(font, left))
+        if missing:
+            warnings.append(
+                f"font {font!r} has no glyph for {' '.join(missing)}; the text leaves them out"
             )
     return warnings
 
@@ -174,13 +230,20 @@ def plate_defines(index: int) -> list[str]:
     return ["-D", f"$plate={index}"]
 
 
+def object_defines(index: int) -> list[str]:
+    """The `-D` that makes a template draw only its declared object ``index`` (#956)."""
+    return ["-D", f"$object={index}"]
+
+
 @dataclass(frozen=True)
 class PartSource:
     """Where a layout part's mesh is on disk, relative to the render's directory:
-    a closed solid's own file, or the material of a split render."""
+    a closed solid's own file, or the material of a split render; and, for a mesh
+    model's painted part, the file of the painting carried onto it (#2146)."""
 
     file: str
     solid: bool = False
+    paint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,8 +271,14 @@ class PlateLayout:
                         "colour": part.colour,
                         "file": source.file,
                         "solid": source.solid,
+                        **({"negative": True} if part.negative else {}),
+                        **({"paint": source.paint} if source.paint is not None else {}),
+                        # Left out for the first object, so a layout of one reads as before.
+                        **({"object": number} if number != 1 else {}),
                     }
-                    for part, source in zip(plate.parts, sources, strict=True)
+                    for part, source, number in zip(
+                        plate.parts, sources, plate.objects, strict=True
+                    )
                 ],
             }
             for plate, sources in zip(self.plates, self.sources, strict=True)
@@ -230,26 +299,45 @@ class PlateLayout:
         splits: dict[str, list[ColourPart]] = {}
 
         def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
-            source = PartSource(entry["file"], entry["solid"])
+            source = PartSource(entry["file"], entry["solid"], entry.get("paint"))
             if source.solid:
-                mesh = solid_mesh(work / source.file)
+                mesh, paint = solid_mesh(work / source.file), None
                 if mesh is None:
                     raise ValueError(f"{source.file} holds no solid")
             else:
                 if source.file not in splits:
                     splits[source.file] = split_by_material(work / source.file)
-                mesh = next(
-                    split.mesh
+                split = next(
+                    split
                     for split in splits[source.file]
                     if split.material_index == entry["material_index"]
                 )
-            return ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh), source
+                mesh, paint = split.mesh, split.paint
+            if source.paint is not None:
+                mesh, paint = read_carried(work / source.paint, mesh)
+            return (
+                ColourPart(
+                    entry["material_index"],
+                    entry["name"],
+                    entry["colour"],
+                    mesh,
+                    paint,
+                    negative=bool(entry.get("negative", False)),
+                ),
+                source,
+            )
 
         plates: list[PlateParts] = []
         sources: list[tuple[PartSource, ...]] = []
         for plate in document["plates"]:
             parts = [part(entry) for entry in plate["parts"]]
-            plates.append(PlateParts(tuple(p for p, _ in parts), tuple(plate["extruders"])))
+            plates.append(
+                PlateParts(
+                    tuple(p for p, _ in parts),
+                    tuple(plate["extruders"]),
+                    tuple(int(entry.get("object", 1)) for entry in plate["parts"]),
+                )
+            )
             sources.append(tuple(s for _, s in parts))
         return cls(
             plates,
@@ -274,6 +362,37 @@ def _part_sources(
     )
 
 
+#: What OpenSCAD logs when the render it is asked to export draws nothing.
+EMPTY_TOP_LEVEL = "Current top level object is empty."
+
+
+def _empty_plate(index: int, count: int) -> str:
+    return (
+        f"plate {index} of {count} rendered no geometry: the template asks for "
+        f"echo(plates = {count}) but draws nothing when $plate = {index}"
+    )
+
+
+def _empty_object(index: int, count: int) -> str:
+    return (
+        f"object {index} of {count} rendered no geometry: the template asks for "
+        f"echo(objects = {count}) but draws nothing when $object = {index}"
+    )
+
+
+def _piece_label(
+    plate: int | None, plates: int, obj: int | None, objects: int, *, counts: bool = True
+) -> str:
+    """How an error names one render of a layout: its plate, its object, or both, with
+    each count ("plate 2 of 3") or, for a warning, without ("plate 2")."""
+    names = []
+    if plate is not None:
+        names.append(f"plate {plate} of {plates}" if counts else f"plate {plate}")
+    if obj is not None:
+        names.append(f"object {obj} of {objects}" if counts else f"object {obj}")
+    return ", ".join(names)
+
+
 async def plate_layout(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -283,19 +402,24 @@ async def plate_layout(
     work_dir: Path,
     *,
     config: Config,
+    objects: int = 1,
 ) -> PlateLayout:
     """The plates of a render: one for an ordinary template, ``count`` for one that
-    asked for more with `echo(plates = N)` (spec §6.4).
+    asked for more with `echo(plates = N)` (spec §6.4), each holding the ``objects`` a
+    template declared with `echo(objects = N)` (#956).
 
     Plate *k* is its own render with ``$plate = k``, split, then the per-colour solids
-    of §6.3 with the same ``$plate``. Its parts are numbered against the extruder
-    order of the everything-at-once render (``preview_parts``), so a colour is the
-    same extruder on every plate. A colour only the everything render draws gets no
+    of §6.3 with the same ``$plate``. A template with declared objects is rendered once
+    per object as well, with ``$object = j`` (and the plate's ``$plate``), and each
+    object's parts are its own (`PlateParts.objects`). Parts are numbered against the
+    extruder order of the everything-at-once render (``preview_parts``), so a colour is
+    the same extruder on every plate. A colour only the everything render draws gets no
     extruder, and one only a plate draws is appended; both are warnings, because
-    either means the template's plates and its preview disagree.
+    either means the template's plates and its preview disagree. An object that draws
+    nothing on a plate is not on it; one drawn on no plate at all is an error.
     """
     box = bounding_box(preview_parts)
-    if count <= 1:
+    if count <= 1 and objects <= 1:
         parts, solid_warnings = await solid_parts(
             scad_path, schema, params, preview_parts, work_dir, config=config
         )
@@ -307,69 +431,153 @@ async def plate_layout(
         raise OpenSCADError(
             f"the template asks for {count} plates; ScadBuddy renders at most {MAX_PLATES}", []
         )
+    if objects > MAX_OBJECTS:
+        raise OpenSCADError(
+            f"the template asks for {objects} objects; ScadBuddy renders at most {MAX_OBJECTS}",
+            [],
+        )
+    if count * objects > MAX_RENDERS:
+        raise OpenSCADError(
+            f"the template asks for {count} plates of {objects} objects, {count * objects}"
+            f" renders; ScadBuddy renders at most {MAX_RENDERS} per job",
+            [],
+        )
 
+    plate_numbers: list[int | None] = list(range(1, count + 1)) if count > 1 else [None]
+    object_numbers: list[int | None] = list(range(1, objects + 1)) if objects > 1 else [None]
     colours = [part.colour for part in preview_parts]
     warnings: list[str] = []
-    drawn: list[tuple[list[ColourPart], list[int]]] = []
+    drawn: list[tuple[list[ColourPart], list[int], list[int]]] = []
     sources: list[tuple[PartSource, ...]] = []
-    for index in range(1, count + 1):
-        plate_dir = work_dir / f"plate-{index}"
-        plate_dir.mkdir(parents=True, exist_ok=True)
-        defines = plate_defines(index)
-        raw = plate_dir / RAW_RENDER_NAME
-        try:
-            await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
-        except OpenSCADError as error:
-            raise OpenSCADError(
-                f"plate {index} of {count}: {error}",
-                error.log_tail,
-                error.returncode,
-                diagnostics=error.diagnostics,
-                diagnostics_dropped=error.diagnostics_dropped,
-            ) from error
-        split = split_by_material(raw)
-        if not split:
-            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
-        for part in split:
-            if part.colour not in colours:
-                colours.append(part.colour)
-                warnings.append(
-                    f"plate {index}: {part.colour} is not in the all-plates render; "
-                    f"it gets extruder {len(colours)}"
+    objects_drawn: set[int] = set()
+    for plate_number in plate_numbers:
+        plate_parts: list[ColourPart] = []
+        plate_objects: list[int] = []
+        plate_sources: list[PartSource] = []
+        for object_number in object_numbers:
+            piece_dir = work_dir
+            defines: list[str] = []
+            if plate_number is not None:
+                piece_dir = piece_dir / f"plate-{plate_number}"
+                defines += plate_defines(plate_number)
+            if object_number is not None:
+                piece_dir = piece_dir / f"object-{object_number}"
+                defines += object_defines(object_number)
+            piece_dir.mkdir(parents=True, exist_ok=True)
+            label = _piece_label(plate_number, count, object_number, objects)
+            # With objects, one may simply not be on this plate: not an error here.
+            may_be_empty = object_number is not None
+            raw = piece_dir / RAW_RENDER_NAME
+            try:
+                output = await render_3mf(
+                    scad_path, schema, params, raw, config=config, extra_defines=defines
                 )
-        split.sort(key=lambda part: colours.index(part.colour))
-        parts, solid_warnings = await solid_parts(
-            scad_path, schema, params, split, plate_dir, config=config, extra_defines=defines
+            except OpenSCADError as error:
+                # OpenSCAD will not export an empty top-level object: it exits 1
+                # before there is a 3MF to find empty (#1328).
+                empty = EMPTY_TOP_LEVEL in (line.strip() for line in error.log_tail)
+                if empty and may_be_empty:
+                    continue
+                assert plate_number is not None or object_number is not None
+                raise OpenSCADError(
+                    _empty_plate(plate_number, count)
+                    if empty and plate_number is not None
+                    else f"{label}: {error}",
+                    error.log_tail,
+                    error.returncode,
+                    diagnostics=error.diagnostics,
+                    diagnostics_dropped=error.diagnostics_dropped,
+                    missing_files=error.missing_files,
+                ) from error
+            split = split_by_material(raw)
+            if not split:
+                if may_be_empty:
+                    continue
+                assert plate_number is not None
+                # A file the plate could not open is often why it drew nothing (#451).
+                raise OpenSCADError(
+                    _empty_plate(plate_number, count),
+                    output.log_tail,
+                    diagnostics=output.diagnostics,
+                    diagnostics_dropped=output.diagnostics_dropped,
+                    missing_files=output.missing_files,
+                )
+            for part in split:
+                if part.colour not in colours:
+                    colours.append(part.colour)
+                    short = _piece_label(plate_number, count, object_number, objects, counts=False)
+                    everything = "all-plates" if object_number is None else "everything-at-once"
+                    warnings.append(
+                        f"{short}: {part.colour} is not in the {everything} render; "
+                        f"it gets extruder {len(colours)}"
+                    )
+            split.sort(key=lambda part: colours.index(part.colour))
+            parts, solid_warnings = await solid_parts(
+                scad_path, schema, params, split, piece_dir, config=config, extra_defines=defines
+            )
+            # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
+            warnings += [warning for warning in solid_warnings if warning not in warnings]
+            plate_parts += parts
+            plate_objects += [object_number or 1] * len(parts)
+            plate_sources += _part_sources(work_dir, raw, split, parts)
+            if object_number is not None:
+                objects_drawn.add(object_number)
+        if not plate_parts:
+            assert plate_number is not None or objects > 1
+            raise OpenSCADError(
+                _empty_plate(plate_number, count)
+                if plate_number is not None
+                else "the render produced no geometry for any of its objects",
+                [],
+            )
+        drawn.append(
+            (plate_parts, [colours.index(part.colour) + 1 for part in plate_parts], plate_objects)
         )
-        # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
-        warnings += [warning for warning in solid_warnings if warning not in warnings]
-        drawn.append((parts, [colours.index(part.colour) + 1 for part in parts]))
-        sources.append(_part_sources(work_dir, raw, split, parts))
+        sources.append(tuple(plate_sources))
+    if objects > 1:
+        for number in range(1, objects + 1):
+            if number not in objects_drawn:
+                raise OpenSCADError(_empty_object(number, objects), [])
 
     # Dense extruders, as §7 promises: a colour no plate draws gives up its slot.
-    used = sorted({extruder for _, extruders in drawn for extruder in extruders})
+    used = sorted({extruder for _, extruders, _ in drawn for extruder in extruders})
     renumber = {old: new for new, old in enumerate(used, start=1)}
     for old, colour in enumerate(colours, start=1):
         if old not in renumber:
             warnings.append(f"{colour} is drawn only with every plate at once; it is on no plate")
     plates = [
-        PlateParts(tuple(parts), tuple(renumber[extruder] for extruder in extruders))
-        for parts, extruders in drawn
+        PlateParts(
+            tuple(parts),
+            tuple(renumber[extruder] for extruder in extruders),
+            _dense_objects(numbers),
+        )
+        for parts, extruders, numbers in drawn
     ]
     return PlateLayout(plates, [colours[old - 1] for old in used], warnings, box, sources)
 
 
+def _dense_objects(numbers: Sequence[int]) -> tuple[int, ...]:
+    """A plate's object numbers counted from 1 on that plate, in order: object 3 of the
+    template may be the first on plate 2."""
+    order = {number: index for index, number in enumerate(dict.fromkeys(numbers), start=1)}
+    return tuple(order[number] for number in numbers)
+
+
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
     """One entry per extruder: the name the first plate to use it gives it, and whether
-    every plate's part of that colour is a closed solid."""
+    every plate's part of that colour is a closed solid. A slot no plate uses (a planned
+    filament order keeps its place, §7) has no part to name and is left out. A painted
+    part names the filaments its painting uses too (#1965)."""
     infos: list[PartInfo] = []
     for extruder, colour in enumerate(layout.colours, start=1):
         parts = [
             part
             for plate in layout.plates
             for part, number in zip(plate.parts, plate.extruders, strict=True)
-            if number == extruder
+            if number == extruder or colour.upper() in _painted_colours(part)
         ]
+        if not parts:
+            continue
         infos.append(
             PartInfo(
                 name=parts[0].name,
@@ -381,6 +589,66 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
     return infos
 
 
+#: A painted part's carried painting beside the layout (spec 2026-10-11 §7): plate, part.
+PAINT_FILE = "paint-{plate}-{part}.json"
+PAINT_NOT_CARRIED = (
+    "the mesh model's painting could not be read, so it is not carried: "
+    "its parts print in their own colour"
+)
+
+
+def paint_layout(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
+    """A mesh model's painting carried onto its render (#2146, spec 2026-10-11 §7): each
+    painted part's codes written beside the layout and named by its `PartSource`, its
+    faces turned to start where their source triangles do, the colours its painting
+    prints with added to the filament list, and the transfer's warnings. Anything but a
+    one-plate render of a model's own model.scad comes back as it was; a model with no
+    scene, or no painted part, too (`carry_paint`)."""
+    if scad.name != SOURCE_NAME or len(layout.plates) != 1:
+        return layout
+    try:
+        return _painted(layout, scad, params, work)
+    except Exception as error:
+        # Whatever a scene.json or mesh file's damage raises (OSError, pydantic's
+        # ValidationError, a zip's BadZipFile, trimesh's KeyError) costs the painting,
+        # never the render.
+        logger.warning(
+            "could not carry the painting of %s: %s", scad.parent.name, type(error).__name__
+        )
+        return replace(layout, warnings=[*layout.warnings, PAINT_NOT_CARRIED])
+
+
+def _painted(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
+    plate, sources = layout.plates[0], layout.sources[0]
+    carried, warnings = carry_paint(scad.parent, params, plate.parts)
+    if not any(found is not None for found in carried) and not warnings:
+        return layout
+    parts, placed, colours = list(plate.parts), list(sources), list(layout.colours)
+    for index, found in enumerate(carried):
+        if found is None:
+            continue
+        name = PAINT_FILE.format(plate=1, part=index + 1)
+        write_carried(work / name, found)
+        parts[index] = replace(
+            parts[index], mesh=turned(parts[index].mesh, found.turns), paint=found.paint
+        )
+        placed[index] = replace(placed[index], paint=name)
+        for colour in found.paint.used():
+            if colour.upper() not in {c.upper() for c in colours}:
+                colours.append(colour.upper())
+    return replace(
+        layout,
+        plates=[replace(plate, parts=tuple(parts))],
+        colours=colours,
+        warnings=[*layout.warnings, *warnings],
+        sources=[tuple(placed)],
+    )
+
+
 def result_plates(layout: PlateLayout) -> list[PlateInfo]:
     """The job result's per-plate summary: empty for a one-plate render."""
     if len(layout.plates) == 1:
@@ -389,10 +657,23 @@ def result_plates(layout: PlateLayout) -> list[PlateInfo]:
         PlateInfo(
             index=index,
             bbox_mm=bounding_box(plate.parts),
-            colors=[layout.colours[extruder - 1] for extruder in plate.extruders],
+            colors=list(
+                dict.fromkeys(
+                    colour
+                    for part, extruder in zip(plate.parts, plate.extruders, strict=True)
+                    for colour in [
+                        layout.colours[extruder - 1],
+                        *(c for c in layout.colours if c.upper() in _painted_colours(part)),
+                    ]
+                )
+            ),
         )
         for index, plate in enumerate(layout.plates, start=1)
     ]
+
+
+def _painted_colours(part: ColourPart) -> set[str]:
+    return {c.upper() for c in part.paint.used()} if part.paint is not None else set()
 
 
 async def plate_thumbnails(
@@ -446,6 +727,8 @@ async def plates_thumbnails(
     documents: a multi-plate render (spec §6.4) is still one job to bound. All or
     none, as the 3MF writer takes them."""
     loop = asyncio.get_running_loop()
+    # Covers show what prints: a negative part is cut out.
+    plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
 
     def render_all() -> list[PlateThumbnails]:
@@ -543,6 +826,13 @@ async def source_directory(
     )
     if requested is None or requested == current:
         return paths.model_dir(slug), current
+    return await revision_export(slug, requested, paths=paths, history=history), requested
+
+
+async def revision_export(
+    slug: str, requested: str, *, paths: DataPaths, history: ModelHistory | None
+) -> Path:
+    """The export of ``slug`` at ``requested``, made now if it is not there yet."""
     directory = paths.model_revision_dir(slug, requested)
     if (directory / SOURCE_NAME).is_file():
         # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
@@ -560,7 +850,7 @@ async def source_directory(
                 " export it from"
             )
         await asyncio.to_thread(export_revision, history, slug, requested, directory)
-    return directory, requested
+    return directory
 
 
 async def resolve_source(
@@ -622,6 +912,16 @@ class SnapshotUnavailableError(RuntimeError):
     """No snapshot is stored and this process has no git history to make one."""
 
 
+class SnapshotPendingError(RuntimeError):
+    """A revision's snapshot is still being stored past the request's wait for it
+    (`SnapshotStore.pin`, #686). The store carries on; a retry after ``retry_after``
+    seconds finds it stored, or joins it."""
+
+    def __init__(self, message: str, *, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:
     """Evict revision exports nobody has rendered from in ``ttl`` seconds.
 
@@ -655,10 +955,15 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
 
     Renders are debounced, so two of the same revision overlap routinely, and a
     reader that finds `model.scad` present while the other writer is still
-    extracting `model.json` would render against half a revision.
+    extracting `model.json` would render against half a revision. The staging name
+    is random, not the pid and thread: every API pod is pid 1 on the shared volume.
+
+    No staging directory is cleaned up before the export: a staging directory left by
+    a pod killed mid-export is removed by `prune_revision_exports`'s TTL sweep, which
+    covers the slug's directory. An up-front cleanup here would race other pods' live
+    staging directories.
     """
-    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
         history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -694,10 +999,52 @@ def no_stage(name: RenderStage) -> AbstractContextManager[None]:
     return nullcontext()
 
 
-def timed_stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
-    """A stage timed into `stage_duration`, as `render_job`'s are; untimed without
-    metrics."""
-    return metrics.stage if metrics is not None else no_stage
+@contextmanager
+def _traced_stage(
+    name: RenderStage,
+    timed: AbstractContextManager[None],
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Iterator[None]:
+    """One render stage: a span (spec 2026-10-01 §5.1) around the existing timing.
+    ``attempt`` is the activity attempt it runs in; a failure ``retried`` says another
+    attempt follows is that attempt's, not the job's (spec §6): the span names its class
+    and ends UNSET (#1183)."""
+    failed: Exception | None = None
+    with span(f"render.{name}") as current:
+        if attempt is not None:
+            current.set_attribute("scadbuddy.attempt", attempt)
+        try:
+            with timed:
+                yield
+        except Exception as error:
+            if retried is None or not retried(error):
+                raise
+            current.set_attribute("scadbuddy.failure_class", failure_class(error))
+            failed = error
+    if failed is not None:
+        raise failed
+
+
+def timed_stage(
+    metrics: Metrics | None,
+    *,
+    attempt: int | None = None,
+    retried: Callable[[Exception], bool] | None = None,
+) -> Callable[[RenderStage], AbstractContextManager[None]]:
+    """A stage timed into `stage_duration`, as `render_job`'s are, and traced; untimed
+    without metrics. ``attempt`` and ``retried`` are `_traced_stage`'s."""
+
+    def stage(name: RenderStage) -> AbstractContextManager[None]:
+        return _traced_stage(
+            name,
+            metrics.stage(name) if metrics is not None else nullcontext(),
+            attempt=attempt,
+            retried=retried,
+        )
+
+    return stage
 
 
 @dataclass(frozen=True)
@@ -784,9 +1131,25 @@ async def _render_solids(
     with stage("solids"):
         # One plate unless the template asked for more (spec §6.4); every plate
         # beyond the ordinary render is rendered and solidified here.
-        layout = await plate_layout(
-            prepared.scad, schema, staged, preview_parts, output.plates or 1, work, config=config
-        )
+        try:
+            layout = await plate_layout(
+                prepared.scad,
+                schema,
+                staged,
+                preview_parts,
+                output.plates or 1,
+                work,
+                config=config,
+                objects=output.objects or 1,
+            )
+        except OpenSCADError as error:
+            # A failed plate warns as a failed whole render does (#451).
+            error.warnings = failed_render_warnings(error.missing_files, schema, params)
+            raise
+    if (prepared.scad.parent / SCENE_NAME).is_file():
+        with stage("paint"):
+            # A mesh model's painting, onto the parts the layout names (spec 2026-10-11 §7).
+            layout = await asyncio.to_thread(paint_layout, layout, prepared.scad, params, work)
     layout.save(work / LAYOUT_NAME)
     return layout
 
@@ -835,6 +1198,18 @@ async def render_solids_stage(
             )
 
 
+async def _thread_to_end[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """`asyncio.to_thread`, except that a cancel returns only once the thread has: a
+    thread cannot be stopped, and a cancelled (timed-out) attempt must not still be
+    writing while its retry runs (#867)."""
+    thread = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(thread)
+    except asyncio.CancelledError:
+        await asyncio.wait({thread})
+        raise
+
+
 async def finish_piece_stage(
     prepared: Prepared,
     params: Mapping[str, ParamValue],
@@ -866,12 +1241,19 @@ async def finish_piece_stage(
         )
     warnings += thumbnail_warnings
     warnings += unreadable_colour_warnings(schema, params)
+    fonts_env = env_for(config.data_dir)
+    warnings += await asyncio.to_thread(
+        missing_glyph_warnings,
+        schema,
+        params,
+        lambda font, timeout: font_coverage(font, fonts_env, timeout),
+    )
 
     model_3mf = work / MODEL_NAME
     # A built-in's bare slug, as download_filename names the file: the id's
     # `builtin:` prefix is not something to show as the model's title.
     with stage("write"):
-        await asyncio.to_thread(
+        await _thread_to_end(
             write_plates_3mf,
             layout.plates,
             layout.colours,
@@ -912,7 +1294,7 @@ async def render_job(
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         if on_stage is not None:
             on_stage(name)
-        return metrics.stage(name) if metrics is not None else nullcontext()
+        return _traced_stage(name, metrics.stage(name) if metrics is not None else nullcontext())
 
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then

@@ -101,6 +101,19 @@ describe('createTabLink', () => {
     expect(results.c3).toMatchObject({ ok: false, error: { code: 'unavailable' } })
   })
 
+  it('answers a call whose bridge throws, such as a stale catalogue chunk, with a failed result (#747)', async () => {
+    const bridge = new AgentBridge()
+    vi.spyOn(bridge, 'call').mockRejectedValue(new TypeError('Failed to fetch dynamically imported module'))
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'c1', tool: 'get_form', args: {} })
+    await vi.waitFor(() => expect(ws().frames().filter((f) => f.type === 'result')).toHaveLength(1))
+    const [result] = ws()
+      .frames()
+      .filter((f) => f.type === 'result')
+    expect(result).toMatchObject({ id: 'c1', outcome: { ok: false, error: { code: 'failed' } } })
+  })
+
   it('answers a result too large for the socket with an error the agent can act on', async () => {
     const bridge = new AgentBridge()
     bridge.register({ get_editor_text: () => ({ text: 'x'.repeat(MAX_RESULT_BYTES) }) }, { label: 'source' })
@@ -111,6 +124,20 @@ describe('createTabLink', () => {
     const result = ws().frames().find((f) => f.type === 'result')!
     expect(result.outcome).toMatchObject({ ok: false, error: { code: 'failed', message: expect.stringMatching(/ask for less/) } })
     expect(ws().sent.at(-1)!.length).toBeLessThan(1000)
+  })
+
+  // #747: a call that throws (the catalogue chunk failing to load after a deploy) still gets its result frame.
+  it('answers a call whose bridge throws with a failed result, not silence', async () => {
+    const bridge = new AgentBridge()
+    vi.spyOn(bridge, 'call').mockRejectedValue(new Error('Failed to fetch dynamically imported module'))
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'c1', tool: 'get_form', args: {} })
+    await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
+    expect(ws().frames().find((f) => f.type === 'result')).toMatchObject({
+      id: 'c1',
+      outcome: { ok: false, error: { code: 'failed', message: expect.stringMatching(/get_form.*Failed to fetch dynamically imported module/) } },
+    })
   })
 
   it('counts a result in bytes, so non-ASCII text under the limit in characters is still refused (#731 review)', async () => {
@@ -159,6 +186,27 @@ describe('createTabLink', () => {
     expect(ws().frames()).toHaveLength(1)
   })
 
+  // #747: tabs dropped together by an agent restart must not all come back in lockstep.
+  it('spreads each reconnect over half to all of its back-off, so dropped tabs do not return together', () => {
+    vi.useFakeTimers()
+    for (const [random, delay] of [
+      [0, 50],
+      [0.5, 75],
+      [0.98, 99],
+    ] as const) {
+      FakeSocket.instances = []
+      const bridge = new AgentBridge()
+      const link = createTabLink({ bridge, WebSocketImpl: Impl, baseMs: 100, maxMs: 1000, random: () => random })
+      link.connect()
+      FakeSocket.instances[0]!.drop()
+      vi.advanceTimersByTime(delay - 1)
+      expect(FakeSocket.instances).toHaveLength(1)
+      vi.advanceTimersByTime(1)
+      expect(FakeSocket.instances).toHaveLength(2)
+      link.close()
+    }
+  })
+
   it('reconnects with back-off as the same tab, and stops after close()', () => {
     vi.useFakeTimers()
     const { link, ws } = linked()
@@ -178,5 +226,25 @@ describe('createTabLink', () => {
     second.drop()
     vi.advanceTimersByTime(10_000)
     expect(FakeSocket.instances).toHaveLength(2)
+  })
+
+  it('spreads its reconnects with jitter, so tabs dropped together do not return together (#747)', () => {
+    vi.useFakeTimers()
+    const random = vi.spyOn(Math, 'random')
+    const { ws } = linked()
+    ws().open()
+    random.mockReturnValue(0)
+    ws().drop()
+    vi.advanceTimersByTime(49)
+    expect(FakeSocket.instances).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    expect(FakeSocket.instances).toHaveLength(2)
+    random.mockReturnValue(0.99)
+    ws().drop()
+    vi.advanceTimersByTime(190)
+    expect(FakeSocket.instances).toHaveLength(2)
+    vi.advanceTimersByTime(10)
+    expect(FakeSocket.instances).toHaveLength(3)
+    random.mockRestore()
   })
 })

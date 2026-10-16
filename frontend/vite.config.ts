@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { defineConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { alias } from './aliases'
 
 const backend = process.env.SCADBUDDY_BACKEND_URL ?? 'http://127.0.0.1:8080'
 const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
@@ -28,16 +29,23 @@ const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
  * handshake therefore held the assistant's socket back, as observed with Chromium
  * through `pnpm preview`.
  *
+ * `/telemetry` is the backend's browser trace relay (tracing spec 2026-10-01 §5.2),
+ * outside `/api` like `/healthz`. Without its entry the page's exporter would post to
+ * Vite's SPA fallback and lose every batch without an error (§5.3). `changeOrigin`
+ * rewrites `Host`, not `Origin`, and the relay's origin check accepts a loopback one.
+ *
  * The mocked build (`VITE_MOCK_API=1`) proxies nothing: msw answers every route.
  */
 const proxy: Record<string, ProxyOptions> = {
   '^/api/v1/ai(?:[/?]|$)': { target: agent, ws: true },
   '^/mcp(?:[/?]|$)': { target: agent },
   '/api': { target: backend, changeOrigin: true, ws: true },
+  '^/telemetry(?:/|$)': { target: backend, changeOrigin: true },
 }
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: { alias },
   server: {
     port: 5173,
     proxy: process.env.VITE_MOCK_API ? undefined : proxy,
@@ -59,5 +67,16 @@ export default defineConfig({
     // three.js dominates the bundle; the viewer is behind a dynamic import so it
     // lands in its own chunk rather than the entry.
     chunkSizeWarningLimit: 1000,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          // src/lib/zodConfig.ts in zod's own chunk, run right after zod: zod reads
+          // `jitless` when a schema is built, and every chunk that builds one imports this
+          // chunk first. In the entry it ran only after the entry's static imports, which
+          // build schemas at import whenever the split puts them in a shared chunk.
+          groups: [{ name: 'zod', test: /[\\/]node_modules[\\/]zod[\\/]|[\\/]src[\\/]lib[\\/]zodConfig\.ts$/ }],
+        },
+      },
+    },
   },
 })

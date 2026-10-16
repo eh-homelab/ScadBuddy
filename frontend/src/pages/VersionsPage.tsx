@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
+import { principalLabel } from '../agent/chat/labels'
+import { useAssistantOpener } from '../agent/chat/opener'
 import { api, ApiError } from '../api/client'
 import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
 import { Button } from '../components/ui/Button'
+import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
@@ -25,6 +28,11 @@ export function VersionsPage() {
   const [diffError, setDiffError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  // #975 — a restore rewrites the model, so it is asked about first, and then said.
+  const [confirming, setConfirming] = useState<ModelVersion | null>(null)
+  const [restored, setRestored] = useState('')
+  /** The revision a restore made, to take focus once the list shows it. */
+  const [focusCommit, setFocusCommit] = useState<string | null>(null)
 
   const versions = versionsState.data
   // #184 — a built-in's history is readable, but the server refuses a restore.
@@ -63,14 +71,23 @@ export function VersionsPage() {
     }
   }, [slug, selected, base])
 
-  async function restore(commit: string) {
+  useEffect(() => {
+    if (!focusCommit || !versions?.some((version) => version.commit === focusCommit)) return
+    document.querySelector<HTMLElement>(`[data-version-select="${CSS.escape(focusCommit)}"]`)?.focus()
+    setFocusCommit(null)
+  }, [versions, focusCommit])
+
+  async function restore(version: ModelVersion) {
     setBusy(true)
     setError(undefined)
+    setRestored('')
     try {
-      const created = await api.restoreVersion(slug, commit)
+      const created = await api.restoreVersion(slug, version.commit)
       // Show what just happened, not what was selected before it.
       setSelected(created.commit)
       setBase(PARENT)
+      setRestored(`Restored ${version.short} as a new version, ${created.commit.slice(0, 7)}.`)
+      setFocusCommit(created.commit)
       versionsState.reload()
       modelState.reload()
     } catch (cause) {
@@ -135,6 +152,11 @@ export function VersionsPage() {
           </div>
         )}
 
+        {/* Always in the page, so the message is announced when it lands. */}
+        <p data-testid="versions-status" role="status" className={`text-[12px] text-ok ${restored ? 'mb-3' : ''}`}>
+          {restored}
+        </p>
+
         {error && (
           <p role="alert" className="mb-3 rounded-[6px] bg-warn/10 px-3 py-2 text-[12px] text-warn">
             {error}
@@ -151,7 +173,9 @@ export function VersionsPage() {
         )}
 
         {versions && versions.length > 0 && (
-          <div className="grid gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+          // #1036 — `grid-cols-1` below `lg`: the implicit `auto` track sized to the longest
+          // commit message, so the list ran off a phone's screen and `truncate` never did.
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
             <ul data-testid="versions" aria-label="Revisions" className="space-y-2">
               {versions.map((version) => (
                 <VersionRow
@@ -164,7 +188,7 @@ export function VersionsPage() {
                     setSelected(version.commit)
                     setBase(PARENT)
                   }}
-                  onRestore={() => void restore(version.commit)}
+                  onRestore={() => setConfirming(version)}
                   onCustomize={() =>
                     void navigate(`${modelPath(slug)}?version=${encodeURIComponent(version.commit)}`)
                   }
@@ -175,12 +199,14 @@ export function VersionsPage() {
             <section className="min-w-0 rounded-[6px] border border-line bg-surface">
               <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
                 <h2 className="text-[12px] font-medium">Changes</h2>
-                <label className="ml-auto flex items-center gap-2 text-[12px] text-muted">
+                {/* #1036 — may shrink: the select is as wide as its longest option, a whole
+                    commit message, and ran past the card on a phone. */}
+                <label className="ml-auto flex min-w-0 max-w-full items-center gap-2 text-[12px] text-muted">
                   Compare with
                   <select
                     value={base}
                     onChange={(event) => setBase(event.target.value)}
-                    className="rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[12px] text-ink"
+                    className="min-w-0 max-w-full rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[12px] text-ink"
                   >
                     <option value={PARENT}>Previous revision</option>
                     {versions
@@ -208,6 +234,36 @@ export function VersionsPage() {
             </section>
           </div>
         )}
+
+        <Dialog
+          open={confirming !== null}
+          title={`Restore version ${confirming?.short ?? ''}?`}
+          description={
+            current
+              ? `The model's source goes back to ${confirming?.short ?? ''}, as a new version on top of ${current.short}. Nothing is lost: ${current.short} stays in the history.`
+              : undefined
+          }
+          onClose={() => setConfirming(null)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setConfirming(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const version = confirming
+                  setConfirming(null)
+                  if (version) void restore(version)
+                }}
+              >
+                Restore
+              </Button>
+            </>
+          }
+        >
+          <p className="text-[13px] text-muted">{confirming?.message}</p>
+        </Dialog>
 
         {current && (
           <p className="sb-num mt-4 text-[12px] text-faint">
@@ -248,6 +304,7 @@ function VersionRow({
         type="button"
         onClick={onSelect}
         aria-pressed={selected}
+        data-version-select={version.commit}
         className="block w-full text-left"
       >
         <span className="flex items-center gap-2">
@@ -265,16 +322,92 @@ function VersionRow({
         </span>
       </button>
 
+      {version.agent && <AgentAuthor agent={version.agent} short={version.short} />}
+
       <div className="mt-2 flex flex-wrap gap-2">
-        <Button size="sm" onClick={onCustomize}>
+        {/* #975 — named after the revision, so a list of these buttons tells them apart. */}
+        <Button size="sm" onClick={onCustomize} aria-label={`Customize this version, ${version.short}`}>
           Customize this version
         </Button>
         {canRestore && (
-          <Button size="sm" onClick={onRestore} disabled={busy || version.current}>
+          <Button
+            size="sm"
+            onClick={onRestore}
+            disabled={busy || version.current}
+            aria-label={`Restore this version, ${version.short}`}
+          >
             Restore this version
           </Button>
         )}
       </div>
     </li>
+  )
+}
+
+/**
+ * #1288 — who an agent-made revision ran for, and the chat it was made in: opening it
+ * shows that session in the assistant panel (`useAssistantOpener`, #931). The session is
+ * read first, so one that was deleted, or that the browser user cannot see (an MCP
+ * client's), says so here instead of opening the panel on nothing. Without the assistant,
+ * or with no session in the trailer (an `/mcp` call), the badge is only text.
+ */
+function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent']>; short: string }) {
+  const opener = useAssistantOpener()
+  const [problem, setProblem] = useState('')
+  const [opening, setOpening] = useState(false)
+  // A realtime refresh can replace the row while the session is read; the chat still
+  // opens, but nothing is set on a row that is gone.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  const who = principalLabel(agent.principal)
+  const badge = 'rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted'
+  const session = agent.session
+
+  async function open(id: string) {
+    if (!opener) return
+    setProblem('')
+    setOpening(true)
+    try {
+      await api.getAiSession(id)
+      opener.openSession(id)
+    } catch (cause) {
+      if (!mounted.current) return
+      setProblem(
+        cause instanceof ApiError && cause.status === 404
+          ? 'That chat is gone, or is not one you can open.'
+          : 'Could not open that chat.',
+      )
+    } finally {
+      if (mounted.current) setOpening(false)
+    }
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      {session && opener ? (
+        <button
+          type="button"
+          onClick={() => void open(session)}
+          disabled={opening}
+          title={agent.principal ?? undefined}
+          aria-label={`Agent, for ${who}: open the chat that made ${short}`}
+          className={`${badge} hover:bg-surface-3 hover:text-ink`}
+        >
+          Agent · {who} · open chat
+        </button>
+      ) : (
+        <span title={agent.principal ?? undefined} className={badge}>
+          Agent · {who}
+        </span>
+      )}
+      <span role="status" className="text-[11px] text-warn">
+        {problem}
+      </span>
+    </div>
   )
 }

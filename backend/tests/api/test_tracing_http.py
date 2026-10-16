@@ -1,0 +1,150 @@
+"""Requests are traced; the infrastructure paths are not (spec 2026-10-01 §6)."""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.telemetry import _runtime as fastapi_runtime
+from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
+
+from scadbuddy.core.settings import Settings
+from scadbuddy.main import create_app
+from tests.conftest import http_server_span, wait_for_span
+
+#: Every attribute a server span carries today (instrumentation 0.66b0, the default
+#: semconv). The scrub (`core/trace_scrub.py`) is a denylist of exact names, so a
+#: release that renames one (the query string moving to a new key) would export it
+#: unscrubbed: this set makes that rename fail here instead, and the bump that
+#: changes it is reviewed alongside `DROPPED_ATTRIBUTES`, `_PATH_ONLY` and `_WITH_ORIGIN`
+#: (review 2 of #1064).
+KNOWN_SERVER_ATTRIBUTES = frozenset(
+    {
+        "http.flavor",
+        "http.method",
+        "http.route",
+        "http.scheme",
+        "http.status_code",
+        "http.target",
+        "net.host.port",
+    }
+)
+
+
+def _server_spans(spans: InMemorySpanExporter) -> list[str]:
+    return [
+        str((s.attributes or {}).get("http.route"))
+        for s in spans.get_finished_spans()
+        if http_server_span(s)
+    ]
+
+
+def test_an_api_request_is_a_server_span_named_by_its_route(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    assert client.get("/api/v1/models").status_code == 200
+    server = wait_for_span(spans, http_server_span)
+    assert (server.attributes or {}).get("http.route") == "/api/v1/models"
+    assert "?" not in server.name
+
+
+def test_its_queries_are_children_of_the_request(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    # A job lookup reads render_jobs (projection.read) before answering 404.
+    missing = "0123456789abcdef0123456789abcdef"
+    assert client.get(f"/api/v1/jobs/{missing}").status_code == 404
+    server = wait_for_span(spans, http_server_span)
+    queries = [
+        s
+        for s in spans.get_finished_spans()
+        if s.kind is SpanKind.CLIENT and s.context.trace_id == server.context.trace_id
+    ]
+    assert queries, "the lookup's query is a child of the request"
+    for query in queries:
+        # Statement text only, never the bound values (sqlcommenter off, spec §6).
+        assert missing not in repr(query.attributes)
+
+
+def test_a_server_span_carries_only_known_attributes(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    missing = "0123456789abcdef0123456789abcdef"
+    headers = {
+        "User-Agent": "agent-s3ntinel",
+        "X-Forwarded-For": "192.0.2.1",
+        "Host": "host-s3ntinel.example",
+    }
+    assert client.get("/api/v1/models?q=s3ntinel", headers=headers).status_code == 200
+    assert client.get(f"/api/v1/jobs/{missing}?q=s3ntinel", headers=headers).status_code == 404
+    wait_for_span(
+        spans,
+        lambda s: http_server_span(s) and (s.attributes or {}).get("http.status_code") == 404,
+    )
+    server = [s for s in spans.get_finished_spans() if http_server_span(s)]
+    assert len(server) == 2
+    for finished in server:
+        assert set(finished.attributes or {}) <= KNOWN_SERVER_ATTRIBUTES, finished.attributes
+        assert "s3ntinel" not in repr(finished.attributes)
+
+
+@pytest.mark.parametrize(
+    ("path", "status"),
+    # The relay route (spec §5.2) takes only POST: a GET's 405 is not traced either.
+    [("/healthz", 200), ("/metrics", 200), ("/telemetry/v1/traces", 405)],
+)
+def test_the_infrastructure_paths_are_not_traced(
+    client: TestClient, spans: InMemorySpanExporter, path: str, status: int
+) -> None:
+    assert client.get(path).status_code == status
+    assert _server_spans(spans) == []
+
+
+def test_a_path_that_only_contains_an_excluded_one_is_traced(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    assert client.get("/api/v1/models/metrics-x").status_code == 404
+    wait_for_span(spans, http_server_span)
+
+
+def test_body_chunks_and_messages_are_not_spans(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    assert client.get("/api/v1/models").status_code == 200
+    wait_for_span(spans, http_server_span)
+    names = [s.name for s in spans.get_finished_spans()]
+    assert not [n for n in names if n.endswith((" http send", " http receive"))], names
+
+
+def test_a_garbage_traceparent_starts_a_fresh_trace(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    response = client.get("/api/v1/models", headers={"traceparent": "00-garbage-xx-01"})
+    assert response.status_code == 200
+    server = wait_for_span(spans, http_server_span)
+    assert server.parent is None
+
+
+def test_fastapi_adds_no_exporter_of_its_own(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FastAPI 0.142 exports traces, metrics and logs to ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    by itself unless told not to: spans past the scrub (`core/trace_scrub.py` wraps only
+    our own exporter), and every log line. Only `core/tracing.py` exports. Its flush on
+    every shutdown also waited out an unreachable collector, about 10 s, in CI (#1167)."""
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318")
+    # FastAPI configures once per process; start it afresh. `_configured` and `_owned`
+    # are FastAPI 0.142's private record of what it set up (`fastapi/telemetry/_runtime.py`):
+    # no public call says whether it added an exporter, and the global tracer provider is
+    # the test session's own. If a FastAPI bump moves them, re-read that module.
+    for name in ("_configured", "_owned"):
+        if not isinstance(getattr(fastapi_runtime, name, None), list):
+            pytest.fail(f"fastapi.telemetry._runtime.{name} is gone: re-read FastAPI's telemetry")
+    monkeypatch.setattr(fastapi_runtime, "_configured", [])
+    monkeypatch.setattr(fastapi_runtime, "_owned", [])
+
+    with TestClient(create_app(settings)):
+        pass
+
+    assert fastapi_runtime._owned == []

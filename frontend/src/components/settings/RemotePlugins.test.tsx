@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
+import { setRemotePluginProblem } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
+import { choose, optionsOf } from '../../test/select'
 
 describe('RemotePluginsPanel', () => {
   it('lists endpoints with the header name and last four only', async () => {
@@ -11,6 +13,20 @@ describe('RemotePluginsPanel', () => {
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     expect(within(card).getByText('Authorization: …9f3a')).toBeInTheDocument()
     expect(within(card).getByText('Disabled')).toBeInTheDocument()
+  })
+
+  it('says when a stored endpoint is not loaded because Claude Code reserves its name (#2127)', async () => {
+    const problem = 'its name "hindsight" is reserved by Claude Code, which drops the server; delete it and register it again under another name'
+    setRemotePluginProblem('hindsight', problem)
+    renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    expect(within(card).getByRole('alert')).toHaveTextContent(`Not loaded: ${problem}`)
+  })
+
+  it('shows no problem for an endpoint that has none', async () => {
+    renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    expect(within(card).queryByText(/Not loaded/)).toBeNull()
   })
 
   it('registers an endpoint with a write-only secret', async () => {
@@ -49,28 +65,84 @@ describe('RemotePluginsPanel', () => {
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     expect(await within(card).findByRole('status')).toHaveTextContent('connected; 3 tools')
-    expect(within(card).getByLabelText('Tier of recall')).toHaveValue('read')
-    expect(within(card).getByLabelText('Tier of retain')).toHaveValue('outward')
+    expect(within(card).getByLabelText('Tier of recall')).toHaveTextContent('read')
+    expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('outward')
     expect(within(card).getByLabelText('Tier of files.list')).toBeDisabled()
     expect(within(card).getByText('(server suggests read)')).toBeInTheDocument()
 
-    await user.selectOptions(within(card).getByLabelText('Tier of retain'), 'write')
-    await user.click(within(card).getByLabelText('Hide files.list'))
+    await choose(user, within(card).getByLabelText('Tier of retain'), 'write')
+    await user.click(within(card).getByLabelText('Show files.list'))
     await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
-    await waitFor(() => expect(within(card).getByLabelText('Tier of retain')).toHaveValue('write'))
+    await waitFor(() => expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('write'))
 
     await waitFor(() => expect(within(card).getByRole('button', { name: 'Enable' })).toBeEnabled())
     await user.click(within(card).getByRole('button', { name: 'Enable' }))
     expect(await within(card).findByText('Enabled')).toBeInTheDocument()
   })
 
+  it('folds the tool review to its line once the tiers are saved, and opens it again (#2172)', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+    const fold = await within(card).findByRole('button', { name: /connected; 3 tools/ })
+    expect(fold).toHaveAttribute('aria-expanded', 'true')
+    await choose(user, within(card).getByLabelText('Tier of retain'), 'write')
+
+    // Folded by hand, an unsaved change is kept.
+    await user.click(fold)
+    expect(within(card).getByLabelText('Tier of retain')).not.toBeVisible()
+    await user.click(fold)
+    expect(within(card).getByLabelText('Tier of retain')).toHaveTextContent('write')
+
+    await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
+    await waitFor(() => expect(fold).toHaveAttribute('aria-expanded', 'false'))
+    expect(within(card).queryByRole('button', { name: 'Save tool settings' })).not.toBeInTheDocument()
+    await user.click(fold)
+    expect(within(card).getByRole('button', { name: 'Save tool settings' })).toBeInTheDocument()
+  })
+
   it('removes an endpoint after confirming', async () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await user.click(within(card).getByRole('button', { name: 'Remove' }))
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove endpoint' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove endpoint' }))
     expect(await screen.findByText('No plugin endpoints.')).toBeInTheDocument()
+  })
+
+  it('lists the built-in tool sets first, marked built in, with no Remove', async () => {
+    renderPage(<RemotePluginsPanel />)
+    const builtIns = await screen.findByRole('list', { name: 'Built-in tools' })
+    const cards = within(builtIns).getAllByRole('listitem')
+    expect(cards.map((c) => c.getAttribute('aria-label'))).toEqual(['Built-in tools scadbuddy'])
+    for (const card of cards) {
+      expect(within(card).getByText('Built in')).toBeInTheDocument()
+      expect(within(card).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+      expect(within(card).queryByRole('button', { name: 'Test connection' })).not.toBeInTheDocument()
+    }
+    // ScadBuddy's own tools have no switch as a set.
+    expect(within(cards[0]!).queryByRole('button', { name: /^(Enable|Disable)$/ })).not.toBeInTheDocument()
+  })
+
+  it('offers only tiers at or above a built-in tool’s own, and saves raised tiers and disabled tools', async () => {
+    let sent: unknown
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH' && request.url.endsWith('/ai/plugins/scadbuddy')) void request.clone().json().then((b) => (sent = b))
+    })
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Built-in tools scadbuddy' })
+    await user.click(within(card).getByRole('button', { name: 'Review tools' }))
+    const options = (label: string) => optionsOf(user, within(card).getByLabelText(label))
+    expect(await options('Tier of list_models')).toEqual(['read', 'write', 'outward (asks first)'])
+    expect(await options('Tier of save_model')).toEqual(['write', 'outward (asks first)'])
+    expect(await options('Tier of send_to_printer')).toEqual(['outward (asks first)'])
+    expect(within(card).getByLabelText('Tier of save_model')).toHaveTextContent('write')
+
+    await choose(user, within(card).getByLabelText('Tier of list_models'), 'outward (asks first)')
+    await user.click(within(card).getByLabelText('Enable save_model'))
+    await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
+    await waitFor(() => expect(sent).toEqual({ tool_tiers: { list_models: 'outward' }, disabled_tools: ['save_model'] }))
+    expect(await within(card).findByText(/1 raised, 1 disabled/)).toBeInTheDocument()
   })
 
   it('marks every write user-only', async () => {

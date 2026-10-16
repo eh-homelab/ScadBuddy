@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
+  AnalysisTarget,
   AnalyzerDecision,
   AnalyzerDiagnostic,
   AnalyzerSeverity,
@@ -21,6 +22,7 @@ import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAnalysis } from '../../lib/useAnalysis'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
+import { FixPreviewCard } from './FixPreviewCard'
 import { SuppressForm } from './SuppressForm'
 
 const TONE: Record<AnalyzerSeverity, string> = {
@@ -63,11 +65,25 @@ interface ItemProps {
   diagnostic: AnalyzerDiagnostic
   /** Where a decision can be stored; empty when no decision can be (no store). */
   scopes: ScopeRef[]
+  /** Whether decisions are stored at all, and why not when they are not (#2927). */
+  decisions: { available: boolean; reason: string | null }
+  target: AnalysisTarget | undefined
+  request: AnalysisRequest | null
   onChanged: () => void
 }
 
-function DiagnosticItem({ diagnostic, scopes, onChanged }: ItemProps) {
+function DiagnosticItem({ diagnostic, scopes, decisions, target, request, onChanged }: ItemProps) {
   const [suppressing, setSuppressing] = useState(false)
+  const [previewing, setPreviewing] = useState<string | null>(null)
+  const applied = diagnostic.decision
+  const acceptedFix =
+    applied?.decision.kind === 'accept'
+      ? diagnostic.fixes?.find((row) => row.id === applied.decision.fix_id)
+      : undefined
+  const fixes = diagnostic.status === 'accepted' ? [] : (diagnostic.fixes ?? [])
+  const previewed = fixes.find((row) => row.id === previewing)
+  /** A preview changes nothing, so it needs no decisions store; only Apply does. */
+  const canPreview = target !== undefined && request !== null && fixes.length > 0
   return (
     <li
       data-testid={`diagnostic-${diagnostic.key}`}
@@ -88,12 +104,50 @@ function DiagnosticItem({ diagnostic, scopes, onChanged }: ItemProps) {
       )}
       {diagnostic.why && <p className="mt-0.5 text-[12px] text-faint">{diagnostic.why}</p>}
       <SourceList sources={diagnostic.sources} />
-      {scopes.length > 0 && !suppressing && (
+      {applied?.decision.kind === 'accept' && !applied.stale && (
+        <p data-testid={`fix-accepted-${diagnostic.key}`} className="mt-1.5 text-[12px] text-ok">
+          Fix accepted for {scopeLabel(applied.decision.scope)}
+          {acceptedFix ? `: ${acceptedFix.title}` : ''}.
+          <RemoveDecision diagnostic={diagnostic} onChanged={onChanged} />
+        </p>
+      )}
+      {applied?.decision.kind === 'accept' && applied.stale && (
+        // model.py AppliedDecision.stale: the diff changed, so the finding is open again (#284).
+        <p data-testid={`fix-stale-${diagnostic.key}`} className="mt-1.5 text-[12px] text-warn">
+          The fix accepted for {scopeLabel(applied.decision.scope)} is stale: its diff has changed
+          since, so this finding is open again.
+          <RemoveDecision diagnostic={diagnostic} onChanged={onChanged} />
+        </p>
+      )}
+      {!suppressing && previewed === undefined && (canPreview || scopes.length > 0) && (
         <div className="mt-1.5 flex flex-wrap gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setSuppressing(true)}>
-            Suppress…
-          </Button>
+          {canPreview &&
+            fixes.map((fix) => (
+              <Button key={fix.id} size="sm" onClick={() => setPreviewing(fix.id)}>
+                Preview fix: {fix.title}
+              </Button>
+            ))}
+          {scopes.length > 0 && (
+            <Button size="sm" variant="ghost" onClick={() => setSuppressing(true)}>
+              Suppress…
+            </Button>
+          )}
         </div>
+      )}
+      {previewed && target !== undefined && request !== null && (
+        <FixPreviewCard
+          target={target}
+          request={request}
+          diagnostic={diagnostic}
+          fix={previewed}
+          scopes={scopes}
+          decisions={decisions}
+          onClose={() => setPreviewing(null)}
+          onApplied={() => {
+            setPreviewing(null)
+            onChanged()
+          }}
+        />
       )}
       {suppressing && (
         <SuppressForm
@@ -119,7 +173,7 @@ function DiagnosticItem({ diagnostic, scopes, onChanged }: ItemProps) {
  */
 function RemoveDecision({ diagnostic, onChanged }: { diagnostic: AnalyzerDiagnostic; onChanged: () => void }) {
   const applied = diagnostic.decision?.decision
-  if (!applied || applied.kind === 'accept') return null
+  if (!applied) return null
   return <RemoveButton key={applied.id} decision={applied} diagnostic={diagnostic} onChanged={onChanged} />
 }
 
@@ -133,7 +187,7 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
-  const verb = decision.kind === 'suppress' ? 'suppression' : 'ignore'
+  const verb = { accept: 'accepted fix', suppress: 'suppression', ignore: 'ignore' }[decision.kind]
   if (decision.enforced) {
     return <span className="ml-1 text-faint">(enforced, so not removable from here)</span>
   }
@@ -206,7 +260,8 @@ function setAsideReason(diagnostic: AnalyzerDiagnostic): string {
 }
 
 interface Props {
-  outputId: string | undefined
+  /** The output, or the library file (#1753), the dialog prints. */
+  target: AnalysisTarget | undefined
   /** The request the dialog would print with; `null` until it has one. */
   request: AnalysisRequest | null
   /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
@@ -220,12 +275,13 @@ interface Props {
  * dialog. Advisory throughout: no finding disables Print (`lib/analyzers.ts`). The
  * nozzle verdict passed as `children` is not an analyzer finding, and its errors do.
  */
-export function AnalyzerPanel({ outputId, request, allPlates = false, children }: Props) {
-  const { report, error, checking, reload } = useAnalysis(outputId, request)
+export function AnalyzerPanel({ target, request, allPlates = false, children }: Props) {
+  const { report, error, checking, reload } = useAnalysis(target, request)
   const { shown, setAside } = partition(report?.diagnostics ?? [])
   const skipped = report?.skipped ?? []
   /** Decisions are stored in Postgres; without it the run says why (`decisions_reason`). */
   const decidable = report?.decisions_available ?? false
+  const accepted = report?.accepted_changes?.length ?? 0
 
   return (
     <section
@@ -269,11 +325,23 @@ export function AnalyzerPanel({ outputId, request, allPlates = false, children }
                 key={diagnostic.key}
                 diagnostic={diagnostic}
                 scopes={decidable && report ? scopesForFinding(report.scopes, diagnostic) : []}
+                decisions={{ available: decidable, reason: report?.decisions_reason ?? null }}
+                target={target}
+                request={request}
                 onChanged={reload}
               />
             ))}
           </ul>
         </>
+      )}
+
+      {accepted > 0 && (
+        // backend/scadbuddy/api/analyzers.py:7-9: "Applying records a decision; it sends
+        // nothing. … Nothing reads ``accepted_changes`` into a print yet."
+        <p data-testid="accepted-changes" className="mt-1.5 text-[12px] text-faint">
+          {accepted} accepted {accepted === 1 ? 'change is' : 'changes are'} recorded; nothing
+          sends {accepted === 1 ? 'it' : 'them'} to Bambuddy yet.
+        </p>
       )}
 
       {report && allPlates && (

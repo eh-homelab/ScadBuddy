@@ -1,0 +1,28 @@
+{
+  "total_prints": 104,
+  "successful_prints": 59,
+  "failed_prints": 22,
+  "cancelled_prints": 23,
+  "total_print_time_hours": 200.5,
+  "total_filament_grams": 4013.6,
+  "total_cost": 76.03,
+  "prints_by_filament_type": {
+    "PLA": 87,
+    "PETG": 18,
+    "pla": 2
+  },
+  "prints_by_printer": {
+    "1": 104
+  },
+  "printer_names": {
+    "1": "3DP-31B-598"
+  },
+  "average_time_accuracy": 93.4,
+  "time_accuracy_by_printer": {
+    "1": 93.4
+  },
+  "total_energy_kwh": 0.0,
+  "total_energy_cost": 0.0,
+  "total_wear_cost": 0.0,
+  "energy_data_warming_up": false
+}

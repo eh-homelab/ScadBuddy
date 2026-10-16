@@ -7,10 +7,18 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -28,6 +36,11 @@ class PresetRef(BambuddyModel):
 
     source: PresetSource
     id: str
+
+
+#: One process setting's value as a process preset stores it: a string, or a list of
+#: strings for a per-extruder-variant option (#717).
+ProcessValue = str | list[str]
 
 
 class Preset(PresetRef):
@@ -132,9 +145,31 @@ class Archive(BambuddyModel):
 FINISH_PHOTO_PREFIX = "finish_"
 
 
+class ArchiveFilamentSlot(BambuddyModel):
+    """One filament slot the sliced file used (``extra_data.filament_slots``, #1860)."""
+
+    slot_id: int
+    used_g: float | None = None
+    type: str | None = None
+    color: str | None = None
+
+
+class ArchiveExtra(BambuddyModel):
+    """What Bambuddy read out of the sliced file (``extra_data``), as far as it is not a
+    top-level field too (#1860). Its ``_print_data`` (the sender's address) is not read."""
+
+    printable_objects: dict[str, str] = Field(default_factory=dict)
+    filament_slots: list[ArchiveFilamentSlot] = Field(default_factory=list)
+    filament_used_mm: float | None = None
+
+
 class ArchiveDetail(Archive):
     """``GET /api/v1/archives/{id}`` (``ArchiveResponse``), as far as print history
-    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them."""
+    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them.
+    A field not named here is kept (``model_extra``): the print detail lists them all
+    (#1860), so a field Bambuddy adds is shown before ScadBuddy maps it."""
+
+    model_config = ConfigDict(extra="allow")
 
     filename: str | None = None
     file_size: int | None = None
@@ -159,6 +194,35 @@ class ArchiveDetail(Archive):
     successful_run_count: int = 0
     failed_run_count: int = 0
     last_run_at: datetime | None = None
+    # #1860 — the rest of what the print detail shows.
+    project_name: str | None = None
+    object_count: int | None = None
+    time_accuracy: float | None = None
+    total_layers: int | None = None
+    bed_temperature: float | None = None
+    nozzle_temperature: float | None = None
+    sliced_for_model: str | None = None
+    designer: str | None = None
+    makerworld_url: str | None = None
+    external_url: str | None = None
+    is_favorite: bool | None = None
+    energy_kwh: float | None = None
+    energy_cost: float | None = None
+    total_filament_actual_grams: float | None = None
+    extra_data: ArchiveExtra = Field(default_factory=ArchiveExtra)
+
+    @field_validator("extra_data", mode="wrap")
+    @classmethod
+    def _no_extra(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> ArchiveExtra:
+        """Free-form in Bambuddy: one archive of an odd shape reads as having none,
+        rather than failing it, and with it every list of archives it is in."""
+        if not isinstance(value, dict):
+            return ArchiveExtra()
+        try:
+            extra: ArchiveExtra = handler(value)
+        except ValidationError:
+            return ArchiveExtra()
+        return extra
 
     @field_validator("photos", mode="before")
     @classmethod
@@ -267,10 +331,15 @@ class NozzleRackSlot(NozzleInfo):
     stat: int | None = None
     filament_type: str = ""
     filament_colour: str = Field(default="", alias="filament_color")
+    #: The Bambu filament id it last ran (``GFA00``), ``""`` when none (#2170);
+    #: ``bambuddy.filament_ids`` names it.
+    filament_id: str = ""
     #: The hotend's own serial (#836). It goes into the ``rack_nozzle_*`` tables and
-    #: nowhere else (spec 2026-10-01 §7), so it is kept out of ``repr``. A firmware
-    #: ``null`` reads as ``""`` and any other non-string is coerced to text, so it can
-    #: never fail the whole status parse or leak through a ValidationError's input.
+    #: the Settings rack-usage route only (spec 2026-10-01 §7), so it is kept out of
+    #: ``repr``. A firmware ``null`` reads as ``""`` and any other non-string is coerced
+    #: to text, so it can never fail the whole status parse or leak through a
+    #: ValidationError's input. The firmware's ``N/A`` (an empty mount) reads as ``""``
+    #: too (#2170), so every empty hotend does not share one history.
     serial_number: str = Field(default="", repr=False)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
@@ -278,6 +347,12 @@ class NozzleRackSlot(NozzleInfo):
     @field_validator("serial_number", mode="before")
     @classmethod
     def _serial_text(cls, value: Any) -> Any:
+        text = "" if value is None else str(value).strip()
+        return "" if text.upper() == "N/A" else text
+
+    @field_validator("filament_id", mode="before")
+    @classmethod
+    def _filament_id_text(cls, value: Any) -> Any:
         return "" if value is None else str(value)
 
 
@@ -296,6 +371,8 @@ Tier = Literal["fine", "standard", "draft"]
 #: in ``scadbuddy/rack`` so the settings store can remember it per printer without
 #: importing the ranking (which reaches the client, which imports the store).
 RackAlgorithm = Literal["least_used", "oldest_first", "newest_first", "bambuddy"]
+#: A printer with no remembered algorithm ranks by this (spec 2026-10-01 §4).
+DEFAULT_ALGORITHM: RackAlgorithm = "least_used"
 
 
 class NozzleChoice(BaseModel):
@@ -346,6 +423,52 @@ class FilaSwitch(BambuddyModel):
     installed: bool = False
 
 
+def _number(value: Any, kind: type[int] | type[float]) -> int | float | None:
+    """``value`` as ``kind``, or None when Bambuddy sent something that is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        # OverflowError: an int too large for a float, which pydantic would not turn
+        # into a ValidationError.
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return int(number) if kind is int else number
+
+
+class HmsError(BambuddyModel):
+    """One of ``status.hms_errors``: a Bambu HMS code with Bambuddy's description,
+    which is ``null`` for a code it has no text for (measured on the recordings)."""
+
+    code: str = ""
+    full_code: str = ""
+    severity: int | None = None
+    description: str | None = None
+    actions: list[str] = Field(default_factory=list)
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _actions(cls, value: Any) -> Any:
+        return [str(action) for action in value or []] if isinstance(value, list) else []
+
+    @field_validator("code", "full_code", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> Any:
+        return "" if value is None else str(value)
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _severity(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _description(cls, value: Any) -> Any:
+        return value if isinstance(value, str) else None
+
+
 class PrinterStatus(BambuddyModel):
     """``GET /api/v1/printers/{id}/status`` — live MQTT state, 60-odd fields deep.
 
@@ -372,6 +495,53 @@ class PrinterStatus(BambuddyModel):
     ams_switch_inlet: dict[str, str] = Field(default_factory=dict)
     fila_switch: FilaSwitch | None = None
     current_plate_id: int | None = None
+    #: What the printer is doing now, whoever started it (#977). ``progress`` is a
+    #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and
+    #: ``mc_remaining_time`` are; ``current_archive_id`` is Bambuddy's archive of the job.
+    subtask_name: str | None = None
+    current_print: str | None = None
+    progress: float | None = None
+    remaining_time: int | None = None
+    layer_num: int | None = None
+    total_layers: int | None = None
+    current_archive_id: int | None = None
+    #: ``None`` when Bambuddy sent something other than a bool (#3632): unknown, which
+    #: /prints shows as "check the plate", never as a quiet "no".
+    awaiting_plate_clear: bool | None = False
+    cover_url: str | None = None
+    hms_errors: list[HmsError] = Field(default_factory=list)
+
+    # #2750 review: these are read on every status read (the print dialog's tray checks
+    # too), only for /prints' cards, so a drifted field reads as unknown rather than
+    # failing a print decision that never looks at it.
+    @field_validator("progress", mode="before")
+    @classmethod
+    def _progress(cls, value: Any) -> Any:
+        return _number(value, float)
+
+    @field_validator(
+        "remaining_time", "layer_num", "total_layers", "current_archive_id", mode="before"
+    )
+    @classmethod
+    def _count(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("subtask_name", "current_print", "cover_url", mode="before")
+    @classmethod
+    def _name(cls, value: Any) -> Any:
+        return value if isinstance(value, str) else None
+
+    @field_validator("awaiting_plate_clear", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> Any:
+        return value if isinstance(value, bool) else None
+
+    @field_validator("hms_errors", mode="before")
+    @classmethod
+    def _hms(cls, value: Any) -> Any:
+        return (
+            [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+        )
 
 
 class AvailableFilament(BambuddyModel):
@@ -432,6 +602,23 @@ class FolderCreate(BambuddyModel):
     project_id: int | None = None
 
 
+class FileUpdate(BambuddyModel):
+    """``PUT /api/v1/library/files/{id}``: a partial update. Only the fields given are
+    sent, and ``folder_id=0`` moves the file to the top level (Bambuddy's sentinel;
+    see `BambuddyClient.annotate_library_file`)."""
+
+    filename: str | None = None
+    folder_id: int | None = None
+
+
+class FolderUpdate(BambuddyModel):
+    """``PUT /api/v1/library/folders/{id}``: a partial update; ``parent_id=0`` moves the
+    folder to the top level."""
+
+    name: str | None = None
+    parent_id: int | None = None
+
+
 class LibraryFile(BambuddyModel):
     """``POST /api/v1/library/files`` (``FileUploadResponse``) — the uploaded file —
     and ``GET /api/v1/library/files/{id}`` (``FileResponse``). ``folder_id`` and
@@ -454,6 +641,19 @@ class LibraryFile(BambuddyModel):
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
+    #: A file Bambuddy only indexes from an external folder: a delete drops its record
+    #: for good instead of moving it to the trash (#2167).
+    is_external: bool = False
+
+
+class TrashedLibraryFile(BambuddyModel):
+    """An item of ``GET /api/v1/library/trash`` (Bambuddy's ``TrashFile``, v1.2.5.5
+    ``backend/app/schemas/library_trash.py``). ``folder_id`` is the folder the file was
+    in when it was trashed, which Bambuddy's folder delete still cascades to."""
+
+    id: int
+    filename: str
+    folder_id: int | None = None
 
 
 class LibraryListRow(BambuddyModel):
@@ -469,6 +669,10 @@ class LibraryListRow(BambuddyModel):
     thumbnail_path: str | None = None
     print_count: int = 0
     sliced_for_model: str | None = None
+    #: When it was added to the library; naive, and UTC like Bambuddy's other times.
+    created_at: datetime | None = None
+    #: Indexed from an external folder: a delete cannot be undone (#2167).
+    is_external: bool = False
 
 
 class LibraryPlate(BambuddyModel):
@@ -489,6 +693,26 @@ class LibraryPlates(BambuddyModel):
     is_multi_plate: bool = False
 
 
+class MoveSkip(BambuddyModel):
+    """One of ``POST /api/v1/library/files/move``'s ``skipped_reasons``: ``code`` is
+    ``not_owner``, ``source_readonly`` or a relocation's own (a name taken on the NAS, a
+    file no longer on disk), ``reason`` the sentence Bambuddy gives."""
+
+    file_id: int
+    code: str | None = None
+    reason: str | None = None
+
+
+class MoveResult(BambuddyModel):
+    """``POST /api/v1/library/files/move`` (no response schema in the OpenAPI; read off
+    Bambuddy's ``move_files``): how many it moved and why it skipped the rest. An id it
+    does not have is neither."""
+
+    moved: int = 0
+    skipped: int = 0
+    skipped_reasons: list[MoveSkip] = Field(default_factory=list)
+
+
 class SliceRequest(BambuddyModel):
     """``POST /api/v1/library/files/{id}/slice``.
 
@@ -504,8 +728,9 @@ class SliceRequest(BambuddyModel):
     plate: int = 1
     use_embedded_settings: bool = False
     #: Process settings written over the process preset for this slice, as Bambuddy's
-    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is.
-    process_overrides: dict[str, str] | None = None
+    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is. A per-extruder
+    #: option (``outer_wall_speed`` on an H2C) is a list, one value per variant (#717).
+    process_overrides: dict[str, ProcessValue] | None = None
 
     @property
     def preset_key(self) -> str:
@@ -524,8 +749,25 @@ class SliceRequest(BambuddyModel):
             f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
         )
         if self.process_overrides:
-            key += "/" + ",".join(f"{k}={v}" for k, v in sorted(self.process_overrides.items()))
+            key += "/" + ",".join(
+                # Each value as JSON, so a list and a string, or a value holding a
+                # separator, can never key the same slice (#2804, #3585 review).
+                f"{k}={json.dumps(v)}"
+                for k, v in sorted(self.process_overrides.items())
+            )
         return key
+
+
+class PresetValues(BambuddyModel):
+    """``GET /slicer/preset-values``: a process preset's effective values, its
+    ``inherits:`` chain flattened by Bambuddy's slicer sidecar. ``resolved`` is false,
+    with ``values`` empty and a ``reason`` (``sidecar_unavailable``,
+    ``preset_unresolved``, ``not_configured`` …), whenever they cannot be read; it is
+    never an error (``slicer_presets.py``)."""
+
+    resolved: bool = False
+    values: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
 
 
 class SliceJobAccepted(BambuddyModel):
@@ -543,10 +785,24 @@ class SliceResult(BambuddyModel):
 
 class SliceJob(BambuddyModel):
     """``GET /api/v1/slice-jobs/{id}``. Bambuddy leaves this one untyped in its own
-    OpenAPI, so every field past ``status`` is optional."""
+    OpenAPI, so every field past ``status`` is optional.
+
+    A failure arrives as ``error_status`` (the HTTP status) and ``error_detail``
+    (``HTTPException.detail``, which may be a dict or list rather than a string) — see
+    Bambuddy's ``backend/app/api/routes/slice_jobs.py``. ``error``/``error_message`` are
+    kept as fallbacks only.
+    """
 
     id: int | None = None
     status: SliceStatus | str
+    #: The file it slices (``library_file`` jobs) and when Bambuddy created the job:
+    #: its job ids live in memory and start from 1 again after a restart, so these
+    #: tell one job from another of the same id (#2169).
+    kind: str | None = None
+    source_id: int | None = None
+    created_at: str | None = None
+    error_status: int | None = None
+    error_detail: Any = None
     error: str | None = None
     error_message: str | None = None
     result: SliceResult | None = None
@@ -559,7 +815,14 @@ class SliceJob(BambuddyModel):
     def failure(self) -> str | None:
         if self.status != "failed":
             return None
-        return self.error or self.error_message or "Bambuddy did not say why"
+        detail = self.error_detail
+        if detail is not None and not isinstance(detail, str):
+            detail = json.dumps(detail)
+        if reason := detail or self.error or self.error_message:
+            return reason
+        if self.error_status is not None:
+            return f"Bambuddy did not say why (HTTP {self.error_status})"
+        return "Bambuddy did not say why"
 
 
 class Spool(BambuddyModel):
@@ -592,6 +855,9 @@ class Spool(BambuddyModel):
     storage_location: str | None = None
     location_id: int | None = None
     archived_at: datetime | None = None
+    #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
+    #: nobody entered a price (#785).
+    cost_per_kg: float | None = None
 
     @property
     def remaining_g(self) -> float:
@@ -706,7 +972,8 @@ class InventoryRemain(BambuddyModel):
 
 
 class QueueItem(BambuddyModel):
-    """``POST /api/v1/queue/`` and ``GET /api/v1/queue/{id}`` — the same schema.
+    """``POST /api/v1/queue/``, ``GET /api/v1/queue/{id}`` and a row of ``GET
+    /api/v1/queue/`` — the same schema.
 
     ``waiting_reason`` is the field that explains a queued item that is not printing,
     and it is Bambuddy's own sentence ("No active H2C printers in …"). It is separate
@@ -729,6 +996,43 @@ class QueueItem(BambuddyModel):
     error_message: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    # What the farm's queue view reads (#1912).
+    archive_name: str | None = None
+    #: A model-targeted item waits for any idle printer of this model.
+    target_model: str | None = None
+    sliced_for_model: str | None = None
+    scheduled_time: datetime | None = None
+    manual_start: bool = False
+    filament_short: bool = False
+    print_time_seconds: int | None = None
+    filament_used_grams: float | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    batch_name: str | None = None
+    created_at: datetime | None = None
+
+
+class ArchiveStats(BambuddyModel):
+    """``GET /api/v1/archives/stats`` (``ArchiveStats``): the farm's totals over its
+    archives, optionally within a date window. The per-printer maps are keyed by the
+    **stringified** printer id, as JSON keys must be."""
+
+    total_prints: int
+    successful_prints: int
+    failed_prints: int
+    cancelled_prints: int = 0
+    total_print_time_hours: float
+    total_filament_grams: float
+    total_cost: float
+    prints_by_filament_type: dict[str, int] = Field(default_factory=dict)
+    prints_by_printer: dict[str, int] = Field(default_factory=dict)
+    printer_names: dict[str, str] = Field(default_factory=dict)
+    #: Percent: how close the slicer's estimate came to the actual time.
+    average_time_accuracy: float | None = None
+    time_accuracy_by_printer: dict[str, float] | None = None
+    total_energy_kwh: float = 0.0
+    total_energy_cost: float = 0.0
+    total_wear_cost: float = 0.0
 
 
 class ExternalLink(BambuddyModel):

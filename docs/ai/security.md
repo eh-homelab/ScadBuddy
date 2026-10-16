@@ -22,7 +22,9 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   other tool paths are the harness's in-process `scadbuddy` server (every session's
   queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
   the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
-  Nothing starts a session over HTTP yet (#266, #300).
+  Sessions start from the panel's chat socket, `POST /api/v1/ai/sessions`
+  ([`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)) and the
+  `sessions_*` tools (#300).
 
 ## MCP bearer tokens
 
@@ -46,7 +48,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
 - **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
-  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
   ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
@@ -174,8 +176,7 @@ print, delete, settings or credential writes). A tool ScadBuddy does not recogni
 The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/harness/permissions.ts):
 
 - `decide(toolName, tierOf, input, guard)`: an optional `InputGuard` may deny a call
-  by its arguments first, at any tier (the headless browser's origin and file-name
-  checks, [headless-browser.md](headless-browser.md)). Then an unknown tool (`tierOf`
+  by its arguments first, at any tier. Then an unknown tool (`tierOf`
   returns `undefined`) is treated as `outward`. `read` and `write` are allowed.
   `outward` gets `needs_approval`.
 - **Approvals** (#258): in a session, `needs_approval` parks the call until a human
@@ -212,15 +213,15 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - `tools: []`, which removes all built-in tools: no Bash, file or web tools.
 - `settingSources: []`, so nothing is read from a host `~/.claude` or a project
   `.claude/`.
-- `strictMcpConfig: true` and `mcpServers: {}`. A query with the headless browser
-  sets `strictMcpConfig: false`, because with it Claude Code 2.1.283 starts no plugin
-  MCP server at all (measured, #349); `settingSources: []` still keeps settings-file
-  MCP configs out, which the e2e test checks with a planted `.mcp.json`.
+- `strictMcpConfig: true` and `mcpServers: {}`. A query with an allowed plugin package
+  sets `strictMcpConfig: false`, because with it Claude Code starts no plugin MCP server
+  at all (measured on 2.1.283, #349, and on 2.1.287, #1540); `settingSources: []` still
+  keeps settings-file MCP configs out.
 - A service-owned `CLAUDE_CONFIG_DIR` and `cwd`.
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
 
-The option semantics are quoted from the pinned SDK's `sdk.d.ts` 0.3.283 in that file.
+The option semantics are quoted from the pinned SDK's `sdk.d.ts` (0.3.283, and unchanged in 0.3.287) in that file.
 `run.ts` also sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, citing the
 [gateway docs](https://code.claude.com/docs/en/llm-gateway-connect) ("Turn off traffic
 outside the gateway path").
@@ -310,11 +311,16 @@ the UI approval". As built:
   (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
   of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
   session id itself.
-- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
-  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/pending-input/approval:<id>`
+  ([`agent/src/routes/pendingInput.ts`](../../agent/src/routes/pendingInput.ts), #815), or
+  the older `POST /api/v1/ai/approvals/:id/approve` or `/deny`
+  ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), both as
   the browser user. `authorize` refuses a principal deciding its own request even with
   an approval grant, so an MCP client cannot approve what it prepared (covered in
-  `agent/test/mcpConfirm.pg.test.ts`).
+  `agent/test/mcpConfirm.pg.test.ts`). The respond route does not need the chat socket:
+  a panel whose socket is down still decides and answers, behind the same origin gate,
+  and its card settles on the route's answer alone; the socket's `approval.resolved` /
+  `question.resolved` frames only confirm it (#1479, `frontend/src/agent/chat/useAgentChat.test.ts`).
 - **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
   takes the `pending_action_id` and the same `arguments` again, because the table has
   only the hash. It answers `pending_approval` while the row is undecided. It runs the
@@ -495,6 +501,12 @@ plugin** if it declares any of the following:
 
 - a hook whose `type` is not `http`, `mcp_tool`, `prompt` or `agent`, so `command` and
   missing types are refused;
+- a hooks module (`modules` in any hooks config): JavaScript that Claude Code runs
+  itself, with process, network and environment access. Claude Code 2.1.287 loads one by
+  default (2.1.283 only with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, which no longer turns
+  it off), and a measured module put the gateway token into the model request (#1540);
+- a hooks-file key other than `$schema`, `description`, `hooks` and `modules`, so a later
+  CLI's new loader key is refused by default;
 - an MCP server that is not `type: "http"`/`"sse"` with a `url` and no `command`, or any
   `.mcpb`/`.dxt`/URL bundle;
 - LSP servers;
@@ -516,18 +528,26 @@ PreToolUse hook is where their tier applies. A subagent's own calls go through
 tasks are off (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, #946), so a subagent asked to run in
 the background runs inside the turn too. Backgrounded, it outlived the turn, and Claude Code
 then refused its calls itself, as if the user had declined them, without asking `canUseTool`
-or anyone. A query
+or anyone. A subagent cannot ask the user with `AskUserQuestion`: Claude Code refuses it
+there ("not available inside subagents") and never asks `canUseTool`. A session the
+browser user owns therefore also gets `mcp__scadbuddy_questions__ask_user` (#940,
+[`agent/src/harness/questions.ts`](../../agent/src/harness/questions.ts)), an in-process
+tool at `read` that parks on the same question gate, so only the user answers it. The same
+server carries `request_user_attention` (#815,
+[`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts)), which parks there
+too and is answered the same way. It is the one entry with a timer, and the timer never
+answers for the user: on `proceed` the call returns `timed_out` and every outward call the
+agent then makes still parks for its own approval; `wait` and `stop` end the turn. The
+`approval_pending` reason is refused, so an approval can never time out to proceed. The
+`done` reason (#815 §4) is the one that does not wait: the call returns at once, takes no
+quick replies or timer, and the row outlives its turn on the badge until the user dismisses
+it. Beside the agent's message its card shows ScadBuddy's own list of what the turn created,
+changed or deleted, read from `ai_session_resources` rather than from the model
+([`agent/src/questions/doneSummary.ts`](../../agent/src/questions/doneSummary.ts)), with what
+was done while an attention request went unanswered listed first, so an outward write made
+unattended would be visible there. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the
 next section.
-
-**The one exception is the headless browser** (#349). Its plugin is not read from
-anyone's directory: `materializeHeadlessBrowser()` in
-[`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts)
-writes it per session from the vendored manifest, with a single stdio server that
-starts under `/usr/bin/env -i` and gets `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSERS_PATH`
-only, so the credential never reaches it or Chromium (measured from
-`/proc/<pid>/environ`). `assertHeadlessPlugin()` checks that file instead of
-`assertPluginAllowed()`, which would refuse it.
 
 ## Plugin packages
 
@@ -546,6 +566,19 @@ approvals as the session's
 package-style subagent that asks for `Bash` and does not get it). The code is in
 [`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
 [operating.md](operating.md#9-plugin-packages-297) describes the flow.
+
+**A subagent's question says who asked (#1109).** Every gated session has
+`mcp__scadbuddy_questions__ask_user` (#1102), so any subagent, an enabled package's
+too, can put a question card in the panel. That adds no capability: only the user
+answers, a question runs nothing, and a package skill could already make the session's
+agent ask, or put text in the chat. But a card looks more official than chat text, so
+a subagent's card says "Asked by the subagent `<type>`, not the assistant itself". The
+panel reads it from the feed: the question's `tool.call` carries its `Agent` call as
+`parent` (#1108), and that call's input names the `subagent_type` (just "a subagent"
+when the input was cut to a preview). We chose labelling over refusing `ask_user` to
+package agents, which would also take questions away from ScadBuddy's own subagents.
+The code is `askedBy()` in
+[`frontend/src/agent/chat/state.ts`](../../frontend/src/agent/chat/state.ts).
 
 **Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
 only fetches, vets and stores the pin with its review. Nothing loads until the admin
@@ -583,14 +616,15 @@ not caught; such a process already controls the pod.
   A package may have at most 2000 files and 20 MB.
 - Like the gateway check, this is point-in-time: git resolves the name again itself.
 
-**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
-is refused, with every problem listed, if it has any of the following:
+**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). A package with any
+of the following does not load, and its review lists every problem (`review.refused`),
+unless the admin allows it at approval (below):
 
 - **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block, anywhere in a
   line, as the CLI matches it) in any Markdown file. These run a shell "before the
   skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
   Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
-  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
+  CLI 2.1.283 and 2.1.287, the CLI then puts a placeholder in place of both forms instead of running
   them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
   resulting Bash call.
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
@@ -614,20 +648,82 @@ is refused, with every problem listed, if it has any of the following:
   [hooks reference](https://code.claude.com/docs/en/hooks) ("MCP tool hook fields")
   does not say their call is permission-checked. `http` hooks may not use `$` or
   `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
-  hooks. There is deliberately no switch to allow one, because it would inherit the
-  credential env (above). Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
+  hooks, because they inherit the credential env (above); only the per-pin approval
+  below can let one run. Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
   `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
   `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
   `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
-  type is refused. In CLI 2.1.283 it races the host's `can_use_tool` answer, and its
-  `behavior: "allow"` wins, so it would approve an outward tool before a human could
-  (spec §8.2). `PreToolUse` is refused too (`permissionDecision`, `updatedInput`), and so
-  is any event not on the list, including one a later CLI adds.
+  type is refused. In CLI 2.1.283, and still in 2.1.287's bundle, it races the host's
+  `can_use_tool` answer, and its `behavior: "allow"` wins, so it would approve an
+  outward tool before a human could (spec §8.2). `PreToolUse` is refused too
+  (`permissionDecision`, `updatedInput`), and so is any event not on the list,
+  including one a later CLI adds.
 - **Manifest fields** that a headless run cannot honour: `dependencies`, `userConfig`,
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
 - **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
-  reserved. The name namespaces the skills (`/<name>:<skill>`).
+  reserved (it may clash with ScadBuddy's own plugin or tools). The name namespaces the
+  skills (`/<name>:<skill>`). A name that is not a safe path segment (`SAFE_NAME_RE`:
+  1–64 letters, digits, `.`, `_` and `-`, starting with a letter or digit) refuses the
+  install outright, because it names the cache directory and the row.
+
+**Allowing what the vetting refuses.** An admin may load a package exactly as it is, for one
+pin. Everything in `review.refused` is allowable, including a reserved name: command hooks, hooks modules, stdio MCP
+servers, LSP servers, monitors, dynamic context injection, the frontmatter and tool rules,
+the hook-event allowlist and the manifest fields. Such a pin installs and shows its
+refusals in the review. `POST …/approve` then answers 409 unless the body also carries
+`allow_refused: true`. In Settings that is a second, user-only checkbox, "Load it as it
+is". The flag (`ai_plugin_packages.allow_refused`) belongs to that approval. Approving a
+re-pin sets it again from that review. A pin with nothing refused is stored without it,
+so a rule added later still refuses that pin.
+
+An allowed pin loads through `allowedPluginPaths` (`run.ts`), which skips
+`assertPluginAllowed()`, and its turn runs with `strictMcpConfig` off so the package's MCP
+servers start. `test/pluginPackages.e2e.test.ts` runs a command hook and a stdio server
+through the real CLI.
+
+This is a decision to run someone else's code **as the agent service itself**. It runs
+as the agent's user in its container, so it can read the Claude credential in its own
+environment. It can also read the service's environment (`/proc/<agent pid>/environ`,
+which holds `SCADBUDDY_DATABASE_URL`) and the `SCADBUDDY_SECRET_KEY_FILE` key that
+decrypts every envelope-encrypted secret. It can use or send any of them, and it can
+decide tool calls itself (a `PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
+are not ScadBuddy's.
+
+Some checks still apply to an allowed pin, at install and at every load:
+
+- the name must be a safe path segment (`SAFE_NAME_RE`);
+- a declared file outside the package (`isOutsideProblem()`), which the pinned hash does
+  not cover;
+- symlinks and submodules;
+- the content hash;
+- the egress check on every URL the package declares.
+
+A turn that loads an allowed pin also gets two more things:
+
+- **Built-in tools.** It gets the Claude Code built-ins the package's skills and subagents
+  name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
+  or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
+  `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
+  `outward`, and in a session it parks for a human. Claude Code's own `WebFetch` is never
+  offered (#2684): it fetches inside Claude Code, outside the agent's egress checks, and
+  resolves the name again as it connects. A package that names it gets the agent's
+  (`builtins/web.ts`, the `builtin` server's `WebFetch`, `builtins/server.ts`
+  `classicBuiltinServer`), which connects only to the addresses its check passed, on every
+  hop, and refuses the pod's loopback (the agent's own services). The `PreToolUse` hook
+  `harness/webFetchEgress.ts` stays as a second line: a Claude Code `WebFetch` call, should
+  one ever be offered, is checked the same way first and denied, approved or not. WebSearch
+  stays Claude Code's: the API searches, not this pod. A durable session gets the same built-ins
+  as the agent's `builtin` turn tools (#2393, [operating.md](operating.md)), on the
+  session workspace instead of the pod's disk, each parked the same way; its `WebFetch`
+  connects only to the addresses it checked, on every hop.
+- **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
+  false). Only an allowed package can carry it, because the vetting refuses it
+  everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
+  - with `Bash` offered, the CLI runs the command as it expands the skill. It asks
+    neither `canUseTool` nor the PreToolUse hook, so **the approval of the pin is its
+    only check**;
+  - without `Bash`, the CLI refuses it ("Permission to use Bash has been denied").
 
 Every URL a package declares (MCP servers, http hooks) goes through the egress check at
 install and again at every load. A marketplace entry must have a git source: a relative
@@ -641,68 +737,26 @@ Not done yet:
 - per-part enabling. The review shows each part, but a package is enabled as a whole.
 - tier maps for a package's own MCP tools. They stay `outward`.
 
-## Headless browser (#349)
+## A browser plugin (Playwright MCP)
 
-Spec §8.6's row "Headless browser used to click past an approval, or to reach other
-origins or files", as built. Details and measurements are in
-[headless-browser.md](headless-browser.md).
+The built-in headless browser of #349 (its vendored plugin, the backend's
+`AgentActorGate` and its one-shot grants) was removed. A browser now reaches a session
+only as a remote plugin, Microsoft's Playwright MCP
+([headless-browser.md](headless-browser.md)), so it gets exactly what any remote plugin
+gets:
 
-- **Off by default**: the `ai_settings` key `headless_browser_enabled` must be `true`.
-  It is set only through `PUT /api/v1/ai/settings/headless-browser`, behind
-  `uiRequestProblem` like the other AI settings writes, from a user-only switch in
-  Settings.
-- **Tools the model cannot see**: `browser_run_code_unsafe`, `browser_evaluate`,
-  `browser_file_upload`, `browser_drop`, `browser_install` are in `disallowedTools`.
-  Every other tool has an explicit tier; a new one is `outward`, so denied.
-- **Origins**: the harness denies any `url` not on the backend's origin before the
-  server sees it (`browserInputProblem()`, using `normaliseOrigin()` from
-  `origins.ts`), and the server's `network.allowedOrigins` blocks navigations,
-  subresources and page `fetch` to other origins. That list does not cover redirects
-  (measured), so a **redirect guard** loaded on every page routes each request itself
-  with `maxRedirects: 0` and refuses any hop off the origin, including one added by a
-  proxy in front of the backend (measured: an off-origin redirect and an on→off chain
-  reach nothing).
-- **Files**: `filename` arguments must be plain names; the server's own
-  workspace-root restriction refuses `../` and outside absolute paths too. No
-  `--allow-unrestricted-file-access`, no downloads (`acceptDownloads: false`).
-- **Approvals cannot be bypassed through the UI**: every request carries
-  `X-ScadBuddy-Agent-Session` (a page `fetch` cannot replace it, measured), and
-  `AgentActorGate` in
-  [`backend/scadbuddy/api/agent_actor.py`](../../backend/scadbuddy/api/agent_actor.py)
-  answers `403` to every non-safe route that is not on its allowlist of read/write
-  routes. Default deny: a new route is refused until listed. The one exception is a
-  **grant**: the model asks for one exact method and path with
-  `mcp__scadbuddy_browser__authorize_request`, an outward tool that parks for a human
-  approval (#258); the approved call writes a one-shot row to `ai_headless_grants`,
-  and the backend's `GRANT_SQL` uses it once, only while the turn that made it is the
-  session's live turn and only if its approval is approved and consumed. Any database
-  problem refuses. The marker is not authentication; forging it can only get a request
-  refused (a request without it is as trusted as today), and a forged marker cannot use
-  a grant without knowing the session id, the grant's exact path, and landing inside its
-  turn and two-minute window, for a request a human already approved.
-- **A grant binds method and path, not the body** (review of #518), so settings routes
-  (`/api/v1/settings` and below) are never grantable: a granted settings write could
-  point `bambuddy_url` at another host and send the API key there. Both the agent's
-  authorize tool and the backend gate refuse them. For print and send, the printer,
-  plate and options in the body are not shown to the approver.
-- **The grant check cannot be flooded** (review of #518): the marker is free for anyone
-  to send, so the lookup it triggers is bounded. It runs on its own async pool of 2
-  Postgres connections (`PostgresGrants`), at most 4 checks at once, and one more is
-  refused at once without touching the database; a pooled connection that is not free
-  within 2 s refuses too. Markers that are not UUIDs, and paths outside `/api/v1/`,
-  are refused before any of that. Measured: 200 concurrent bogus markers opened at most
-  2 connections, and a real grant still worked right after
-  (`backend/tests/api/test_agent_actor_grants.py`).
-- **No open redirects from the backend** either, as defence in depth:
-  `backend/tests/api/test_no_open_redirect.py`
-  ([headless-browser.md](headless-browser.md#redirects-guarded-in-the-browser-and-none-from-the-backend)).
-- **Isolation**: `--isolated`, no profile on disk, one server per query, so no state
-  crosses sessions (or turns).
-- **Chromium's sandbox is on where the pod allows it**: the agent probes it once and
-  asks for it (`chromiumSandbox: true`) when it starts; otherwise it warns and runs with
-  `--no-sandbox`, where a renderer exploit would land in the agent container. It needs
-  a seccomp profile that allows user namespaces, not `RuntimeDefault`
-  ([headless-browser.md](headless-browser.md#sandbox)).
+- Its tools are `outward` until an admin tiers them in Settings → Plugins, so every call
+  parks for a human until then; tiers and disabled tools are the plugin's own.
+- ScadBuddy no longer marks or limits what that browser requests. Nothing on the backend
+  tells its requests from a person's. Where it may go is decided where it is deployed:
+  its `--allowed-origins`/`--blocked-origins` and the network. Do not let it reach
+  ScadBuddy's backend or agent API without the sign-in a person needs, or a page it
+  opens could make outward requests that no approval sees. So it runs in its own pod,
+  never as a sidecar of the backend or agent (their loopback needs no sign-in), behind
+  an egress policy that allows no private address; and its navigation and input tools
+  stay `outward` unless that isolation is in place.
+- **No open redirects from the backend** stays, since Playwright MCP's origin lists do
+  not cover redirects: `backend/tests/api/test_no_open_redirect.py`.
 
 ## HTTP request tool (#827)
 
@@ -734,9 +788,8 @@ so a name re-pointed between check and connect reaches nothing new.
 - **Only the model's headers.** The request is built from the tool input alone: no
   user agent, no cookies, no proxy variables, nothing from the agent's environment. The
   Claude credential lives in Claude Code's per-query `env`, which this code never reads.
-- **Never the agent-actor header.** A request naming `X-ScadBuddy-Agent-Session` (any
-  case) is refused, as are `Host`, `Content-Length`, `Transfer-Encoding` and the other
-  connection-level headers Node sets itself.
+- **Never the connection's headers.** `Host`, `Content-Length`, `Transfer-Encoding`
+  and the other connection-level headers Node sets itself are refused.
 - **Never the turn's secrets.** A header value (`Authorization`, `Cookie` or any other),
   the URL or the body that contains the Claude credential or a plugin's header token
   (the same list the event log is redacted of) is refused, so an injected instruction
@@ -745,9 +798,19 @@ so a name re-pointed between check and connect reaches nothing new.
 - **Limits.** One deadline for the whole request, redirects included: `timeout_ms`,
   default 30 s, at most 120 s. At most 5 redirects. The body is read up to 20 MiB and
   returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
-  body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
-  newest kept) and read in pages of up to 1 MiB, text as text and anything else as
-  base64.
+  body is saved with its session in Postgres (`ai_session_http_bodies`, the 10 newest
+  kept, deleted with the session; #2374), so any replica reads it, after a deploy
+  too. A flow run's, which has no session, is kept on the pod that ran the call
+  (`<state>/durable-turns/flow-<run>/http/`, swept with the run). Either is read in
+  pages of up to 1 MiB, text as text and anything else as base64. Like
+  `ai_session_blobs`, the bytes are plaintext. The UI can fetch a saved body whole (#1292,
+  `GET /api/v1/ai/sessions/:id/http/:saved`): a UI read, gated by whether the
+  principal may see the session, by the UUID the audit row names and nothing else.
+  It is untrusted bytes from whatever server answered, so it is never rendered:
+  `text/plain` and JSON are served as `text/plain` inline, everything else (HTML and
+  SVG included) as `application/octet-stream` with `Content-Disposition:
+  attachment`, always with `nosniff` and `Content-Security-Policy: default-src
+  'none'; sandbox`.
 - **Redirects** follow fetch's rules: a 303, or a 301/302 after a `POST`, becomes a
   `GET` with no body. `Authorization`, `Cookie` and `Proxy-Authorization` are dropped
   when a redirect leaves the origin, and a 307/308 that would re-send an approved
@@ -765,6 +828,28 @@ so a name re-pointed between check and connect reaches nothing new.
   `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
   behind `uiRequestProblem` like the other AI settings writes, and the write is audited
   as a `settings` row. Settings → AI shows it as "Let the assistant make HTTP requests".
+
+## Workflow scripts (#2393)
+
+A session's `Workflow` (Claude Code's tool, `docs/ai/operating.md`) runs a script the
+model wrote. The call is `outward`, so the user approves it, and sees the script, first.
+The script then runs on an agent replica, which holds the KEK and the database's
+credentials, so it never runs in the service's own JavaScript. Node's `vm`, Temporal's
+workflow sandbox included, is not a boundary: a host object's `constructor` reaches the
+host's `Function`, and through it `process`. It runs in QuickJS compiled to WebAssembly
+(`background/workflowRunner.ts`, `quickjs-emscripten`, pinned exactly). That is an
+interpreter of its own, whose only way out is four host functions: `agent`, `phase`, `log`
+and `script`.
+- **Isolated:** inside it there is no `process`, `require`, `fetch`, file, socket or
+  clock. `test/workflowRunner.test.ts` checks that the constructor escape finds none.
+- **Bounded:** memory is capped at 64 MiB, and a stretch that runs 5 s without awaiting
+  is interrupted.
+- **Through the gate:** each `agent()` is a chat of the session's owner on the session's
+  budget, so its tool calls go through the gate theirs do.
+- **Marked as computed:** its task is framed as computed text with no user authority, as
+  Claude Code frames it.
+- **Delivered as data:** the result reaches the model in the untrusted-data envelope,
+  redacted of every saved credential.
 
 ## Browser bridge and pairing (#254)
 
@@ -814,6 +899,76 @@ they are stored:
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
 
+## Images in the chat (#1866, #1941)
+
+The panel uploads each image when the user attaches it, and its `user.message` names
+up to four of them by id, `{ kind: 'attachment', id }`. No image travels in the chat
+socket.
+
+**The upload.** `POST /api/v1/ai/attachments`
+([`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)) passes the
+same UI check as the other browser writes (`guard.ts` `uiRequestProblem`: the HTTPS
+ingress and the one origin allowlist in `http/origins.ts`), takes `multipart/form-data`
+only (two file parts, `image` and `preview`, each typed by its Content-Type; base64 in
+JSON is refused with 415, #2479), and caps the body at one image and its preview before
+reading it. The image is checked by
+[`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts): PNG, JPEG, GIF
+or WebP, at most 3.75 MiB (what the Messages API's 5 MiB of base64 holds), its bytes
+starting with its type's signature, and a preview of at most 48 KiB (PNG, JPEG or WebP).
+A refusal names fields and caps, never the bytes. The answer is pointers only,
+`{ id, name, mediaType, preview: { name, mediaType } }`, the `<sha256>.<ext>` names the
+image and its preview take in the session; the composer shows its own copy from a blob
+URL. `DELETE /api/v1/ai/attachments/:id` (same check) removes one the user took out of
+the composer.
+
+**The store.** `ai_attachments`
+([`agent/src/attachments/store.ts`](../../agent/src/attachments/store.ts)) is a staging
+area per owner (the browser user for the panel). Every query names the owner, so
+another owner's id reads as unknown. A row expires an hour after upload
+(`ATTACHMENT_TTL_MS`) and a sweep deletes expired rows every five minutes. One owner
+holds at most 24 rows and 40 MiB (`OWNER_ROWS_MAX`, `OWNER_BYTES_MAX`); past either,
+an upload is refused with 429, so the route cannot fill the database. Every panel
+upload is the browser user's, so the cap covers all tabs together: drafts abandoned in
+several tabs can hold it for up to the TTL. Removing an image in the composer deletes
+its upload; a message the agent refuses after the composer has cleared leaves its
+uploads to expire. The bytes are plaintext, as in `ai_session_blobs`.
+
+**The turn.** The chat socket, and `sessions_send` for an MCP caller
+(`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
+the attachments a message names for the principal sending it. An id that is unknown,
+expired or another owner's refuses the message as `invalid` before any turn starts, and
+so do images that together exceed the 8 MiB total (each upload was checked alone).
+The model gets the images as `image` blocks in the turn's user message. Claude Code
+re-encodes them and keeps a copy under its own temp directory in the agent's state, as
+it does for any pasted image. Once the turn has started, the attachments move into the
+session: their bytes go to `ai_session_blobs` through `SessionBlobs.put`, named
+`<sha256>.<ext>`, and the staging rows are deleted. The session's own lifetime governs
+them from then on (deleting the session cascades). A durable session (#1056) reads
+images from that table by name in an activity, so no image enters a Temporal payload.
+Every image a turn starts with, whatever brought it (an attachment, or a backend
+reference over `sessions_send`), is also stored in
+`ai_session_blobs` with its preview before the `user.turn` event is logged
+(`sessions/blobs.ts` `sentImageBlobs`; an attachment's later move then finds its row
+there), and a store that fails refuses the message. The event names each image and its
+preview, `{ name, mediaType, preview: { name, mediaType } }`, never their bytes (#2479;
+the migration `20261012T0226Z_images_by_pointer.sql` moved older turns' inline previews
+into the blobs), and an MCP transcript (`sessions_get`) keeps only their count. The
+panel loads the previews and the full-size view by name from
+`GET /api/v1/ai/sessions/:id/blobs/:name` (`routes/sessions.ts`): the same UI-read
+check as the session's other reads, `Content-Type` from the stored type, `nosniff`,
+`Content-Disposition: inline`, a sandboxing CSP, `Cross-Origin-Resource-Policy:
+same-origin` and `Cache-Control: private, immutable` (the name is the bytes' hash).
+Nothing logs or traces the bytes.
+
+**The socket.** The chat socket takes frames up to 256 KiB (`CHAT_FRAME_MAX`), the
+same as the tab socket (`BRIDGE_FRAME_MAX`), and at most 32 unhandled frames per
+connection. A message carries images only as attachment ids; it never carries image
+bytes (#1959). A tab loaded before #1941 still sends its images inline: within the cap
+the message is refused as `invalid`, asking the user to reload the page
+(`sessions/clientProtocol.ts` `STALE_TAB_IMAGES`), before anything reads the images or
+starts a turn. A larger frame closes the socket with 1009, and the old tab reconnects
+without that message.
+
 ## Audit log (#258)
 
 Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credentials
@@ -833,6 +988,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
 | `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
 | `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
+| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../agent/src/db/migrations/20261009T0924Z_audit_turn_cost.sql)) |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
@@ -954,24 +1110,42 @@ the render timeout, the queue's workers and the body-size gates in
 cannot tell a person dragging a slider from an agent rendering in a loop, so the
 agent bounds its own callers before a render reaches the queue
 ([`agent/src/tools/renderLimits.ts`](../../agent/src/tools/renderLimits.ts), used by
-`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts)):
+`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts) and `arrange`
+in [`arrange.ts`](../../agent/src/tools/arrange.ts), on every path a tool runs: in
+process, over `/mcp` and as a Temporal activity, all sharing one limiter):
 
-- per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
-  or the browser user, whose harness sessions share one count);
-- at most **2** of its renders in flight at once, counted until the backend job
-  settles (done, failed or cancelled). A render `render_model` hands back still
-  running keeps its slot while the agent polls the job in the background, for at most
-  **30 minutes**, or until the backend stops answering for it (PR #752 review). Past
-  30 minutes the slot is freed even if the job still runs, so for a job that long (a
-  raised render timeout, applied per colour) this cap is best effort, and only the
-  backend's shared render concurrency bounds it;
-- at most **30** started in any **10 minutes**.
+- per principal (`Principal.id`: a token, an OIDC subject, or the browser user, whose
+  harness sessions and sub-agents share one count). Anonymous MCP principals are one
+  per MCP session, which a caller opens at will, so they all share the one count
+  `anonymous`: a new session buys no new slots;
+- at most **4** of its renders in flight at once (an override per principal may change
+  that), and optionally at most N of every principal's together, counted until the
+  backend job settles (done, failed or cancelled). A render past either bound **waits**
+  for a slot, first come first served, rather than being refused, until its caller
+  aborts or the tool's own wait passes (`ACCEPTING_MS` + `renderWaitMs`, 14 minutes by
+  default). That wait ends before the tool's deadline, with "not rendered", nothing
+  submitted. At most **100** of one principal's renders may wait; past that a call is
+  refused. A render or arrange handed back still running keeps its slot while the
+  agent polls the job in the background, for at most **30 minutes** (PR #752 review).
+  Past 30 minutes the slot is freed even if the job still runs, so for a job that long
+  this cap is best effort, and only the backend's shared render concurrency bounds it;
+- at most **30** started in any **10 minutes** (0 turns it off). Renders waiting for a
+  slot count against it as if started, and a waiting render is checked again when it
+  starts, so a burst cannot queue past the cap.
+
+The numbers are a setting (`ai_settings.render_limits`, Settings → "Assistant render
+limits", `GET`/`PUT /api/v1/ai/settings/render-limits` in
+[`routes/renderLimits.ts`](../../agent/src/routes/renderLimits.ts)), written only
+through the UI-origin gate (`uiRequestProblem`, audited as the browser user) and
+validated (integers in range; a stored value out of range falls back to its default).
+The limiter re-reads it at every render it starts and settles and while any render
+waits, so a change applies without a restart; a failed read keeps the last limits.
+The Save button is user-only, so an agent driving the page cannot raise its own limits.
 
 A refusal is an error result that names the limit and when to try again, and nothing is
 sent to the backend. The counts are in memory. They bound a burst, not a total, so a
-restart clears them, and there is no new state or setting. A principal with nothing in
-flight and nothing started in the window is dropped, so the counts hold only recent
-callers (anonymous MCP principals are one per session).
+restart clears them. A principal with nothing in flight and nothing started in the
+window is dropped, so the counts hold only recent callers.
 
 ## Known limitations
 
@@ -983,8 +1157,9 @@ From the merged code and PR bodies:
    What a non-trusted peer cannot do is claim HTTPS. The gate therefore does not stop a
    hostile process on the trusted proxy or on the pod's loopback. The human approval
    comes with #258.
-2. **`GET /api/v1/ai/credentials` is unguarded.** It returns only the non-secret
-   summary (`view()`). It and the `PUT` route await `ready()` without a route-level
+2. **`GET /api/v1/ai/credentials` returns a summary.** It returns only the non-secret
+   summary (`view()`), behind `uiReadProblem` like every other read (#989). It and the
+   `PUT` route await `ready()` without a route-level
    timeout; that wait is bounded by `lock_timeout` (10 s) (PR #379, "Also checked").
 3. **The gateway SSRF check is point-in-time.** Claude Code re-resolves at connect
    (`egress.ts`; PR #379, row 6).
@@ -997,16 +1172,15 @@ From the merged code and PR bodies:
    declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
-   - `SessionStore` is `@alpha` in SDK 0.3.283;
+   - `SessionStore` is `@alpha` in SDK 0.3.283, and still in 0.3.287;
    - concurrent `append` under two project keys is not measured;
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
-   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
-   packages and the headless browser's vendored plugin (when enabled, see
-   [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
-   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
+7. **Plugins are vetted before every turn.** `main.ts` gives the
+   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins and plugin
+   packages for each turn, however the session was
+   started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
@@ -1030,8 +1204,10 @@ From the merged code and PR bodies:
     the credential routes' interim gate (item 1). Someone who can reach Settings can
     point `/mcp` at an IdP they control, which is the "Stated plainly" caveat of spec
     §8.3.
-12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
-    without its sandbox** (see above).
+12. **A browser plugin's reach and sandbox are its deployment's.** The built-in
+    headless browser is gone; Playwright MCP, added as a plugin, runs wherever it is
+    deployed, and ScadBuddy does not limit what it opens
+    ([A browser plugin](#a-browser-plugin-playwright-mcp)).
 13. **The `http_request` tool's reach is open until it runs in a sandbox** (#827,
     decided 2026-09-30; [HTTP request tool](#http-request-tool-827)). A `GET` runs
     without a human, so injected content can make the model read anything on the
@@ -1060,7 +1236,6 @@ the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
 ([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
 see [mcp-resources.md](mcp-resources.md#the-event-source).
 
-#349 measured the headless-browser rows and moved them to spec §3.1 (see
-[headless-browser.md](headless-browser.md), "Measured"), including how the backend
-matches the agent-actor marker to an approved outward action (a one-shot grant in the
-shared database).
+#349 measured the headless-browser rows and moved them to spec §3.1. That browser,
+and the backend's agent-actor gate it needed, have since been removed
+([headless-browser.md](headless-browser.md)).

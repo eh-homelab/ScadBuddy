@@ -1,8 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
 import { choicesView } from '../mocks/choices'
@@ -16,13 +16,24 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import * as fixtures from '../mocks/fixtures'
-import { setMockPlates } from '../mocks/handlers'
+import {
+  mockSettings,
+  setMockJobOutputs,
+  setMockPlates,
+  setMockPresets,
+  setMockRenderColors,
+  setMockRemembered,
+  setMockSettings,
+} from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
+import { AssistantOpenerContext } from '../agent/chat/opener'
+import { setSessionResources } from '../mocks/features/assistantSessions'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
+import { chooseProject, pickerValue } from '../test/projectPicker'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
 // The viewer itself is covered by the Playwright smoke test. The page's own buttons,
@@ -34,14 +45,20 @@ vi.mock('../components/Preview', () => ({
     plate,
     leading,
     controls,
+    rejected,
+    blocked,
   }: {
     job?: Job
     rendering: boolean
     plate?: Plate
     leading?: ReactNode
     controls?: ReactNode
+    rejected?: boolean
+    blocked?: string
   }) => (
     <div data-testid="preview">
+      {rejected && <span data-testid="preview-rejected" />}
+      {blocked && <span data-testid="preview-blocked" data-reason={blocked} />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -97,14 +114,72 @@ function watchRenders(): Promise<{ inputs: { params: Record<string, unknown> }; 
 }
 
 async function firstRender() {
-  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+  // The whole mocked render pipeline; on a loaded host it took over 4 s to show (#1485).
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
 }
 
+/**
+ * Holds the next render running (#2116, #2121): POST /render answers a job that
+ * `GET /jobs/:id` keeps reporting `running`, so the page sits on a submitted render.
+ * `posted` counts the renders submitted since, `read` the page's reads of them.
+ */
+function holdRenders() {
+  const held = { posted: 0, read: 0, workflowId: '' }
+  server.use(
+    http.post('/api/v1/models/:slug/render', async ({ request, params }) => {
+      const body = (await request.json()) as { inputs?: Record<string, unknown> }
+      held.posted += 1
+      const id = String(held.posted).padStart(32, 'a')
+      held.workflowId = `render-${id}`
+      heldJobs.set(id, {
+        id,
+        slug: String(params['slug']),
+        status: 'running',
+        created_at: new Date().toISOString(),
+        params: (body.inputs?.['params'] as Record<string, unknown>) ?? {},
+        inputs: body.inputs ?? {},
+        log_tail: ['Compiling design (CSG Tree generation)...'],
+        workflow_id: held.workflowId,
+      })
+      return HttpResponse.json(
+        { job_id: id, status_url: `/api/v1/jobs/${id}`, inputs: body.inputs ?? {} },
+        { status: 202 },
+      )
+    }),
+    http.get('/api/v1/jobs/:id', ({ params }) => {
+      const job = heldJobs.get(String(params['id']))
+      if (!job) return undefined
+      held.read += 1
+      return HttpResponse.json(job)
+    }),
+  )
+  return held
+}
+const heldJobs = new Map<string, Record<string, unknown>>()
+afterEach(() => heldJobs.clear())
+
 describe('CustomizePage', () => {
+  it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
+    // The schema's title is the .scad file's name, "model" for every model.
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...fixtures.keychainSchema, title: 'model' }),
+      ),
+      http.get('/api/v1/models/:slug', async () => {
+        await delay('infinite')
+        return HttpResponse.json({})
+      }),
+    )
+    render()
+    const heading = await screen.findByRole('heading', { level: 1 })
+    expect(heading).not.toHaveTextContent(/^model$/)
+    expect(heading).toHaveTextContent('name-keychain')
+  })
+
   it('offers to delete the model, naming it', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
-    expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
+    expect(await screen.findByRole('alertdialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
   it('manages the template media from a Media dialog (#279)', async () => {
@@ -118,6 +193,19 @@ describe('CustomizePage', () => {
     expect(items).toHaveLength(1)
     expect(items[0]).toHaveTextContent('Cover')
     expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
+  })
+
+  it('opens the README of a template that has one (#1074)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'README' }))
+    const dialog = screen.getByRole('dialog', { name: 'README' })
+    expect(await within(dialog).findByText(/A name in raised letters on a base plate/)).toBeInTheDocument()
+  })
+
+  it('offers no README for a template without one (#1074)', async () => {
+    render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    expect(await screen.findByRole('button', { name: 'Media' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'README' })).not.toBeInTheDocument()
   })
 
   it("opens a built-in's media to add to, what it ships read-only (#279, #722)", async () => {
@@ -152,10 +240,86 @@ describe('CustomizePage', () => {
     expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
   })
 
+  // #938 — the extruder a colour parameter gets is the render's, not its place among
+  // the colour parameters: a hard-coded colour can take extruder 1, and an unused
+  // parameter takes none.
+  it("labels each colour parameter with the render's extruder, or as not in the render", async () => {
+    setMockRenderColors('name-keychain', ['#3366FF', '#E8532F'])
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const field = (name: string) => screen.getByRole('textbox', { name: `${name} hex` }).closest('[data-param]')!
+    await waitFor(() => expect(field('Text')).toHaveTextContent('extruder 2'))
+    expect(field('Plate')).toHaveTextContent('not in this render')
+    expect(field('Plate')).not.toHaveTextContent(/extruder \d/)
+  })
+
+  // #938 review — the previous render's colours cannot speak for a colour changed since:
+  // while its render is pending, the edited field must not claim it is not printed.
+  it('does not label a just-changed colour "not in this render" while it renders', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    // One whole valid colour: clear-then-type left '#000000#00FF00', which is not one,
+    // so the field never took a new value and the test passed whatever the label did
+    // (#2033).
+    const held = holdRenders()
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(hex).toHaveValue('#00FF00')
+    // Before the debounce has submitted anything…
+    expect(field).not.toHaveTextContent('not in this render')
+    // …and once the render is submitted and still running (#2121).
+    await waitFor(() => expect(held.posted).toBe(1), { timeout: 4000 })
+    await waitFor(() => expect(held.read).toBeGreaterThan(0))
+    expect(field).not.toHaveTextContent('not in this render')
+  })
+
+  // #1685 — a submit refused before it made a job leaves the previous render on show.
+  // Its colours belong to the values it ran with, so the changed colour must not read
+  // "not in this render": the page cannot know yet.
+  it('says nothing about a changed colour whose render was refused before it started', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    const field = hex.closest('[data-param]')!
+    await waitFor(() => expect(field).toHaveTextContent('extruder 2'))
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'the render could not be started' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.tripleClick(hex)
+    await user.paste('#00FF00')
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('the render could not be started')
+    expect(field).not.toHaveTextContent('not in this render')
+    expect(field).not.toHaveTextContent(/extruder \d/)
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('renders and generates a model with no customizer parameters (#941)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ ...keychainSchema, groups: [], parameters: [] }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
   })
 
   it('says the queue is full and renders anyway once the delay passes', async () => {
@@ -183,6 +347,94 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await firstRender()
     expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it("says the revision's source is still uploading, not that the queue is full (#1422)", async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: "the revision's snapshot is still uploading",
+              retry_after: 1,
+              code: 'snapshot_pending',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent("Uploading this revision's source; retrying in 1 s.")
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('says it cannot reach the render service, not that the queue is full', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/temporal-unavailable',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'Temporal is unavailable',
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    const busy = await screen.findByTestId('render-busy', {}, { timeout: 4000 })
+    expect(busy).toHaveTextContent('ScadBuddy cannot reach its render service; retrying in 1 s')
+    expect(busy).not.toHaveTextContent('queue is full')
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
+  it('does not invite a parameter change over a render the server refused (#367)', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Unprocessable Content',
+              status: 422,
+              detail: "parameter 'size' expects a number, got \"big\"",
+            },
+            { status: 422 },
+          ),
+      ),
+    )
+    render()
+    expect(await screen.findByText(/expects a number/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The viewer is told, so it drops its "Change a parameter to render." placeholder.
+    expect(screen.getByTestId('preview-rejected')).toBeInTheDocument()
+  })
+
+  it('offers no "Try again" for a refusal no retry fixes, a 422 (review #1066 (13) 2)', async () => {
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'width must be at most 100' },
+          { status: 422 },
+        ),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('alert', {}, { timeout: 4000 })).toHaveTextContent('width must be at most 100')
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
   it('re-renders after a parameter change and updates the dimensions', async () => {
@@ -227,6 +479,65 @@ describe('CustomizePage', () => {
     expect(log).not.toHaveTextContent('Compilation failed')
   })
 
+  describe('links a render to its workflow in the Temporal UI (#1293)', () => {
+    const link = () => screen.queryByRole('link', { name: 'Open workflow ↗' })
+
+    it('on a failed render, under the deployment\'s namespace', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      const href = (await screen.findByRole('link', { name: 'Open workflow ↗' })).getAttribute('href')
+      expect(href).toMatch(/^https:\/\/temporal\.example\/namespaces\/default\/workflows\/render-[0-9a-f]+$/)
+      expect(link()).toHaveAttribute('target', '_blank')
+    })
+
+    // #2116: the case the link is mainly for, a render that is stuck running.
+    it('on a render still running, naming its workflow', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      const { user } = render()
+      await firstRender()
+      expect(link()).not.toBeInTheDocument()
+
+      const held = holdRenders()
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'stuck')
+      await waitFor(() => expect(held.posted).toBeGreaterThan(0), { timeout: 4000 })
+
+      await waitFor(() =>
+        expect(link()).toHaveAttribute(
+          'href',
+          `https://temporal.example/namespaces/default/workflows/${held.workflowId}`,
+        ),
+      )
+    })
+
+    it('not once the render is done', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      render()
+      await firstRender()
+      expect(link()).not.toBeInTheDocument()
+    })
+
+    it('not when Settings has no Temporal UI URL', async () => {
+      const { user } = render()
+      await firstRender()
+
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'boom')
+
+      await screen.findByTestId('render-log', {}, { timeout: 4000 })
+      expect(link()).not.toBeInTheDocument()
+    })
+  })
+
   it('disables Generate while a render is in flight', async () => {
     const { user } = render()
     await firstRender()
@@ -248,6 +559,97 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+  })
+
+  it('shows the first output once it is saved, and names the others that failed', async () => {
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    const indexes: unknown[] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { index?: number }
+        indexes.push(body.index)
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+
+    // The alert, not its announcement in the status region (#967).
+    await waitFor(() => expect(screen.getByText(/^Saved /, { selector: '[role="alert"]' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
+    expect(
+      await screen.findByText('Saved the first output; output 2 could not be saved: the disk is full', {
+        selector: '[role="alert"]',
+      }),
+    ).toBeInTheDocument()
+    // Generate again saves only the one that is missing.
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(indexes).toEqual([undefined, 1, 1]))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
+  })
+
+  it('retries only the missing outputs of a re-render Generate had to start', async () => {
+    // The page's job did not render these inputs (a UI-state change): Generate renders
+    // them, saves output 0 of that job, and output 1 fails. A retry saves only output 1.
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    let pageJob: unknown
+    const posts: [unknown, unknown][] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { job_id?: string; index?: number }
+        pageJob ??= body.job_id
+        posts.push([body.job_id === pageJob ? 'page' : 'rerender', body.index])
+        if (body.job_id === pageJob) {
+          return HttpResponse.json(
+            { title: 'Unprocessable Content', status: 422, detail: `inputs are not the ones job ${String(body.job_id)} rendered` },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    expect(
+      await screen.findByText(
+        'Saved the first output; output 2 could not be saved: the disk is full',
+        { selector: '[role="alert"]' },
+        { timeout: 5000 },
+      ),
+    ).toBeInTheDocument()
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(posts).toHaveLength(4))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
+    expect(posts).toEqual([
+      ['page', undefined],
+      ['rerender', undefined],
+      ['rerender', 1],
+      ['rerender', 1],
+    ])
   })
 
   it('says to allow pop-ups when the download popup is blocked inside Bambuddy (#612)', async () => {
@@ -425,6 +827,26 @@ describe('CustomizePage', () => {
     expect(screen.getByText('reopened from Nova')).toBeInTheDocument()
   })
 
+  it('acts on a reopened output once its render is on screen, without saving a duplicate (#2445)', async () => {
+    const saves: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/outputs')) saves.push(request.url)
+    })
+    const { user } = render(`/m/name-keychain?from=${'c'.repeat(32)}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled(), {
+      timeout: 5000,
+    })
+    expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+    expect(saves).toEqual([])
+
+    // Changed, the values on screen are no longer the output's.
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), '!')
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeDisabled()
+  })
+
   it('renders a pinned revision from its own schema, without restoring it', async () => {
     const seen = watchRequests()
     render(`/m/name-keychain?version=${versionIds.added}`)
@@ -474,6 +896,175 @@ describe('CustomizePage', () => {
     // Two debounced renders and a schema refetch do not fit the default budget.
   }, 20000)
 
+  it('renders a retyped number once, never the empty field as 0 (#1323)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    await user.clear(padding)
+    // Longer than the debounce: an empty field that committed 0 would render it now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    await user.type(padding, '-12')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(before), { timeout: 4000 })
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['padding'])
+    expect(sent).toEqual([-12])
+  }, 20000)
+
+  it('flags a font family that is not installed on its field, and renders again once it is installed there (#1286)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+
+    await user.click(screen.getByRole('tab', { name: 'Text' }))
+    const typeface = screen.getByRole('combobox', { name: 'Typeface' })
+    // All at once: typed a key at a time, every prefix would be a family too.
+    fireEvent.change(typeface, { target: { value: 'Roboto:style=Bold' } })
+
+    await waitFor(() => expect(typeface).toHaveAttribute('aria-invalid', 'true'), { timeout: 4000 })
+    expect(typeface).toHaveAccessibleDescription(/Roboto is not installed/)
+    const before = renders.length
+
+    await user.click(screen.getByRole('button', { name: 'Install Roboto' }))
+
+    await waitFor(() => expect(typeface).not.toHaveAttribute('aria-invalid'), { timeout: 4000 })
+    expect(renders.length).toBeGreaterThan(before)
+    expect(screen.queryByRole('button', { name: 'Install Roboto' })).not.toBeInTheDocument()
+  }, 20000)
+
+  it('flags an out-of-range number on its field and neither renders nor generates it (#921)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    expect(size).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Text size must be between 6 and 28.')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    // Longer than the debounce: a render of 500 would have been asked for by now.
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(size)
+    await user.type(size, '20')
+    expect(screen.queryByText(/must be between/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent).not.toContain(500)
+    expect(sent.at(-1)).toBe(20)
+  }, 20000)
+
+  // #2444 — the field that stops the render may be on another tab: the panel, the
+  // preview, Generate and the tab itself all say why.
+  it('says why nothing renders, wherever the out-of-range field is (#2444)', async () => {
+    const { user } = render()
+    await firstRender()
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    const groups = screen.getByRole('tablist', { name: 'Parameter groups' })
+    const home = within(groups).getByRole('tab', { selected: true })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    const blocked = await screen.findByTestId('render-blocked')
+    expect(blocked).toHaveTextContent('Not rendering: Text size must be between 6 and 28.')
+    // The preview is told why (its wording: Preview.test.tsx), and keeps the last render.
+    expect(screen.getByTestId('preview-blocked')).toHaveAttribute('data-reason', 'Text size must be between 6 and 28.')
+    expect(screen.getByTestId('bbox')).toBeInTheDocument()
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    expect(screen.getByTestId('generate-blocked')).toHaveTextContent('Fix Text size first')
+    expect(screen.getByTestId('generate')).toHaveAccessibleDescription('Fix Text size first')
+    expect(within(home).getByTestId('tab-flagged')).toBeInTheDocument()
+    expect(home).toHaveAccessibleName(/a value to fix/)
+
+    // From another tab, the notice is still there and leads back to the field.
+    await user.click(within(groups).getByRole('tab', { name: 'Colours' }))
+    expect(screen.queryByRole('spinbutton', { name: 'Text size value' })).not.toBeInTheDocument()
+    expect(within(groups).getByRole('tab', { name: 'Colours' })).not.toHaveAccessibleName(/a value to fix/)
+    await user.click(within(screen.getByTestId('render-blocked')).getByRole('button', { name: 'Show the field' }))
+    expect(home).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('spinbutton', { name: 'Text size value' })).toHaveValue(500)
+
+    const again = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(again)
+    await user.type(again, '20{Enter}')
+    await waitFor(() => expect(screen.queryByTestId('render-blocked')).not.toBeInTheDocument())
+    expect(screen.queryByTestId('preview-blocked')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('generate-blocked')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('tab-flagged')).not.toBeInTheDocument()
+  }, 20000)
+
+  // #2464 — a submit that failed (a 503 during a deploy) leaves the previous job on show;
+  // Generate must not save it for the new values, and the render is tried again on its own.
+  it('keeps Generate off while the job on show is not of the current values, and retries the render (#2464)', async () => {
+    let down = false
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        down ? new HttpResponse('upstream connect error', { status: 503 }) : undefined,
+      ),
+    )
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    down = true
+    const before = renders.length
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '20{Enter}')
+    expect(await screen.findByText(/The server is not answering right now \(HTTP 503\)/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The previous render is on screen, but it is not of 20: nothing to generate.
+    expect(screen.getByTestId('bbox')).toBeInTheDocument()
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    // Back up: the page sends it again by itself, and Generate comes back for 20.
+    down = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 15_000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent.length).toBeGreaterThanOrEqual(2)
+    expect(sent.at(-1)).toBe(20)
+    expect(screen.queryByText(/not answering right now/)).not.toBeInTheDocument()
+  }, 30000)
+
+  it('flags a colour that is no colour on its field and neither renders nor generates it (#2357)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('#RREEDD')
+    await user.tab()
+
+    expect(hex).toHaveValue('#RREEDD')
+    expect(hex).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+
+    await user.tripleClick(hex)
+    await user.keyboard('red')
+    await user.tab()
+    expect(hex).toHaveValue('#FF0000')
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_color'])
+    expect(sent).not.toContain('#RREEDD')
+    expect(sent.at(-1)).toBe('#FF0000')
+  }, 20000)
+
   it('links to the versions panel', async () => {
     render()
     await firstRender()
@@ -502,6 +1093,35 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(schemaReads()).toBe(before.schema + 1))
     await waitFor(() => expect(renders.length).toBe(before.renders + 1), { timeout: 4000 })
     await firstRender()
+  })
+
+  it("links the assistant sessions that changed the model, and the reopened output's (#931)", async () => {
+    const id = 'e'.repeat(32)
+    const at = '2026-10-03T12:00:00.000Z'
+    const row = { action: 'created' as const, before: null, after: null, tool: 'save_output', at }
+    setSessionResources('sess-model', [{ ...row, type: 'preset', id: 'p1', model: 'name-keychain' }], { title: 'Bigger name' })
+    setSessionResources('sess-output', [{ ...row, type: 'output', id, model: 'name-keychain' }], { title: 'Saved it' })
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({ output_id: id, slug: 'name-keychain', name: null, params: {}, model_version: 'v1', source: 'record' }),
+      ),
+    )
+    const openSession = vi.fn()
+    const { user } = renderPage(
+      <AssistantOpenerContext.Provider value={{ openSession }}>
+        <CustomizePage />
+      </AssistantOpenerContext.Provider>,
+      { route: `/m/name-keychain?from=${id}`, path: '/m/:slug' },
+    )
+    // Waited for by text, then found by role once: a role query re-run on every change
+    // while the page loads costs ~0.2-0.45 s each in jsdom (a computed style per
+    // element), which kept the menu from appearing within the 1 s wait (#1485).
+    await screen.findByText('Changed by assistant (2)')
+    await screen.findByText('Output changed by assistant (1)')
+    expect(screen.getByRole('button', { name: 'Changed by assistant (2)' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Output changed by assistant (1)' }))
+    await user.click(await screen.findByRole('option', { name: /Saved it/ }))
+    expect(openSession).toHaveBeenCalledWith('sess-output')
   })
 
   it('reopens from the 3MF alone when the output record is gone', async () => {
@@ -629,6 +1249,34 @@ describe('CustomizePage', () => {
     expect(await screen.findByTestId('gone')).toBeInTheDocument()
   })
 
+  it('hands an arranged output to /edit rather than opening it', async () => {
+    // spec 2026-09-27 §7: an arranged output has no one set of inputs to reopen, and
+    // /edit/{id} owns the page that says so.
+    const id = 'f'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Batch',
+          params: {},
+          inputs: {},
+          model_version: null,
+          source: 'record',
+          arranged_from: ['a'.repeat(32)],
+        }),
+      ),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+        <Route path="/edit/:outputId" element={<div data-testid="arranged" />} />
+      </Routes>,
+      { route: `/m/name-keychain?from=${id}` },
+    )
+    expect(await screen.findByTestId('arranged')).toBeInTheDocument()
+  })
+
   it('renders nothing for a page it is only passing through', async () => {
     // The hooks run before the redirects below them, so without a guard the wrong
     // model gets a real OpenSCAD job — one render-concurrency slot for nothing.
@@ -724,6 +1372,45 @@ describe('CustomizePage', () => {
     expect(screen.getByTestId('plate-fit')).toHaveTextContent(/Y is 105\.2 mm over the A1 mini/)
     expect(screen.getByTestId('print')).toHaveTextContent('Too big on X, Y')
     // Two generates, two picker opens and a debounced re-render.
+  }, 20000)
+
+  it('bounds a `// plate` parameter by the plate in view, and the chosen printer widens it (#81)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({
+          ...keychainSchema,
+          parameters: (keychainSchema.parameters ?? []).map((p) =>
+            p.name === 'padding' ? { ...p, plate_max: 'x' } : p,
+          ),
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    // The default plate: 256 mm.
+    await waitFor(() => expect(padding).toHaveAttribute('max', '256'))
+    await user.clear(padding)
+    await user.type(padding, '280')
+    await waitFor(() => expect(screen.getByText('Margin around the text must be at most 256.')).toBeInTheDocument())
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    await user.clear(padding)
+    await user.type(padding, '6')
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    // The print dialog opens on the H2C: 300 mm where both nozzles reach.
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('H2C 330 × 320'))
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    const widened = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    expect(widened).toHaveAttribute('max', '300')
+    await user.clear(widened)
+    await user.type(widened, '280')
+    expect(screen.queryByText(/Margin around the text must be at most/)).not.toBeInTheDocument()
   }, 20000)
 
   it('warns of what the send would refuse even when every axis fits (#81)', async () => {
@@ -1116,13 +1803,17 @@ describe('full screen', () => {
 })
 
 describe('CustomizePage, project file (#317)', () => {
-  /** The last send went to `Reagan Keychain` (1), so both pickers open on it. */
+  /**
+   * The last send went to `projectId`, and this model was last filed there (#1660), so
+   * both pickers open on it.
+   */
   function withLastProject(projectId: number | null) {
     server.use(
       http.get('/api/v1/print/projects', () =>
         HttpResponse.json({ projects: projectViews, last_project_id: projectId }),
       ),
     )
+    if (projectId !== null) setMockRemembered({ modelProjects: { 'name-keychain': { project_id: projectId } } })
   }
 
   /** The bodies of every request to a path ending in `suffix`, by method. */
@@ -1139,7 +1830,7 @@ describe('CustomizePage, project file (#317)', () => {
     return bodies
   }
 
-  function pagePicker(): HTMLSelectElement {
+  function pagePicker(): HTMLElement {
     return screen.getByTestId('customize-project-select')
   }
 
@@ -1153,14 +1844,14 @@ describe('CustomizePage, project file (#317)', () => {
   it('opens the picker on the last project', async () => {
     withLastProject(1)
     render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
   })
 
   it('files the generated output in the chosen project and links to it', async () => {
     withLastProject(1)
     const filed = watchBodies('POST', '/project-file')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     const status = await screen.findByTestId('project-filed')
@@ -1175,8 +1866,8 @@ describe('CustomizePage, project file (#317)', () => {
     const filed = watchBodies('POST', '/project-file')
     const remembered = watchBodies('PUT', '/print/projects/last')
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
-    await user.selectOptions(pagePicker(), '')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await chooseProject(user, pagePicker(), null)
     await waitFor(() => expect(remembered).toHaveLength(1))
     expect(await remembered[0]).toEqual({ project_id: null })
 
@@ -1205,7 +1896,7 @@ describe('CustomizePage, project file (#317)', () => {
       }),
     )
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     // The print reuses the filed copy, and the file lands where the picker showed.
@@ -1220,8 +1911,8 @@ describe('CustomizePage, project file (#317)', () => {
   it('shares one choice with the print dialog', async () => {
     withLastProject(null)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue(''))
-    await user.selectOptions(pagePicker(), '2')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe(''))
+    await chooseProject(user, pagePicker(), 2)
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -1230,10 +1921,10 @@ describe('CustomizePage, project file (#317)', () => {
     // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
     await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
-    expect(dialogPicker).toHaveValue('2')
+    expect(pickerValue(dialogPicker)).toBe('2')
 
-    await user.selectOptions(dialogPicker, '1')
-    expect(pagePicker()).toHaveValue('1')
+    await chooseProject(user, dialogPicker, 1)
+    expect(pickerValue(pagePicker())).toBe('1')
   })
 
   it('keeps a project created in the dialog while the remembered one is still the old one', async () => {
@@ -1248,7 +1939,7 @@ describe('CustomizePage, project file (#317)', () => {
       }
     })
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -1256,19 +1947,19 @@ describe('CustomizePage, project file (#317)', () => {
     const dialog = await screen.findByRole('dialog')
     // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
     await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
-    const dialogPicker = await within(dialog).findByTestId<HTMLSelectElement>('project-select')
-    await user.selectOptions(dialogPicker, 'new')
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    await chooseProject(user, dialogPicker, 'new')
     await user.type(within(dialog).getByTestId('new-project-name'), 'Workshop Bins')
     await user.click(within(dialog).getByTestId('create-project'))
 
-    await waitFor(() => expect(dialogPicker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
-    const created = dialogPicker.value
+    await waitFor(() => expect(dialogPicker).toHaveTextContent(/Workshop Bins/))
+    const created = pickerValue(dialogPicker)
     expect(created).not.toBe('1')
-    expect(pagePicker()).toHaveValue(created)
+    expect(pickerValue(pagePicker())).toBe(created)
     // Neither picker snaps back to the remembered project on a later re-read.
     await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(pagePicker()).toHaveValue(created)
-    expect(dialogPicker).toHaveValue(created)
+    expect(pickerValue(pagePicker())).toBe(created)
+    expect(pickerValue(dialogPicker)).toBe(created)
     // One list for the page and the dialog, not one each.
     expect(listed).toBe(1)
   })
@@ -1280,8 +1971,8 @@ describe('CustomizePage, project file (#317)', () => {
     // The print run only: the dialog's analyzers also POST to `/analyzers/run` (#563).
     const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
     const { user } = render()
-    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
-    await user.selectOptions(pagePicker(), '')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await chooseProject(user, pagePicker(), null)
     await generate(user)
 
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
@@ -1293,6 +1984,195 @@ describe('CustomizePage, project file (#317)', () => {
 
     await waitFor(() => expect(ran).toHaveLength(1))
     expect(await ran[0]).toHaveProperty('project_id', null)
+  })
+
+  it('leaves project_id out of a run while the list is unknown (#1045)', async () => {
+    // The server then files it under the remembered project, not "No project".
+    server.use(
+      http.get(
+        '/api/v1/print/projects',
+        () => new HttpResponse('upstream request timeout', { status: 504 }),
+      ),
+    )
+    const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
+    const { user } = render()
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const print = await within(dialog).findByTestId('run-print')
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    await waitFor(() => expect(ran).toHaveLength(1))
+    expect(await ran[0]).not.toHaveProperty('project_id')
+  })
+
+  // #1660 — the project each model and preset was last filed in.
+
+  it('remembers the project Generate filed the model in', async () => {
+    withLastProject(1)
+    const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await generate(user)
+
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    expect(await remembered[0]).toEqual({ preset_id: null, preset_name: null, project_id: 1 })
+  })
+
+  it("opens on no project rather than another model's last one", async () => {
+    // The 2026-10-11 QA report: a project chosen on another model filed an apple into it.
+    server.use(
+      http.get('/api/v1/print/projects', () => HttpResponse.json({ projects: projectViews, last_project_id: 1 })),
+    )
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await firstRender()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(pickerValue(pagePicker())).toBe('')
+    await generate(user)
+    expect(filed).toHaveLength(0)
+  })
+
+  it("opens on the model's remembered project over the last one", async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+  })
+
+  it("moves to a preset's remembered project when it is loaded, and back without one", async () => {
+    withLastProject(1)
+    setMockRemembered({
+      modelProjects: {
+        'name-keychain': { project_id: 1 },
+        'name-keychain/template-tiny': { project_id: 2, preset_name: 'Tiny' },
+      },
+    })
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    const presets = screen.getByRole('combobox', { name: 'Preset' })
+    await user.selectOptions(presets, 'template-tiny')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await user.selectOptions(presets, '')
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+  })
+
+  it("opens a preset never filed on the model's project, without asking", async () => {
+    withLastProject(null)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Preset' }), 'template-tiny')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(pickerValue(pagePicker())).toBe('2')
+    await generate(user)
+    // The preset was never filed anywhere, so there is nothing to ask about.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await filed[0]).toEqual({ project_id: 2 })
+  })
+
+  it('asks before filing somewhere other than the remembered project', async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await chooseProject(user, pagePicker(), 1)
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    // Cancel saves nothing.
+    await user.click(screen.getByTestId('generate'))
+    const dialog = await screen.findByRole('dialog', { name: 'File in another project?' })
+    expect(within(dialog).getByTestId('generate-project-confirm')).toHaveTextContent(
+      'Name Keychain was last filed in Gridfinity Bins. File this in Reagan Keychain?',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(filed).toHaveLength(0)
+
+    // "Use" files in the remembered project and moves the picker there.
+    await user.click(screen.getByTestId('generate'))
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Use Gridfinity Bins' }),
+    )
+    await screen.findByTestId('project-filed')
+    expect(await filed[0]).toEqual({ project_id: 2 })
+    expect(pickerValue(pagePicker())).toBe('2')
+  })
+
+  it('reads the remembered project again when another tab files the model', async () => {
+    withLastProject(2)
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 1 } } })
+    await waitFor(() => {
+      emitRealtime('settings.changed', ['settings'], { section: 'model_project' })
+      expect(pickerValue(pagePicker())).toBe('1')
+    })
+    // The question is asked against the project now remembered, not the one read first.
+    await chooseProject(user, pagePicker(), 2)
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    expect(
+      within(await screen.findByRole('dialog')).getByTestId('generate-project-confirm'),
+    ).toHaveTextContent('Name Keychain was last filed in Reagan Keychain. File this in Gridfinity Bins?')
+  })
+
+  it("names the print's project in Simple mode, and (change) opens its picker", async () => {
+    withLastProject(1)
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
+    await generate(user)
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByTestId('print-filed-under')).toHaveTextContent(
+      'Filed under: Reagan Keychain (change)',
+    )
+    await user.click(within(dialog).getByTestId('print-filed-under-change'))
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    await waitFor(() => expect(dialogPicker).toHaveFocus())
+    expect(within(dialog).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+    expect(within(dialog).queryByTestId('print-filed-under')).not.toBeInTheDocument()
+
+    // "No project" is named too, so a print filed nowhere is not a surprise either.
+    await chooseProject(user, dialogPicker, null)
+    await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
+    expect(within(dialog).getByTestId('print-filed-under')).toHaveTextContent('Filed under: No project')
+  })
+
+  it('files in the chosen project when asked, which becomes the remembered one', async () => {
+    withLastProject(1)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const remembered = watchBodies('PUT', '/print/models/name-keychain/project')
+    const { user } = render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('2'))
+    await chooseProject(user, pagePicker(), 1)
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'File in Reagan Keychain' }),
+    )
+    await screen.findByTestId('project-filed')
+    expect(await filed[0]).toEqual({ project_id: 1 })
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    expect(await remembered[0]).toMatchObject({ project_id: 1 })
+    expect(pickerValue(pagePicker())).toBe('1')
+
+    // Now they match: no question.
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(filed).toHaveLength(2))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
 
@@ -1326,5 +2206,157 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     await waitFor(() =>
       expect(bodies[0]).toMatchObject({ inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 } }),
     )
+  })
+
+  function reopenOld(migrate: () => Response) {
+    const outputId = 'c'.repeat(32)
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: 'name-keychain',
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', migrate),
+    )
+    return render(`/m/name-keychain?from=${outputId}`)
+  }
+
+  it('brings an older output\'s inputs up to the template version before applying them', async () => {
+    reopenOld(() =>
+      HttpResponse.json({ inputs: { params: { name: 'Migrated' }, v: 1 }, from_version: 0, to_version: 1 }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Migrated'),
+    )
+    expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).not.toBeInTheDocument()
+  })
+
+  it('shows inputs it cannot migrate read-only and keeps the current values', async () => {
+    reopenOld(() =>
+      HttpResponse.json(
+        { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+        { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    expect(await screen.findByText(/could not be brought up to this template version: defines no migrate/)).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    // The schema default, as before the output was reopened.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+
+  it("dismisses a preset's unmigrated inputs on Reset to defaults (#3074)", async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Old',
+        description: '',
+        tags: [],
+        origin: 'mine',
+        params: { name: 'Old' },
+        inputs: { params: { name: 'Old' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render('/m/name-keychain')
+    const name = await screen.findByRole('textbox', { name: 'Name on the tag' })
+    // Off the defaults, or Reset is disabled.
+    await user.clear(name)
+    await user.type(name, 'Edited')
+    const select = screen.getByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Old' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Old')
+    await user.click(await screen.findByRole('button', { name: 'Replace my changes' }))
+    expect(await screen.findByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    // A preset that cannot be migrated keeps the values on screen.
+    expect(name).toHaveValue('Edited')
+
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }))
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+    expect(name).toHaveValue('Reagan')
+  })
+
+  it('migrates a preset from its stored inputs before cutting them to the schema', async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Renamed',
+        description: '',
+        tags: [],
+        origin: 'mine',
+        params: { old_name: 'x' },
+        inputs: { params: { old_name: 'x' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      // The template's migrate renames old_name to name.
+      http.post('/api/v1/models/name-keychain/inputs/migrate', async ({ request }) => {
+        const { inputs } = (await request.json()) as { inputs: { params: Record<string, unknown> } }
+        const { old_name: oldName, ...rest } = inputs.params
+        return HttpResponse.json({
+          inputs: { params: { ...rest, name: oldName }, v: 1 },
+          from_version: 0,
+          to_version: 1,
+        })
+      }),
+    )
+    const { user } = render('/m/name-keychain')
+    const select = await screen.findByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Renamed' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Renamed')
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('x'),
+    )
+  })
+
+  it('says a model that failed to load could not be loaded, not that it is gone (#1041)', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        fail
+          ? HttpResponse.json({ title: 'Gateway Timeout', status: 504, detail: 'injected 504' }, { status: 504 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('heading', { name: 'Could not load this model' })).toBeInTheDocument()
+    expect(alert).toHaveTextContent('injected 504')
+    expect(screen.queryByText('That model is not here')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await firstRender()
+  })
+
+  it('says a model that is not there is not there (#1041)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no model named x' }, { status: 404 }),
+      ),
+    )
+    render()
+    expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 })

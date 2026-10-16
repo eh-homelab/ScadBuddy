@@ -1,11 +1,12 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { z } from 'zod'
+import { type Context, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
+import { TOOL_USE_META, toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
-import { errorResult, parsedOrRaw, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
+import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -59,6 +60,12 @@ function detailOf(run: ToolRun): { detail?: string } {
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
 }
 
+/** What Claude Code puts in an MCP call's `_meta` (TOOL_USE_META, telemetry/trace.ts). */
+function toolUseIdFrom(extra: unknown): string | undefined {
+  const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.[TOOL_USE_META]
+  return typeof id === 'string' && id ? id : undefined
+}
+
 function signalFrom(extra: unknown): AbortSignal {
   return (extra as ExtraLike | undefined)?.signal ?? new AbortController().signal
 }
@@ -78,6 +85,10 @@ export function createHarnessServer(
   principal: Principal,
   /** The session the server's calls run in, for the commits they make (authorship.ts, #252). */
   session?: string,
+  /** The turn's open segment (telemetry/turn.ts TurnTrace.context): where a call with no bound span is traced. */
+  turnContext?: () => Context,
+  /** The tier the turn's permission seam applies to each tool (registry.ts ToolContext.seamTier); its own by default. */
+  seamTierOf: (tool: Tool) => Risk = (tool) => tool.risk,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -87,31 +98,34 @@ export function createHarnessServer(
       sdkTool(
         t.name,
         t.description,
-        // A whole z.object, not the raw shape the SDK's types ask for. Given a
-        // raw shape, the server bundled in @anthropic-ai/claude-agent-sdk
-        // 0.3.283 rebuilds the object with its own copy of zod, and that copy
-        // refuses an omitted `.default()` field ("expected nonoptional,
-        // received undefined") instead of filling the default, so e.g.
-        // update_source without `force` never ran. Measured 2026-09-28 by the
-        // eval harness (evals/, test/evals.test.ts); test/projections.test.ts
-        // keeps it fixed. The server accepts any zod schema at runtime
-        // (it validates with the schema's own `safeParseAsync`), and the
-        // listed JSON Schema is unchanged (same test). The cast hides that
-        // from the types, so the same file pins the SDK version: a bump fails
-        // there until someone re-checks this (and drops it if fixed).
-        z.object(t.shape) as unknown as typeof t.shape,
+        // The raw shape, as the SDK's types ask. The server rebuilds the object
+        // with the zod it bundles. On SDK 0.3.283 (zod 4.4.3) that copy refused
+        // an omitted `.default()` field of ours ("expected nonoptional,
+        // received undefined"), so update_source without `force` never ran,
+        // and this passed a whole z.object behind a cast instead. 0.3.287
+        // (zod 4.5.4) marks such a field defaulted before rebuilding, and fills
+        // the default: measured 2026-10-06 (#1540). test/projections.test.ts
+        // fails if a bump brings the refusal back.
+        t.shape,
         (args, extra) =>
-          // `gate: 'harness'`: the query's permission seam has already parked
-          // an outward call for approval (registry.ts ToolContext.gate).
-          runTool(t, args, {
-            ...services,
-            principal,
-            session,
-            progress: progressFrom(extra),
-            signal: signalFrom(extra),
-            lookup,
-            gate: 'harness',
-          }),
+          // In the call's own span (telemetry/turn.ts TurnTrace), found by the
+          // tool_use id Claude Code sends in `_meta`: the SDK runs this handler
+          // in the query's context, not the tool's (telemetry/trace.ts).
+          otelContext.with(toolContextFor(extra, turnContext), () =>
+            // `gate: 'harness'`: the query's permission seam has already parked
+            // an outward call for approval (registry.ts ToolContext.gate).
+            runTool(t, args, {
+              ...services,
+              principal,
+              session,
+              toolUseId: toolUseIdFrom(extra),
+              progress: progressFrom(extra),
+              signal: signalFrom(extra),
+              lookup,
+              gate: 'harness',
+              seamTier: seamTierOf(t),
+            }),
+          ),
         { annotations: t.annotations },
       ),
     ),
@@ -122,6 +136,20 @@ export function createHarnessServer(
 export function principalFrom(extra: unknown): Principal | undefined {
   const principal = (extra as ExtraLike | undefined)?.authInfo?.extra?.principal
   return principal as Principal | undefined
+}
+
+/** Each /mcp server's way to bring its tool list in line with Settings → Plugins (#1953). */
+const refreshers = new WeakMap<McpServer, () => Promise<void>>()
+
+/**
+ * Offers on `server` exactly the tools Settings → Plugins has not disabled
+ * (#1953), read now; /mcp calls it before each request, so a `tools/list`
+ * never shows a disabled tool. A change sends `notifications/tools/list_changed`.
+ * A read that fails leaves the list as it was: every call to a tool re-reads
+ * its override and is refused when it cannot be read (registry.ts).
+ */
+export async function refreshOfferedTools(server: McpServer): Promise<void> {
+  await refreshers.get(server)?.()
 }
 
 /**
@@ -142,21 +170,37 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
         MCP_UNTRUSTED_CONTENT_POLICY,
     },
   )
+  const registered = new Map<string, RegisteredTool>()
   for (const t of tools) {
-    server.registerTool(
+    const handle = server.registerTool(
       t.name,
       { description: t.description, inputSchema: t.shape, annotations: t.annotations },
       async (args, extra): Promise<CallToolResult> => {
         const principal = principalFrom(extra)
         if (!principal) return errorResult('unauthenticated')
         const startedAt = new Date()
-        const run = await runToolWithOutcome(t, args, {
-          ...services,
-          principal,
-          progress: progressFrom(extra),
-          signal: extra.signal,
-          lookup,
-        })
+        // `agent.tool/<name>` under the request's `agent.mcp/tools/call` (spec
+        // 2026-10-01 §5.4); never its input or result (§6).
+        const run = await withSpan(
+          `agent.tool/${t.name}`,
+          { attributes: { 'scadbuddy.tool': t.name, 'scadbuddy.tier': t.risk } },
+          async (span) => {
+            const done = await runToolWithOutcome(t, args, {
+              ...services,
+              principal,
+              progress: progressFrom(extra),
+              signal: extra.signal,
+              lookup,
+            })
+            span.setAttribute('scadbuddy.outcome', done.outcome)
+            // A ToolRun carries no error class, only a message (never recorded, §6).
+            if (done.outcome === 'error') {
+              span.setStatus({ code: SpanStatusCode.ERROR })
+              span.setAttribute('scadbuddy.failure_class', 'ToolError')
+            }
+            return done
+          },
+        )
         // Every /mcp call, whatever became of it (#258, audit/log.ts). The row
         // names the tool that ran: a confirm_action that executed its approved
         // call is recorded as that call, with the approval it ran on, and its
@@ -181,6 +225,25 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
         return run.result
       },
     )
+    registered.set(t.name, handle)
+  }
+  const overrides = services.toolOverrides
+  if (overrides) {
+    refreshers.set(server, async () => {
+      let disabled: ReadonlySet<string>
+      try {
+        disabled = await overrides.disabled()
+      } catch {
+        return
+      }
+      for (const [name, handle] of registered) {
+        const on = !disabled.has(name)
+        if (handle.enabled !== on) {
+          if (on) handle.enable()
+          else handle.disable()
+        }
+      }
+    })
   }
   return server
 }

@@ -72,12 +72,27 @@ Methods and their limits
     wall estimate covers that). It is measured on the mesh as rendered and knows
     nothing of the chosen nozzle or layer height.
 
+    *Weak joints* (spec 2026-10-11 §9). The parts are taken as *pieces*: each part's
+    islands, joined across parts where they share a vertex (two colours printed as one).
+    Each piece is cut level every :data:`WEAK_LAYER_MM` up its height, thinner on a piece
+    that would need over :data:`MAX_WEAK_LAYERS` layers (`meshmodel/section.py`
+    `layer_areas`); a layer whose section is under
+    :data:`WEAK_RATIO` of the larger of the sections :data:`WEAK_WINDOW_MM` below and
+    above it, with at least :data:`WEAK_MIN_VOLUME_MM3` of the piece above it (the layer
+    areas above it times the layer height), is weak. Weak layers less than the window
+    apart are one joint, reported at its narrowest weak layer (the middle one of equal
+    narrowest ones), and only when that section's centroid lies inside it: a ring (a
+    cup's walls on its floor) is neither a neck nor a place a peg goes. Each carries a
+    `split_at_plane` edit with a joint sized to the section as `edit_scene` sizes one.
+    It knows nothing of the layer height actually printed or of the material.
+
 Not covered yet (see #284): bridges, text height at the chosen detail, and any
 mapping of a location back to ``.scad`` source lines.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import xml.etree.ElementTree as ET
@@ -85,27 +100,31 @@ import zipfile
 import zlib
 from collections.abc import Collection, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 
 import numpy as np
 import numpy.typing as npt
 import trimesh
 from pydantic import BaseModel, Field
 
+from scadbuddy.meshmodel.section import Section, layer_areas, measure
+from scadbuddy.meshmodel.shared import WALL, JointSpec
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     laid_out_plates,
+    parse_model,
 )
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import UNCOLOURED_WARNING
+from scadbuddy.render.meshmatch import match_points
 from scadbuddy.render.solids import SPLIT_FALLBACK
 from scadbuddy.render.split import ColourPart, normalise_colour
 
 #: Bumped whenever a measurement changes meaning, so a cached analysis written by
-#: an older version is computed again rather than served.
-ANALYSIS_VERSION = 2
+#: an older version is computed again rather than served. 3: weak joints (#2146).
+ANALYSIS_VERSION = 3
 
 #: Overhang buckets, in degrees below horizontal.
 OVERHANG_ANGLES = (45, 60, 75)
@@ -133,6 +152,20 @@ _SUPPORT_LIFT_MM = 1e-3
 _RAY_BATCH = 1 << 22
 #: Located edges returned; the counts are always complete.
 MAX_REPORTED_EDGES = 500
+#: Weak joints (spec 2026-10-11 §9): the layer, the window either side, the ratio, and
+#: the volume above that makes a narrow layer a joint that can snap.
+WEAK_LAYER_MM = 0.2
+WEAK_WINDOW_MM = 2.0
+WEAK_RATIO = 0.25
+WEAK_MIN_VOLUME_MM3 = 1000.0
+#: The most layers a piece is cut into: a taller piece's layers are spread thinner.
+MAX_WEAK_LAYERS = 2000
+MAX_WEAK_JOINTS = 20
+#: Pieces examined (the largest by volume) and sections measured, per analysis.
+MAX_WEAK_PIECES = 64
+MAX_WEAK_ATTEMPTS = 4 * MAX_WEAK_JOINTS
+#: Two parts' islands are one piece where they share a vertex within this, mm.
+TOUCH_MM = 1e-3
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
@@ -201,6 +234,49 @@ class FeatureEstimate(BaseModel):
     islands: int
 
 
+class JointSuggestion(BaseModel):
+    """`split_at_plane`'s ``joint`` (meshmodel/edits.py `JointSpec`), sized to the section."""
+
+    diameter: float
+    depth: float
+    clearance: float
+    key: Literal["none", "flat", "hex"]
+    peg_on: Literal["above", "below"]
+
+
+class SplitSuggestion(BaseModel):
+    """An `edit_scene` edit (spec 2026-10-11 §5): cut level through the section with a
+    keyed peg on the narrower side and its socket in the wider. ``object`` is the mesh
+    model's scene object the section is in, which `GET /outputs/{id}/geometry` names
+    for a mesh model's render (`meshmodel/locate.py`); None otherwise. ``joint`` is None
+    where no peg fits the section with two walls around its socket."""
+
+    edit: Literal["split_at_plane"] = "split_at_plane"
+    object: str | None = None
+    point: Point
+    normal: Point = (0.0, 0.0, 1.0)
+    joint: JointSuggestion | None
+
+
+class WeakJoint(BaseModel):
+    """A level section much narrower than the piece just below or above it, with enough
+    of the piece above it to snap it (spec 2026-10-11 §9)."""
+
+    z: float
+    area_mm2: float
+    #: The larger of the sections `WEAK_WINDOW_MM` below and above.
+    neighbour_area_mm2: float
+    volume_above_mm3: float
+    centroid: Point
+    #: From the centroid to the section's nearest edge.
+    room_mm: float
+    #: The extruders of the parts the piece is made of.
+    parts: list[int]
+    #: The piece's box.
+    bbox: BoundingBox
+    suggestion: SplitSuggestion
+
+
 class GeometryAnalysis(BaseModel):
     """What :func:`analyze_geometry` measured. See the module docstring for methods."""
 
@@ -223,6 +299,8 @@ class GeometryAnalysis(BaseModel):
     edges_truncated: bool = False
     thinnest_wall: WallEstimate | None = None
     smallest_feature: FeatureEstimate | None = None
+    #: Where a piece is narrow enough to snap (spec 2026-10-11 §9), narrowest first.
+    weak_joints: list[WeakJoint] = Field(default_factory=list)
 
 
 def _box(low: FloatArray, high: FloatArray) -> BoundingBox:
@@ -270,7 +348,7 @@ class Unreadable3MFError(ValueError):
     """
 
 
-def parts_from_3mf(path: Path, plate: int = 1) -> list[ColourPart]:
+def parts_from_3mf(path: Path | IO[bytes], plate: int = 1) -> list[ColourPart]:
     """The parts on one plate of a ScadBuddy 3MF, in extruder order.
 
     Read from the ``3D/Objects/object_<n>.model`` files `bambu3mf.write_plates_3mf`
@@ -282,7 +360,7 @@ def parts_from_3mf(path: Path, plate: int = 1) -> list[ColourPart]:
     return _plate_parts(path, plate)[0]
 
 
-def _plate_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
+def _plate_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
     """The plate's parts and how many plates the 3MF has."""
     try:
         return _read_parts(path, plate)
@@ -290,7 +368,7 @@ def _plate_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
 
-def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
+def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -318,6 +396,8 @@ def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
         # objects across plates (spec §6.4), so each part's extruder is read from
         # the part list rather than assumed.
         extruders: dict[int, int] = {}
+        # Negative parts (an arranged library file's, #1863): cut out, never checked.
+        negative: set[int] = set()
         if MODEL_SETTINGS_NAME in names:
             listing = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
             for part_node in listing.iter("part"):
@@ -325,25 +405,16 @@ def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
                 part_id, extruder = part_node.get("id") or "", metadata.get("extruder") or ""
                 if part_id.isdigit() and extruder.isdigit():
                     extruders[int(part_id)] = int(extruder)
+                if part_id.isdigit() and part_node.get("subtype") == "negative_part":
+                    negative.add(int(part_id))
         for index in indices:
-            root = ET.fromstring(archive.read(f"3D/Objects/object_{index}.model"))
-            obj = root.find(f".//{{{CORE_NS}}}object")
-            vertices_node = root.find(f".//{{{CORE_NS}}}vertices")
-            triangles_node = root.find(f".//{{{CORE_NS}}}triangles")
-            vertices = np.array(
-                [
-                    [float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))]
-                    for v in (vertices_node if vertices_node is not None else [])
-                ],
-                dtype=np.float64,
-            ).reshape(-1, 3)
-            faces = np.array(
-                [
-                    [int(t.get("v1", 0)), int(t.get("v2", 0)), int(t.get("v3", 0))]
-                    for t in (triangles_node if triangles_node is not None else [])
-                ],
-                dtype=np.int64,
-            ).reshape(-1, 3)
+            if index in negative:
+                continue
+            model = parse_model(archive, f"3D/Objects/object_{index}.model")
+            obj = model.root.find(f".//{{{CORE_NS}}}object")
+            meshes = list(model.meshes.values())
+            vertices = meshes[0].vertices if meshes else np.empty((0, 3))
+            faces = meshes[0].faces if meshes else np.empty((0, 3), dtype=np.int64)
             name = (obj.get("name") if obj is not None else None) or f"Color {index}"
             number = extruders.get(index, index)
             colour = normalise_colour(colours[number - 1] if 1 <= number <= len(colours) else None)
@@ -520,6 +591,208 @@ def _islands(vertex_count: int, faces: IntArray) -> IntArray:
         if np.array_equal(updated, labels):
             return labels
         labels = updated
+
+
+def _pieces(
+    welded: Sequence[tuple[FloatArray, IntArray]],
+) -> list[tuple[list[int], FloatArray, IntArray]]:
+    """The pieces the parts print as: each part's islands, joined where islands of two
+    parts share a vertex (parts whose boxes do not meet are not compared). Each is the
+    indices of its parts, and its own vertices and faces, compacted. A part pair
+    `match_points` refuses (too many distinct points in a cell) is not joined: its
+    islands stay pieces of their own."""
+    labels = [_islands(len(vertices), faces) for vertices, faces in welded]
+    nodes: dict[tuple[int, int], int] = {}
+    node_faces: list[IntArray] = []
+    for part, ((_, faces), label) in enumerate(zip(welded, labels, strict=True)):
+        if len(faces) == 0:
+            continue
+        of_face = label[faces[:, 0]]
+        order = np.argsort(of_face, kind="stable")
+        islands, starts = np.unique(of_face[order], return_index=True)
+        for island, chunk in zip(islands.tolist(), np.split(order, starts[1:]), strict=True):
+            nodes[(part, int(island))] = len(nodes)
+            node_faces.append(faces[chunk])
+    parent = list(range(len(nodes)))
+
+    def root(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    # Only parts whose boxes, grown by the tolerance, meet can share a point.
+    boxes = [
+        (vertices.min(axis=0) - TOUCH_MM, vertices.max(axis=0) + TOUCH_MM)
+        if len(vertices)
+        else None
+        for vertices, _ in welded
+    ]
+    for i, j in itertools.combinations(range(len(welded)), 2):
+        a, b = boxes[i], boxes[j]
+        if a is None or b is None or (a[0] > b[1]).any() or (b[0] > a[1]).any():
+            continue
+        try:
+            hit = match_points(welded[i][0], welded[j][0], TOUCH_MM)
+        except ValueError:
+            continue
+        touching = np.flatnonzero(hit >= 0)
+        pairs = set(
+            zip(labels[i][hit[touching]].tolist(), labels[j][touching].tolist(), strict=True)
+        )
+        for a, b in pairs:
+            if (i, a) in nodes and (j, b) in nodes:
+                parent[root(nodes[(i, a)])] = root(nodes[(j, b)])
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for node, at in nodes.items():
+        groups.setdefault(root(at), []).append(node)
+    pieces: list[tuple[list[int], FloatArray, IntArray]] = []
+    for members in groups.values():
+        piece_vertices: list[FloatArray] = []
+        piece_faces: list[IntArray] = []
+        offset = 0
+        for part, island in members:
+            used, compact = np.unique(node_faces[nodes[(part, island)]], return_inverse=True)
+            piece_vertices.append(welded[part][0][used])
+            piece_faces.append(compact.reshape(-1, 3) + offset)
+            offset += len(used)
+        pieces.append(
+            (
+                sorted({part for part, _ in members}),
+                np.concatenate(piece_vertices),
+                np.concatenate(piece_faces),
+            )
+        )
+    return pieces
+
+
+def _suggestion(
+    section: Section, z: float, below: float, above: float, low: float, high: float
+) -> SplitSuggestion:
+    """A level cut through the section with `edit_scene`'s joint (meshmodel/edits.py):
+    ``below`` and ``above`` are the largest sections on each side of it; the socket goes
+    in the wider side (the peg on the other), no deeper than that side has room for. The diameter
+    is the default (1.2 times the room) when it fits with two walls around it, else no
+    joint."""
+    spec = JointSpec()
+    peg_on: Literal["above", "below"] = "above" if below >= above else "below"
+    socket_side = (z - low) if peg_on == "above" else (high - z)
+    diameter = round(1.2 * section.room, 2)
+    fits = section.room >= diameter / 2 + spec.clearance + WALL
+    joint = (
+        JointSuggestion(
+            diameter=diameter,
+            depth=round(min(spec.depth, max(1.0, socket_side - 1.0)), 1),
+            clearance=spec.clearance,
+            key=spec.key,
+            peg_on=peg_on,
+        )
+        if fits
+        else None
+    )
+    return SplitSuggestion(point=_point(section.centroid), joint=joint)
+
+
+def weak_joints(
+    parts: Sequence[ColourPart],
+    welded: Sequence[tuple[FloatArray, IntArray]],
+    numbers: Sequence[int],
+    split: Collection[str],
+) -> list[WeakJoint]:
+    """Each piece's weak joints (see the module docstring), the narrowest for its
+    neighbours first, at most :data:`MAX_WEAK_JOINTS`. Parts whose mesh is the open
+    split are left out: a section of an open mesh is not one. A piece under
+    :data:`WEAK_MIN_VOLUME_MM3`, or too short to have a layer a window clear of both its
+    ends, cannot hold a joint and is skipped; only layers with a full window of the piece
+    below them are candidates; at most :data:`MAX_WEAK_PIECES` are
+    examined, the largest first, and at most :data:`MAX_WEAK_ATTEMPTS` sections measured,
+    weakest first. A weak layer whose section is several loops (a row of pegs, a ring)
+    has its centroid outside the section and is dropped, like a cup's wall."""
+    checked = [
+        i
+        for i, part in enumerate(parts)
+        if part.colour not in split and not part.negative and len(welded[i][1])
+    ]
+    candidates = []
+    for members, vertices, faces in _pieces([welded[i] for i in checked]):
+        corners = vertices[faces]
+        low, high = float(corners[:, :, 2].min()), float(corners[:, :, 2].max())
+        if high - low < WEAK_WINDOW_MM + WEAK_LAYER_MM:
+            continue
+        volume = abs(_signed_volume(vertices, faces))
+        if volume >= WEAK_MIN_VOLUME_MM3:
+            candidates.append((volume, members, vertices, faces, corners, low, high))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    found: list[WeakJoint] = []
+    attempts = 0
+    for _, members, vertices, faces, corners, low, high in candidates[:MAX_WEAK_PIECES]:
+        if len(found) >= MAX_WEAK_JOINTS or attempts >= MAX_WEAK_ATTEMPTS:
+            break
+        layer = max(WEAK_LAYER_MM, (high - low) / MAX_WEAK_LAYERS)
+        count = int((high - low) / layer)
+        if count < 1:
+            continue
+        zs = low + layer * (np.arange(count) + 0.5)
+        areas = layer_areas(vertices, faces, zs)
+        window = max(1, round(WEAK_WINDOW_MM / layer))
+        padded = np.concatenate([np.zeros(window), areas, np.zeros(window)])
+        below, above = padded[:count], padded[2 * window : 2 * window + count]
+        neighbour = np.maximum(below, above)
+        volume_above = (areas[::-1].cumsum()[::-1] - areas) * layer
+        # A layer needs a full window of the piece below it: nearer the bottom the
+        # neighbour is only the section above, and a ball's first layer is "narrow".
+        # (Near the top the volume above is what rules a tip out.)
+        weak = np.flatnonzero(
+            (areas > 0)
+            & (areas < WEAK_RATIO * neighbour)
+            & (volume_above >= WEAK_MIN_VOLUME_MM3)
+            & (np.arange(count) >= window)
+        )
+        if len(weak) == 0:
+            continue
+        used = corners.reshape(-1, 3)
+        box = _box(used.min(axis=0), used.max(axis=0))
+        extruders = [numbers[checked[m]] for m in members]
+        picks = []
+        for run in np.split(weak, np.flatnonzero(np.diff(weak) * layer >= WEAK_WINDOW_MM) + 1):
+            narrowest = float(areas[run].min())
+            ties = run[areas[run] <= narrowest * (1 + 1e-6)]
+            picks.append(int(ties[len(ties) // 2]))
+        picks.sort(key=lambda at: areas[at] / neighbour[at])
+        face_low, face_high = corners[:, :, 2].min(axis=1), corners[:, :, 2].max(axis=1)
+        for at in picks:
+            if len(found) >= MAX_WEAK_JOINTS or attempts >= MAX_WEAK_ATTEMPTS:
+                break
+            attempts += 1
+            z = float(zs[at])
+            straddling = faces[(face_low <= z) & (face_high >= z)]
+            near = trimesh.Trimesh(vertices=vertices, faces=straddling, process=False)
+            section = measure(near, (0.0, 0.0, z), (0.0, 0.0, 1.0))
+            if section is None or not section.inside:
+                continue
+            found.append(
+                WeakJoint(
+                    z=z,
+                    area_mm2=float(areas[at]),
+                    neighbour_area_mm2=float(neighbour[at]),
+                    volume_above_mm3=float(volume_above[at]),
+                    centroid=_point(section.centroid),
+                    room_mm=section.room,
+                    parts=extruders,
+                    bbox=box,
+                    suggestion=_suggestion(
+                        section,
+                        z,
+                        float(areas[:at].max(initial=0.0)),
+                        float(areas[at + 1 :].max(initial=0.0)),
+                        low,
+                        high,
+                    ),
+                )
+            )
+    found.sort(key=lambda joint: joint.area_mm2 / joint.neighbour_area_mm2)
+    return found[:MAX_WEAK_JOINTS]
 
 
 def analyze_geometry(
@@ -707,6 +980,8 @@ def analyze_geometry(
                 islands=0,
             )
 
+    joints = weak_joints(parts, welded, list(numbers), split)
+
     footprint: BoundingBox | None = None
     ratio: float | None = None
     height = float(high[2] - low[2])
@@ -745,6 +1020,7 @@ def analyze_geometry(
         edges_truncated=total_edges > len(edges),
         thinnest_wall=wall,
         smallest_feature=feature,
+        weak_joints=joints,
     )
 
 

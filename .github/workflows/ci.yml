@@ -100,6 +100,7 @@ jobs:
       backend: ${{ steps.detect.outputs.backend }}
       frontend: ${{ steps.detect.outputs.frontend }}
       agent: ${{ steps.detect.outputs.agent }}
+      agent_durable: ${{ steps.detect.outputs.agent_durable }}
       e2e: ${{ steps.detect.outputs.e2e }}
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
@@ -126,6 +127,8 @@ jobs:
           if [ -f frontend/package.json ]; then frontend=true; fi
           agent=false
           if [ -f agent/package.json ]; then agent=true; fi
+          agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then agent_durable=true; fi
           e2e=false
           if [ -d frontend/e2e ]; then e2e=true; fi
           models=false
@@ -158,6 +161,7 @@ jobs:
             echo "backend=$backend"
             echo "frontend=$frontend"
             echo "agent=$agent"
+            echo "agent_durable=$agent_durable"
             echo "e2e=$e2e"
             echo "models=$models"
             echo "image=$image"
@@ -210,11 +214,14 @@ jobs:
         run: .github/scripts/fonts-probe.test.sh
 
       # The config lives in .hadolint.yaml so the same rules apply to a local
-      # `hadolint Dockerfile` as to this job.
+      # `hadolint Dockerfile` as to this job. `recursive` lints every file
+      # named `Dockerfile` (the action's `**/Dockerfile` glob): the root one and
+      # each Go CLI's, tools/go/<m>/Dockerfile (#2686).
       - name: hadolint
         uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
+          recursive: true
           config: .hadolint.yaml
           failure-threshold: warning
 
@@ -227,10 +234,13 @@ jobs:
       # job runs, and a word-splitting bug in one is a check that silently
       # asserts something other than what it says.
       - name: shellcheck the CI scripts and the template verify scripts
-        run: shellcheck .github/scripts/*.sh models/*/verify.sh
+        run: shellcheck .github/scripts/*.sh scripts/*.sh models/*/verify.sh
 
       - name: Test the template selector
         run: .github/scripts/select-models.test.sh
+
+      - name: Test the Go selector
+        run: .github/scripts/select-go.test.sh
 
       # verify-models.sh reaps a timed-out template's containers by the
       # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
@@ -249,6 +259,9 @@ jobs:
       - name: Test the issue-intake failure check
         run: .github/scripts/intake-verify.test.sh
 
+      - name: Test the follow-up-issues delivery check
+        run: .github/scripts/follow-up-verify.test.sh
+
       - name: Test the OpenSCAD bump script
         run: .github/scripts/openscad-bump.test.sh
 
@@ -256,6 +269,36 @@ jobs:
       # including the agent sidecar's image beside the API's (#720).
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
+
+      # deploy/grafana is built by kustomize in ArgoCD's repo-server, which
+      # runs 5.6.0 (clusters/prod/bambuddy/kustomization.yaml says so), so the
+      # lint builds it with that release, never whatever kustomize the runner
+      # image happens to carry. The sha256 is the one kustomize published in
+      # that release's checksums.txt, pinned here so a replaced asset fails.
+      - name: Install kustomize
+        env:
+          KUSTOMIZE_VERSION: v5.6.0
+          KUSTOMIZE_SHA256: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
+        run: |
+          set -euo pipefail
+          tarball="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/${tarball}"
+          echo "${KUSTOMIZE_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/kustomize"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/kustomize" kustomize
+          "$RUNNER_TEMP/kustomize/kustomize" version
+          echo "KUSTOMIZE=$RUNNER_TEMP/kustomize/kustomize" >> "$GITHUB_ENV"
+
+      # The dashboard (#988, spec 2026-10-01 §7): JSON, uid, datasource
+      # variables, the series and span names its queries read, and the
+      # ConfigMap kustomize builds from it. Its own tests first, so a
+      # regression in the lint reads as a failing case.
+      - name: Test the dashboard lint
+        run: .github/scripts/lint-dashboard.test.sh
+
+      - name: Lint the Grafana dashboard
+        run: .github/scripts/lint-dashboard.sh
 
       # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
       # in CI reads: a skill that loses its frontmatter still loads with its
@@ -269,6 +312,25 @@ jobs:
 
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
+
+      # No image travels as base64 inside JSON or text (#2479): an image is a blob
+      # and moves as a pointer. This fails on new code in any package that builds
+      # base64 or a data: URL outside the allowlisted Messages API boundaries.
+      - name: Check that no image is built as base64
+        run: .github/scripts/lint-base64-images.sh
+
+      - name: Test the base64 image check
+        run: .github/scripts/lint-base64-images.test.sh
+
+      # The payload codec is kept in agent/, agent-durable/ and backend/; the
+      # backend's tests run in an image without agent/, so they read copies of the
+      # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md
+      # Ruling 10). This fails when a copy, or one Python codec, drifts.
+      - name: Check the payload codec copies
+        run: .github/scripts/lint-codec-copies.sh
+
+      - name: Test the codec copy check
+        run: .github/scripts/lint-codec-copies.test.sh
 
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
@@ -314,7 +376,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -389,9 +451,10 @@ jobs:
   # The same shape as `frontend` (same Node major, corepack-pinned pnpm,
   # frozen lockfile), plus the sidecar image: `--target agent` is a separate
   # image with nothing in common with the OpenSCAD stages, so it is built and
-  # smoke-tested here rather than in `image`. The build itself asserts the
-  # Claude Code version the Agent SDK bundles (the Dockerfile's
-  # CLAUDE_CODE_VERSION), so an SDK bump that moves it reds this job on the PR.
+  # smoke-tested here rather than in `image`. The build itself checks that the
+  # Claude Code binary the Agent SDK bundles reports the version the SDK
+  # declares (agent/src/check-cli-version.ts). An SDK bump that changes what the
+  # harness relies on reds this job's tests, which run that binary (#1540).
   #
   # No test here calls Anthropic: test/run.test.ts points the SDK at a local
   # fake Anthropic-format endpoint as its gateway (ANTHROPIC_BASE_URL, #255).
@@ -432,12 +495,16 @@ jobs:
 
       # `pnpm gen:api`, which typecheck, test and build run first, exports the
       # backend's spec with uv: the spec and the generated clients are not
-      # committed (#492). Same pinned action as the `freshness` job.
+      # committed (#492). Same pinned action as the `freshness` job. The durable
+      # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
+      # worker with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          cache-dependency-glob: backend/uv.lock
+          cache-dependency-glob: |
+            backend/uv.lock
+            agent-durable/uv.lock
 
       - name: Enable corepack
         run: corepack enable
@@ -451,17 +518,26 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # The headless browser's tests (#349: test/headlessBrowser.server.test.ts
-      # and .e2e.test.ts) drive the pinned @playwright/mcp with a real Chromium
-      # and skip without one. The same build the Dockerfile's `agent` stage
-      # installs, through the pinned package, so it matches the pin.
-      - name: Install the headless browser's Chromium
-        # --with-deps runs apt through sudo itself when it is not root.
-        run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
+      # The agent-tools worker's tests (#1055: test/*.temporal.test.ts,
+      # test/temporal.worker.test.ts) start their own dev server from this CLI and
+      # skip without one. The same version and amd64 digest as the Dockerfile's
+      # `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together.
+      - name: Install the Temporal CLI
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
 
       - name: Unit tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: pnpm test
 
       - name: Build
@@ -523,6 +599,131 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-agent-ci || true
 
+  agent-durable:
+    name: Agent-durable lint, test, image
+    needs: layout
+    if: ${{ needs.layout.outputs.agent_durable == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: agent-durable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent-durable/uv.lock
+
+      # The pin still resolves from temporalio/ai-integrations (spec §6.2): a
+      # commit only a draft PR references can vanish. Runs on every PR, so a
+      # change to uv.lock is checked where it is made. The test also proves the
+      # check fails on a vanished commit, which `uv lock --check` alone never sees.
+      - name: Check the pin still resolves
+        working-directory: .
+        run: .github/scripts/agent-durable-pin.test.sh
+
+      # The same check on the backend's temporal-agent-harness pin (plan
+      # 2026-10-09-durable-phase-6-flows.md Ruling 1). It runs here only because
+      # this job already sets up uv on the runner; the backend's own jobs run in
+      # the image.
+      - name: Check the harness pin still resolves
+        working-directory: .
+        run: .github/scripts/harness-pin.test.sh
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Lint
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+
+      - name: Typecheck
+        run: uv run --frozen mypy
+
+      # Opens agent/test/fixtures/secret-vectors.json, which the agent job
+      # regenerates and compares: a format change in agent/src/secrets.ts or
+      # credentials.ts fails one job or the other. Runs every
+      # agent/test/fixtures/pending-input-vectors.json vector against the gate's
+      # validator port, as the agent job runs them against agent/src/gate/validate.ts.
+      # Opens and re-seals agent/test/fixtures/payload-vectors.json, which the agent
+      # job regenerates from agent/src/temporal/payloadCodec.ts.
+      # DurableSession's tests (tests/test_session_*.py, #1056 phase 5c) start their own
+      # dev server from this CLI and skip without one. Same version and digest as the
+      # agent job's step and the Dockerfile's `test` stage; bump together.
+      - name: Install the Temporal CLI
+        working-directory: .
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
+          "$RUNNER_TEMP/temporal" --version
+
+      - name: Tests
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+        run: uv run --frozen pytest -v
+
+      - uses: docker/setup-buildx-action@v4
+
+      # The stage copies the agent's tool manifest from `agent-build` (5e), so
+      # it also reads `scope=agent`, whose mode=max index holds that chain.
+      - name: Build the agent-durable image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: agent-durable
+          load: true
+          tags: scadbuddy-agent-durable:ci
+          cache-from: |
+            type=gha,scope=agent-durable
+            type=gha,scope=agent
+          cache-to: type=gha,scope=agent-durable,mode=min
+
+      - name: Start it and check /healthz
+        working-directory: .
+        run: |
+          set -euo pipefail
+          docker run -d --name scadbuddy-agent-durable-ci --read-only \
+            --tmpfs /tmp --tmpfs /srv/agent:uid=10001,gid=10001 \
+            -p 18082:8082 scadbuddy-agent-durable:ci
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18082/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          body="$(curl --fail --silent --show-error http://127.0.0.1:18082/healthz)"
+          echo "$body"
+          jq -e '.status == "ok"' <<<"$body" >/dev/null
+
+      - name: Tear down
+        if: always()
+        working-directory: .
+        run: docker rm -f scadbuddy-agent-durable-ci || true
+
   # ── Image build + everything that needs a real openscad ─────────────────────
   #
   # ONE job, on purpose. The backend's integration tests are marked
@@ -535,9 +736,9 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
-    # About 15 min on main, the pytest step 10 of it. `tests/api` rendering on
-    # Temporal (#546) costs about 15% more there, so 45 still leaves a wide margin.
-    timeout-minutes: 45
+    # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
+    # suite is `backend-pytest` (#1167).
+    timeout-minutes: 30
     # For the backend tests that need Postgres: every one that builds the app
     # (the settings live there, #401), the render queue's store, the `render_jobs`
     # projection the Temporal path writes (#424) and the other `requires_postgres`
@@ -607,20 +808,7 @@ jobs:
       - name: mypy
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
 
-      # No `-m` filter: inside the image `requires_openscad` tests are supposed
-      # to run, and the point of building the image at all is that they can.
-      # `requires_postgres` ones run against the service container above.
-      # `requires_temporal` ones, and all of `tests/api` (every app renders on
-      # Temporal, #546), start one dev server per session from the image's
-      # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
-      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
-      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
-      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
-      - name: pytest
-        run: >-
-          docker run --rm --network host --shm-size=1g
-          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
+      # The backend suite runs in `backend-pytest`, four jobs of its own (#1167).
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -800,6 +988,224 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci temporal-ci || true
 
+  # ── Backend pytest, in four shards (#1167) ─────────────────────────────────
+  #
+  # One 4-vCPU runner is CPU-bound on this suite: eight xdist workers took longer
+  # than four (25:59 against 23:53, the per-test setup 0.70 s -> 2.66 s at the
+  # median). So the lever is more runners: four jobs, each running a quarter by
+  # time with pytest-split and `-n auto` inside it.
+  #
+  # Each shard builds the test image itself, READING the `image` job's gha cache
+  # (`cache-from` only: no new cache scope, nothing written, so the 10 GB ceiling
+  # is untouched); on a warm cache that build is ~3 min. Each has its own Postgres
+  # service, and its xdist workers start their own Temporal dev servers, as the
+  # suite always did.
+  #
+  # The split reads backend/.test_durations (pytest-split's format). A test it does
+  # not list -- a new one -- is placed by the average duration, so it always runs
+  # in some shard; a stale file only balances the shards worse, it never fails a
+  # run. Refresh it with
+  #   cd backend && uv run --frozen pytest -n auto --store-durations
+  # (from the image, as CI runs it, for CI's own timings) and commit the result.
+  #
+  # The file is mounted at pytest-split's default path, `.test_durations` beside
+  # pyproject.toml, so no `--durations-path` is passed: pytest reads its rootdir
+  # from the command line before plugins add their options, so
+  # `--durations-path /durations.json` made `/` the rootdir, dropped
+  # pyproject.toml's settings (asyncio_mode=auto among them) and broke the run.
+  #
+  # Each shard also counts what it selected and what the whole suite collects,
+  # and `backend-pytest-split` checks the four counts add up to the whole, so no
+  # test can fall between the shards unnoticed.
+  # The LFS fixtures, pulled once per change of them into the Actions cache the four
+  # shards restore from: a new fixture costs one ~290 MB pull of the LFS bandwidth
+  # quota, not four. An entry evicted from the full cache since, or a save that never
+  # landed, is the exception: each shard then pulls them itself, four pulls in all
+  # (#2488). A failure here
+  # skips the required backend-pytest, which CI Summary reports as a failure.
+  lfs-fixtures:
+    name: LFS fixtures
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      key: ${{ steps.lfs.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # hashFiles() reads only the workspace, so the list's hash is taken here.
+      - name: List the LFS fixtures
+        id: lfs
+        run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
+      # Restore and save as two steps (#2488): the save is a step of its own, in this
+      # job's log, not a post-step that can quietly not happen.
+      - uses: actions/cache/restore@v6
+        id: cache
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
+      - name: Fetch the LFS fixtures
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
+      - uses: actions/cache/save@v6
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
+
+  backend-pytest:
+    name: Backend pytest (${{ matrix.group }}/4)
+    needs: [layout, lfs-fixtures]
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
+      # `lfs-fixtures` filled. They are mounted into the test container below; no image
+      # carries them (.dockerignore).
+      - uses: actions/cache/restore@v6
+        id: lfs-cache
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
+      # A miss is a cache hiccup, not a test failure (#2488): a save that never landed
+      # (two runs racing for a new key), or the entry evicted from the full Actions
+      # cache since. This shard pulls them itself; SCADBUDDY_TEST_FIXTURES below still
+      # fails a fixture that is missing even then.
+      - name: Fetch the LFS fixtures the cache missed
+        if: ${{ steps.lfs-cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
+      - name: Check out the LFS fixtures
+        run: git lfs checkout
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:ci-test
+          cache-from: type=gha
+
+      # What this shard selects, and what the suite collects: pytest prints
+      # "<selected>/<collected> tests collected (<n> deselected)".
+      - name: Count this shard's tests
+        run: |
+          set -euo pipefail
+          line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
+            -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
+            --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
+          echo "$line"
+          selected=${line%%/*}
+          rest=${line#*/}
+          collected=${rest%% *}
+          mkdir -p counts
+          echo "${{ matrix.group }} ${selected} ${collected}" > counts/selected.txt
+
+      # No `-m` filter: inside the image `requires_openscad` tests are supposed
+      # to run, and the point of building the image at all is that they can.
+      # `requires_postgres` ones run against the service container above.
+      # `requires_temporal` ones, and all of `tests/api` (every app renders on
+      # Temporal, #546), start one dev server per xdist worker from the image's
+      # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
+      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
+      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
+      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
+      #
+      # `-n auto`: pytest-xdist, one worker per vCPU (4 on ubuntu-latest). Each
+      # worker gets a database of its own on the service (tests/conftest.py
+      # `_pg_database_url`), since advisory locks and NOTIFY channels are per
+      # database, and a Temporal dev server of its own, each well under 1 GiB of shm.
+      #
+      # `--junitxml`: the next step counts what this run reported, one testcase per
+      # test whatever its outcome, to set beside what the shard selected.
+      - name: pytest
+        run: >-
+          mkdir -p results && chmod 777 results &&
+          docker run --rm --network host --shm-size=1g
+          -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
+          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
+          -v "$PWD/results:/results"
+          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
+          --splits 4 --group ${{ matrix.group }}
+          --junitxml=/results/junit.xml --durations=20
+
+      # Even when pytest failed, so the split check still says what ran.
+      - name: Count what this shard ran
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ran=0
+          [ -f results/junit.xml ] && ran=$(grep -o '<testcase ' results/junit.xml | wc -l)
+          echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.group }}.txt
+          cat counts/shard-${{ matrix.group }}.txt
+
+      - name: Upload the count
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-pytest-count-${{ matrix.group }}
+          path: counts/shard-${{ matrix.group }}.txt
+
+  # The shards between them ran every test: each one's selection adds up to the
+  # whole collection, which every shard saw the same, and each shard's run
+  # reported exactly the tests it selected (the `--collect-only` count is serial,
+  # the run is under xdist). Each count file is "<group> <selected> <collected> <ran>".
+  backend-pytest-split:
+    name: Backend pytest shards cover the suite
+    needs: backend-pytest
+    if: ${{ !cancelled() && needs.backend-pytest.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: backend-pytest-count-*
+          merge-multiple: true
+          path: counts
+
+      - name: Check the counts
+        run: |
+          set -euo pipefail
+          cat counts/shard-*.txt
+          files=(counts/shard-*.txt)
+          [ "${#files[@]}" -eq 4 ] || { echo "::error::expected 4 shard counts, got ${#files[@]}"; exit 1; }
+          totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
+          [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
+          sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
+          [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
+          short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
+          [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
+          echo "The four shards select and ran all ${totals} tests."
+
   # ── Each template's verify.sh (#229) ────────────────────────────────────────
   #
   # Every bundled template ships a `models/<slug>/verify.sh` that renders it
@@ -884,6 +1290,11 @@ jobs:
           echo "Selected ${count} template(s):"
           cat "$list"
           echo "count=${count}" >>"$GITHUB_OUTPUT"
+          # Of those, the ones whose verify.sh runs their pipeline: only they need
+          # the `test` image, so only they pay for building it.
+          pipelines="$(.github/scripts/select-models.sh pipelines <"$list" | grep -c . || true)"
+          echo "${pipelines} of them run a pipeline check."
+          echo "pipelines=${pipelines}" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
         if: ${{ steps.select.outputs.count != '0' }}
@@ -912,6 +1323,22 @@ jobs:
           tags: scadbuddy-verify:ci
           cache-from: type=gha
 
+      # The backend and its pinned `temporal` CLI, for a template's pipeline check
+      # (`SCADBUDDY_PIPELINE_IMAGE`; spec 2026-09-27 §5.5): `base` has no Python.
+      # Read-only from the same cache, which an earlier run's `image` job wrote
+      # (its test-image build, mode=max), as for `base` above. Built only when a
+      # selected template has a pipeline: the stage copies models/, so a template
+      # PR misses the cache from there on, and only those templates use it.
+      - name: Build the pipeline image (Dockerfile `test` stage)
+        if: ${{ steps.select.outputs.pipelines != '0' && steps.select.outputs.count != '0' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:test
+          cache-from: type=gha
+
       # `base` sits BELOW the Dockerfile's OPENSCAD_VERSION assertion (that is
       # in the `app` stage), so assert it here too: a template check against an
       # OpenSCAD the rest of the repo has not been verified on proves nothing.
@@ -933,19 +1360,64 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
         env:
           SCADBUDDY_OPENSCAD_IMAGE: scadbuddy-verify:ci
           SCADBUDDY_FONTS_IMAGE: scadbuddy-verify:ci
+          # Unset (empty) without a pipeline template: verify.sh then skips the check.
+          SCADBUDDY_PIPELINE_IMAGE: ${{ steps.select.outputs.pipelines != '0' && 'scadbuddy:test' || '' }}
         run: .github/scripts/verify-models.sh <"$RUNNER_TEMP/models.txt"
 
       - name: Nothing to verify
         if: ${{ steps.select.outputs.count == '0' }}
         run: |
           echo "This change touches no template and no verify tooling; no verify.sh ran." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── The Go workspace (#2686) ────────────────────────────────────────────────
+  #
+  # go.work, the root vendor/ and the modules under tools/go/. Never path-gated:
+  # `go-select` reads this change's paths the way the `models` job does, and the
+  # `go` job always runs, checking nothing and saying so when no Go changed.
+  # Both are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
+  # diff that cannot be computed checks everything.
+  go-select:
+    name: Select Go work
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Did this change touch Go?
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+            && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
+            run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
+          elif [ "$EVENT_NAME" = "merge_group" ] \
+            && git fetch -q --depth=1 origin "$QUEUE_BASE" \
+            && git diff --name-only "$QUEUE_BASE" HEAD >"$RUNNER_TEMP/changed.txt"; then
+            run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
+          fi
+          echo "run=$run" | tee -a "$GITHUB_OUTPUT"
+
+  go:
+    name: Go modules
+    needs: [go-select]
+    uses: ./.github/workflows/go-module-ci.yml
+    with:
+      run: ${{ needs.go-select.outputs.run }}
 
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
@@ -955,8 +1427,8 @@ jobs:
   # job could regenerate anything. The `frontend` and `agent` jobs now export
   # the spec and generate their clients themselves (`pnpm gen:api`, run by
   # typecheck, test and build), so a backend change that breaks a client reds
-  # those jobs directly. This job no longer regenerates or commits anything.
-  # It checks two things and reports a third:
+  # those jobs directly. The one thing this job regenerates and commits is the
+  # Go client (4. below). It checks two things and reports a third:
   #
   #   1. The export is deterministic. `scadbuddy.tools.export_openapi` builds
   #      the FastAPI app with `frontend_dir=/nonexistent` and dumps
@@ -976,6 +1448,13 @@ jobs:
   #      edited in place on every push. Without a committed spec nothing in the
   #      PR's own diff shows a contract change, and review still needs to see
   #      it. Reported, never a failure: changing the API is allowed.
+  #
+  #   4. The Go client, tools/go/scadbuddy-client (#2686), which is committed
+  #      because a vendored Go module must build offline. Generated twice from this PR's spec
+  #      and compared, then against the tree. A stale one is regenerated and
+  #      pushed to the PR's branch with the app token (same-repo PRs only) and
+  #      fails this run; the push's own run checks the result. Its state is a
+  #      section of the API comment.
   #
   # Deliberately NOT covered:
   #   models/<slug>/model.json — hand-authored catalogue metadata (name,
@@ -1063,7 +1542,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -1144,6 +1623,107 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The Go client (tools/go/scadbuddy-client, #2686) IS committed: a
+      # vendored Go module must build offline. So it is generated here from the spec exported
+      # above, twice, and compared: Kiota's output must be a function of the
+      # spec. Skipped when neither the API nor the client or its generator
+      # changed. A missing API diff (main did not export) counts as changed.
+      - name: Set up Go for the client
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      - name: Go client is deterministic and fresh
+        id: goclient
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        env:
+          LINES: ${{ steps.diff.outputs.changed_lines }}
+          # As go-module-ci.yml: a newer runner Go would write a different vendor/.
+          GOTOOLCHAIN: go1.26.9+auto
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # `--quiet`, not a `| head -1` of the names: a long list SIGPIPEs git
+          # and pipefail fails the step.
+          if [ "$LINES" = "0" ] \
+            && git diff --quiet "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh; then
+            echo "state=unchanged" | tee -a "$GITHUB_OUTPUT"; exit 0
+          fi
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          cp -a tools/go/scadbuddy-client/client "$RUNNER_TEMP/client-1"
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          if ! diff -r "$RUNNER_TEMP/client-1" tools/go/scadbuddy-client/client >/dev/null; then
+            echo "::error::Two generations of the Go client differ; Kiota output is not a function of the spec."
+            exit 1
+          fi
+          # All of tools/go: tidy can move the client's go.mod and go.sum.
+          if [ -z "$(git status --porcelain -- tools/go vendor go.work go.work.sum)" ]; then
+            echo "state=fresh" | tee -a "$GITHUB_OUTPUT"
+          else
+            # Staged so the stat counts new files as well as changed ones.
+            git add -A -- tools/go vendor go.work
+            git diff --cached --stat -- tools/go vendor go.work > "$RUNNER_TEMP/client.stat" || true
+            echo "state=stale" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # On the head ref, in a worktree: `head.json` is the merge ref's spec, the
+      # API that will land, and generating from it on the head ref is the
+      # intended result. No token in this step: the generator runs Kiota and
+      # `go work vendor` from the PR's own tree. The fetch needs none (public).
+      - name: Commit the regenerated Go client
+        id: goclient-commit
+        if: ${{ steps.goclient.outputs.state == 'stale' && env.CAN_COMMENT == 'true' }}
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GOTOOLCHAIN: go1.26.9+auto
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/heads/${HEAD_REF}"
+          git worktree add -B regen "$RUNNER_TEMP/head" FETCH_HEAD
+          cd "$RUNNER_TEMP/head"
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          git add -A -- tools/go vendor go.work
+          if [ -e go.work.sum ]; then git add go.work.sum; fi
+          git -c user.name="scadbuddy-ci" -c user.email="ci@scadbuddy.invalid" \
+            commit -m "chore: regenerate Kiota client" -m "Generated by the freshness job from this PR's API spec."
+          echo "sha=$(git rev-parse --short HEAD)" | tee -a "$GITHUB_OUTPUT"
+
+      # Its own token, scoped to contents and minted only here, so no step that
+      # runs the PR's code ever holds a token that can write.
+      - name: Generate push token
+        id: push-token
+        if: ${{ steps.goclient-commit.outputs.sha != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # The app token, never GITHUB_TOKEN: a GITHUB_TOKEN push starts no
+      # workflow, so the PR would sit on a commit CI never checked. Only git
+      # runs here. The token is only ever in the URL, never in a remote's
+      # config, and the checkout's persisted GITHUB_TOKEN header is cleared,
+      # or git would send it instead. --no-verify skips git-lfs's pre-push hook,
+      # whose lock check refused the app token ("You must have push access to
+      # verify locks"); the commit is generated Go only, so there is no LFS
+      # object for the hook to upload.
+      - name: Push the regenerated Go client
+        id: goclient-push
+        if: ${{ steps.goclient-commit.outputs.sha != '' }}
+        working-directory: ${{ runner.temp }}/head
+        env:
+          GH_TOKEN: ${{ steps.push-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.goclient-commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -c "http.https://github.com/.extraheader=" \
+            push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+          echo "sha=${SHA}" | tee -a "$GITHUB_OUTPUT"
+
       - name: Upload the API diff
         if: ${{ steps.diff.outputs.changed_lines != '' && steps.diff.outputs.changed_lines != '0' }}
         uses: actions/upload-artifact@v7
@@ -1154,8 +1734,8 @@ jobs:
 
       # One comment per PR, found by its marker and edited in place, so a PR
       # pushed ten times carries one current diff and not ten stale ones. No
-      # comment is created for a PR that never changed the API; one that did
-      # and then reverted it is edited to say so.
+      # comment is created for a PR that never changed the API or regenerated
+      # the Go client; one that did and then reverted it is edited to say so.
       - name: Post the API diff on the PR
         if: ${{ env.CAN_COMMENT == 'true' && steps.diff.outputs.changed_lines != '' }}
         env:
@@ -1164,6 +1744,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           LINES: ${{ steps.diff.outputs.changed_lines }}
+          GO_STATE: ${{ steps.goclient.outputs.state }}
+          GO_SHA: ${{ steps.goclient-push.outputs.sha }}
         run: |
           set -euo pipefail
           marker='<!-- scadbuddy-api-diff -->'
@@ -1191,10 +1773,26 @@ jobs:
               echo
               echo "</details>"
             fi
+            if [ -n "$GO_STATE" ]; then echo; echo "### Go client"; echo; fi
+            case "$GO_STATE" in
+              fresh) echo "Up to date." ;;
+              unchanged) echo "Unchanged by this PR." ;;
+              stale)
+                echo "Regenerated in \`${GO_SHA}\`."
+                echo
+                echo "<details><summary>Changed files</summary>"
+                echo
+                echo '```'
+                head -c 20000 "$RUNNER_TEMP/client.stat"
+                echo '```'
+                echo
+                echo "</details>"
+                ;;
+            esac
           } > "$body"
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$body" >/dev/null
-          elif [ "$LINES" -ne 0 ]; then
+          elif [ "$LINES" -ne 0 ] || [ "$GO_STATE" = "stale" ]; then
             gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$body" >/dev/null
           fi
 
@@ -1232,12 +1830,27 @@ jobs:
             exit 1
           fi
 
+      # Last, so a stale client does not hide the checks above. Red even after
+      # the push: this run checked the old commit, the push's own run checks
+      # the new one.
+      - name: Fail on a stale Go client
+        if: ${{ steps.goclient.outputs.state == 'stale' }}
+        env:
+          GO_SHA: ${{ steps.goclient-push.outputs.sha }}
+        run: |
+          if [ -n "$GO_SHA" ]; then
+            echo "::error::The Go client was stale; regenerated in ${GO_SHA}. The next run verifies it."
+          else
+            echo "::error::The Go client is stale. Run scripts/generate-go-client.sh and commit."
+          fi
+          exit 1
+
   # ── The required check ──────────────────────────────────────────────────────
   summary:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, image, models, freshness]
+    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1264,8 +1877,13 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
+          AGENT_DURABLE_RESULT: ${{ needs.agent-durable.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          BACKEND_PYTEST_RESULT: ${{ needs.backend-pytest.result }}
+          BACKEND_PYTEST_SPLIT_RESULT: ${{ needs.backend-pytest-split.result }}
           MODELS_RESULT: ${{ needs.models.result }}
+          GO_SELECT_RESULT: ${{ needs.go-select.result }}
+          GO_RESULT: ${{ needs.go.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -1298,6 +1916,8 @@ jobs:
           if [ -f frontend/package.json ]; then has_frontend=true; fi
           has_agent=false
           if [ -f agent/package.json ]; then has_agent=true; fi
+          has_agent_durable=false
+          if [ -f agent-durable/pyproject.toml ]; then has_agent_durable=true; fi
           has_models=false
           if [ -d models ]; then has_models=true; fi
           has_image=false
@@ -1317,8 +1937,15 @@ jobs:
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
+          assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$has_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
+          assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$has_image"
+          assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$has_image"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
+          # Always required: the `go` job runs on every commit and reports "No Go
+          # changes" itself when `go-select` found none, so a skip is a failure.
+          assert "Select Go work"                         "$GO_SELECT_RESULT" true
+          assert "Go modules"                             "$GO_RESULT"       true
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore
@@ -1350,7 +1977,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, models, summary]
+    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

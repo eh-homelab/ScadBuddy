@@ -9,6 +9,7 @@ import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { useProjectList } from '../lib/projects'
+import { chooseParent, chooseProject, openPicker, pickerValue } from '../test/projectPicker'
 import { ProjectPicker } from './ProjectPicker'
 
 /**
@@ -33,14 +34,13 @@ function mount(onChange: (projectId: number | null) => void = vi.fn()) {
   return renderPage(<Harness />)
 }
 
-function select(): HTMLSelectElement {
+function select(): HTMLElement {
   return screen.getByTestId('project-select')
 }
 
 /** The list lands before anything else can be asserted. */
 async function listed() {
   await screen.findByTestId('project-select')
-  await waitFor(() => expect(within(select()).getAllByRole('option').length).toBeGreaterThan(2))
 }
 
 /** The last send went to `Reagan Keychain`, so the picker opens on it. */
@@ -56,33 +56,68 @@ describe('ProjectPicker', () => {
   beforeEach(() => resetMockState())
 
   it('lists each project with the library folder that belongs to it', async () => {
-    mount()
+    const { user } = mount()
     await listed()
+    const list = await openPicker(user, select())
 
     // The folder is named first because it is what decides whether the send has anywhere
     // to go: Bambuddy's project page lists the folder's files, not the project row.
-    expect(within(select()).getByRole('option', { name: /Reagan Keychain/ })).toHaveTextContent(
+    expect(within(list).getByRole('option', { name: /Reagan Keychain/ })).toHaveTextContent(
       'Raegan',
     )
-    expect(within(select()).getByRole('option', { name: /Reagan Keychain/ })).toHaveTextContent(
+    expect(within(list).getByRole('option', { name: /Reagan Keychain/ })).toHaveTextContent(
       '1 archived',
     )
-    expect(within(select()).getByRole('option', { name: /Gridfinity Bins/ })).toHaveTextContent(
+    expect(within(list).getByRole('option', { name: /Gridfinity Bins/ })).toHaveTextContent(
       '3 queued',
     )
-    expect(within(select()).getByRole('option', { name: 'No project' })).toBeInTheDocument()
+    expect(within(list).getByRole('option', { name: 'No project' })).toBeInTheDocument()
+  })
+
+  it('finds a project by a misspelt or partial name (#3651)', async () => {
+    const { user } = mount()
+    await listed()
+    const list = await openPicker(user, select())
+
+    await user.type(within(list).getByPlaceholderText('Search projects…'), 'gridfinty')
+    await waitFor(() => expect(within(list).queryByRole('option', { name: /Reagan Keychain/ })).toBeNull())
+    await user.click(within(list).getByRole('option', { name: /Gridfinity Bins/ }))
+    expect(pickerValue(select())).toBe('2')
+  })
+
+  it('lists the most recently chosen project first, or sorts by name (#3651)', async () => {
+    window.localStorage.clear()
+    const { user } = mount()
+    await listed()
+    await chooseProject(user, select(), 1)
+
+    let list = await openPicker(user, select())
+    const names = () =>
+      within(list)
+        .getAllByRole('option')
+        .map((option) => option.getAttribute('data-testid'))
+        .filter((testId) => testId?.startsWith('project-option-') && testId !== 'project-option-none')
+    expect(names()[0]).toBe('project-option-1')
+
+    await user.click(within(list).getByRole('radio', { name: 'Name' }))
+    expect(names()[0]).toBe('project-option-2')
+    await user.keyboard('{Escape}')
+    list = await openPicker(user, select())
+    // The order chosen is kept for the next time.
+    expect(within(list).getByRole('radio', { name: 'Name' })).toHaveAttribute('aria-checked', 'true')
+    window.localStorage.clear()
   })
 
   it('warns before the send when the chosen project has no folder yet', async () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), '1')
+    await chooseProject(user, select(), 1)
     expect(screen.queryByTestId('project-no-folder')).not.toBeInTheDocument()
 
     // A project made in Bambuddy rather than here usually has no folder; linking it
     // creates one rather than refusing, and the picker says so first.
-    await user.selectOptions(select(), '2')
+    await chooseProject(user, select(), 2)
     expect(await screen.findByTestId('project-no-folder')).toHaveTextContent('Gridfinity Bins')
   })
 
@@ -96,13 +131,13 @@ describe('ProjectPicker', () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), 'new')
+    await chooseProject(user, select(), 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
     await user.type(screen.getByLabelText('Colour'), '#ef4444')
     await user.click(screen.getByTestId('create-project'))
 
     await waitFor(() =>
-      expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins · Workshop Bins/),
+      expect(select()).toHaveTextContent(/Workshop Bins · Workshop Bins/),
     )
     // Bambuddy's ProjectCreate also carries target_count, due_date and budget; inventing
     // values for them would put numbers nobody chose on its project page.
@@ -119,16 +154,16 @@ describe('ProjectPicker', () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), 'new')
-    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
-    expect(parent).toHaveValue('')
-    expect(within(parent).getByRole('option', { name: 'None' })).toBeInTheDocument()
+    await chooseProject(user, select(), 'new')
+    const parent = screen.getByTestId('new-project-parent')
+    expect(pickerValue(parent)).toBe('')
+    expect(parent).toHaveTextContent('None')
     await user.type(screen.getByTestId('new-project-name'), 'Tags')
-    await user.selectOptions(parent, '1')
+    await chooseParent(user, 'Reagan Keychain')
     await user.click(screen.getByTestId('create-project'))
 
     await waitFor(() =>
-      expect(select().selectedOptions[0]).toHaveTextContent(/^Reagan Keychain › Tags · /),
+      expect(select()).toHaveTextContent(/^Reagan Keychain › Tags · /),
     )
     expect(posted).toEqual([{ name: 'Tags', description: null, colour: null, parent_id: 1 }])
   })
@@ -137,25 +172,25 @@ describe('ProjectPicker', () => {
     withLastProject(1)
     const { user } = mount()
     await listed()
-    await waitFor(() => expect(select()).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(select())).toBe('1'))
 
-    await user.selectOptions(select(), 'new')
-    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
-    expect(parent).toHaveValue('')
+    await chooseProject(user, select(), 'new')
+    const parent = screen.getByTestId('new-project-parent')
+    expect(pickerValue(parent)).toBe('')
     await user.click(screen.getByTestId('suggested-parent'))
-    expect(parent).toHaveValue('1')
+    expect(pickerValue(screen.getByTestId('new-project-parent'))).toBe('1')
   })
 
   it('reopens the form on None after a cancelled one chose a parent (#930 review)', async () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), 'new')
-    await user.selectOptions(screen.getByTestId('new-project-parent'), '2')
+    await chooseProject(user, select(), 'new')
+    await chooseParent(user, 'Gridfinity Bins')
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    await user.selectOptions(select(), 'new')
+    await chooseProject(user, select(), 'new')
 
-    expect(screen.getByTestId('new-project-parent')).toHaveValue('')
+    expect(pickerValue(screen.getByTestId('new-project-parent'))).toBe('')
   })
 
   it('has the mock refuse a parent the backend refuses (#930)', async () => {
@@ -180,11 +215,12 @@ describe('ProjectPicker', () => {
         }),
       ),
     )
-    mount()
+    const { user } = mount()
     await listed()
-    expect(within(select()).getByRole('option', { name: /Tags/ })).toHaveTextContent(
-      /^Reagan Keychain › Tags · /,
-    )
+    const list = await openPicker(user, select())
+    expect(within(list).getByTestId('project-option-3')).toHaveTextContent(/^Reagan Keychain › Tags/)
+    await user.click(within(list).getByTestId('project-option-3'))
+    expect(select()).toHaveTextContent(/^Reagan Keychain › Tags · /)
   })
 
   it('disables the select while its own "Create project" is in flight (#710 review)', async () => {
@@ -203,14 +239,14 @@ describe('ProjectPicker', () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), 'new')
+    await chooseProject(user, select(), 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
     await user.click(screen.getByTestId('create-project'))
     await waitFor(() => expect(select()).toBeDisabled())
 
     release()
     await waitFor(() => expect(select()).toBeEnabled())
-    expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+    expect(select()).toHaveTextContent(/Workshop Bins/)
   })
 
   it('opens on the project the last send went to', async () => {
@@ -218,10 +254,10 @@ describe('ProjectPicker', () => {
     mount()
     await listed()
 
-    // ScadBuddy remembers one id so the picker opens where it was left. It models no
-    // relationship between a model and a project — which prints belong to a project is
-    // on the project's own page, and a second answer here would go stale.
-    await waitFor(() => expect(select()).toHaveValue('1'))
+    // ScadBuddy remembers one id so the picker opens where it was left. It keeps no
+    // project membership — which prints belong to a project is on the project's own
+    // page, and a second answer here would go stale.
+    await waitFor(() => expect(pickerValue(select())).toBe('1'))
   })
 
   it('re-reads a list missing the value without moving the value back to the remembered one', async () => {
@@ -239,18 +275,18 @@ describe('ProjectPicker', () => {
     }
     const { user } = renderPage(<Harness />)
     await listed()
-    await waitFor(() => expect(screen.getByTestId('first')).toHaveValue('1'))
+    await waitFor(() => expect(pickerValue(screen.getByTestId('first'))).toBe('1'))
 
-    await user.selectOptions(select(), 'new')
+    await chooseProject(user, select(), 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
     await user.click(screen.getByTestId('create-project'))
-    await waitFor(() => expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
-    const created = select().value
+    await waitFor(() => expect(select()).toHaveTextContent(/Workshop Bins/))
+    const created = pickerValue(select())
 
     // The first picker's list predates the project, so it re-reads; the value is kept.
     await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(select()).toHaveValue(created)
-    expect(screen.getByTestId('first')).toHaveValue(created)
+    expect(pickerValue(select())).toBe(created)
+    expect(pickerValue(screen.getByTestId('first'))).toBe(created)
   })
 
   it('re-reads a missing project once for pickers sharing a list, together or one after another', async () => {
@@ -290,7 +326,7 @@ describe('ProjectPicker', () => {
     withLastProject(null)
     mount()
     await listed()
-    expect(select()).toHaveValue('')
+    expect(pickerValue(select())).toBe('')
   })
 
   it('writes nothing of its own when a project is chosen', async () => {
@@ -301,7 +337,7 @@ describe('ProjectPicker', () => {
     const { user } = mount()
     await listed()
 
-    await user.selectOptions(select(), '2')
+    await chooseProject(user, select(), 2)
 
     // The choice rides on the run request; there is no per-model store to update.
     expect(writes).toEqual([])
@@ -320,5 +356,51 @@ describe('ProjectPicker', () => {
     mount()
 
     expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+  })
+
+  it('offers a Retry after a failed read, which loads the list and the last project (#1045)', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/print/projects', () => {
+        calls += 1
+        if (calls === 1) return new HttpResponse('upstream request timeout', { status: 504 })
+        return HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 1 })
+      }),
+    )
+    const { user } = mount()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP 504')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await listed()
+    expect(pickerValue(select())).toBe('1')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(calls).toBe(2)
+  })
+
+  it('keeps a project created while the list was failed when Retry then loads it (#1045)', async () => {
+    const created = { ...fixtures.projectViews[0]!, id: 99, name: 'Workshop Bins' }
+    let calls = 0
+    server.use(
+      http.get('/api/v1/print/projects', () => {
+        calls += 1
+        if (calls === 1) return new HttpResponse('upstream request timeout', { status: 504 })
+        return HttpResponse.json({ projects: [...fixtures.projectViews, created], last_project_id: 1 })
+      }),
+      http.post('/api/v1/print/projects', () => HttpResponse.json(created, { status: 201 })),
+    )
+    const onChange = vi.fn()
+    const { user } = mount(onChange)
+    await screen.findByRole('alert')
+
+    await chooseProject(user, select(), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(99))
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await listed()
+    // The remembered project does not replace the one just made.
+    expect(pickerValue(select())).toBe('99')
   })
 })

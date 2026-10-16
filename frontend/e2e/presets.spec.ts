@@ -28,6 +28,85 @@ test.describe('template presets', () => {
     await expect(preset.locator('option:checked')).toHaveText('Dad')
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
   })
+
+  test('ArrowDown over unsaved edits asks about the first preset once, and gives focus back (#1457)', async ({
+    page,
+  }) => {
+    // Chromium fires a change per ArrowDown on a closed select, which jsdom cannot
+    // reproduce: before #359, arrowing applied each preset in turn over the edits.
+    await page.goto('/m/name-keychain')
+    // Exact: the confirmation's own label starts with "Apply preset".
+    const preset = page.getByLabel('Preset', { exact: true })
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+    // The list loads before the select takes keys (it is disabled until then).
+    await expect(preset).toBeEnabled({ timeout: 20_000 })
+    await name.fill('Emmalina')
+
+    await preset.focus()
+    for (let press = 0; press < 3; press += 1) await page.keyboard.press('ArrowDown')
+
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toHaveCount(1)
+    await expect(dialog).toHaveAccessibleName('Apply preset Tiny?')
+    await expect(name).toHaveValue('Emmalina')
+    await expect(preset).toHaveValue('')
+
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(preset).toBeFocused()
+    await expect(preset).toHaveValue('')
+    await expect(name).toHaveValue('Emmalina')
+  })
+
+  test('Save as preset takes typing at once, keeps Tab inside, and gives focus back (#351)', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const saveAs = page.getByRole('button', { name: 'Save as preset…' })
+    await saveAs.focus()
+    await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'Save as preset' })
+    const field = dialog.getByLabel('Preset name')
+    await expect(field).toBeFocused()
+    await page.keyboard.type('Emma')
+    await expect(field).toHaveValue(/Emma$/)
+
+    for (let press = 0; press < 12; press += 1) {
+      await page.keyboard.press('Tab')
+      expect(await dialog.evaluate((panel) => panel.contains(panel.ownerDocument.activeElement))).toBe(true)
+    }
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(saveAs).toBeFocused()
+  })
+})
+
+test.describe('the "Changed from" note (#352)', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  for (const width of [1440, 1024, 390]) {
+    test(`stays one line inside the picker at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/m/name-keychain')
+      await page.getByLabel('Preset').selectOption({ label: 'Old engraving' })
+      await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Someone else')
+
+      const note = page.getByTestId('preset-modified')
+      await expect(note).toHaveText('Changed from Old engraving')
+      const box = await note.boundingBox()
+      const picker = await page.getByTestId('preset-picker').boundingBox()
+      const update = await page.getByRole('button', { name: 'Update' }).boundingBox()
+      if (!box || !picker || !update) throw new Error('not laid out')
+      // One line, not a word per line beside the buttons.
+      expect(box.height).toBeLessThan(24)
+      // Inside the panel: a long name pushed its first letters off the left edge.
+      expect(box.x).toBeGreaterThanOrEqual(picker.x)
+      expect(box.x + box.width).toBeLessThanOrEqual(picker.x + picker.width)
+      // Above the buttons, on its own line.
+      expect(box.y + box.height).toBeLessThanOrEqual(update.y)
+    })
+  }
 })
 
 test.describe('duplicating a preset', () => {
@@ -42,7 +121,7 @@ test.describe('duplicating a preset', () => {
     await page.goto('/m/name-keychain')
     const preset = page.getByLabel('Preset')
     await preset.selectOption({ label: 'Tiny' })
-    await expect(page.getByRole('button', { name: 'Update' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^Update preset / })).toHaveCount(0)
 
     await page.getByRole('button', { name: 'Duplicate preset Tiny' }).click()
     const dialog = page.getByRole('dialog', { name: 'Duplicate Tiny' })
@@ -52,7 +131,7 @@ test.describe('duplicating a preset', () => {
     await expect(dialog).toBeHidden()
     await expect(preset.locator('option:checked')).toHaveText('Tiny copy')
     await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Bo')
-    await page.getByRole('button', { name: 'Update' }).click()
+    await page.getByRole('button', { name: /^Update preset / }).click()
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
   })
 })

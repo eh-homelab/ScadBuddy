@@ -73,6 +73,10 @@ export class PgEventListener implements EventSource {
   readonly #sql: Sql
   readonly #followers = new Followers()
   readonly #seen = new Set<string>()
+  /** Other channels LISTENed on this connection, and who hears them (`listenAlso`). */
+  readonly #channels = new Map<string, (payload: string) => void>()
+  /** Who is told when the connection is back after a drop (`onReconnect`). */
+  readonly #reconnects: (() => void)[] = []
   readonly #retryMin: number
   readonly #retryMax: number
   readonly #checkMs: number
@@ -113,6 +117,7 @@ export class PgEventListener implements EventSource {
       onnotice: () => {},
       onnotify: (channel: string, payload: string) => {
         if (channel === PG_CHANNEL) this.#heard(payload)
+        else this.#channels.get(channel)?.(payload)
       },
       onclose: () => this.#dropped(),
       ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
@@ -138,6 +143,29 @@ export class PgEventListener implements EventSource {
     return this.#followers.follow(listener)
   }
 
+  /**
+   * Also LISTEN on `channel`, on this connection and with its reconnects
+   * (bridge/relay.ts). Nothing on it is replayed: a NOTIFY sent while the
+   * connection is down is lost, so its user must not depend on every one.
+   */
+  listenAlso(channel: string, onNotify: (payload: string) => void): void {
+    this.#channels.set(channel, onNotify)
+    if (this.#listening) {
+      void this.#sql.unsafe(`LISTEN "${channel}"`).catch((err: unknown) => {
+        this.#log(`event bus: LISTEN ${channel} failed (${(err as Error).message}); it is retried on the next reconnect`)
+      })
+    }
+  }
+
+  /**
+   * Calls `fn` each time LISTEN is back after a drop, once the channels are
+   * listened again. Whatever was sent on `listenAlso`'s channels meanwhile is
+   * lost, so its user re-reads what it needs.
+   */
+  onReconnect(fn: () => void): void {
+    this.#reconnects.push(fn)
+  }
+
   async close(): Promise<void> {
     this.#closed = true
     clearInterval(this.#timer)
@@ -146,9 +174,9 @@ export class PgEventListener implements EventSource {
 
   /** Waits until LISTEN is in place (tests). */
   async ready(timeoutMs = 10_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
+    const deadline = performance.now() + timeoutMs
     while (!this.#listening) {
-      if (Date.now() > deadline) throw new Error('the event listener did not connect in time')
+      if (performance.now() > deadline) throw new Error('the event listener did not connect in time')
       await (this.#connecting ?? sleep(20))
     }
   }
@@ -170,13 +198,17 @@ export class PgEventListener implements EventSource {
     while (!this.#closed) {
       try {
         await this.#sql.unsafe(`LISTEN "${PG_CHANNEL}"`)
+        for (const channel of this.#channels.keys()) await this.#sql.unsafe(`LISTEN "${channel}"`)
         this.#listening = true
         const reconnected = this.#everListened
         if (reconnected) await this.#replayGap()
         else this.#adopt(await this.#maxSeq())
         this.#everListened = true
         // After the replay: NOTIFY-only kinds (bus.ts `onReconnect`) are re-read now.
-        if (reconnected) this.#followers.reconnected()
+        if (reconnected) {
+          this.#followers.reconnected()
+          for (const fn of this.#reconnects) fn()
+        }
         return
       } catch (err) {
         this.#listening = false
@@ -231,10 +263,11 @@ export class PgEventListener implements EventSource {
     }
     let rows: Row[]
     try {
+      // ORDER BY names events.seq: a bare `seq` is the text output column, which sorts "9" above "10" (#893).
       rows = await this.#sql<Row[]>`
         SELECT seq::text AS seq, event_id, payload, logged_at, now() AS read_at FROM events
         WHERE seq > ${from.toString()}::bigint
-        ORDER BY seq DESC LIMIT ${this.#replayLimit + 1}`
+        ORDER BY events.seq DESC LIMIT ${this.#replayLimit + 1}`
     } catch (err) {
       this.#adopt(undefined)
       this.#resync(`the event log could not be read (${(err as Error).message})`)

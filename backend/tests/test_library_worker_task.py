@@ -1,0 +1,606 @@
+"""The API's library worker task (#1054): like the print worker's (review #1061 1a), a
+worker that fails while it runs is reported at once and started again."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import threading
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.testing import ActivityEnvironment
+
+from scadbuddy import main
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.workflows.housekeeping import (
+    GIT_SWEEP,
+    LOST_SLICES_SWEEP,
+    PREVIEWS_SWEEP,
+    PRUNE_SWEEPS,
+    SWEEPS,
+)
+from tests.test_print_worker_task import StubWorker
+
+
+async def test_a_library_worker_that_fails_while_running_is_started_again(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    second = asyncio.Event()
+    built: list[StubWorker] = []
+
+    runners: list[Any] = []
+
+    def build(*args: Any, **kwargs: Any) -> StubWorker:
+        runners.append(kwargs.get("workflow_runner"))
+        built.append(StubWorker(False, second if built else asyncio.Event(), fail_after=not built))
+        return built[-1]
+
+    async def no_schedules(*args: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(main, "library_worker", build)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    monkeypatch.setattr(main, "ensure_schedules", no_schedules)
+    monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
+    state = SimpleNamespace(
+        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        temporal=object(),
+        config=SimpleNamespace(asset_sweep_interval=0),
+        previews=None,
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
+        settings_store=None,
+    )
+    stop = asyncio.Event()
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
+        await asyncio.wait_for(second.wait(), 5)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert len(built) == 2
+    assert built[1].stopped.is_set()
+    assert "the library worker failed" in caplog.text
+    # The app's sandbox, as every worker's (#2014).
+    assert all("opentelemetry" in runner.restrictions.passthrough_modules for runner in runners)
+
+
+async def test_a_library_worker_still_connecting_stops_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connecting = asyncio.Event()
+
+    async def never(*args: Any, **kwargs: Any) -> Any:
+        connecting.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "connect", never)
+    state = SimpleNamespace(
+        settings=SimpleNamespace(
+            temporal_task_queue_library="library",
+            temporal_address="unused:7233",
+            temporal_namespace="default",
+        ),
+        temporal=None,
+        config=SimpleNamespace(asset_sweep_interval=0),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(connecting.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 1)
+
+
+async def test_the_schedules_are_set_up_once_temporal_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I2: a create that fails after the connect (a frontend up before its
+    history service) is retried, not left to the next restart."""
+    calls: list[float] = []
+    previews: list[float | None] = []
+
+    async def flaky(client: object, queue: str, interval: float) -> bool:
+        calls.append(interval)
+        if len(calls) == 1:
+            raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+        return False
+
+    async def preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
+        previews.append(render_bound)
+
+    monkeypatch.setattr(main, "ensure_schedules", flaky)
+    monkeypatch.setattr(main, "ensure_preview_schedule", preview_schedule)
+    monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
+    stop = asyncio.Event()
+    await asyncio.wait_for(
+        main._set_up_housekeeping(object(), "library", 600.0, 360.0, stop),  # type: ignore[arg-type]
+        5,
+    )
+    assert calls == [600.0, 600.0]
+    # The preview backfill's Schedule (#1054) is set up once the housekeeping ones
+    # are: each set-up triggers a run, so a retry must not set it up again (final
+    # review M3).
+    assert previews == [360.0]
+
+
+@pytest.mark.parametrize("paused", [True, False])
+async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
+    paused: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #1095 2: the Schedule's sweep is what backfills the uploads; while an
+    operator keeps it paused, the start does that instead."""
+    set_up = asyncio.Event()
+    backfilled: list[object] = []
+
+    async def schedules(client: object, queue: str, interval: float) -> bool:
+        set_up.set()
+        return paused
+
+    async def backfill(assets: object, *, stop: object = None) -> int:
+        backfilled.append(assets)
+        return 0
+
+    async def no_preview_schedule(client: object, queue: str, render_bound: float | None) -> None:
+        pass
+
+    monkeypatch.setattr(main, "library_worker", lambda *a, **k: StubWorker(False, asyncio.Event()))
+    monkeypatch.setattr(main, "ensure_schedules", schedules)
+    monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
+    state = SimpleNamespace(
+        settings=SimpleNamespace(temporal_task_queue_library="library"),
+        temporal=object(),
+        config=SimpleNamespace(asset_sweep_interval=600.0),
+        previews=None,
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
+        settings_store=None,
+        store=SimpleNamespace(
+            content=object(), remote_assets=SimpleNamespace(backfill=backfill), fonts=None
+        ),
+        assets=object(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(set_up.wait(), 5)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert backfilled == ([state.assets] if paused else [])
+
+
+def _broken(error: Exception) -> Callable[..., Any]:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return fail
+
+
+async def _broken_async(*args: Any, **kwargs: Any) -> None:
+    raise RuntimeError("the projection is gone")
+
+
+@contextlib.asynccontextmanager
+async def _a_client(settings: object) -> AsyncIterator[object]:
+    yield object()
+
+
+@pytest.mark.parametrize("staging_error", [OSError("read-only"), ValueError("a bad name")])
+@pytest.mark.parametrize("sweep", SWEEPS)
+async def test_a_failing_sweep_fails_its_activity(
+    sweep: str,
+    staging_error: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review #1095 1: a sweep that fails is logged and fails its activity, so the
+    workflow reports it and Temporal's UI shows it; whatever the error (review #1095b 4)."""
+    monkeypatch.setattr(main, "_remote_assets", lambda state: None)
+    monkeypatch.setattr(main, "sweep_assets", _broken(RuntimeError("the volume is gone")))
+    monkeypatch.setattr(main, "sweep_blobs", _broken(RuntimeError("the refs are gone")))
+    monkeypatch.setattr(main, "attach_backfills", _broken(RuntimeError("the outputs are gone")))
+    monkeypatch.setattr(main, "reap_orphan_holds", _broken(RuntimeError("the holds are gone")))
+    monkeypatch.setattr(main, "sweep_flow_runs", _broken_async)
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", _broken_async)
+    monkeypatch.setattr(main, "sweep_lost_slices", _broken_async)
+    monkeypatch.setattr(
+        main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
+    )
+    state = SimpleNamespace(
+        render=SimpleNamespace(prune=_broken_async, store=SimpleNamespace(read=None)),
+        outputs=object(),
+        store=SimpleNamespace(content=None),
+        blobs=object(),
+        refs=object(),
+        config=SimpleNamespace(job_ttl=60.0),
+        catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
+        paths=SimpleNamespace(claims=None),
+        events=None,
+        components=SimpleNamespace(
+            get=lambda key: SimpleNamespace(
+                client=object(),
+                store=None,
+                index=SimpleNamespace(repair=_broken_async, prune=_broken_async),
+            )
+        ),
+        settings_store=SimpleNamespace(load=StoredSettings),
+        uploads=None,
+        history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
+    )
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    with (
+        caplog.at_level(logging.ERROR, logger="scadbuddy.main"),
+        pytest.raises((RuntimeError, OSError, ValueError)),
+    ):
+        await ActivityEnvironment().run(activities[sweep])
+    assert caplog.records, "the failure is logged too"
+
+
+@pytest.mark.parametrize("packed", [True, False])
+async def test_the_models_git_sweep_runs_maintain_and_logs_a_pack(
+    packed: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2344: the success path of `GIT_SWEEP`: the activity calls `history.maintain`,
+    completes, and logs only when it packed."""
+    calls: list[str] = []
+
+    def maintain() -> bool:
+        calls.append("maintain")
+        return packed
+
+    state = SimpleNamespace(history=SimpleNamespace(maintain=maintain))
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(activities[GIT_SWEEP])
+    assert calls == ["maintain"]
+    logged = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.main"]
+    assert logged == (["packed the models repository"] if packed else [])
+
+
+async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #1095 2: a lost worker is noticed within the heartbeat timeout, not the
+    sweep's whole start-to-close timeout."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+
+    async def slow() -> None:
+        await asyncio.sleep(0.1)
+
+    await env.run(main._heartbeating, slow())
+    assert len(beats) >= 3
+
+
+@pytest.mark.parametrize("sweep", PRUNE_SWEEPS)
+async def test_the_prune_sweeps_heartbeat_while_they_run(
+    sweep: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1707: the prune settles in its `finally`, describe after describe; a worker
+    lost meanwhile is noticed within the heartbeat timeout, as for the other sweeps."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+
+    async def slow_prune() -> None:
+        await asyncio.sleep(0.1)
+
+    def slow_claims(*args: object) -> None:
+        time.sleep(0.1)
+
+    async def slow_previews(*args: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_lost_slices", slow_previews)
+    state = SimpleNamespace(
+        render=SimpleNamespace(prune=slow_prune),
+        paths=SimpleNamespace(),
+        settings_store=SimpleNamespace(load=lambda: None),
+        uploads=None,
+    )
+    state.paths.claims = None
+
+    class SlowIndex:
+        async def repair(self, window: float) -> int:
+            await asyncio.sleep(0.1)
+            return 0
+
+        async def prune(self, ttl: float, placeholder_ttl: float) -> int:
+            return 0
+
+    state.settings_store = SimpleNamespace(load=StoredSettings)
+    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    await env.run(activities[sweep])
+    assert len(beats) >= 3
+
+
+@pytest.mark.parametrize("name", ["print", "library"])
+async def test_a_worker_that_does_not_stop_is_logged_under_its_name(
+    name: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review #1095 3: the library worker's shutdown is not the print worker's."""
+    monkeypatch.setattr(main, "PRINT_WORKER_STOP_TIMEOUT", 0.01)
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(forever())
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+        await main._stop_queue_worker(task, name)
+    assert f"the {name} worker did not stop in time" in caplog.text
+
+
+def _blocking_work() -> tuple[threading.Event, threading.Event, threading.Event, Any]:
+    """A sweep whose thread runs until ``release``: ``entered`` once it runs, ``done``
+    once it has returned."""
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def blocking() -> None:
+        entered.set()
+        release.wait(10)
+        done.set()
+
+    async def work() -> None:
+        await asyncio.to_thread(blocking)
+
+    return entered, release, done, work
+
+
+async def test_a_sweep_cancelled_at_shutdown_ends_after_its_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1708: the lifespan closes the stores a sweep uses once the library worker has
+    stopped. A sweep the stop cancels waits for its thread, so none still runs on
+    them by then."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    entered, release, done, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.worker_shutdown()
+        env.cancel()
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the cancelled sweep waits for its thread"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert done.is_set()
+    finally:
+        release.set()
+
+
+async def test_a_sweep_cancelled_at_shutdown_waits_for_its_thread_only_so_long(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#1708: the wait is bounded, so a stuck thread never holds the shutdown."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 0.1)
+    entered, release, _, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.worker_shutdown()
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+            env.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        assert "still running" in caplog.text
+    finally:
+        release.set()
+
+
+async def test_a_sweep_that_checks_the_stop_ends_inside_the_join(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2140: the shutdown sets the stop before its join, so a sweep that checks it
+    between items ends there, rather than running on past the bound."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 5.0)
+    stop, entered = threading.Event(), threading.Event()
+
+    def sweeping() -> None:
+        entered.set()
+        while not stop.wait(0.01):
+            pass
+
+    async def work() -> None:
+        await asyncio.to_thread(sweeping)
+
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work(), stop))
+    assert await asyncio.to_thread(entered.wait, 5)
+    env.worker_shutdown()
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+        env.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    assert stop.is_set()
+    assert "still running" not in caplog.text
+
+
+async def test_a_stop_at_one_shutdown_does_not_stop_the_next_workers_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2140: the stop a worker's shutdown sets ends that run's asset sweep only. The
+    worker `_run_library_worker` starts after it sweeps with a stop that is not set,
+    or its sweeps would remove nothing until the pod restarts."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 5.0)
+    entered = threading.Event()
+    stops: list[threading.Event] = []
+
+    def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
+        assert stop is not None
+        stops.append(stop)
+        if len(stops) == 1:
+            entered.set()
+            while not stop.wait(0.01):
+                pass
+        return []
+
+    monkeypatch.setattr(main, "sweep_assets", sweeping)
+    state = SimpleNamespace(store=SimpleNamespace(remote_assets=None))
+    first = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(first[SWEEPS[1]]))
+    assert await asyncio.to_thread(entered.wait, 5)
+    env.worker_shutdown()
+    env.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert stops[0].is_set()
+
+    # The restarted worker, on the same state.
+    second = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    await ActivityEnvironment().run(second[SWEEPS[1]])
+    assert not stops[1].is_set()
+
+
+async def test_a_sweep_cancelled_while_the_worker_runs_stops_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside a shutdown nothing closes its stores, so the sweep stops at once."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    entered, release, done, work = _blocking_work()
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(main._heartbeating, work()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        env.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert not done.is_set()
+    finally:
+        release.set()
+
+
+def test_the_library_worker_has_time_to_join_its_sweeps() -> None:
+    """#1708: the lifespan waits for the library worker past its graceful shutdown and
+    the sweeps' join, so it never closes the stores under a sweep still joining."""
+    assert (
+        main.LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + main.SWEEP_SHUTDOWN_JOIN + 5
+    ) <= main.LIBRARY_WORKER_STOP_TIMEOUT
+
+
+async def test_the_boots_backfills_stop_and_their_threads_finish_before_shutdown_goes_on() -> None:
+    """#2128: the boot's backfills run in threads, which a cancel would leave running on
+    the pool the lifespan closes next. The shutdown sets their stop and waits for them."""
+    stop = threading.Event()
+    entered = threading.Event()
+    finished = threading.Event()
+
+    def work() -> None:
+        entered.set()
+        while not stop.is_set():  # the item in hand, then the check between items
+            time.sleep(0.01)
+        time.sleep(0.05)
+        finished.set()
+
+    task = asyncio.create_task(asyncio.to_thread(work))
+    assert await asyncio.to_thread(entered.wait, 5)
+    await main._join_background(stop, task, None)
+    assert finished.is_set()
+    assert task.done() and not task.cancelled()
+
+
+async def test_the_shutdown_waits_for_a_stuck_backfill_only_so_long(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2128: the wait is bounded; a backfill past it is cancelled and logged."""
+    monkeypatch.setattr(main, "BACKGROUND_SHUTDOWN_JOIN", 0.1)
+    release = threading.Event()
+    task = asyncio.create_task(asyncio.to_thread(release.wait, 5), name="store backfill")
+    try:
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+            await asyncio.wait_for(main._join_background(threading.Event(), task), 5)
+        assert task.cancelled()
+        assert "still running at shutdown" in caplog.text
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize(
+    ("sweep", "expected"), [(PREVIEWS_SWEEP, ["previews"]), (LOST_SLICES_SWEEP, ["lost"])]
+)
+async def test_each_slice_sweep_is_its_own_activity(
+    sweep: str, expected: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background slices obey the sweeps' switch, the lost slice starts (#2715) run
+    on the prune Schedule too, inside Bambuddy's 30 minutes of keeping a finished job:
+    two activities, each sweeping only its own."""
+    swept: list[str] = []
+
+    def record(name: str) -> Callable[..., Awaitable[int]]:
+        async def run(*args: object) -> int:
+            swept.append(name)
+            return 1
+
+        return run
+
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", record("previews"))
+    monkeypatch.setattr(main, "sweep_lost_slices", record("lost"))
+    state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+
+    await ActivityEnvironment().run(activities[sweep])
+
+    assert swept == expected
+
+
+def test_the_background_slices_obey_the_sweeps_switch() -> None:
+    """The owner's sweeps-off setting deletes the sweeps' Schedule; the prune Schedule
+    runs whatever it is. The background slices are only on the first."""
+    assert PREVIEWS_SWEEP in SWEEPS
+    assert PREVIEWS_SWEEP not in PRUNE_SWEEPS
+    assert LOST_SLICES_SWEEP in PRUNE_SWEEPS
+
+
+@pytest.mark.parametrize(
+    ("sweep", "message"),
+    [
+        (PREVIEWS_SWEEP, "could not sweep the print dialog's background slices"),
+        (LOST_SLICES_SWEEP, "could not sweep the files of lost slice starts"),
+    ],
+)
+async def test_a_failing_slice_sweep_is_logged_once_and_fails(
+    sweep: str, message: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sweep's own failure is logged as its own, not as Bambuddy unreachable too."""
+
+    async def fail(*args: object) -> int:
+        raise ApiError(503, "Bambuddy is busy")
+
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", fail)
+    monkeypatch.setattr(main, "sweep_lost_slices", fail)
+    state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"), pytest.raises(ApiError):
+        await ActivityEnvironment().run(activities[sweep])
+
+    assert [record.getMessage() for record in caplog.records] == [message]

@@ -16,8 +16,12 @@ import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
-import { Button } from '../components/ui/Button'
-import { Spinner } from '../components/ui/Spinner'
+import { ClipboardPasteIcon, LinkIcon, PlusIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
 import {
   type CatalogueQuery,
   clearFilters,
@@ -97,35 +101,53 @@ export function CataloguePage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
-        <div className="mb-5 flex items-end justify-between gap-4">
-          <div>
+        {/* Wraps, so on a phone the actions drop under the intro rather than pushing
+            Add model past the screen's edge (#932). */}
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+          <div className="min-w-0 flex-[1_1_16rem]">
             <h1 className="text-lg font-semibold tracking-tight">Models</h1>
-            <p className="mt-0.5 text-[13px] text-muted">
+            <p className="mt-0.5 text-sm text-muted-foreground">
               Pick a model to set its parameters and generate a multi-colour 3MF.
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button onClick={() => void navigate('/new')}>Paste source</Button>
-            <Button onClick={() => setImportOpen(true)}>Import from URL</Button>
-            <Button variant="primary" onClick={() => setUploadOpen(true)}>
-              Add model
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="lg" onClick={() => void navigate('/new')}>
+              <ClipboardPasteIcon /> Paste source
+            </Button>
+            <Button variant="outline" size="lg" onClick={() => setImportOpen(true)}>
+              <LinkIcon /> Import from URL
+            </Button>
+            <Button size="lg" onClick={() => setUploadOpen(true)}>
+              <PlusIcon /> Add model
             </Button>
           </div>
         </div>
 
         {loading && (
-          <p className="flex items-center gap-2 py-16 text-[13px] text-muted">
-            <Spinner /> Loading models
-          </p>
+          <div role="status" aria-label="Loading models">
+            <span className="sr-only">Loading models</span>
+            <ul aria-hidden className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 6 }, (_, n) => (
+                <li key={n}>
+                  <Card className="gap-3 px-3 pt-3">
+                    <Skeleton className="aspect-[4/3] w-full" />
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-3 w-full" />
+                    <Skeleton className="h-3 w-1/2" />
+                  </Card>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         {error && (
-          <div role="alert" className="rounded-[6px] border border-warn/40 bg-warn/8 p-4">
-            <p className="text-[13px] text-warn">Could not load the catalogue: {error.message}</p>
-            <Button size="sm" className="mt-3" onClick={reload}>
+          <Card role="alert" className="border-destructive/40 bg-destructive/5 px-4 ring-destructive/30">
+            <p className="text-sm text-destructive">Could not load the catalogue: {error.message}</p>
+            <Button size="sm" variant="outline" className="w-fit" onClick={reload}>
               Try again
             </Button>
-          </div>
+          </Card>
         )}
 
         {data && data.length === 0 && (
@@ -219,9 +241,8 @@ function ModelCard({
   // The media links to the template itself; its expand button opens the lightbox.
   const raised = 'relative z-10'
   return (
-    <li
-      data-model-card={model.slug}
-      className="relative rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
+    <li data-model-card={model.slug} className="relative">
+      <Card className="h-full gap-0 py-0 transition-shadow hover:ring-foreground/25">
       <div className="p-3 pb-0">
         <MediaCarousel
           slides={slides}
@@ -241,10 +262,10 @@ function ModelCard({
 
       <div className="px-3 pb-3">
         <div className="mt-3 flex items-center gap-2">
-          <h2 className="min-w-0 truncate text-[14px] font-medium">
+          <h2 className="min-w-0 truncate text-base font-medium">
             <Link
               to={modelPath(model.slug)}
-              className="outline-none after:absolute after:inset-0 after:rounded-[6px] after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-accent"
+              className="outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] focus-visible:after:ring-3 focus-visible:after:ring-ring/50"
             >
               {model.name}
             </Link>
@@ -252,12 +273,12 @@ function ModelCard({
           <UpstreamBadge state={model.upstream_state} />
         </div>
         {model.origin === 'builtin' && (
-          <p data-testid="builtin-badge" className="mt-0.5 text-[11px] text-faint">
+          <Badge data-testid="builtin-badge" variant="secondary" className="mt-1">
             Built-in template — read-only
-          </p>
+          </Badge>
         )}
         {model.description && (
-          <p className="mt-1 line-clamp-2 text-[13px] leading-snug text-muted">
+          <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">
             {model.description}
           </p>
         )}
@@ -266,30 +287,33 @@ function ModelCard({
           <ul className="mt-2.5 flex flex-wrap gap-1">
             {(model.tags ?? []).map((tag) => (
               <li key={tag} className={raised}>
-                <button
-                  type="button"
-                  aria-label={`Filter by ${tag}`}
-                  onClick={() => onTag(tag)}
-                  className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-surface-3 hover:text-ink"
-                >
-                  {tag}
-                </button>
+                <Badge variant="secondary" asChild>
+                  <button
+                    type="button"
+                    aria-label={`Filter by ${tag}`}
+                    onClick={() => onTag(tag)}
+                    className="cursor-pointer hover:bg-ui-accent hover:text-accent-foreground"
+                  >
+                    {tag}
+                  </button>
+                </Badge>
               </li>
             ))}
           </ul>
         )}
 
-        <p className="mt-3 border-t border-line pt-2 text-[12px] text-faint">
+        <p className="mt-3 border-t pt-2 text-xs text-muted-foreground">
           Updated {timeAgo(model.updated_at)}
         </p>
       </div>
-      <ModelOrigin url={model.origin_url} className={`${raised} px-3 pb-2.5`} />
-      <div className={`${raised} flex items-center justify-between gap-2 px-3 pb-2`}>
+      <ModelOrigin url={model.origin_url} className={cn(raised, 'px-3 pb-2.5')} />
+      <div className={cn(raised, 'mt-auto flex items-center justify-between gap-2 px-3 pb-2')}>
         <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
         <span className="ml-auto">
           <DuplicateModelButton slug={model.slug} name={model.name} />
         </span>
       </div>
+      </Card>
     </li>
   )
 }
@@ -314,33 +338,35 @@ function summarise(model: ModelSummary) {
 
 function NoResults({ onClear }: { onClear: () => void }) {
   return (
-    <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
-      <h2 className="text-[15px] font-medium">No models match</h2>
-      <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-muted">
+    <Card className="items-center border border-dashed bg-transparent px-6 py-10 text-center ring-0">
+      <h2 className="text-base font-medium">No models match</h2>
+      <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
         Nothing in the catalogue fits this search and these filters.
       </p>
-      <Button className="mt-4" onClick={onClear}>
+      <Button variant="outline" onClick={onClear}>
         Clear filters
       </Button>
-    </div>
+    </Card>
   )
 }
 
 function EmptyState({ onUpload, onImport }: { onUpload: () => void; onImport: () => void }) {
   return (
-    <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
-      <h2 className="text-[15px] font-medium">No models yet</h2>
-      <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-muted">
-        Drop <code className="sb-num text-ink">.scad</code> files into{' '}
-        <code className="sb-num text-ink">models/</code> on the ScadBuddy volume, or add one here.
+    <Card className="items-center border border-dashed bg-transparent px-6 py-10 text-center ring-0">
+      <h2 className="text-base font-medium">No models yet</h2>
+      <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
+        Drop <code className="sb-num text-foreground">.scad</code> files into{' '}
+        <code className="sb-num text-foreground">models/</code> on the ScadBuddy volume, or add one here.
         Parameters marked up for the MakerWorld customizer work unchanged.
       </p>
-      <div className="mt-4 flex justify-center gap-2">
-        <Button onClick={onImport}>Import from URL</Button>
-        <Button variant="primary" onClick={onUpload}>
-          Add model
+      <div className="flex justify-center gap-2">
+        <Button variant="outline" onClick={onImport}>
+          <LinkIcon /> Import from URL
+        </Button>
+        <Button onClick={onUpload}>
+          <PlusIcon /> Add model
         </Button>
       </div>
-    </div>
+    </Card>
   )
 }

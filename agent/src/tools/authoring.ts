@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
@@ -12,9 +13,24 @@ import { defineTool, json, ToolError, type Tool } from './registry.js'
 const COMMIT_ID = /^[0-9a-f]{7,64}$/
 
 /** A backend 409's `current` (RFC 9457 extension member), when it is a commit id. */
-function currentOf(error: unknown): string | null {
+export function currentOf(error: unknown): string | null {
   const current = (error as { current?: unknown } | undefined)?.current
   return typeof current === 'string' && COMMIT_ID.test(current) ? current : null
+}
+
+/**
+ * A stale-`base` 409 as the structured result apply_patch and update_source share (#866),
+ * or null for any other answer, which goes through `ok()` as usual.
+ */
+export function staleBase(
+  answered: { error?: unknown; response: Response },
+  base: string | null | undefined,
+  next: string,
+) {
+  if (answered.response.status !== 409 || base === null || base === undefined) return null
+  const current = currentOf(answered.error)
+  if (current === null) return null
+  return { ...json({ status: 'conflict', base, current, next }), isError: true }
 }
 
 export const authoringTools: Tool[] = [
@@ -48,30 +64,25 @@ export const authoringTools: Tool[] = [
     source:
       "the backend's account of the edit, whose refusal can quote the model's OpenSCAD source",
     routes: ['POST /api/v1/models/{slug}/source/patch'],
-    handler: async ({ slug, base, patch, edits, message, force }, { backend }) => {
+    handler: async ({ slug, base, patch, edits, message, force }, ctx) => {
       if ((patch === undefined) === (edits === undefined)) {
         throw new ToolError('give exactly one of `patch` and `edits`')
       }
-      const answered = await backend.POST('/api/v1/models/{slug}/source/patch', {
-        params: { path: { slug } },
-        body: { base, patch: patch ?? null, edits: edits ?? null, message: message ?? null, force },
-      })
-      if (answered.response.status === 409) {
-        const current = currentOf(answered.error)
-        if (current !== null) {
-          return {
-            ...json({
-              status: 'conflict',
-              base,
-              current,
-              next:
-                'Nothing was written: the model changed after you read it. Call get_source (and get_model ' +
-                'for its version) again, rebuild the patch against that, and pass `current` as `base`.',
-            }),
-            isError: true,
-          }
-        }
-      }
+      const answered = await commandAnswer(ctx, `patch source of ${slug}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/source/patch', {
+          params: { path: { slug } },
+          body: { base, patch: patch ?? null, edits: edits ?? null, message: message ?? null, force },
+          headers,
+        }),
+      )
+      if (isRunning(answered)) return json(answered)
+      const stale = staleBase(
+        answered,
+        base,
+        'Nothing was written: the model changed after you read it. Call get_source (and get_model ' +
+          'for its version) again, rebuild the patch against that, and pass `current` as `base`.',
+      )
+      if (stale !== null) return stale
       return json(await ok(Promise.resolve(answered), `patch source of ${slug}`))
     },
   }),

@@ -40,6 +40,15 @@ export function joinInputs(params: ParamValues, extra: InputsExtra): JsonObject 
   return { ...extra, params }
 }
 
+/** Whether two JSON values are equal, whatever the order of their object keys. */
+export function sameJson(a: Json | undefined, b: Json | undefined): boolean {
+  if (a === b) return true
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((item, i) => sameJson(item, b[i]))
+  if (!isJsonObject(a) || !isJsonObject(b)) return false
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameJson(a[key], b[key]))
+}
+
 /** Keys a patch from a template's UI never writes: they would reach a prototype. */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
@@ -64,8 +73,11 @@ export function getPath(root: Json, path: string): Json | undefined {
   return node
 }
 
+/** `root` with `value` at a dotted path; a path with an `UNSAFE_KEYS` segment leaves it as it is (#1275). */
 export function setPath(root: JsonObject, path: string, value: Json): JsonObject {
-  const [head = '', ...rest] = path.split('.')
+  const segments = path.split('.')
+  if (segments.some((segment) => UNSAFE_KEYS.has(segment))) return root
+  const [head = '', ...rest] = segments
   if (rest.length === 0) return { ...root, [head]: value }
   const child = root[head]
   return { ...root, [head]: setPath(isJsonObject(child) ? child : {}, rest.join('.'), value) }

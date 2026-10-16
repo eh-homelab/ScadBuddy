@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -42,6 +42,17 @@ describe('MediaCarousel (#275)', () => {
     expect(onOpen).not.toHaveBeenCalled()
   })
 
+  it("shows a slide's card copy, and the original should it fail (#1034)", () => {
+    const card = { ...images[0]!, card: '/card.webp' }
+    setup({ slides: [card] })
+    const image = screen.getByRole('img', { name: card.alt })
+    expect(image).toHaveAttribute('src', '/card.webp')
+
+    fireEvent.error(image)
+
+    expect(screen.getByRole('img', { name: card.alt })).toHaveAttribute('src', card.src)
+  })
+
   it('is a labelled carousel of labelled slides', () => {
     setup()
     const region = screen.getByRole('region', { name: 'Crème Coaster' })
@@ -75,6 +86,20 @@ describe('MediaCarousel (#275)', () => {
     )
 
     expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('stays on a real slide when its slides shrink under it (#624)', async () => {
+    const { user, rerender } = setup()
+    await user.click(screen.getByRole('button', { name: 'Go to slide 3' }))
+    expect(current()).toBe('3 of 3')
+
+    rerender(<MediaCarousel slides={images.slice(0, 2)} onOpen={vi.fn()} label="Crème Coaster" />)
+
+    expect(current()).toBe('2 of 2')
+    expect(screen.getByRole('button', { name: 'Go to slide 2' })).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('button', { name: 'Next slide' })).toBeDisabled()
+    // The current slide's media is still the carousel's tab stop.
+    expect(screen.getByRole('button', { name: `Open ${images[1]!.alt}` })).toHaveAttribute('tabindex', '0')
   })
 
   it('keeps a click on its controls from reaching a link around it', async () => {

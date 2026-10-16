@@ -8,26 +8,27 @@ no I/O and no logging. A serial rides on :class:`Pick` only (spec §7), never on
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from scadbuddy.bambuddy.extruders import RACK_SIDE
+from scadbuddy.bambuddy.filament_ids import filament_material
 from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     SpoolOption,
     WarningKind,
     normalise_colour,
 )
-from scadbuddy.bambuddy.models import FilamentRequirement, NozzleRackSlot, RackAlgorithm
+from scadbuddy.bambuddy.models import (
+    DEFAULT_ALGORITHM,
+    FilamentRequirement,
+    NozzleRackSlot,
+    RackAlgorithm,
+)
 
-__all__ = ["RackAlgorithm"]
+__all__ = ["DEFAULT_ALGORITHM", "RackAlgorithm"]
 
-DEFAULT_ALGORITHM: RackAlgorithm = "least_used"
-#: The flow every slice carries while Bambuddy has no High Flow presets (#484): the
-#: preview and the manual pick's 422 judge it, since Bambuddy re-checks a pick against
-#: the sliced group at dispatch.
-SLICED_VOLUME_TYPE = "Standard"
 #: ``nozzle_type`` code -> material, from the hotends' own labels (spec §8 unknown 1).
 #: Ships EMPTY: every code then counts as not hardened, so an abrasive group always
 #: carries ``rack-unsafe-material`` and never gets a silent brass pick.
@@ -59,6 +60,10 @@ class Usage:
     print_seconds: int = 0
     grams: float = 0.0
     first_seen_at: datetime | None = None
+    #: Picks whose print has not settled yet (#1079): queued, or printing.
+    pending: int = 0
+    #: When its newest recorded print settled (#1298); ``None`` before its first.
+    last_used_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -90,9 +95,14 @@ class RackCandidate:
     high_flow: bool
     nozzle_type: str
     color: str | None
+    #: The filament the hotend last ran: ``bambuddy.filament_ids`` names its
+    #: ``filament_id``, else ``nozzle_rack[].filament_type``; "" unknown.
+    filament_type: str
     material: str | None
     prints: int
     print_seconds: int
+    #: Open picks: prints queued or running on it that have not settled (#1079).
+    pending: int
     #: (material, color, algorithm, algorithm, position): lower is better.
     key: tuple[float, ...]
 
@@ -230,9 +240,19 @@ def _available(
     }
 
 
-def _algorithm_key(algorithm: RackAlgorithm, use: Usage) -> tuple[float, float]:
+def pending_estimate(usage: Mapping[str, Usage], serials: Iterable[str]) -> float:
+    """What one open pick adds to a hotend's ``print_seconds`` for Least used (#1079):
+    the mean settled print over these hotends, 0 before any has settled. So an open
+    pick on an unused rack breaks the tie through ``prints``, and with history it costs
+    one average print."""
+    used = [usage[s] for s in serials if s in usage]
+    prints = sum(use.prints for use in used)
+    return sum(use.print_seconds for use in used) / prints if prints else 0.0
+
+
+def _algorithm_key(algorithm: RackAlgorithm, use: Usage, estimate: float) -> tuple[float, float]:
     if algorithm == "least_used":
-        return float(use.print_seconds), float(use.prints)
+        return use.print_seconds + use.pending * estimate, float(use.prints + use.pending)
     seen = use.first_seen_at
     if algorithm == "oldest_first":
         return (1.0, 0.0) if seen is None else (0.0, seen.timestamp())
@@ -249,6 +269,7 @@ def _rank(
     taken: Set[int],
 ) -> tuple[RackCandidate, ...]:
     want = normalise_colour(group.color)
+    estimate = pending_estimate(usage, (entry.serial_number for entry in positions.values()))
     found: list[RackCandidate] = []
     for position, entry in _available(group, positions, taken).items():
         use = usage.get(entry.serial_number, Usage()) if entry.serial_number else Usage()
@@ -260,13 +281,17 @@ def _rank(
                 high_flow=entry.high_flow,
                 nozzle_type=entry.nozzle_type,
                 color=have,
+                # Named from its Bambu filament id where it has one (#2170), else the
+                # type the printer reports.
+                filament_type=filament_material(entry.filament_id) or entry.filament_type,
                 material=nozzle_material(entry.nozzle_type),
                 prints=use.prints,
                 print_seconds=use.print_seconds,
+                pending=use.pending,
                 key=(
                     0.0 if hardened(entry.nozzle_type) == group.abrasive else 1.0,
                     0.0 if want is not None and want == have else 1.0,
-                    *_algorithm_key(algorithm, use),
+                    *_algorithm_key(algorithm, use, estimate),
                     float(position),
                 ),
             )

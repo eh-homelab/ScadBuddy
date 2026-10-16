@@ -30,8 +30,11 @@ The ScadBuddy MCP tools arrive with issue #251. A print tool wraps the run
 behind a single approval (AI spec §5.1): read the choices, then run with them.
 The routes below are what it calls. Use the tool when you have it. There is no
 pipeline or eligibility step in the print dialog any more (spool-first spec §0).
-The `/api/v1/print/library` routes (#313, printing a file already in Bambuddy's
-library) have no agent tool yet — that's a #313 follow-up.
+A file already in Bambuddy's library (#313) prints the same way as an output; only
+the 3MF it slices differs (#1749). The `/api/v1/print/library/{file_id}/…` routes
+mirror the output ones, and every print tool takes `library_file_id` (a file from
+`GET /api/v1/print/library`, the `list_library` tool) in place of `output_id`
+(#1756).
 
 ## Approvals come first
 
@@ -140,10 +143,18 @@ print again until they have, since another print would be a second one.
   (spool-first spec §4.5). A slot error needs the uploaded file, so it arrives
   as the run's `failed` `error` with that 422, not as the POST's answer.
 - **Warnings** come back in the result and never block: spool not loaded, nozzle
-  not installed, High Flow slicing as Standard, a mounted High Flow nozzle of
-  the chosen size whatever flow is chosen (`hf-mounted`, #797), a Generic
-  filament preset fallback, or a plate that differs from the last print
-  (spool-first spec §4.3, §4.5).
+  not installed, a nozzle of the chosen size mounted in the other flow on a
+  side the slice may use (`hf-mounted`, #797), a Generic filament preset
+  fallback, or a plate that differs from the last print (spool-first spec
+  §4.3, §4.5). An output's flow (Standard or High Flow) is sliced as chosen
+  for each side (#484), so choosing the mounted nozzle's flow for its side
+  avoids `hf-mounted`. When both sides could print their chosen flows and
+  those differ, the print goes to the High Flow side. A library file that
+  Bambuddy slices (an unsliced 3MF) is sliced as chosen too: with High Flow
+  chosen, the slicer gets a copy of it, uploaded to the library folder, that
+  states each side's flow; the file itself is never changed. A sliced file,
+  an STL or a 3MF from another slicer prints as it is, taken as Standard
+  whatever is chosen (#484).
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,

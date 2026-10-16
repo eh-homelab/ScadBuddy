@@ -1,18 +1,23 @@
 import type {
+  Attention,
   Origin,
   Owner,
   Question,
   Risk,
+  SentImage,
   ServerEvent,
   SessionStatus,
+  SessionMode,
   SessionSummary,
   Source,
+  ToolImage,
   VersionLink,
 } from './protocol'
 
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
-  | { kind: 'user'; id: string; text: string; author: Owner }
+  /** `images`: previews of the images sent with the turn (#1866). */
+  | { kind: 'user'; id: string; text: string; author: Owner; images?: SentImage[] }
   | { kind: 'assistant'; id: string; text: string; done: boolean }
   | {
       kind: 'tool'
@@ -20,7 +25,12 @@ export type FeedItem =
       name: string
       input: Record<string, unknown>
       risk: Risk
-      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink }
+      /** `images`: what the result carried (#782), served by the agent (`blobUrl`). */
+      result?: { ok: boolean; summary: string; sources: Source[]; version?: VersionLink; images?: ToolImage[] }
+      /** A subagent's call (#1108): the session's `Agent` call that spawned it. */
+      parent?: string
+      /** #782 — what the call does, as the tool declares it; `toolTitle` names the rest. */
+      title?: string
     }
   | {
       kind: 'approval'
@@ -28,32 +38,53 @@ export type FeedItem =
       tool: string
       summary: string
       /**
-       * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `queued` when it is waiting for the connection
-       * to come back (sent first on reconnect); `approved`/`denied` from
-       * `approval.resolved`, the server's confirmation.
+       * `pending` until the user decides; `sent` while the decision is on its way
+       * (`POST /api/v1/ai/pending-input/{id}`, #815), back to `pending` if it was
+       * refused; `closed` (with `reason`) when it was refused because the entry was
+       * already resolved or expired, so no resolve frame need arrive for the card to
+       * end; `approved`/`denied`/`expired`/`cancelled` (with `reason`) from
+       * `approval.resolved`, the server's confirmation, which also replaces `closed`
+       * when it does arrive. Nobody denied an expired or cancelled one (#979).
        */
-      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'sent' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'closed'
       by?: Owner
+      reason?: string
     }
   /**
    * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
-   * `sent` once the answer left the panel; `queued` when it waits for the connection to
-   * come back (sent first on reconnect); `answered` or `cancelled` (its turn ended
-   * first, `reason`) from `question.resolved`, the server's confirmation.
+   * `sent` while the answer is on its way, back to `pending` if it was refused,
+   * `closed` (`reason`) if it was refused as already resolved or expired;
+   * `answered` or `cancelled` (its turn ended first, `reason`) from
+   * `question.resolved`, the server's confirmation.
    */
   | {
       kind: 'question'
       id: string
-      /** The AskUserQuestion `tool.call` id. */
+      /** The AskUserQuestion or `ask_user` tool_use id: a `tool.call` in the feed (a subagent's too, #1108). */
       tool: string
       questions: Question[]
-      state: 'pending' | 'queued' | 'sent' | 'answered' | 'cancelled'
+      /** #815 — set when this is an attention request rather than a question. */
+      attention?: Attention
+      state: 'pending' | 'sent' | 'answered' | 'cancelled' | 'closed'
       answers?: string[]
       by?: Owner
       reason?: string
+      /** #815 — the tab came back, which ended a tab_disconnected attention request. */
+      reconnected?: true
     }
-  | { kind: 'error'; id: string; message: string }
+  /**
+   * `about`: the approval or question whose response the respond route did not take
+   * (#815). Its resolve frame, or a later response the route took, drops the error:
+   * a POST that landed but whose answer was lost resolves the card anyway (#1359).
+   */
+  | {
+      kind: 'error'
+      id: string
+      message: string
+      about?: string
+      /** The agent's error code, when it gave one: `interrupted` marks a stopped turn (#2149). */
+      code?: string
+    }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
   | {
       kind: 'memory'
@@ -66,6 +97,8 @@ export type FeedItem =
       input?: string
       memories?: string[]
     }
+  /** #2399 — a file uploaded to, or deleted from, the session's workspace through the panel's Files: a quiet line. */
+  | { kind: 'file'; id: string; path: string; change: 'uploaded' | 'deleted'; by: Owner; size?: number }
 
 export interface SessionState {
   id: string
@@ -86,13 +119,54 @@ export interface SessionState {
    */
   budgetSpent?: boolean
   /**
-   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
-   * Their decision goes out right after the attach, so the replayed card shows `sent`,
-   * not live buttons, until `approval.resolved`.
+   * #815 — approvals and questions whose response was still on its way (`sent`) when the
+   * feed was cleared for a replay. The replayed card shows `sent`, not live buttons, so
+   * the respond route's answer (`responded`/`respond-failed`) still finds it (#1395).
    */
-  queuedDecisions?: string[]
-  /** #940 — the same for answers to questions: the replayed card shows `sent`. */
-  queuedAnswers?: string[]
+  sending?: string[]
+  /** #795 — the session it was forked from, for the switcher's nesting and the "Forked from" link. */
+  parentId?: string | null
+  /** #795 — when it last changed (the agent's `updated_at`), for the switcher. */
+  updatedAt?: string
+  /** Plan 5d — how it runs; absent from an older agent (classic). */
+  mode?: SessionMode
+  /** Plan 5d — why a session whose mode came from the default runs classic, not durable. */
+  modeFallback?: string
+  /**
+   * #1885 — archived by the user: left out of the switcher's list and read-only until
+   * unarchived. Known from a session route's answer; the snapshot lists only the others.
+   */
+  archived?: boolean
+  /** #1284 — a live handoff offer the agent's list reported: to whom, until when. */
+  offer?: HandoffOffer | null
+  /** #2329 — how many `workspace.file` events arrived: the Files list reads again when it moves. */
+  workspaceChanges?: number
+}
+
+export type HandoffOffer = { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string }
+
+/**
+ * #792 — what a session route answered about a session (`AiSessionView` of a fork or
+ * an edit, agent `routes/sessions.ts`), laid over what the panel knows. A session the
+ * panel has not heard of yet (a fork it is about to open) is added, first in the list.
+ */
+export interface SessionPatch {
+  id: string
+  title?: string
+  status?: SessionStatus
+  parentId?: string | null
+  updatedAt?: string
+  costUsd?: number
+  budgetUsd?: number
+  /** Plan 5d — classic or durable. */
+  mode?: SessionMode
+  /** For a session new to the panel: where it came from and who holds it. */
+  origin?: Origin
+  owner?: Owner
+  /** #1885 — archived, or not. */
+  archived?: boolean
+  /** #1284 — the live handoff offer, or none. */
+  offer?: HandoffOffer | null
 }
 
 export interface ChatState {
@@ -115,9 +189,23 @@ export type ChatAction =
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
-  /** #940 — the user's answer to a question left the panel (or waits for the reconnect). */
-  | { type: 'answered'; sessionId: string; questionId: string; queued?: boolean }
+  | { type: 'decided'; sessionId: string; approvalId: string }
+  /** #940 — the user's answer to a question left the panel. */
+  | { type: 'answered'; sessionId: string; questionId: string }
+  /**
+   * #815 — the respond route took a decision or an answer: the card shows it at once,
+   * without waiting for the socket's resolve frame (which may be reconnecting).
+   */
+  | { type: 'responded'; sessionId: string; id: string; outcome: 'approved' | 'denied' | 'answered'; answers?: string[]; by: Owner }
+  /**
+   * #815 — the respond route refused a decision or an answer. The card is live again,
+   * with `message` beside it, unless `closed` is set: the entry was already resolved
+   * or expired, so the card ends there with that reason (a resolve frame, if one
+   * still arrives, replaces it with the real outcome).
+   */
+  | { type: 'respond-failed'; sessionId: string; id: string; message: string; closed?: string }
+  /** #792 — a session route's answer (fork, rename, done), shown before the socket says it. */
+  | { type: 'session-patched'; patch: SessionPatch }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -132,15 +220,37 @@ export const initialChatState: ChatState = {
   notice: null,
 }
 
-function blankSession(summary: Omit<SessionSummary, 'sessionId'> & { id: string }): SessionState {
+function blankSession(summary: Pick<SessionState, 'id' | 'title' | 'origin' | 'owner' | 'status'>): SessionState {
   return { ...summary, items: [] }
+}
+
+/**
+ * #795 — a snapshot's parent, last activity and spend, laid over `s`. The spend is
+ * taken only when `live` is false: the open session's events are newer than the list.
+ */
+function withListed(s: SessionState, summary: SessionSummary, live: boolean): SessionState {
+  let next = s
+  // #1885 — the snapshot leaves archived sessions out, so a listed one was unarchived,
+  // unless the list was read before this panel's own archive landed (an archive moves
+  // `updatedAt`, so that list is older than what the panel knows).
+  if (s.archived && !(s.updatedAt && summary.updatedAt && summary.updatedAt <= s.updatedAt)) {
+    next = { ...next, archived: false }
+  }
+  if (summary.parentId !== undefined) next = { ...next, parentId: summary.parentId }
+  if (summary.updatedAt !== undefined) next = { ...next, updatedAt: summary.updatedAt }
+  if (summary.mode !== undefined) next = { ...next, mode: summary.mode }
+  if (summary.offer !== undefined) next = { ...next, offer: summary.offer }
+  if (summary.costUsd !== undefined && summary.budgetUsd !== undefined && (!live || !next.budget)) {
+    next = withBudget(next, summary.costUsd, summary.budgetUsd)
+  }
+  return next
 }
 
 function upsertSummary(state: ChatState, s: SessionSummary): ChatState {
   const existing = state.sessions[s.sessionId]
   const next: SessionState = existing
     ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: s.status }
-    : blankSession({ id: s.sessionId, ...s })
+    : blankSession({ id: s.sessionId, title: s.title, origin: s.origin, owner: s.owner, status: s.status })
   return {
     ...state,
     sessions: { ...state.sessions, [s.sessionId]: next },
@@ -168,6 +278,22 @@ function push(session: SessionState, item: FeedItem): SessionState {
   return { ...session, items: [...session.items, item] }
 }
 
+/** An id no item has: the feed can shrink (`dropErrorsAbout`), so its length alone may repeat one. */
+function freshId(session: SessionState, prefix: string): string {
+  let n = session.items.length
+  while (session.items.some((i) => i.id === `${prefix}-${n}`)) n += 1
+  return `${prefix}-${n}`
+}
+
+const errorId = (session: SessionState) => freshId(session, 'error')
+
+/** Without the respond errors about `id`, which a resolution has made stale (#1359). */
+function dropErrorsAbout(session: SessionState, id: string): SessionState {
+  return session.items.some((i) => i.kind === 'error' && i.about === id)
+    ? { ...session, items: session.items.filter((i) => i.kind !== 'error' || i.about !== id) }
+    : session
+}
+
 function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
     case 'sessions.snapshot': {
@@ -181,15 +307,14 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       const sessions: Record<string, SessionState> = {}
       for (const s of event.sessions) {
         const existing = state.sessions[s.sessionId]
-        sessions[s.sessionId] = existing
-          ? {
-              ...existing,
-              title: s.title,
-              origin: s.origin,
-              owner: s.owner,
-              status: s.sessionId === state.activeId ? existing.status : s.status,
-            }
-          : blankSession({ id: s.sessionId, ...s })
+        const live = s.sessionId === state.activeId
+        sessions[s.sessionId] = withListed(
+          existing
+            ? { ...existing, title: s.title, origin: s.origin, owner: s.owner, status: live ? existing.status : s.status }
+            : blankSession({ id: s.sessionId, title: s.title, origin: s.origin, owner: s.owner, status: s.status }),
+          s,
+          live && !!existing,
+        )
       }
       const active = state.activeId ? state.sessions[state.activeId] : undefined
       if (active && !listed.has(active.id)) sessions[active.id] = active
@@ -201,18 +326,26 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
     }
 
     case 'session.started': {
-      const known = event.sessionId in state.sessions
+      const known = state.sessions[event.sessionId]
+      // #2371 — opening a chat replays its log from this event, which carries the title
+      // and status the session started with. What the panel already has for it (the
+      // list, a rename) is newer, so a replay keeps it.
       const summarised = upsertSummary(state, {
         sessionId: event.sessionId,
-        title: event.title ?? 'New chat',
+        title: known ? known.title : (event.title ?? 'New chat'),
         origin: event.origin,
         owner: event.owner,
-        status: 'running',
+        status: known ? known.status : 'running',
       })
-      const next =
+      const budgeted =
         event.budgetUsd === undefined
           ? summarised
           : patchSession(summarised, event.sessionId, (s) => withBudget(s, 0, event.budgetUsd!))
+      const next = patchSession(budgeted, event.sessionId, (s) => ({
+        ...s,
+        ...(event.mode ? { mode: event.mode } : {}),
+        ...(event.modeFallback ? { modeFallback: event.modeFallback } : {}),
+      }))
       // Newest first (a replay on attach keeps its place); the panel's own new chat
       // becomes the active one.
       const order = known
@@ -234,7 +367,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         s.items.some((i) => i.kind === 'user' && i.id === event.turnId)
           ? s
-          : push(s, { kind: 'user', id: event.turnId, text: event.text, author: event.author }),
+          : push(s, {
+              kind: 'user',
+              id: event.turnId,
+              text: event.text,
+              author: event.author,
+              ...(event.images?.length ? { images: event.images } : {}),
+            }),
       )
 
     case 'assistant.text.delta':
@@ -257,7 +396,15 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'tool.call':
       return patchSession(state, event.sessionId, (s) =>
-        push(s, { kind: 'tool', id: event.id, name: event.name, input: event.input, risk: event.risk }),
+        push(s, {
+          kind: 'tool',
+          id: event.id,
+          name: event.name,
+          input: event.input,
+          risk: event.risk,
+          ...(event.parent === undefined ? {} : { parent: event.parent }),
+          ...(event.title === undefined ? {} : { title: event.title }),
+        }),
       )
 
     case 'tool.result':
@@ -271,6 +418,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
                   summary: event.summary,
                   sources: event.sources ?? [],
                   version: event.version,
+                  ...(event.images?.length ? { images: event.images } : {}),
                 },
               }
             : i,
@@ -284,15 +432,20 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
     case 'approval.resolved':
       return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+        mapItems(dropErrorsAbout(s, event.id), (i) =>
           i.kind === 'approval' && i.id === event.id
-            ? { ...i, state: event.approved ? 'approved' : 'denied', by: event.by }
+            ? {
+                ...withoutReason(i),
+                state: event.decision ?? (event.approved ? 'approved' : 'denied'),
+                by: event.by,
+                ...(event.reason ? { reason: event.reason } : {}),
+              }
             : i,
         ),
       )
@@ -304,17 +457,24 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           questions: event.questions,
-          state: s.queuedAnswers?.includes(event.id) ? 'sent' : 'pending',
+          ...(event.attention ? { attention: event.attention } : {}),
+          state: s.sending?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
     case 'question.resolved':
       return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+        mapItems(dropErrorsAbout(s, event.id), (i) =>
           i.kind === 'question' && i.id === event.id
             ? event.answered
-              ? { ...i, state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
-              : { ...i, state: 'cancelled', ...(event.reason === undefined ? {} : { reason: event.reason }) }
+              ? { ...withoutReason(i), state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
+              : // A closed card's reason is not this one's (#1401).
+                {
+                  ...withoutReason(i),
+                  state: 'cancelled',
+                  ...(event.reason === undefined ? {} : { reason: event.reason }),
+                  ...(event.reconnected ? { reconnected: true as const } : {}),
+                }
             : i,
         ),
       )
@@ -347,7 +507,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return patchSession(state, event.sessionId, (s) =>
         push(s, {
           kind: 'memory',
-          id: `memory-${s.items.length}`,
+          id: freshId(s, 'memory'),
           action: event.action,
           bank: event.bank,
           outcome: event.outcome,
@@ -356,6 +516,22 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           ...(event.input === undefined ? {} : { input: event.input }),
           ...(event.memories === undefined ? {} : { memories: event.memories }),
         }),
+      )
+
+    case 'workspace.file':
+      // The Files list reads again on the count; the feed notes the change where it happened (#2399).
+      return patchSession(state, event.sessionId, (s) =>
+        push(
+          { ...s, workspaceChanges: (s.workspaceChanges ?? 0) + 1 },
+          {
+            kind: 'file',
+            id: freshId(s, 'file'),
+            path: event.path,
+            change: event.change,
+            by: event.by,
+            ...(event.size === undefined ? {} : { size: event.size }),
+          },
+        ),
       )
 
     case 'error': {
@@ -372,7 +548,15 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : s, { kind: 'error', id: `error-${s.items.length}`, message }),
+          push(event.questionId ? reopen(s, event.questionId) : s, {
+            kind: 'error',
+            id: errorId(s),
+            message,
+            // #2133: an error that refused an answer is about that question, so its
+            // resolution drops it, as a respond route's error is (#1359).
+            ...(event.questionId ? { about: event.questionId } : {}),
+            ...(event.code ? { code: event.code } : {}),
+          }),
         )
       }
       return { ...state, notice: message, awaitingStart: false }
@@ -385,6 +569,32 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
  * SDK's result subtype), or a send was refused because of it (agent `manager.ts`).
  */
 const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
+
+function patched(state: ChatState, p: SessionPatch): ChatState {
+  const existing = state.sessions[p.id]
+  const parent = p.parentId ? state.sessions[p.parentId] : undefined
+  let s: SessionState = existing ?? {
+    id: p.id,
+    title: p.title ?? 'New chat',
+    origin: p.origin ?? parent?.origin ?? 'chat',
+    owner: p.owner ?? { kind: 'browser', id: 'browser', label: 'You' },
+    status: p.status ?? 'idle',
+    items: [],
+  }
+  if (p.title !== undefined) s = { ...s, title: p.title }
+  if (p.status !== undefined) s = { ...s, status: p.status }
+  if (p.parentId !== undefined) s = { ...s, parentId: p.parentId }
+  if (p.updatedAt !== undefined) s = { ...s, updatedAt: p.updatedAt }
+  if (p.mode !== undefined) s = { ...s, mode: p.mode }
+  if (p.archived !== undefined) s = { ...s, archived: p.archived }
+  if (p.offer !== undefined) s = { ...s, offer: p.offer }
+  if (p.costUsd !== undefined && p.budgetUsd !== undefined) s = withBudget(s, p.costUsd, p.budgetUsd)
+  return {
+    ...state,
+    sessions: { ...state.sessions, [p.id]: s },
+    order: existing ? state.order : [p.id, ...state.order],
+  }
+}
 
 /** New budget numbers; the session is spent exactly when they say so. */
 function withBudget(s: SessionState, costUsd: number, budgetUsd: number): SessionState {
@@ -434,11 +644,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             items: [],
             // Replayed from the log; the numbers stay for a log that has none.
             budgetSpent: false,
-            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
-            queuedAnswers: s.items.flatMap((i) => (i.kind === 'question' && i.state === 'queued' ? [i.id] : [])),
+            sending: s.items.flatMap((i) => ((i.kind === 'approval' || i.kind === 'question') && i.state === 'sent' ? [i.id] : [])),
           }))
         : next
     }
+    case 'session-patched':
+      return patched(state, action.patch)
     case 'not-sent':
       return { ...state, awaitingStart: false, notice: action.message }
     case 'queued':
@@ -447,25 +658,72 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'answered':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'question' && i.id === action.questionId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'question' && i.id === action.questionId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
-          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: action.queued ? 'queued' : 'sent' }
-            : i,
+          i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
         ),
       )
+    case 'responded':
+      return patchSession(state, action.sessionId, (s) =>
+        mapItems(dropErrorsAbout(s, action.id), (i) => {
+          if ((i.kind !== 'approval' && i.kind !== 'question') || i.id !== action.id || i.state !== 'sent') return i
+          if (i.kind === 'approval' && action.outcome !== 'answered') return { ...i, state: action.outcome, by: action.by }
+          if (i.kind === 'question' && action.outcome === 'answered') {
+            return { ...i, state: 'answered', by: action.by, ...(action.answers ? { answers: action.answers } : {}) }
+          }
+          return i
+        }),
+      )
+    case 'respond-failed': {
+      const { closed } = action
+      if (closed !== undefined) {
+        return patchSession(state, action.sessionId, (s) =>
+          mapItems(dropErrorsAbout(s, action.id), (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent'
+              ? { ...i, state: 'closed', reason: closed }
+              : i,
+          ),
+        )
+      }
+      return patchSession(state, action.sessionId, (s) =>
+        push(
+          mapItems(s, (i) =>
+            (i.kind === 'approval' || i.kind === 'question') && i.id === action.id && i.state === 'sent' ? { ...i, state: 'pending' } : i,
+          ),
+          { kind: 'error', id: errorId(s), message: action.message, about: action.id },
+        ),
+      )
+    }
   }
+}
+
+/** The item without the reason its previous state gave; a new state brings its own. */
+function withoutReason<T extends { reason?: string }>(item: T): Omit<T, 'reason'> {
+  const { reason: _reason, ...rest } = item
+  return rest
 }
 
 /** A turn is live: running, or parked on a human (an approval, or a question, #940). */
 function isLive(status: SessionStatus): boolean {
   return status === 'running' || status === 'waiting_approval' || status === 'waiting_input'
+}
+
+/**
+ * #1109 — who asked a question, from the feed: undefined for the session's own agent
+ * (or a call not in the feed), else a subagent's: its `subagent_type` from the `Agent`
+ * call that spawned it (#1108's `parent`), or '' when the feed does not show it (a
+ * truncated input). Any subagent may ask, a package's too, so the card says so.
+ */
+export function askedBy(items: readonly FeedItem[], question: Extract<FeedItem, { kind: 'question' }>): string | undefined {
+  const call = items.find((i) => i.kind === 'tool' && i.id === question.tool)
+  if (call?.kind !== 'tool' || call.parent === undefined) return undefined
+  const agent = items.find((i) => i.kind === 'tool' && i.id === call.parent)
+  const type = agent?.kind === 'tool' ? agent.input.subagent_type : undefined
+  return typeof type === 'string' ? type : ''
 }
 
 /** A session is busy while a turn runs or waits on a human. */

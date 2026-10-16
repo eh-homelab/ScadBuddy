@@ -8,12 +8,14 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 
 API = f"{BASE}/api/v1"
 
@@ -62,19 +64,35 @@ def test_creating_a_project_pairs_it_with_a_folder(client: TestClient, model: st
             200, json={"id": 9, "name": "Reagan keychains", "project_id": 7}
         )
     )
-    body = client.post("/api/v1/print/projects", json={"name": "Reagan keychains"}).json()
+    body = client.post(
+        "/api/v1/print/projects", json={"name": "Reagan keychains"}, headers=press()
+    ).json()
     assert (body["id"], body["folder_id"]) == (7, 9)
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
 
 
-def test_scadbuddy_keeps_no_model_to_project_relationship(client: TestClient) -> None:
-    """ScadBuddy renders and sends; Bambuddy owns projects. Which prints belong to a
-    project is on the project's own page, so there is no per-model route to store a
-    second answer that would go stale."""
-    configure(client)
-    assert client.put(
-        "/api/v1/print/models/anything/project", json={"project_id": 7}
-    ).status_code in (404, 405)
+def test_scadbuddy_keeps_no_project_membership(app: FastAPI) -> None:
+    """ScadBuddy renders and sends; Bambuddy owns projects. Which prints and files belong
+    to a project is on the project's own page, so no ScadBuddy route answers it from a
+    second copy that would go stale.
+
+    What ScadBuddy does keep is a *default*: the project Generate last filed a model
+    (and preset) into, so the picker opens there (#1660), forgettable in Settings like
+    ``last_project_id``. That is a preference about the next filing, not a record of
+    what the project holds. ``GET /farm/archives?project_id=`` is the one read scoped
+    to a project, and it is Bambuddy's own archive list passed through."""
+    schema = app.openapi()
+    scoped = {
+        path
+        for path, item in schema["paths"].items()
+        if "get" in item
+        and any("project" in param["name"] for param in item["get"].get("parameters", []))
+    }
+    assert scoped == {"/api/v1/farm/archives"}
+
+    # The remembered default names a project and nothing it holds.
+    remembered = schema["components"]["schemas"]["RememberedModelProject"]
+    assert set(remembered["properties"]) == {"preset_id", "preset_name", "project_id"}
 
 
 @pytest.mark.requires_postgres
@@ -178,6 +196,7 @@ def test_filing_the_results_attaches_the_entries_and_their_archives(
     body = client.post(
         f"/api/v1/print/outputs/{output_id}/project",
         json={"project_id": 7, "queue_item_ids": [71]},
+        headers=press(),
     ).json()
     assert body == {"project_id": 7, "queue_item_ids": [71], "archive_ids": [88]}
     assert queue.called and archives.called
@@ -186,6 +205,6 @@ def test_filing_the_results_attaches_the_entries_and_their_archives(
 def test_filing_an_output_with_no_project_says_so(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
-    response = client.post(f"/api/v1/print/outputs/{output_id}/project", json={})
+    response = client.post(f"/api/v1/print/outputs/{output_id}/project", json={}, headers=press())
     assert response.status_code == 409
     assert "no project" in response.json()["detail"]

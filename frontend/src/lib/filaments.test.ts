@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest'
 import type { FilamentOptions, FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
 import {
   NO_FILTERS,
+  carriedPlan,
   checkPlan,
   facets,
   filterSpools,
   loadedLabel,
   seedPlan,
+  slicedPlateSlots,
   slotNeed,
+  withSlicedGrams,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -45,7 +48,7 @@ function loaded(rest: Partial<NonNullable<SpoolOption['loaded']>> = {}) {
 }
 
 function slot(rest: Partial<SlotNeed> = {}): SlotNeed {
-  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, ...rest }
+  return { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [], ...rest }
 }
 
 describe('spoolLabel', () => {
@@ -70,22 +73,30 @@ describe('loadedLabel', () => {
   it('counts AMS slots from 1, the way the printer does', () => {
     // tray_id is 0-based on the wire; Bambu's own UI numbers the slots 1-4.
     expect(loadedLabel(spool({ loaded: loaded({ ams_id: 0, tray_id: 1 }) }), 1)).toBe(
-      'AMS 0 · slot 2',
+      'AMS-A · slot 2',
     )
+  })
+
+  it("names the unit the way Bambuddy does, by letter (the fourth AMS is not 'AMS 3')", () => {
+    const at = (ams_id: number) => loadedLabel(spool({ loaded: loaded({ ams_id, tray_id: 3 }) }), 1)
+    expect(at(3)).toBe('AMS-D · slot 4')
+    expect(at(128)).toBe('HT-A · slot 4')
+    expect(at(129)).toBe('HT-B · slot 4')
+    expect(at(255)).toBe('External · slot 4')
   })
 
   it('names the other printer when the spool is not in the one being printed on', () => {
     const away = spool({ loaded: loaded({ printer_id: 2, printer_name: '3DP-77A-114' }) })
-    expect(loadedLabel(away, 1)).toBe('AMS 0 · slot 2 · on 3DP-77A-114')
+    expect(loadedLabel(away, 1)).toBe('AMS-A · slot 2 · on 3DP-77A-114')
     // Same printer: repeating its name on every row would say nothing.
-    expect(loadedLabel(away, 2)).toBe('AMS 0 · slot 2')
+    expect(loadedLabel(away, 2)).toBe('AMS-A · slot 2')
     // No printer chosen yet, so there is nothing to differ from.
-    expect(loadedLabel(away, null)).toBe('AMS 0 · slot 2')
+    expect(loadedLabel(away, null)).toBe('AMS-A · slot 2')
   })
 
   it('falls back when Bambuddy did not name the other printer', () => {
     expect(loadedLabel(spool({ loaded: loaded({ printer_id: 2, printer_name: null }) }), 1)).toBe(
-      'AMS 0 · slot 2 · on another printer',
+      'AMS-A · slot 2 · on another printer',
     )
   })
 })
@@ -100,6 +111,21 @@ describe('slotNeed', () => {
     // nothing" would declare every spool sufficient and print "0 g".
     expect(slotNeed(slot({ used_grams: 0 }), 2)).toBeNull()
     expect(slotNeed(slot({ used_grams: null }), 2)).toBeNull()
+  })
+})
+
+describe('withSlicedGrams (#2365)', () => {
+  const options = { slots: [slot({ slot_id: 1, used_grams: null }), slot({ slot_id: 2, used_grams: 0 })] } as FilamentOptions
+
+  it("takes each slot's grams from the slice", () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: 13 }, { slot_id: 2, grams: 0.1 }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([13, 0.1])
+  })
+
+  it('leaves a slot the slice has no grams for, and everything without a slice', () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: null }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([null, 0])
+    expect(withSlicedGrams(options, null)).toBe(options)
   })
 })
 
@@ -257,6 +283,24 @@ describe('checkPlan', () => {
     expect(checkPlan(unsliced, [{ slot_id: 1, spool_id: 1 }], 1000)).toEqual([])
   })
 
+  it('warns when slots sharing a spool need more of it between them than it holds (#2851)', () => {
+    const shared = options({
+      slots: [
+        { slot_id: 1, used_grams: 10 },
+        { slot_id: 2, used_grams: 10 },
+        { slot_id: 3, used_grams: 10 },
+        { slot_id: 4, used_grams: 0 },
+      ],
+      spools: [spool({ spool_id: 1, remaining_g: 25, loaded: loaded({}) })],
+    })
+    const plan = [1, 2, 3, 4].map((slot_id) => ({ slot_id, spool_id: 1 }))
+    const found = checkPlan(shared, plan, 1)
+    expect(found.map((w) => w.slot_id)).toEqual([1, 2, 3])
+    expect(found.every((w) => w.message.includes('slots 1, 2 and 3 need 30 g of it between them'))).toBe(true)
+    // Two of them: 20 g of 25.
+    expect(checkPlan(shared, plan.slice(0, 2), 1).filter((w) => w.kind === 'low-filament')).toEqual([])
+  })
+
   it('says so when a slot has nothing chosen', () => {
     expect(checkPlan(options(), [], 1).map((w) => w.kind)).toEqual(['no-choice'])
   })
@@ -266,7 +310,10 @@ describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
     track_switch: false,
-    slots: [slot({ slot_id: 1 }), slot({ slot_id: 2, colour: '#FF1493' })],
+    slots: [
+      slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
+      slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
+    ],
     spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
     suggested: [
       { slot_id: 1, spool_id: 1 },
@@ -286,7 +333,73 @@ describe('seedPlan', () => {
     expect(seedPlan(options, [{ slot_id: 1, spool_id: 99 }])).toEqual(options.suggested)
   })
 
+  it('falls back to the auto-match for a remembered spool whose colour no longer fits (#933)', () => {
+    const recoloured: FilamentOptions = {
+      ...options,
+      slots: [options.slots![0]!, slot({ slot_id: 2, colour: '#FF1493', colour_matches: [2] })],
+    }
+    expect(seedPlan(recoloured, [{ slot_id: 2, spool_id: 3 }])).toEqual(options.suggested)
+  })
+
   it('ignores a remembered slot this plate does not have', () => {
     expect(seedPlan(options, [{ slot_id: 3, spool_id: 3 }])).toEqual(options.suggested)
   })
 })
+
+describe('carriedPlan', () => {
+  const options: FilamentOptions = {
+    library_file_id: 1,
+    track_switch: false,
+    slots: [
+      slot({ slot_id: 1, colour_matches: [1, 2, 3] }),
+      slot({ slot_id: 2, colour: '#FF1493', colour_matches: [1, 2, 3] }),
+    ],
+    spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
+    suggested: [
+      { slot_id: 1, spool_id: 1 },
+      { slot_id: 2, spool_id: 2 },
+    ],
+    warnings: [],
+  }
+
+  it("keeps the spool a re-arrange was made for, whatever its colour (#933 is for remembered ones)", () => {
+    const recoloured: FilamentOptions = {
+      ...options,
+      slots: [options.slots![0]!, slot({ slot_id: 2, colour: '#FF1493', colour_matches: [2] })],
+    }
+    expect(carriedPlan(recoloured, [{ slot_id: 2, spool_id: 3 }])).toEqual([
+      { slot_id: 1, spool_id: 1 },
+      { slot_id: 2, spool_id: 3 },
+    ])
+  })
+
+  it('drops a carried spool no longer in the inventory, and a slot the new file lacks', () => {
+    expect(
+      carriedPlan(options, [
+        { slot_id: 1, spool_id: 99 },
+        { slot_id: 3, spool_id: 3 },
+      ]),
+    ).toEqual(options.suggested)
+  })
+})
+
+describe('slicedPlateSlots (#2702 review)', () => {
+  const slots = [1, 2].map((slot_id) => ({ slot_id, colour_matches: [] }))
+
+  it("is unknown for a two-plate file under All plates, or with another plate's slice shown", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 'all', sliced: 1 })).toBeNull()
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 1, sliced: 2 })).toBeNull()
+  })
+
+  it("is unknown while the slice shown is still another plate's, stale (#2702 review)", () => {
+    // Plate 2 just chosen: its slots are read at once, but plate 1's slice stays shown.
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: 1 })).toBeNull()
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: null })).toBeNull()
+  })
+
+  it("is the dialog's slots for the chosen plate's own slice, or a one-plate file", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: 2 })).toBe(slots)
+    expect(slicedPlateSlots(slots, { plates: 1, chosen: 'all', sliced: 1 })).toBe(slots)
+  })
+})
+

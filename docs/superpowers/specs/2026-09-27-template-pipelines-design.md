@@ -328,11 +328,27 @@ Measured while phase 1 landed (the base spec's §3 rule), in
 - `imports_passed_through` for `scadbuddy.render.job_models` and
   `scadbuddy.workflows.models` (pydantic) is accepted by the sandbox.
 
-Still to verify when their phases land: the sandbox exception type and message shape
-on a restricted import or call, and that a traceback through `exec`'d source compiled
-with a file name carries usable line numbers (phase 4, §5.2); worker build-ID
-versioning semantics, including whether the dev server needs
-`system.enableDeploymentVersions` (§3.5, the worker PR).
+Measured while phase 4 landed, against the pinned 1.33.0, in
+`backend/tests/test_pipeline_sandbox.py`:
+
+- `compile(source, "pipeline/pipeline.py", "exec")`, then `exec`, works inside the
+  sandbox.
+- A traceback frame's `co_filename`/`tb_lineno` name the template file and line. This
+  holds for a runtime error, for a restricted call at module level or inside `run`,
+  and for a `SyntaxError` (via its `lineno`).
+- A restricted call raises
+  `temporalio.worker.workflow_sandbox._restrictions.RestrictedWorkflowAccessError`,
+  which the workflow can catch. For `datetime.datetime.now()` inside `run`, the
+  message is "Cannot access datetime.datetime.now.__call__ from inside a workflow.
+  If this is code from a module not used in a workflow or known to only be used
+  deterministically from a workflow, mark the import as pass through."
+- For `open(...)` at module level: "Cannot access __builtins__.open from inside a
+  workflow. If this is code from a module not used in a workflow or known to only be
+  used deterministically from a workflow, mark the import as pass through."
+- Walking `tb_next` needs no `linecache`, so no file is read inside the sandbox.
+
+Still to verify when its phase lands: worker build-ID versioning semantics, including
+whether the dev server needs `system.enableDeploymentVersions` (§3.5, the worker PR).
 
 ### 3.7 Tests
 
@@ -370,14 +386,28 @@ No `ui` → today's generated form.
 ### 4.2 Mounting
 
 ```js
-export function mount(root: ShadowRoot, host: Host, ctx: {slot, version, theme}): (() => void) | void
+export function mount(root: ShadowRoot, host: Host, ctx: {slot, version, theme, api}):
+  (() => void) | void | Promise<(() => void) | void>
 ```
 
 Mounted into a shadow root for style isolation; **not** sandboxed (§9). If `mount`
-throws, or the declared `api` major is unsupported, the host renders the generated
-form with an error banner naming the template file and the error. A broken UI never
-bricks a template. The Customize page shows the template's origin (built-in / mine /
-imported from URL) beside a custom UI.
+throws (or its promise rejects), or the declared `api` major is unsupported, the host
+renders the generated form with an error banner naming the template file and the
+error. A broken UI never bricks a template. The Customize page shows the template's
+origin (built-in / mine / imported from URL) beside a custom UI.
+
+`mount` may return a promise of its cleanup. Loading the module and mounting it share
+one deadline of 15 s (#847): past it the page falls back to the form as for a throw,
+and a module that loads after it is never mounted. A cleanup that arrives after the
+deadline, or after the page unmounted the UI, runs at once. A cleanup that throws is
+logged to the console, never reported as the UI failing.
+
+`ctx.version` names the last commit to the template's `ui/`, not the template's own
+revision (#846): a commit that leaves `ui/` alone does not remount the UI. Use it, or
+`host.files.url`, for the UI's own files; it is not the revision the template renders.
+`GET /models/{slug}/versions/{commit}/ui/{path}` serves that commit's files: from the
+live `ui/` (`no-cache`) while it holds exactly that commit's tree with nothing
+uncommitted, otherwise from an export of the commit (immutable, #1481).
 
 ### 4.3 Host API v1
 
@@ -386,7 +416,7 @@ interface Host {
   inputs: { get(): Json; set(patch: Json): void; subscribe(fn: (i: Json) => void): () => void }
   schema(file?: string): Promise<CustomizerSchema>     // default model.scad
   files: { url(path: string): string }                  // template assets
-  generate(): Promise<{ jobId: string; outputId: string }>
+  generate(): Promise<{ jobId: string; outputId: string; superseded?: true }>
   openPrint(outputId: string): void
   presets: { list(); save(name); load(id) }             // over inputs
   describe?: (fn: () => string) => void                 // agent-facing summary (optional)
@@ -396,6 +426,15 @@ interface Host {
 `generate()` waits for the render of the current inputs and keeps it as an output,
 resolving with both ids: a template's own Generate then has an output to hand to
 `openPrint`, with no polling of its own (phase 4's pipeline outputs build on this shape).
+
+An output is saved with the whole of `inputs`. An `inputs.set` that changes any key
+but `params` (the UI's own state) leaves the saved output behind, as a parameter
+change does: "Saved …" clears and Generate has to run again (#848). A write that
+leaves the state as it was (the same JSON, keys in any order) does not. Keep transient
+flags such as "generating" in the UI's own variables, not in `inputs`. If the state
+moves while `generate()` is saving, the output is still saved, but the result carries
+`superseded: true`: it is not the one on screen, and `openPrint` refuses it. The
+agent's `generate` tool says the same with `superseded` and a `note` (#1471).
 
 `inputs` is the one piece of state. It is JSON the template owns. For a template
 with no custom UI, inputs are exactly the parameter values, so today's
@@ -650,6 +689,11 @@ re-rendering; this makes that the rule.
   tower) | `keep_together` groups. It produces a new layout → 3MF in seconds, with no
   re-render. `ctx.pack(goal=…, filament_plan=…)` in a pipeline awaits the same
   packing activity with the same parameters (§5.2).
+- A saved arranged output records its plates as `layout_plates` (#2281): per plate,
+  its index, bbox and colours, as the render reported them. It is kept so History,
+  the Print dialog and agents can check or summarise each plate against a printer
+  without reading the 3MF; no UI consumes it yet (#2557). Distinct from `plates`,
+  which records what the last print queued.
 - Heuristic, not a solver: group by colour signature, first-fit-decreasing 2D packing
   against `plate.py`'s exclusion zones and prime-tower rules, then order plates to
   minimise swaps. `Goal` is pluggable.

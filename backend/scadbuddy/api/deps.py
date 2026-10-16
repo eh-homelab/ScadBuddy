@@ -3,26 +3,34 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import shutil
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import Depends, Path, status
+from fastapi import Depends, Path, Query
+from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
-from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
+from scadbuddy.bambuddy.progress import (
+    PrintProgress,
+    ProgressObserver,
+    library_progress,
+    progress_for,
+)
+from scadbuddy.bambuddy.runs import PrintRunStore, TransactionalEvents, newest_failed_from
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
-from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
+    Event,
     EventBus,
     UpstreamAvailable,
     VersionCommitted,
@@ -31,17 +39,25 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
-from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import (
+    CheckoutFetcher,
+    CheckoutGate,
+    CheckoutLeases,
+    InstallPermits,
+    LibraryStore,
+)
 from scadbuddy.library.media_store import PostgresMediaStore
+from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
+from scadbuddy.library.repo_lock import PgRepoCoordinator
+from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
@@ -50,18 +66,25 @@ from scadbuddy.render.previews import (
     PreviewScheduler,
 )
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.read_budget import (
+    CEILINGS,
+    ReadBudget,
+    ReadBudgetOverride,
+    budget_of,
+)
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.workflows.client import connect_lazily
 
 logger = logging.getLogger(__name__)
 
 STATE_ATTR = "scadbuddy"
-VERSION_TIMEOUT = 10.0
-JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
-RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
+#: A render job, a print run and an operation are all named by ``uuid.uuid4().hex``,
+#: so they share one pattern rather than three copies that could drift apart (#1807).
+HEX_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 #: URL fetches at once per replica (#178): `POST /models/import` and, since #844,
@@ -87,9 +110,16 @@ class ImportPermits:
         self.limit = limit
         #: When each held permit was taken, by a token of its own.
         self._taken: dict[object, float] = {}
+        #: Set when a permit is given back, then replaced.
+        self._freed = asyncio.Event()
 
     def full(self) -> bool:
         return len(self._taken) >= self.limit
+
+    async def wait(self) -> None:
+        """Until a permit is free; take it with `hold` with no await in between."""
+        while self.full():
+            await self._freed.wait()
 
     @contextmanager
     def hold(self) -> Iterator[None]:
@@ -99,6 +129,8 @@ class ImportPermits:
             yield
         finally:
             del self._taken[token]
+            self._freed.set()
+            self._freed = asyncio.Event()
 
     def retry_after(self) -> int:
         """Seconds until the oldest held fetch reaches `IMPORT_TIMEOUT` and must have
@@ -134,34 +166,34 @@ class AppState:
     projection: JobProjection
     refs: BlobRefs
     #: Default-render previews: the thumbnail of a model with none and no output.
-    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
+    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS).
     previews: PreviewScheduler | None
     #: Where every state change is published (spec §7): `PgNotifyEventBus` on
     #: #241's database, or `InProcessEventBus` in a test that builds one itself.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
-    #: Follows each started print until it settles (#268).
-    print_watcher: PrintWatcher
-    #: The print dialog's runs, answered 202 and run in the background (#470).
-    print_runs: PrintRuns
+    #: What `FollowPrint`'s activity reads with (#1053), on the follow worker.
+    print_follower: Follower
+    #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
+    #: start them.
+    print_runs: PrintCommands
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the worker's cap is its activity slots, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
-    #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
-    #: thread for up to the git timeout; uncapped, a burst of installs would hold the
-    #: default executor that every other `to_thread` route shares. More than one, so
+    #: At most INSTALL_CONCURRENCY library clones at once, across every process that
+    #: shares the database (#1131). Each runs in a worker thread for up to the git
+    #: timeout; uncapped, a burst of installs would hold the default executor that
+    #: every other `to_thread` route shares. More than one, so
     #: a long clone (NopSCADlib) doesn't hold up adding another library. Nothing
     #: orders two clones of the same library: each runs in full, and the one whose
     #: commit is already checked out gives way to it (`LibraryStore._clone`); the pin
     #: itself is written under the history's write lock. A queued install waits on
     #: the loop, not in a thread.
-    installs: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
-    )
+    installs: InstallPermits = field(default_factory=lambda: InstallPermits(INSTALL_CONCURRENCY))
     #: At most IMPORT_CONCURRENCY `POST /models/import` and `POST
     #: /models/{slug}/assets/fetch` fetches at once on this replica, together. Held for
     #: the fetch only -- an import's parse check takes `checks` like any create, an
@@ -207,6 +239,34 @@ class AppState:
     temporal: Client | None = field(default=None)
 
 
+@dataclass(frozen=True)
+class PrintCommands:
+    """What the print routes need (#1052): our record, and the client and queue that
+    ``PrintRun`` starts on. The client is the API's lazy one, so the API boots while
+    Temporal is down; a print then answers 503 until it is back."""
+
+    store: PrintRunStore
+    client: Client
+    task_queue: str
+    search_attributes: bool = False
+
+
+class _Immediate:
+    """``publish_in`` for a bus that has no transaction of its own (the in-process bus
+    of a test): publishes at once, before the caller's transaction commits, so a
+    subscriber that re-reads the row may see it as it was (review #1061 5)."""
+
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None:
+        emit(self.bus, event)
+
+
+def transactional_events(events: EventBus) -> TransactionalEvents:
+    return events if isinstance(events, PgNotifyEventBus) else _Immediate(events)
+
+
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
     """The history's commit hook: ``version.committed`` for each template a commit
     touched, and ``upstream.available`` for every duplicate of one that still exists.
@@ -242,14 +302,25 @@ def build_state(settings: Settings) -> AppState:
 def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    # Every replica commits to the one repository on the share: the lock and the HEAD
+    # each writer leaves are in Postgres (#2385).
+    history = ModelHistory(
+        paths.models,
+        wrapper_prefix=WRAPPER_PREFIX,
+        timeout=config.git_timeout,
+        coordinator=PgRepoCoordinator(settings.database_url),
+    )
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     # Nothing connects here: the projection's pool opens in the lifespan, and the
     # event bus's in `PgNotifyEventBus.start`. The previews share the projection's
-    # pool (#454, #401).
+    # pool (#454).
     projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
     pool = projection.pool
+    # Registered on the shared listener before the bus (#2507): a commit's HEAD is
+    # refreshed here before the bus delivers the events the writer published after
+    # it, and a reconnect refreshes before subscribers are told to resync.
+    follower = ModelsHeadFollower(paths, history, projection.pg_listener)
     # One LISTEN connection per process: the bus shares the projection's.
     events = PgNotifyEventBus(
         settings.database_url,
@@ -263,10 +334,11 @@ def _build_core(settings: Settings) -> AppState:
     # Job events commit with the job change that they describe.
     projection.events = events
     preview_store = PreviewStore(pool.connection)
-    outputs = OutputStore(paths)
+    outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     uploads = BambuddyUploadStore(pool)
-    checkouts = CheckoutGate()
-    installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
+    # Render leases in Postgres, so a removal here sees the render worker's (#872).
+    checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
+    installs = InstallPermits(INSTALL_CONCURRENCY, pool)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
         paths.assets,
@@ -294,15 +366,18 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
-    # Lazy, so the API boots while Temporal is down: its renders wait, and the
-    # reconciler starts them once it is back.
+    follower.catalogue = catalogue
+    # Lazy, so the API boots while Temporal is down: a render is then refused with
+    # `temporal-unavailable` (#1053) until it is back.
+    temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
     render = RenderService(
         projection=projection,
-        client=connect_lazily(settings.temporal_address, settings.temporal_namespace),
+        client=temporal,
         task_queue=settings.temporal_task_queue_render,
         config=config,
         paths=paths,
         metrics=metrics,
+        search_attributes=settings.temporal_search_attributes,
     )
     previews = (
         build_previews(catalogue, outputs, render, config) if settings.preview_renders else None
@@ -313,18 +388,24 @@ def _build_core(settings: Settings) -> AppState:
     print_links = PrintLinkStore(pool)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
-        # The watcher links archives too (#306), so a print nobody watches is found.
+        # The follow links archives too (#306), so a print nobody watches is found.
         async with client_for(settings_store.load()) as client:
             return await progress_for(
                 client,
                 meta,
-                uploads=uploads if pool is not None else None,
+                uploads=uploads,
                 # Load-bearing for the rack settle hook (#836): without ``links=`` a fast
                 # print's archive is never linked, so its rack use goes uncounted, and
                 # no test catches it (the P3 settle test builds its own reader).
-                links=print_links if print_links.available else None,
+                links=print_links,
             )
 
+    async def read_library(subject: PrintSubject) -> PrintProgress | None:
+        # A library print is linked by its sends (#1073).
+        async with client_for(settings_store.load()) as client:
+            return await library_progress(client, subject, print_links, uploads=uploads)
+
+    print_run_store = PrintRunStore(pool, events=transactional_events(events))
     return AppState(
         settings=settings,
         config=config,
@@ -348,15 +429,20 @@ def _build_core(settings: Settings) -> AppState:
         metrics=metrics,
         events=events,
         print_progress=print_progress,
-        print_watcher=PrintWatcher(
-            outputs=outputs,
+        print_follower=Follower(
+            outputs=LocalOutputs(outputs, catalogue),
             observer=print_progress,
             read=read_progress,
+            read_library=read_library,
             events=events,
-            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
-            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
+            newest_failed=newest_failed_from(print_run_store, settings_store.load),
         ),
-        print_runs=PrintRuns(PrintRunStore(pool), events),
+        print_runs=PrintCommands(
+            store=print_run_store,
+            client=temporal,
+            task_queue=settings.temporal_task_queue_bambuddy,
+            search_attributes=settings.temporal_search_attributes,
+        ),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -367,27 +453,6 @@ def _build_core(settings: Settings) -> AppState:
     )
 
 
-async def probe_openscad_version(config: Config) -> str | None:
-    """``openscad --version`` writes to stderr, so both streams are merged."""
-    if shutil.which(config.openscad) is None:
-        return None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            config.openscad,
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=VERSION_TIMEOUT)
-    except (OSError, TimeoutError):
-        logger.exception("could not read the openscad version")
-        return None
-    if process.returncode != 0:
-        return None
-    first = stdout.decode("utf-8", "replace").strip().splitlines()
-    return first[0].strip() if first else None
-
-
 def build_previews(
     catalogue: Catalogue,
     outputs: OutputStore,
@@ -395,8 +460,8 @@ def build_previews(
     config: Config,
 ) -> PreviewScheduler | None:
     """The preview scheduler, hooked to every change that can call for a new preview;
-    ``None`` without a database, where there is nowhere to keep one. A preview is a
-    render on Temporal like any other (`RenderService.render_preview`)."""
+    ``None`` for a catalogue with no preview store, where there is nowhere to keep one.
+    A preview is a render on Temporal like any other (`RenderService.render_preview`)."""
     if catalogue.previews is None:
         return None
     previews = PreviewScheduler(
@@ -434,6 +499,17 @@ StateDep = Annotated[AppState, Depends(get_state)]
 
 def get_config(state: StateDep) -> Config:
     return state.config
+
+
+def downloads_of(state: AppState) -> DownloadCache | None:
+    """The shared cache of Bambuddy downloads (#2788); None before the store is built,
+    or when this process keeps none."""
+    bundle: StoreBundle | None = getattr(state, "store", None)
+    return bundle.downloads if bundle is not None else None
+
+
+def get_downloads(state: StateDep) -> DownloadCache | None:
+    return downloads_of(state)
 
 
 def get_paths(state: StateDep) -> DataPaths:
@@ -492,22 +568,7 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
-def get_print_watcher(state: StateDep) -> PrintWatcher:
-    return state.print_watcher
-
-
-#: Problem ``type`` for a route that needs the database when none is configured.
-DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
-
-
-def require_print_runs(state: StateDep) -> PrintRuns:
-    """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
-    if not state.print_runs.store.available:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "print runs are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
+def get_print_runs(state: StateDep) -> PrintCommands:
     return state.print_runs
 
 
@@ -515,7 +576,7 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
 
-def get_installs(state: StateDep) -> asyncio.Semaphore:
+def get_installs(state: StateDep) -> InstallPermits:
     return state.installs
 
 
@@ -533,6 +594,7 @@ def get_checkouts(state: StateDep) -> CheckoutGate:
 
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
+DownloadsDep = Annotated[DownloadCache | None, Depends(get_downloads)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
@@ -546,10 +608,9 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
-PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
+PrintRunsDep = Annotated[PrintCommands, Depends(get_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
-InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+InstallsDep = Annotated[InstallPermits, Depends(get_installs)]
 DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
 ImportsDep = Annotated[ImportPermits, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
@@ -562,11 +623,33 @@ def get_fetcher(state: StateDep, libraries: LibrariesDep) -> CheckoutFetcher:
 
 FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 
+
+def get_read_budget(
+    state: StateDep,
+    max_objects: Annotated[int | None, Query(gt=0, le=CEILINGS["max_objects"])] = None,
+    max_visits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_visits"])] = None,
+    max_triangles: Annotated[int | None, Query(ge=0)] = None,
+    max_paint_digits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_paint_digits"])] = None,
+) -> ReadBudget:
+    """What a GET's read of a library 3MF may spend (#2087): the settings in effect, then
+    any budget the query overrides, each at most its ceiling."""
+    override = ReadBudgetOverride(
+        max_objects=max_objects,
+        max_visits=max_visits,
+        max_triangles=max_triangles,
+        max_paint_digits=max_paint_digits,
+    )
+    return budget_of(state.settings, override)
+
+
+ReadBudgetDep = Annotated[ReadBudget, Depends(get_read_budget)]
+
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
-JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
+JobIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
-RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
+RunIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
+OperationIdPath = Annotated[str, Path(pattern=HEX_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]

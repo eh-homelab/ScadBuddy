@@ -210,6 +210,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           tool_prefix: 'mcp__hindsight__',
           auth: { header: 'Authorization', last4: TOKEN.slice(-4) },
           usable: true,
+          problem: null,
           tool_tiers: { recall: 'read' },
         })
 
@@ -274,7 +275,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           status: 400,
           detail: expect.stringMatching(/resolves to 169\.254\.169\.254/) as unknown,
         })
-        expect(await refused('http://hs.example/mcp', ['10.0.0.5'])).toMatchObject({
+        expect(await refused('http://hs.example/mcp', ['203.0.113.5'])).toMatchObject({
           status: 400,
           detail: expect.stringMatching(/must be https/) as unknown,
         })
@@ -348,7 +349,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // Claude Code gets the forwarder's loopback URL, never the endpoint or the secret.
         expect(run?.remotePlugins?.[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
         expect(JSON.stringify(run?.remotePlugins)).not.toContain(TOKEN)
-        // Released when the turn ended.
+        // Held while the process is warm (spec 2026-10-13 §5.3): released with it.
+        expect(forwarder.size).toBe(1)
+        await m.warm.evict(session.id, 'the test')
         expect(forwarder.size).toBe(0)
 
         const logged = (

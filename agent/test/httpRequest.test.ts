@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
@@ -9,10 +9,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { AuditEntry, AuditSink } from '../src/audit/log.js'
-import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
 import {
   HTTP_READ_TOOL,
   HTTP_READ_TOOL_NAME,
+  dirBodies,
   HTTP_TOOL,
   HTTP_TOOL_NAME,
   type HttpRequestArgs,
@@ -24,6 +24,7 @@ import {
   httpTierOf,
   readSavedResponse,
   runHttpRequest,
+  savedBody,
 } from '../src/harness/httpRequest.js'
 import { decide } from '../src/harness/permissions.js'
 import { assertHostAllowed, assertHttpUrl, EgressError } from '../src/http/egress.js'
@@ -70,7 +71,7 @@ class MemoryAudit implements AuditSink {
 
 async function context(overrides: Partial<HttpRequestContext> = {}): Promise<HttpRequestContext & { audit: MemoryAudit }> {
   return {
-    saveDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'http'),
+    saved: dirBodies(path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'http')),
     secrets: () => [SECRET, PLUGIN_TOKEN],
     audit: new MemoryAudit(),
     actor: { kind: 'browser', id: 'user', label: 'User' },
@@ -154,14 +155,11 @@ describe('what is sent', () => {
     const { headers } = seen[0]!
     // Node adds only the connection-level headers.
     expect(Object.keys(headers).sort()).toEqual(['connection', 'content-length', 'content-type', 'host', 'x-custom'])
-    expect(headers[AGENT_ACTOR_HEADER.toLowerCase()]).toBeUndefined()
     expect(JSON.stringify(headers)).not.toContain(SECRET)
     expect(seen[0]!.body).toBe('hello')
   })
 
   it.each([
-    ['the agent-actor header', { headers: { [AGENT_ACTOR_HEADER]: 'x' } }, /ScadBuddy's own/],
-    ['the actor header in another case', { headers: { 'x-scadbuddy-agent-session': 'x' } }, /ScadBuddy's own/],
     ['the credential in Authorization', { headers: { Authorization: `Bearer ${SECRET}` } }, /own credential/],
     ['a plugin token in a Cookie', { headers: { Cookie: `s=${PLUGIN_TOKEN}` } }, /own credential/],
     ['the credential in the URL', { url: `QUERY?key=${SECRET}` }, /URL contains/],
@@ -266,9 +264,9 @@ describe('the response', () => {
     const { url } = await serve(() => {
       // never answers
     })
-    const started = Date.now()
+    const started = performance.now()
     const result = await runHttpRequest(args({ url, timeout_ms: 200 }), await context())
-    expect(Date.now() - started).toBeLessThan(5000)
+    expect(performance.now() - started).toBeLessThan(5000)
     expect(result.isError).toBe(true)
     expect(json(result).error).toMatch(/within 200 ms/)
   })
@@ -351,6 +349,47 @@ describe('audit', () => {
     })
     const all = JSON.stringify(ctx.audit.entries)
     for (const leaked of ['secret-path', 'private', 'request-body-text', 'response-body-text']) expect(all).not.toContain(leaked)
+  })
+})
+
+describe('a saved body in the audit (#1292)', () => {
+  it('names the saved body on the row of the hop that answered, and only there', async () => {
+    const { url } = await serve((req, res) => {
+      if (req.url === '/start') res.writeHead(302, { location: '/data' }).end()
+      else res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(Buffer.from([0, 1, 2, 3]))
+    })
+    const ctx = await context()
+    const body = json(await runHttpRequest(args({ url: `${url}/start` }), ctx))
+    const saved = (body.saved as { id: string }).id
+    expect(ctx.audit.entries).toHaveLength(2)
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+    expect(JSON.parse(ctx.audit.entries[1]!.inputSummary!)).toMatchObject({ status: 200, saved })
+    expect(await savedBody(ctx.saved, saved)).toMatchObject({ meta: { content_type: 'application/octet-stream', size_bytes: 4 } })
+  })
+
+  it('names nothing when the body was returned inline', async () => {
+    const { url } = await serve((_req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end('short'))
+    const ctx = await context()
+    expect(json(await runHttpRequest(args({ url }), ctx)).saved).toBeNull()
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+  })
+
+  it('names nothing when the save failed, and still writes the row (#2224)', async () => {
+    const { url } = await serve((_req, res) => res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(Buffer.from([0, 1])))
+    // A directory that cannot be made: its parent is a regular file.
+    const file = path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'not-a-dir')
+    await writeFile(file, '')
+    const ctx = await context({ saved: dirBodies(path.join(file, 'http')) })
+    await expect(runHttpRequest(args({ url }), ctx)).rejects.toThrow()
+    expect(ctx.audit.entries).toHaveLength(1)
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).toMatchObject({ status: 200, size_bytes: 2 })
+    expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
+  })
+
+  it('reads back only a saved response id in its directory', async () => {
+    const ctx = await context()
+    expect(await savedBody(ctx.saved, '../../etc/passwd')).toBeUndefined()
+    expect(await savedBody(ctx.saved, '00000000-0000-4000-8000-000000000000')).toBeUndefined()
   })
 })
 

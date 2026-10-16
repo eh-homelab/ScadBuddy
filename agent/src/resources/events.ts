@@ -33,6 +33,7 @@ export function affectedBy(event: BusEvent): Affected {
     case 'job.pending':
     case 'job.running':
     case 'job.superseded':
+    case 'job.cancelled':
       return event.job_id ? { uris: [u('scadbuddy://jobs/{job_id}', { job_id: event.job_id })], listChanged: false } : none
     case 'job.done':
     case 'job.failed':
@@ -63,6 +64,7 @@ export function affectedBy(event: BusEvent): Affected {
     case 'upstream.available':
       return { uris: slug ? model(slug, '', '/upstream') : [], listChanged: false }
     case 'output.created':
+    case 'output.updated':
     case 'output.deleted': {
       const id = event.output_id
       return {
@@ -74,10 +76,19 @@ export function affectedBy(event: BusEvent): Affected {
       }
     }
     case 'print.progress':
-    case 'print.settled':
-      return event.output_id
-        ? { uris: [u('scadbuddy://print/outputs/{output_id}/progress', { output_id: event.output_id })], listChanged: false }
-        : none
+    case 'print.settled': {
+      const id = event.output_id
+      if (!id) return none
+      // A library file's print (#1751) names its subject, `library:<file id>`, which
+      // is no output: it has a resource of its own (#1967).
+      if (id.startsWith('library:')) {
+        const file = id.slice('library:'.length)
+        return /^[1-9]\d*$/.test(file)
+          ? { uris: [u('scadbuddy://print/library/{file_id}/progress', { file_id: file })], listChanged: false }
+          : none
+      }
+      return { uris: [u('scadbuddy://print/outputs/{output_id}/progress', { output_id: id })], listChanged: false }
+    }
     case 'library.changed':
       return { uris: ['scadbuddy://libraries', ...(slug ? model(slug, '') : [])], listChanged: false }
     case 'library.removed':

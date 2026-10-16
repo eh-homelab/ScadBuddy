@@ -153,7 +153,10 @@ async def test_stream_passes_the_range_through_and_answers_206(bambuddy: Bambudd
     )
 
     async with bambuddy.stream(
-        "/archives/35/timelapse", what="play the timelapse", range_header="bytes=100-199"
+        "/archives/35/timelapse",
+        operation="media.timelapse",
+        what="play the timelapse",
+        range_header="bytes=100-199",
     ) as upstream:
         body = b"".join([chunk async for chunk in upstream.aiter_raw()])
 
@@ -172,7 +175,9 @@ async def test_stream_maps_a_missing_file_to_a_404_problem(bambuddy: BambuddyCli
     )
 
     with pytest.raises(ApiError) as caught:
-        async with bambuddy.stream("/archives/35/timelapse", what="play the timelapse"):
+        async with bambuddy.stream(
+            "/archives/35/timelapse", operation="media.timelapse", what="play the timelapse"
+        ):
             pass
 
     assert caught.value.status == 404

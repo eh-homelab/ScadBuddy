@@ -1,0 +1,631 @@
+"""``Operation`` (#1053, spec 2026-10-01 §4.2) against fake activities registered under
+the real names, on a dev server: the generic command every Bambuddy write runs as."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import uuid
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+from temporalio import activity
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
+from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
+from scadbuddy.operations.store import Operation
+from scadbuddy.workflows import operation, operation_activities
+from scadbuddy.workflows.commands import start_command
+from scadbuddy.workflows.operation import OperationWorkflow
+from scadbuddy.workflows.operation_activities import _kind_activities
+from scadbuddy.workflows.operation_models import (
+    FinishOp,
+    InsertOp,
+    OperationAnswer,
+    OperationInput,
+    PreludeStep,
+    RunOp,
+)
+from scadbuddy.workflows.print_models import FAILED, REFUSED
+from scadbuddy.workflows.problems import (
+    OPERATION_CANCELLED,
+    OPERATION_CHECK_TIMED_OUT,
+    OPERATION_UNEXPECTED_DETAIL,
+    operation_cancelled_running,
+    operation_unexpected_running_detail,
+    problem_of,
+)
+from tests.support.temporal import temporal_client
+
+pytestmark = pytest.mark.requires_temporal
+
+REFUSAL = PrintRunError(status=409, title="Conflict", detail="archive 5 was deleted")
+BAMBUDDY_502 = PrintRunError(status=502, title="Bad Gateway", detail="Bambuddy said no")
+
+
+class Fake:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.refuse = False
+        self.run_error: Exception | None = None
+        self.hold = asyncio.Event()
+        self.hold.set()
+        #: Set, the check waits on it, so a test can act while it is in flight.
+        self.check_gate: asyncio.Event | None = None
+        #: Set, the insert waits on it.
+        self.insert_gate: asyncio.Event | None = None
+        #: Set, the finish waits on it.
+        self.finish_gate: asyncio.Event | None = None
+
+    def _op(self, status: str = "running", **fields: Any) -> Operation:
+        return Operation(
+            id="op-1",
+            kind="test",
+            subject="s",
+            status=status,  # type: ignore[arg-type]
+            created_at=datetime(2026, 10, 3, tzinfo=UTC),
+            **fields,
+        )
+
+    @activity.defn(name="op.test.check")
+    async def check(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append("check")
+        if self.check_gate is not None:
+            await self.check_gate.wait()
+        if self.refuse:
+            raise ApplicationError(REFUSAL.detail, REFUSAL, type=REFUSED, non_retryable=True)
+        return {"checked": True}
+
+    @activity.defn(name="op_insert")
+    async def insert(self, input: InsertOp) -> Operation:
+        self.calls.append("insert")
+        if self.insert_gate is not None:
+            await self.insert_gate.wait()
+        return self._op()
+
+    @activity.defn(name="op.test.run")
+    async def run(self, input: RunOp) -> dict[str, Any]:
+        self.calls.append("run")
+        assert input.checked == {"checked": True}
+        await self.hold.wait()
+        if self.run_error is not None:
+            raise self.run_error
+        return {"queue_item_id": 7}
+
+    @activity.defn(name="op_finish")
+    async def finish(self, input: FinishOp) -> Operation:
+        self.calls.append("finish:ok" if input.error is None else f"finish:{input.error.status}")
+        if self.finish_gate is not None:
+            await self.finish_gate.wait()
+        if input.error is not None:
+            return self._op("failed", error=input.error)
+        return self._op("succeeded", result=input.result)
+
+    def all(self) -> list[Callable[..., Any]]:
+        return [self.check, self.insert, self.run, self.finish]
+
+
+@pytest.fixture
+async def client() -> AsyncIterator[Client]:
+    async with temporal_client() as connected:
+        yield connected
+
+
+@pytest.fixture
+def fake() -> Fake:
+    return Fake()
+
+
+@pytest.fixture
+async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
+    queue = f"op-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client, task_queue=queue, workflows=[OperationWorkflow], activities=fake.all()
+    ):
+        yield queue
+
+
+def op_input(
+    *, run_attempts: int = 1, answer_running: bool = False, where: str = "Bambuddy"
+) -> OperationInput:
+    return OperationInput(
+        kind="test",
+        subject="s",
+        key=uuid.uuid4().hex,
+        request={"archive_id": 5},
+        run_attempts=run_attempts,
+        answer_running=answer_running,
+        where=where,
+    )
+
+
+async def start(client: Client, queue: str, arg: OperationInput) -> OperationAnswer:
+    return await start_command(
+        client,
+        "Operation",
+        arg,
+        id=f"op-{arg.kind}-{arg.key}",
+        task_queue=queue,
+        update="accepted",
+        result_type=OperationAnswer,
+        reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    )
+
+
+async def ended(client: Client, arg: OperationInput) -> Operation:
+    handle = client.get_workflow_handle(f"op-{arg.kind}-{arg.key}", result_type=Operation)
+    result: Operation = await handle.result()
+    return result
+
+
+async def test_a_refusal_answers_the_update_and_writes_nothing(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    fake.refuse = True
+    arg = op_input()
+    answer = await start(client, worker, arg)
+    assert answer.operation is None and answer.refusal == REFUSAL
+    with pytest.raises(WorkflowFailureError):
+        await ended(client, arg)
+    assert fake.calls == ["check"]
+
+
+async def test_a_done_kind_answers_the_finished_operation(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    arg = op_input()
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    assert answer.operation.result == {"queue_item_id": 7} and not answer.repeated
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+async def test_a_kind_that_answers_running_answers_once_recorded(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#2462: the dialog's background slice answers with its record while the effect
+    still runs, not after it, which rode out the 10 s command deadline every time."""
+    fake.hold.clear()
+    arg = op_input(answer_running=True)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.status == "running"
+    assert "finish:ok" not in fake.calls
+    fake.hold.set()
+    assert (await ended(client, arg)).status == "succeeded"
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+async def test_an_effect_failure_completes_with_the_problem(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """§4.2: once the record exists, every outcome completes the execution."""
+    fake.run_error = ApplicationError(
+        BAMBUDDY_502.detail, BAMBUDDY_502, type=FAILED, non_retryable=True
+    )
+    arg = op_input()
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
+    assert (await ended(client, arg)).status == "failed"
+    assert fake.calls[-1] == "finish:502"
+
+
+async def test_an_unexpected_effect_error_says_the_effect_may_have_happened(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 (second) 1: a crash or timeout in the run may come after Bambuddy
+    took the write, so the record warns as a cancel mid-run does."""
+    fake.run_error = RuntimeError("boom")
+    arg = op_input()
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error is not None
+    assert answer.operation.error.status == 500
+    assert answer.operation.error.detail == operation_unexpected_running_detail("Bambuddy")
+    assert operation_unexpected_running_detail("Bambuddy") != OPERATION_UNEXPECTED_DETAIL
+
+
+async def test_the_run_activity_takes_the_kinds_attempts(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    attempts: dict[str, int] = {}
+    for n in (1, 3):
+        arg = op_input(run_attempts=n)
+        await start(client, worker, arg)
+        await ended(client, arg)
+        handle = client.get_workflow_handle(f"op-{arg.kind}-{arg.key}")
+        async for event in handle.fetch_history_events():
+            if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+                scheduled = event.activity_task_scheduled_event_attributes
+                if scheduled.activity_type.name == "op.test.run":
+                    attempts[f"run{n}"] = scheduled.retry_policy.maximum_attempts
+                    heartbeat = scheduled.heartbeat_timeout.ToTimedelta().total_seconds()
+                    attempts["run_heartbeat"] = int(heartbeat)
+                if scheduled.activity_type.name == "op.test.check":
+                    timeout = scheduled.start_to_close_timeout.ToTimedelta().total_seconds()
+                    attempts["check_timeout"] = int(timeout)
+    assert attempts == {"run1": 1, "run3": 3, "check_timeout": 8, "run_heartbeat": 30}
+
+
+async def test_a_retryable_effect_failure_is_tried_again_and_records_the_last_problem(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#1144: a transient Bambuddy failure of a kind that may run again is retried up to
+    the kind's attempts; when every attempt meets it, the record keeps its problem."""
+    fake.run_error = ApplicationError(BAMBUDDY_502.detail, BAMBUDDY_502, type=FAILED)
+    arg = op_input(run_attempts=2)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
+    assert fake.calls.count("run") == 2
+
+
+#: Bambuddy's answers, as `bambuddy/errors.py` maps them.
+GATEWAY_503 = ApiError(502, "Bambuddy answered 503", type_=UNAVAILABLE_PROBLEM, bambuddy_status=503)
+NO_ANSWER = ApiError(504, "could not reach Bambuddy: ReadTimeout", type_=UNAVAILABLE_PROBLEM)
+REFUSED_CONNECT = ApiError(502, "could not reach Bambuddy: ConnectError", type_=UNAVAILABLE_PROBLEM)
+BAMBUDDY_500 = ApiError(
+    502, "Bambuddy answered 500", type_=UNAVAILABLE_PROBLEM, bambuddy_status=500
+)
+SCOPE = ApiError(409, "Bambuddy refused the API key", type_=SCOPE_PROBLEM, bambuddy_status=403)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "error", "retryable"),
+    [
+        (3, GATEWAY_503, True),
+        (3, NO_ANSWER, True),
+        (3, REFUSED_CONNECT, True),
+        (3, BAMBUDDY_500, False),
+        (3, SCOPE, False),
+        (1, GATEWAY_503, False),
+        (1, NO_ANSWER, False),
+    ],
+)
+async def test_only_a_transient_bambuddy_failure_of_a_kind_that_may_run_again_is_retryable(
+    attempts: int, error: ApiError, retryable: bool
+) -> None:
+    """#1144: ``send`` and ``register_sidebar`` take 3 attempts, but every Bambuddy error
+    left the run non-retryable, so a 502/503/504 or no answer failed them at once. Only
+    a kind with more than one attempt is retried: the others' effects Bambuddy does not
+    dedupe."""
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        raise error
+
+    _, activity_run = _kind_activities(
+        OperationKind(name="k", check=check, run=run, run_attempts=attempts)
+    )
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_run, RunOp(request={}, checked={}))
+    assert caught.value.type == FAILED
+    assert caught.value.non_retryable is not retryable
+    assert problem_of(caught.value).status == error.status
+
+
+async def test_a_second_update_while_running_is_a_repeat_that_runs_nothing(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    fake.hold.clear()
+    arg = op_input()
+    first = asyncio.create_task(start(client, worker, arg))
+    while "run" not in fake.calls:
+        await asyncio.sleep(0.05)
+    second = asyncio.create_task(start(client, worker, arg))
+    await asyncio.sleep(0.5)
+    fake.hold.set()
+    answers = await asyncio.gather(first, second)
+    assert sorted(a.repeated for a in answers) == [False, True]
+    assert fake.calls.count("run") == 1
+
+
+async def test_a_cancel_during_the_check_answers_the_update_before_the_execution_ends(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1061 1c: the Update answers a refusal, never outlived by its execution."""
+    fake.check_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "check" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        answer = await accepting
+        assert answer.operation is None
+        assert answer.refusal == OPERATION_CANCELLED
+        with pytest.raises(WorkflowFailureError):
+            await ended(client, arg)
+        assert fake.calls == ["check"]
+    finally:
+        fake.check_gate.set()
+
+
+async def test_a_check_no_attempt_of_which_answered_is_a_timeout_not_an_unexpected_failure(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2065: a check whose every attempt hit the activity's own timeout answers a 504
+    that says nothing was done, not "failed unexpectedly". Unsandboxed, so the shorter
+    timeout patched here is the one the workflow reads."""
+    monkeypatch.setattr(operation, "CHECK_TIMEOUT", timedelta(seconds=1))
+    monkeypatch.setattr(operation, "READ_RETRY", RetryPolicy(maximum_attempts=2))
+    fake.check_gate = asyncio.Event()
+    queue = f"op-{uuid.uuid4().hex[:8]}"
+    arg = op_input()
+    try:
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[OperationWorkflow],
+            activities=fake.all(),
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            answer = await start(client, queue, arg)
+            assert answer.operation is None
+            assert answer.refusal == OPERATION_CHECK_TIMED_OUT
+            with pytest.raises(WorkflowFailureError):
+                await ended(client, arg)
+    finally:
+        fake.check_gate.set()
+    assert fake.calls == ["check", "check"]
+
+
+async def test_a_cancel_during_the_insert_still_records_and_ends_the_operation(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 1: the insert may commit after the workflow saw the cancel, so it is
+    waited out and its row ended, never left ``running``. Nothing ran."""
+    fake.insert_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    while "insert" not in fake.calls:
+        await asyncio.sleep(0.05)
+    await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+    await asyncio.sleep(0.5)
+    fake.insert_gate.set()
+    answer = await accepting
+    assert answer.operation is not None and answer.operation.error == OPERATION_CANCELLED
+    assert (await ended(client, arg)).status == "failed"
+    assert fake.calls == ["check", "insert", "finish:409"]
+
+
+async def test_a_cancel_during_the_finish_still_records_the_effects_outcome(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 third review 1: the effect ran, so a cancel while its outcome is being
+    recorded waits the finish out; the row is never left for the reconciler to call lost."""
+    fake.finish_gate = asyncio.Event()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    while "finish:ok" not in fake.calls:
+        await asyncio.sleep(0.05)
+    await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+    await asyncio.sleep(0.5)
+    fake.finish_gate.set()
+    answer = await accepting
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    done = await ended(client, arg)
+    assert done.status == "succeeded" and done.result == {"queue_item_id": 7}
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """Review #1063 2: not the unexpected failure, which points at logs that say
+    nothing: the effect may have reached Bambuddy, so check there first."""
+    fake.hold.clear()
+    arg = op_input()
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "run" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        answer = await accepting
+    finally:
+        fake.hold.set()
+    assert answer.operation is not None
+    assert answer.operation.error == operation_cancelled_running("Bambuddy")
+    assert (await ended(client, arg)).status == "failed"
+
+
+async def test_a_library_kind_says_to_check_the_model_not_bambuddy(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#1174: a cancel mid-run, or an unexpected failure, of a kind whose effect is on
+    the model and its libraries names that, not Bambuddy."""
+    where = "the model and its libraries"
+    fake.hold.clear()
+    arg = op_input(where=where)
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "run" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        cancelled = await accepting
+    finally:
+        fake.hold.set()
+    assert cancelled.operation is not None and cancelled.operation.error is not None
+    assert "Check the model and its libraries before" in cancelled.operation.error.detail
+    assert "Bambuddy" not in cancelled.operation.error.detail
+
+    fake.run_error = RuntimeError("boom")
+    failed = await start(client, worker, op_input(where=where))
+    assert failed.operation is not None and failed.operation.error is not None
+    assert "Check the model and its libraries before" in failed.operation.error.detail
+
+
+# --- a prelude on another queue (#1060) ------------------------------------------
+
+
+class Prelude:
+    """The prelude kind's run, on its own worker and queue (the print worker's)."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+        self.error: Exception | None = None
+        self.requests: list[dict[str, Any]] = []
+
+    @activity.defn(name="op.inbox.run")
+    async def run(self, input: RunOp) -> dict[str, Any]:
+        self.calls.append("prelude")
+        self.requests.append(input.request)
+        if self.error is not None:
+            raise self.error
+        return {}
+
+
+@pytest.fixture
+async def prelude(client: Client, fake: Fake) -> AsyncIterator[tuple[str, Prelude]]:
+    queue = f"op-prelude-{uuid.uuid4().hex[:8]}"
+    step = Prelude(fake.calls)
+    async with Worker(client, task_queue=queue, activities=[step.run]):
+        yield queue, step
+
+
+def with_prelude(queue: str) -> OperationInput:
+    return op_input().model_copy(update={"prelude": PreludeStep(kind="inbox", task_queue=queue)})
+
+
+async def test_a_prelude_runs_on_its_queue_before_the_run(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    queue, step = prelude
+    answer = await start(client, worker, with_prelude(queue))
+    assert answer.operation is not None and answer.operation.status == "succeeded"
+    assert fake.calls == ["check", "insert", "prelude", "run", "finish:ok"]
+    assert step.requests == [{"archive_id": 5}]
+
+
+async def test_a_failed_prelude_fails_the_operation_and_the_run_never_starts(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    queue, step = prelude
+    step.error = ApplicationError(
+        BAMBUDDY_502.detail, BAMBUDDY_502, type=FAILED, non_retryable=True
+    )
+    arg = with_prelude(queue)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error == BAMBUDDY_502
+    assert (await ended(client, arg)).status == "failed"
+    assert fake.calls == ["check", "insert", "prelude", "finish:502"]
+
+
+async def test_a_failed_prelude_says_to_check_where_the_prelude_writes(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    """#1174 review: a prelude that dies unexpectedly may have done its part where it
+    writes (Bambuddy's inbox), not where the outer kind's run would have."""
+    queue, step = prelude
+    step.error = RuntimeError("boom")
+    arg = op_input(where="the model and its libraries").model_copy(
+        update={
+            "prelude": PreludeStep(
+                kind="inbox", task_queue=queue, where="the inbox folder in Bambuddy"
+            )
+        }
+    )
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error is not None
+    detail = answer.operation.error.detail
+    assert "Check the inbox folder in Bambuddy before" in detail
+    assert "the model and its libraries" not in detail
+
+    # Once the prelude is done, a failed run names the kind's own place again.
+    step.error = None
+    fake.run_error = RuntimeError("boom")
+    answer = await start(client, worker, arg.model_copy(update={"key": uuid.uuid4().hex}))
+    assert answer.operation is not None and answer.operation.error is not None
+    assert "Check the model and its libraries before" in answer.operation.error.detail
+
+
+async def test_an_operation_without_a_prelude_records_no_patch_marker(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """A history recorded before preludes replays unchanged (`workflow.patched`)."""
+    arg = op_input()
+    await start(client, worker, arg)
+    await ended(client, arg)
+    history = await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").fetch_history()
+    assert not [e for e in history.events if e.event_type == EventType.EVENT_TYPE_MARKER_RECORDED]
+
+
+async def test_the_run_activity_heartbeats_while_the_effect_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #1063 (second) 2: a run on a worker that died is retired after the
+    heartbeat timeout, not after the whole ``RUN_TIMEOUT``."""
+    monkeypatch.setattr(operation_activities, "HEARTBEAT_EVERY", 0.01)
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def slow(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {"done": True}
+
+    _, run = _kind_activities(OperationKind(name="slow", check=check, run=slow))
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    env.on_heartbeat = lambda *details: beats.append(details)
+    assert await env.run(run, RunOp(request={}, checked={})) == {"done": True}
+    assert beats
+
+
+@pytest.mark.parametrize(
+    ("raised", "still_waiting"),
+    [(None, False), (LookupError, False), (TimeoutError, True), (asyncio.CancelledError, True)],
+)
+async def test_only_a_timeout_leaves_the_check_waiting_on_bambuddy(
+    raised: type[BaseException] | None, still_waiting: bool
+) -> None:
+    """Review #1063 third review 2: a check that catches a Bambuddy error and goes on to
+    slow work of its own must not blame Bambuddy when that work runs out of time."""
+    waiting = [False]
+    token = CHECK_ON_BAMBUDDY.set(waiting)
+    try:
+        with pytest.raises(raised) if raised is not None else contextlib.nullcontext():
+            async with waiting_on_bambuddy():
+                assert waiting == [True]
+                if raised is not None:
+                    raise raised
+    finally:
+        CHECK_ON_BAMBUDDY.reset(token)
+    assert waiting == [still_waiting]
+
+
+@pytest.mark.parametrize("bambuddy_answered", [False, True])
+async def test_a_check_out_of_time_blames_bambuddy_only_while_waiting_on_it(
+    monkeypatch: pytest.MonkeyPatch, bambuddy_answered: bool
+) -> None:
+    """The budget cuts the check with a cancel inside ``waiting_on_bambuddy``, which keeps
+    the blame; a check that left it with an error and then ran out of time does not."""
+    monkeypatch.setattr(operation_activities, "CHECK_BUDGET_SECONDS", 0.2)
+
+    async def check(request: dict[str, Any]) -> dict[str, Any]:
+        with contextlib.suppress(LookupError):
+            async with waiting_on_bambuddy():
+                if bambuddy_answered:
+                    raise LookupError
+                await asyncio.Event().wait()
+        await asyncio.Event().wait()
+        return {}
+
+    async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    activity_check, _ = _kind_activities(OperationKind(name="slow", check=check, run=run))
+    with pytest.raises(ApplicationError) as caught:
+        await ActivityEnvironment().run(activity_check, {})
+    answer = problem_of(caught.value)
+    assert answer.status == 504
+    assert (answer.type == UNAVAILABLE_PROBLEM) is not bambuddy_answered

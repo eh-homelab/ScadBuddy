@@ -1,27 +1,47 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  LibraryFileName,
+  AttachResult,
   PrintCheck,
+  PrintProgress,
+  ProjectAttach,
   ChoicesView,
   FilamentOptions,
+  LibraryCopyResult,
+  LibraryDeleteResult,
   LibraryEntry,
+  LibraryFileObjects,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryFolderView,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
+  LibraryRestoreResult,
+  LibrarySearch,
   ModelPrintChoices,
   OutputPlate,
   PrintRun,
   PrintRunRequest,
   PrintRunResult,
+  SlicedProfile,
 } from '../../api/types'
 import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
+import { keychainGlb } from '../glb'
+import { H2C_FILE, H2C_FILENAME, H2C_NOZZLES, h2cFilaments, h2cPlan } from '../h2c'
 import {
   mockLibraryChoices,
+  mockLibraryOutput,
   mockSettings,
   nextNumber,
   problem,
   recordMockPrintRun,
   setMockLibraryChoices,
 } from '../handlers'
+import { SLICED_REASON, mockLibraryObjects } from '../libraryObjects'
 
 /**
  * #313 — printing a file already in Bambuddy's library: the listing, a file's plates and
@@ -33,13 +53,25 @@ const base = '/api/v1'
 
 /** The mocked Bambuddy library, shaped like tests/bambuddy/recordings. */
 export const libraryFolders: LibraryFolderView[] = [
-  { id: 1, name: 'MakerWorld', parent_id: null, depth: 0, file_count: 1 },
+  { id: 1, name: 'MakerWorld', parent_id: null, depth: 0, file_count: 2 },
   { id: 3, name: 'Supplies', parent_id: null, depth: 0, file_count: 0 },
   { id: 4, name: 'Storage', parent_id: 3, depth: 1, file_count: 1 },
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
+  // #2670 — a folder linked to a Bambuddy project: a move out of it takes a file out of the project.
+  { id: 13, name: 'Lamp', parent_id: null, depth: 0, file_count: 1, project_id: 7, project_name: 'Desk lamp' },
+  // #2165 — a name repeated under another folder, as the live library has it.
+  { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
+  { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },
+  { id: 12, name: 'Work', parent_id: 11, depth: 2, file_count: 3 },
 ]
 
-function entry(id: number, filename: string, fileType: string, folderId: number | null): LibraryEntry {
+function entry(
+  id: number,
+  filename: string,
+  fileType: string,
+  folderId: number | null,
+  added: Pick<LibraryEntry, 'file_size' | 'created_at'> & { is_external?: boolean } = {},
+): LibraryEntry {
   return {
     id,
     filename,
@@ -47,17 +79,49 @@ function entry(id: number, filename: string, fileType: string, folderId: number 
     folder_id: folderId,
     has_thumbnail: fileType !== 'stl',
     print_count: 0,
-    printable: ['3mf', 'stl'].includes(fileType.toLowerCase()),
+    printable: ['3mf', 'stl', 'gcode.3mf'].includes(fileType.toLowerCase()),
+    sliced: fileType.toLowerCase() === 'gcode.3mf',
+    file_size: added.file_size ?? 64_000,
+    created_at: added.created_at ?? '2026-09-20T12:00:00Z',
+    is_external: added.is_external ?? false,
   }
 }
 
+/** #935 — two uploads of one output: the same name and size, three minutes apart. */
+const BAG_CLIP = 'bag-clip-3155628dc2bb43d4940fad6dba164efc'
+
 export const libraryFiles: LibraryEntry[] = [
-  entry(89, 'bag-clip.3mf', '3mf', null),
-  entry(104, 'bag-clip.gcode.3mf', 'gcode.3mf', null),
+  entry(89, `${BAG_CLIP}.3mf`, '3mf', null, { file_size: 109_795, created_at: '2026-09-26T17:05:45Z' }),
+  entry(91, `${BAG_CLIP}.3mf`, '3mf', null, { file_size: 109_795, created_at: '2026-09-26T17:08:42Z' }),
+  entry(104, `${BAG_CLIP}.gcode.3mf`, 'gcode.3mf', null, {
+    file_size: 864_242,
+    created_at: '2026-09-27T17:17:51Z',
+  }),
   entry(67, "Clara's Wand.3mf", '3mf', 1),
+  // #2166 — the H2C's two-colour file (Mistletoe Green and Inland Black PLA).
+  entry(H2C_FILE, H2C_FILENAME, '3mf', 1),
   entry(46, 'Desiccant_Box.stl', 'stl', 4),
+  // #2167 — in Spec/MakerWorld/Work: one to delete, one Bambuddy's key may not (another
+  // user added it), and one linked from an external folder.
+  entry(120, 'drawer-label.3mf', '3mf', 12),
+  entry(121, 'alex-headphone-hook.3mf', '3mf', 12),
+  entry(122, 'nas-share-bracket.3mf', '3mf', 12, { is_external: true }),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
+  // #2670 — the Desk lamp project's file.
+  entry(130, 'lamp-shade.3mf', '3mf', 13),
 ]
+
+/** #2671 — what each sliced file was sliced for, as the backend reads it from the file. */
+export const SLICED_PROFILES: Record<number, SlicedProfile> = {
+  104: {
+    printer_model: 'Bambu Lab H2C',
+    printer_preset: 'Bambu Lab H2C 0.4 nozzle',
+    process: '0.20mm Standard @BBL H2C',
+    bed_type: 'Textured PEI Plate',
+    nozzle_diameters: ['0.4'],
+    plates: [{ index: 1, print_seconds: 2700, weight_g: 9.8, nozzle_diameters: ['0.4'] }],
+  },
+}
 
 /** The two-plate file; every other 3MF is one plate and an STL none. */
 export const MULTI_PLATE_FILE = 67
@@ -72,14 +136,11 @@ function libraryRefusal(fileId: number) {
       `Bambuddy has no such resource when asked to read library file ${fileId}`,
     )
   }
-  if (file.file_type === 'gcode.3mf') {
-    return problem(422, 'Unprocessable Content', `${file.filename} is sliced already. Print it from Bambuddy.`)
-  }
   if (!file.printable) {
     return problem(
       422,
       'Unprocessable Content',
-      `ScadBuddy prints only 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
+      `ScadBuddy prints only 3MF, sliced 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
     )
   }
   return null
@@ -90,25 +151,208 @@ function pngResponse() {
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
+/** The backend's `search_library` (#3630): every word in the name or the folder path. */
+function searchFiles(query: string, all: boolean): LibrarySearch {
+  const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
+  const terms = words(query).split(' ').filter(Boolean)
+  const pathOf = (id: number | null | undefined): string[] => {
+    const folder = listedFolders().find((row) => row.id === id)
+    return folder ? [...pathOf(folder.parent_id), folder.name] : []
+  }
+  const matched = terms.length === 0
+    ? []
+    : listedFiles().filter((file) => {
+        const name = words(file.filename)
+        const where = words(pathOf(file.folder_id).join(' '))
+        return terms.every((term) => name.includes(term) || where.includes(term))
+      })
+  const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
+  const inName = (file: LibraryEntry) => terms.filter((term) => words(file.filename).includes(term)).length
+  shown.sort((a, b) => inName(b) - inName(a) || a.filename.localeCompare(b.filename))
+  return {
+    query,
+    all,
+    files: shown.slice(0, 100).map((file) => ({
+      ...file,
+      output_id: mockLibraryOutput(file.id) ?? null,
+      folder_path: pathOf(file.folder_id),
+    })),
+    total: shown.length,
+    hidden: matched.length - shown.length,
+  }
+}
+
 export const handlers = [
+  // #2349 — names by id; a file the mock library does not have is `name: null`.
+  http.get(`${base}/print/library/names`, ({ request }) => {
+    const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
+    return HttpResponse.json(
+      ids.map((id) => {
+        const file = listedFiles().find((row) => row.id === id)
+        return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
+      }) satisfies LibraryFileName[],
+    )
+  }),
+
+  http.get(`${base}/print/library/search`, ({ request }) => {
+    const search = new URL(request.url).searchParams
+    return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
+  }),
+
   http.get(`${base}/print/library`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const asked = search.get('folder_id')
-    const folderId = asked === null ? null : Number(asked)
+    const linked = search.get('file_id')
+    let folderId = asked === null ? null : Number(asked)
+    if (asked === null && linked !== null) {
+      const file = listedFiles().find((row) => row.id === Number(linked))
+      if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${linked}`)
+      folderId = file.folder_id ?? null
+    }
     const all = search.get('all') === 'true'
-    const here = libraryFiles.filter((file) => (file.folder_id ?? null) === folderId)
+    const here = listedFiles().filter((file) => (file.folder_id ?? null) === folderId)
     const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
     return HttpResponse.json({
       folder_id: folderId,
       all,
-      folders: libraryFolders,
-      files,
+      folders: listedFolders(),
+      files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
       hidden: here.length - files.length,
     } satisfies LibraryListing)
   }),
 
+  /** #2167 — to the mocked trash; Bambuddy skips the file another user added. */
+  http.post(`${base}/print/library/delete`, async ({ request }) => {
+    const { file_ids } = (await request.json()) as { file_ids: number[] }
+    const ids = [...new Set(file_ids)]
+    const files = ids.map((id) => listedFiles().find((row) => row.id === id))
+    const absent = ids.find((_, n) => !files[n])
+    if (absent !== undefined) return problem(404, 'Not Found', `library file ${absent} is no longer in Bambuddy's library`)
+    const result: LibraryDeleteResult = { deleted: [], skipped: [] }
+    for (const file of files as LibraryEntry[]) {
+      if (file.id === NOT_OWNED) {
+        result.skipped.push({ id: file.id, filename: file.filename, reason: "Bambuddy deletes only files its API key's user added" })
+        continue
+      }
+      if (file.is_external) removed.add(file.id)
+      else trashed.add(file.id)
+      result.deleted.push({ id: file.id, filename: file.filename, trashed: !file.is_external })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  /** #2670 — a move keeps each id; Bambuddy skips the file another user added. */
+  http.post(`${base}/print/library/move`, async ({ request }) => {
+    const { file_ids, folder_id } = (await request.json()) as { file_ids: number[]; folder_id: number | null }
+    const target = folder_id ?? null
+    const project = (id: number | null) => libraryFolders.find((folder) => folder.id === id)
+    const result: LibraryMoveResult = { folder_id: target, moved: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      const file = listedFiles().find((row) => row.id === id)
+      if (!file) return problem(404, 'Not Found', `library file ${id} is no longer in Bambuddy's library`)
+      if (file.id === NOT_OWNED) {
+        result.skipped.push({ id, filename: file.filename, reason: 'Bambuddy did not move it: not the file owner' })
+        continue
+      }
+      const from = project(file.folder_id ?? null)
+      const to = project(target)
+      const left = from?.project_id != null && from.project_id !== to?.project_id
+      moved.set(id, target)
+      result.moved.push({
+        id,
+        filename: file.filename,
+        left_project: left ? { id: from.project_id!, name: from.project_name ?? null } : null,
+      })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  /** #2670 — each copy a new file, numbered after the mocked library's ids. */
+  http.post(`${base}/print/library/copy`, async ({ request }) => {
+    const { file_ids, folder_id } = (await request.json()) as { file_ids: number[]; folder_id: number | null }
+    const result: LibraryCopyResult = { folder_id: folder_id ?? null, copied: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      const file = listedFiles().find((row) => row.id === id)
+      if (!file) return problem(404, 'Not Found', `library file ${id} is no longer in Bambuddy's library`)
+      const copy = { ...file, id: 9000 + copies.length, folder_id: folder_id ?? null, print_count: 0 }
+      copies.push(copy)
+      result.copied.push({ source_id: id, id: copy.id, filename: copy.filename })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  /** #2670 — a new name under the same id; Bambuddy refuses one a printer's SD card would. */
+  http.post(`${base}/print/library/rename`, async ({ request }) => {
+    const { file_id, filename } = (await request.json()) as { file_id: number; filename: string }
+    const file = listedFiles().find((row) => row.id === file_id)
+    if (!file) return problem(404, 'Not Found', `library file ${file_id} is no longer in Bambuddy's library`)
+    if (/[<>:"|?*]/.test(filename)) {
+      return problem(400, 'Bad Request', `Filename contains characters a printer's SD card does not allow: ${filename}`)
+    }
+    renamed.set(file_id, filename)
+    return HttpResponse.json({ id: file_id, filename, previous: file.filename } satisfies LibraryRenameResult)
+  }),
+
+  /** #3650 — a folder renamed or moved; `parent_id` 0 is the top level. */
+  http.patch(`${base}/print/library/folders/:id`, async ({ params, request }) => {
+    const id = Number(params['id'])
+    const update = (await request.json()) as LibraryFolderUpdate
+    const folder = listedFolders().find((row) => row.id === id)
+    if (!folder) return problem(404, 'Not Found', `library folder ${id} is no longer in Bambuddy's library`)
+    const parent = update.parent_id === 0 ? null : (update.parent_id ?? folder.parent_id ?? null)
+    if (parent !== null && (parent === id || descendants(id).has(parent))) {
+      return problem(400, 'Bad Request', 'Cannot move a folder into itself or one of its subfolders')
+    }
+    folderEdits.set(id, { name: update.name ?? folder.name, parent_id: parent })
+    return HttpResponse.json({ id, name: update.name ?? folder.name, parent_id: parent } satisfies LibraryFolder)
+  }),
+
+  http.post(`${base}/print/library/folders`, async ({ request }) => {
+    const body = (await request.json()) as LibraryFolderCreate
+    const folder: LibraryFolderView = { id: 500 + createdFolders.length, name: body.name, parent_id: body.parent_id ?? null, depth: 0, file_count: 0 }
+    createdFolders.push(folder)
+    return HttpResponse.json({ id: folder.id, name: folder.name, parent_id: folder.parent_id } satisfies LibraryFolder)
+  }),
+
+  /** #3650 — the folder's files to the trash, then the folder and its subfolders. */
+  http.post(`${base}/print/library/folders/:id/delete`, ({ params }) => {
+    const id = Number(params['id'])
+    if (!listedFolders().some((row) => row.id === id)) {
+      return problem(404, 'Not Found', `library folder ${id} is no longer in Bambuddy's library`)
+    }
+    const gone = new Set([id, ...descendants(id)])
+    const result: LibraryFolderDeleteResult = { deleted: [], folders: [...gone], skipped: [] }
+    for (const file of listedFiles().filter((row) => gone.has(row.folder_id ?? -1))) {
+      if (file.is_external) removed.add(file.id)
+      else trashed.add(file.id)
+      result.deleted.push({ id: file.id, filename: file.filename, trashed: !file.is_external })
+    }
+    for (const folder of gone) deletedFolders.add(folder)
+    return HttpResponse.json(result)
+  }),
+
+  http.post(`${base}/print/library/restore`, async ({ request }) => {
+    const { file_ids } = (await request.json()) as { file_ids: number[] }
+    const result: LibraryRestoreResult = { restored: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      if (trashed.delete(id)) result.restored.push(id)
+      else result.skipped.push({ id, reason: "it is not in Bambuddy's trash" })
+    }
+    return HttpResponse.json(result)
+  }),
+
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
+  http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
+    const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']
+    // #2169 — each plate a shape of its own, so the pane visibly changes plate.
+    const plate = Number(new URL(request.url).searchParams.get('plate') ?? '1')
+    const glb = keychainGlb(colours, plate === 1 ? { x: 60, y: 60, z: 8 } : { x: 30, y: 90, z: 20 })
+    return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
 
   http.get(`${base}/print/library/:id/plates`, ({ params }) => {
     const file = libraryFiles.find((row) => row.id === Number(params['id']))
@@ -132,6 +376,16 @@ export const handlers = [
       asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
     const printerName =
       (choicesView.printers ?? []).find((printer) => printer.id === printerId)?.name ?? null
+    if (fileId === H2C_FILE) {
+      return HttpResponse.json({
+        ...choicesView,
+        printer_id: printerId,
+        installed: [{ size: '0.4', flow: 'high_flow', count: 2 }],
+        default_nozzles: H2C_NOZZLES,
+        filaments: h2cFilaments(printerId),
+        model_choices: remembered,
+      } satisfies ChoicesView)
+    }
     return HttpResponse.json({
       ...choicesView,
       printer_id: printerId,
@@ -142,7 +396,25 @@ export const handlers = [
         printer_name: printerName,
       },
       model_choices: remembered,
+      sliced: SLICED_PROFILES[fileId] ?? null,
     } satisfies ChoicesView)
+  }),
+
+  // #1863 — the objects Arrange reads from the file's 3MF; a sliced file is refused.
+  http.get(`${base}/print/library/:id/objects`, ({ params }) => {
+    const fileId = Number(params['id'])
+    const file = libraryFiles.find((row) => row.id === fileId)
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${fileId}`)
+    const objects = mockLibraryObjects(fileId)
+    if (!objects) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `1 library file(s) cannot be arranged: ${file.filename}: ${SLICED_REASON}`,
+        { code: 'library_file_not_arrangeable', library_file_ids: [fileId] },
+      )
+    }
+    return HttpResponse.json({ file_id: fileId, filename: file.filename, objects } satisfies LibraryFileObjects)
   }),
 
   http.put(`${base}/print/library/:id/choices`, async ({ params, request }) => {
@@ -154,6 +426,9 @@ export const handlers = [
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
     const printerId = new URL(request.url).searchParams.get('printer_id')
+    if (Number(params['id']) === H2C_FILE) {
+      return HttpResponse.json(h2cFilaments(printerId === null ? null : Number(printerId)))
+    }
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...(printerId === null ? { nozzles: [] } : {}),
@@ -164,9 +439,13 @@ export const handlers = [
 
   // #755 — refuses a missing or unprintable file as the run does; a test that needs a
   // verdict answers this route itself.
-  http.post(`${base}/print/library/:id/check`, ({ params }) => {
+  http.post(`${base}/print/library/:id/check`, async ({ params, request }) => {
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
+    if (Number(params['id']) === H2C_FILE) {
+      const body = (await request.json()) as PrintRunRequest
+      return HttpResponse.json({ errors: [], warnings: [], rack: null, nozzle_plan: h2cPlan(body) } satisfies PrintCheck)
+    }
     return HttpResponse.json({ errors: [], warnings: [], rack: null } satisfies PrintCheck)
   }),
 
@@ -193,6 +472,7 @@ export const handlers = [
     const now = new Date().toISOString()
     const run: PrintRun = {
       id: `run-${nextNumber()}`,
+      subject: `library:${fileId}`,
       output_id: `library:${fileId}`,
       status: 'succeeded',
       created_at: now,
@@ -203,6 +483,98 @@ export const handlers = [
       repeated: false,
     }
     recordMockPrintRun(run)
+    lastQueued.set(fileId, result.queue_item_ids[0] ?? 0)
     return HttpResponse.json(run, { status: 202 })
   }),
+
+  /** #1751 — the file's newest print, queued and waiting, as an output's is. */
+  http.get(`${base}/print/library/:id/progress`, ({ params }) => {
+    const item = lastQueued.get(Number(params['id']))
+    if (item === undefined) return HttpResponse.json(null)
+    return HttpResponse.json({
+      ...fixtures.queuedSliceProgress,
+      queue_item_id: item,
+      copies_detail: (fixtures.queuedSliceProgress.copies_detail ?? []).map((copy) => ({ ...copy, queue_entry_id: item })),
+    } satisfies PrintProgress)
+  }),
+
+  http.post(`${base}/print/library/:id/project`, async ({ params, request }) => {
+    const body = (await request.json()) as ProjectAttach
+    const item = lastQueued.get(Number(params['id']))
+    return HttpResponse.json({
+      project_id: body.project_id ?? 0,
+      queue_item_ids: body.queue_item_ids?.length ? body.queue_item_ids : item === undefined ? [] : [item],
+      archive_ids: [],
+    } satisfies AttachResult)
+  }),
 ]
+
+/** #1751 — each library file's newest queue item, by the mocked run that queued it. */
+const lastQueued = new Map<number, number>()
+
+/** #2167 — the files the mocked delete moved to the trash, or removed for good. */
+const trashed = new Set<number>()
+const removed = new Set<number>()
+/** The file Bambuddy's key may not delete: another user added it. */
+export const NOT_OWNED = 121
+
+/** #2670 — the mocked moves, renames and copies, laid over the fixed files. */
+const moved = new Map<number, number | null>()
+const renamed = new Map<number, string>()
+const copies: LibraryEntry[] = []
+
+/** #3650 — the mocked folder renames, moves, creates and deletes, laid over the fixed tree. */
+const folderEdits = new Map<number, { name: string; parent_id: number | null }>()
+const createdFolders: LibraryFolderView[] = []
+const deletedFolders = new Set<number>()
+
+/** The folder tree as the listing sends it: flattened depth first, each with its depth. */
+function listedFolders(): LibraryFolderView[] {
+  const all = [...libraryFolders, ...createdFolders]
+    .filter((folder) => !deletedFolders.has(folder.id))
+    .map((folder) => ({ ...folder, ...folderEdits.get(folder.id) }))
+  const out: LibraryFolderView[] = []
+  const walk = (parent: number | null, depth: number) => {
+    for (const folder of all.filter((row) => (row.parent_id ?? null) === parent)) {
+      out.push({ ...folder, depth })
+      walk(folder.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return out
+}
+
+function descendants(id: number): Set<number> {
+  const found = new Set<number>()
+  const folders = [...libraryFolders, ...createdFolders].map((folder) => ({ ...folder, ...folderEdits.get(folder.id) }))
+  const walk = (parent: number) => {
+    for (const folder of folders.filter((row) => row.parent_id === parent)) {
+      found.add(folder.id)
+      walk(folder.id)
+    }
+  }
+  walk(id)
+  return found
+}
+
+function listedFiles(): LibraryEntry[] {
+  return [...libraryFiles, ...copies]
+    .filter((file) => !trashed.has(file.id) && !removed.has(file.id))
+    .map((file) => ({
+      ...file,
+      folder_id: moved.has(file.id) ? moved.get(file.id)! : file.folder_id,
+      filename: renamed.get(file.id) ?? file.filename,
+    }))
+}
+
+export function reset(): void {
+  lastQueued.clear()
+  trashed.clear()
+  removed.clear()
+  moved.clear()
+  renamed.clear()
+  copies.length = 0
+  folderEdits.clear()
+  createdFolders.length = 0
+  deletedFolders.clear()
+}

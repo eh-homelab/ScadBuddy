@@ -7,13 +7,11 @@ tools, the tab's socket to the agent, and pairing) is the follow-up PR for #254.
 [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers/specs/2026-09-27-ai-integration-design.md).
 The code is in [`frontend/src/agent/`](../../frontend/src/agent/).
 
-Sessions that have **no** user tab use a different tool: a headless Chromium in the
-agent container, driven through the Playwright plugin (#349,
-[headless-browser.md](headless-browser.md)). The two do not overlap: the headless
-browser loads ScadBuddy's UI on its own and never sees the user's tab, and the bridge
-stays the only way to act in that tab. The headless browser does not honour
-`data-agent-user-only` (it clicks like a user would); what it cannot do is complete an
-outward request, which the backend refuses for it (`AgentActorGate`).
+Sessions that have **no** user tab can use a different tool: Microsoft's Playwright
+MCP server added as a remote plugin ([headless-browser.md](headless-browser.md)). The
+two do not overlap: that browser never sees the user's tab, and the bridge stays the
+only way to act in that tab. It does not honour `data-agent-user-only` (it clicks like
+a user would).
 
 > **Status.** The bridge has three callers: the agent service, over the tab's socket
 > (below, [The agent's side](#the-agents-side-browser_-tools)); WebMCP, which is opt-in
@@ -30,7 +28,7 @@ outward request, which the backend refuses for it (`AgentActorGate`).
 | [`catalog.ts`](../../frontend/src/agent/catalog.ts) | `TOOLS`: every tool declared once, with its description, zod input schema, risk tier and scope. It is loaded lazily, so zod stays out of the entry chunk. |
 | [`bridge.ts`](../../frontend/src/agent/bridge.ts) | `AgentBridge`: `register()`, `listTools()`, `call()` and `snapshot()`. `call()` validates arguments against the schema and runs the **newest** mounted handler. It always answers a typed result and never throws. |
 | [`useAgentHandlers.ts`](../../frontend/src/agent/useAgentHandlers.ts) | `useAgentHandlers()`: a page registers its handlers for as long as it is mounted. |
-| [`global.ts`](../../frontend/src/agent/global.ts) | The global tools (`navigate`, `snapshot`, and the `click`/`fill` fallbacks). |
+| [`global.ts`](../../frontend/src/agent/global.ts) | The global tools (`navigate`, `snapshot`, `highlight`, and the `click`/`fill` fallbacks). |
 | [`snapshot.ts`](../../frontend/src/agent/snapshot.ts) | `takeSnapshot()`: the route, dialogs, form values, errors, page state and interactive elements. |
 | [`dom.ts`](../../frontend/src/agent/dom.ts) | Role and accessible-name lookup, `USER_ONLY` and `isUserOnly()`, and `setControlValue()`. |
 | [`highlight.ts`](../../frontend/src/agent/highlight.ts) | `touch()`: scrolls to and briefly outlines what the agent touched. The pulse is dropped under `prefers-reduced-motion`. |
@@ -50,7 +48,7 @@ spec §8.1.
 
 | Scope (where it is live) | Tool | Tier |
 |---|---|---|
-| global (any page) | `navigate`, `snapshot` | read |
+| global (any page) | `navigate`, `snapshot`, `highlight` (points, changes nothing) | read |
 | | `click`, `fill` (fallbacks) | write |
 | catalogue (`/`) | `search`, `open_model` | read |
 | customize (`/m/<slug>`) | `get_params`, `render` | read |
@@ -103,6 +101,15 @@ Controls marked user-only on `main` (`grep -rn "{...USER_ONLY}" frontend/src`):
 | [`DeleteModelButton.tsx`](../../frontend/src/components/DeleteModelButton.tsx) | Delete model |
 | [`HistoryPage.tsx`](../../frontend/src/pages/HistoryPage.tsx) | Delete output |
 | [`SettingsPage.tsx`](../../frontend/src/pages/SettingsPage.tsx) | Test connection button, WebMCP toggle, Add to Bambuddy sidebar, Save changes |
+
+A confirmation of a change that stays in the page is not outward and carries no
+`USER_ONLY`: the assistant can press "Replace my changes", which a preset pick over
+unsaved edits asks for (#359). Nothing in the page tells whose edits those are, so the
+guard is the instruction, not the code: when `fill` leaves a control's value unchanged
+because it opened a dialog, its result carries a `confirm` note naming the dialog and
+telling the agent to ask the user before confirming over changes the user made
+(#1445). The `customize` skill says the same. A dialog that was already open when
+`fill` ran never produces the note.
 
 **When you add an outward confirmation**, spread `{...USER_ONLY}` on it, or on a wrapper
 around it. `isUserOnly()` uses `closest()`, so a wrapper covers everything inside.
@@ -160,7 +167,7 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
 |---|---|---|
 | `browser_status` | read | (the agent's own: attached or not, why not, the route and the live tools) |
 | `browser_pair` | write | (the agent's own: ask the user to pair, [Pairing](#pairing-spec-85)) |
-| `browser_snapshot`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
+| `browser_snapshot`, `browser_highlight`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
 | `browser_navigate`, `browser_open_model` | **write** | `read` in the tab |
 | `browser_click`, `browser_fill`, `browser_set_param`, `browser_set_params`, `browser_reset_param`, `browser_generate`, `browser_select_plate`, `browser_replace_range`, `browser_set_field` | write | same tier |
 | `browser_open_print_dialog` | **outward** (gated) | same tier |
@@ -186,6 +193,35 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
   the paired tab is not connected, or no database for pairing), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
+  In a session the browser user owns, `no browser attached` does not fail the call at
+  once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
+  card and the Assistant badge), and calls that fail together share one request, as does
+  the model's own `request_user_attention(tab_disconnected)` in the same turn: whichever
+  asks second joins the open card rather than opening another. When
+  the session has a connected tab again (its tab reconnects, or the user opens the chat
+  from another tab, which pairs it), the hub resolves the request as `reconnected`; the
+  user's "I'm back" reply also ends the wait. A read-tier call (`browser_snapshot`,
+  `browser_get_params`, …) then runs once more. A write or outward call (`browser_click`,
+  `browser_set_param`, `browser_open_print_dialog`, …) is never re-run: the page may have
+  reloaded or changed while the tab was away, and an outward call's approval was given for
+  the page as it was. It fails with "the session has a connected tab again, but <tool> was
+  not run …" (or, after "I'm back", "the user said they are back (a tab may not be
+  attached yet), but <tool> was not run …"), ending "Re-check the page (browser_status,
+  then browser_snapshot) and call <tool> again if it is still what you want", and the
+  model decides. Any other typed reply is passed to the model as the user's words ("The
+  user replied "…" instead; the call was not run. Act on their reply."), and the call is
+  not run. After 5 minutes with no reply the call fails with `timed_out`, and the agent
+  carries on with what needs no tab; a timeout never approves anything. A call already
+  aborted opens no wait. Only once per call: a read retry that still finds no tab fails
+  with the hub's usual `no browser attached: …` error followed by why — "The session's tab
+  reconnected, but it cannot be reached now: it may have dropped again." or
+  "The user said they were back, but no tab is attached here yet." A turn waits for its
+  tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab", a
+  typed reply, a timeout, or a reconnect to another replica it does not ask again that
+  turn. Across the user's sessions at most 10 tab waits are opened in 10 minutes
+  (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
+  fails at once with "The user was not asked for the tab: …". Every wait opened counts,
+  including ones withdrawn because their calls stopped.
   The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
   as `the tab answered <tool> with <code>: …`, with the tab's message in the
   untrusted-data envelope (#258), because it can quote the page.
@@ -193,11 +229,11 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   envelope with the source "the user's open ScadBuddy tab". A result over 200 000
   bytes of UTF-8 (measured with `TextEncoder`, not string length) is answered by the tab
   as a `failed` error that asks for less (`MAX_RESULT_BYTES`,
-  [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's sockets take
-  frames up to 256 KiB (`main.ts`).
+  [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's tab socket takes
+  frames up to 256 KiB (`routes/bridge.ts` `BRIDGE_FRAME_MAX`).
 - **Not here:** `screenshot()`, which PR #339 left out of the tab on purpose; and the
-  headless browser (#349, [headless-browser.md](headless-browser.md)), a separate
-  Chromium whose Playwright tools are `mcp__plugin_playwright_playwright__browser_*`.
+  Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
+  browser whose tools are `mcp__playwright__browser_*`.
 
 ## The tab's socket
 
@@ -279,14 +315,60 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 
 ## Replicas
 
-The tabs are held by the process their socket reached. A turn runs where its chat socket
-started it, and `/mcp` sessions are already per replica (`mcp/http.ts`), so a call
-reaches the tab only when the tab's bridge socket is on the same replica. Otherwise it
-answers "the paired ScadBuddy tab is not connected (… or is connected to another agent
-replica)". Pairing requests reach every tab whatever the replica: each replica re-reads
-them from Postgres every 3 s (`PAIRINGS_POLL_MS`). Routing a call to another replica's
-tab is follow-up work; one replica, or an ingress that keeps a browser on one replica,
-has no gap.
+The tabs are held by the process their socket reached. A classic turn runs where its chat
+socket started it, a durable session's tool call on whichever replica's `agent-tools`
+worker took the activity, and an `/mcp` call on the replica holding its session
+([mcp-resources.md](mcp-resources.md#sessions-across-replicas-2086)), so the tab a
+call is for may be connected to another replica. A chat session's tab is therefore kept
+in Postgres as well as in the hub (`ai_session_tabs`,
+[`bridge/sessionTabs.ts`](../../agent/src/bridge/sessionTabs.ts), #2086): a call that runs
+where the session's messages never arrived reads it there. The row is written on every
+message the user sends and is what every replica uses; a replica's own copy answers only
+when there is no row or it cannot be read. Then the call goes there through
+Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
+
+```mermaid
+sequenceDiagram
+  participant A as caller replica
+  participant PG as Postgres
+  participant B as replica holding the tab
+  A->>PG: INSERT request row, NOTIFY scadbuddy_bridge {call, tab, row}
+  PG-->>B: NOTIFY (every replica hears it)
+  B->>PG: DELETE … RETURNING the row (only a replica holding the tab)
+  B->>PG: NOTIFY {ack}
+  PG-->>A: ack
+  B->>B: run the call on the tab, as a local call
+  B->>PG: INSERT answer row, NOTIFY {result, row}
+  PG-->>A: result
+  A->>PG: DELETE … RETURNING the answer row
+```
+
+- **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
+  the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
+  200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
+  leaves the tab id briefly on two replicas. So a forwarded call's arguments and the
+  tab's result, page snapshots included, are written to Postgres. A row nobody took
+  stays there until a sweep finds it more than 10 minutes old, and a replica sweeps only
+  when it next forwards something, so such a row can outlive those 10 minutes.
+- **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
+  (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
+  payload on that one it cannot decode.
+- **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
+  answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
+  that apart from a slow tab. Before answering, the caller withdraws its request row;
+  when the row is already gone, a replica took it and its ack is late or was lost, so
+  the caller waits for the answer as if acked rather than report a tab that may be
+  running the call as not connected.
+- **Timeouts:** the replica holding the tab applies the call's own timeout and answers
+  `no_answer`, as for a local call; the caller gives up on that replica after the timeout
+  plus 3 s. `browser_status` asks the same way for the tab's route and live tools.
+- **Not covered:** a NOTIFY sent while a replica's listening connection is down is lost,
+  so the call times out. A cancelled call stops waiting but is not withdrawn from the
+  tab, as with a local call. Without a database there is no relay, and only tabs on the
+  same process can be reached.
+
+Pairing requests reach every tab whatever the replica: each replica re-reads them from
+Postgres every 3 s (`PAIRINGS_POLL_MS`).
 
 ## Inside Bambuddy's iframe
 
@@ -316,6 +398,8 @@ reaches an agent.
   with `catalog.ts`, tiers, forwarding, "no browser attached", the timeout, a dropped
   or replaced tab, the harness and `/mcp` projections, `tab.bind`, and pairing by code).
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
+  Two replicas on one database:
+  [`bridgeRelay.pg.test.ts`](../../agent/test/bridgeRelay.pg.test.ts).
 - The round trip in Node:
   [`agent/test/bridge.e2e.test.ts`](../../agent/test/bridge.e2e.test.ts) runs the tab's
   own `bridge.ts` and `link.ts` over a real socket against the agent's real server: an

@@ -1,9 +1,9 @@
 """`render_jobs` as a projection (spec 2026-09-27 §3.2).
 
-The API inserts a row and starts the workflow named by it; the workflow's `project`
-activity moves `state` forward in place. Every write is guarded by the state it
-expects, so a retried activity cannot move a job backwards, and every state change
-publishes its ``job.*`` event on the bus inside its own transaction
+The workflow `render-<render_key>` inserts its row in its first activity (`accept`,
+#1053) and its `project` activity moves `state` forward in place. Every write is
+guarded by the state it expects, so a retried activity cannot move a job backwards,
+and every state change publishes its ``job.*`` event on the bus inside its own transaction
 (`PgNotifyEventBus.publish_in`), so it is heard on commit or not at all.
 """
 
@@ -18,26 +18,100 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.core.events import JobEvent, JobKind
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
     QueueCounts,
     QueueFullError,
     StepInfo,
-    Submitted,
     now,
 )
 from scadbuddy.render.pg_store import TransactionalEvents, migrate
+from scadbuddy.workflows.commands import execution_gone
 
 logger = logging.getLogger(__name__)
 
-CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
+LEGACY_UNSTARTED_ERROR = "failed: the upgrade left it waiting with no workflow to run it"
+ORPHANED_ERROR = "failed: its workflow closed before it ran"
+CLOSED_ERROR = "failed: its workflow closed without settling it"
+#: How old a pending row an older build inserted must be before it can be orphaned: an
+#: older API inserts its row, then starts its workflow, within its own 5 s start
+#: timeout; this is six of those.
+LEGACY_GRACE = timedelta(seconds=30)
+#: How old an unsettled row must be before a settle pass asks about its run: Visibility,
+#: which `open_runs` reads, can list a run a moment after it started.
+VISIBILITY_GRACE = timedelta(seconds=30)
+#: The executions whose rows a settle pass leaves alone: every open render run, of
+#: this build (`render-<render_key>`) or an older one (`render-<job id>`).
+OPEN_RENDERS = "WorkflowType = 'TemplatePipeline' AND ExecutionStatus = 'Running'"
+
+
+class LegacyPendingError(Exception):
+    """A row an older build inserted waits on the same render key: its pending key
+    holds until that build runs it, or `render_accept` finds it orphaned."""
+
+    def __init__(self, job: Job) -> None:
+        super().__init__(f"render job {job.id} of an older build waits on the same key")
+        self.job = job
+
+
+async def legacy_unrun(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
+    """Whether no workflow will settle ``job``, a pending or running row an older build
+    inserted past `LEGACY_GRACE`: it names none, or Temporal has none running. Raises the
+    RPC error when Temporal cannot say."""
+    if now() - job.created_at < LEGACY_GRACE:
+        return False
+    if job.workflow_id is None:
+        return True
+    try:
+        described = await client.get_workflow_handle(job.workflow_id).describe(
+            rpc_timeout=rpc_timeout
+        )
+    except RPCError as error:
+        if execution_gone(error):
+            return True
+        raise
+    # A closed run (terminated, failed) that retention still keeps never settles it.
+    return described.status != WorkflowExecutionStatus.RUNNING
+
+
+async def open_runs(client: Client, *, rpc_timeout: timedelta) -> set[tuple[str, str]]:
+    """The workflow and run ids of every open render run, from one Visibility listing
+    (paged) rather than one describe per row (review #1066 (9) 4). Visibility trails
+    the executions, so a row missing from it is only a candidate: `run_closed` or
+    `legacy_unrun` decides."""
+    return {
+        (execution.id, execution.run_id)
+        async for execution in client.list_workflows(OPEN_RENDERS, rpc_timeout=rpc_timeout)
+    }
+
+
+async def run_closed(client: Client, job: Job, *, rpc_timeout: timedelta) -> bool:
+    """Whether the execution that owns ``job``, an unsettled row of a
+    ``render-<render_key>`` run, has closed: its run settles the row before it closes,
+    so one that closed without (terminated, timed out) never will. Raises the RPC error
+    when Temporal cannot say."""
+    assert job.workflow_id is not None and job.workflow_run_id is not None
+    try:
+        described = await client.get_workflow_handle(
+            job.workflow_id, run_id=job.workflow_run_id
+        ).describe(rpc_timeout=rpc_timeout)
+    except RPCError as error:
+        if execution_gone(error):
+            return True  # past retention
+        raise
+    return described.status != WorkflowExecutionStatus.RUNNING
+
 
 PROJECTION_COLUMNS = (
     "id",
@@ -60,19 +134,37 @@ PROJECTION_COLUMNS = (
     "pipeline_version",
     "steps",
     "workflow_id",
+    "workflow_run_id",
+    "traceparent",
+    "outputs",
 )
 
 
-#: The event a settled job announces; `core.events.JobKind` has no ``job.cancelled``.
-_FINISHED_KINDS: dict[str, JobKind] = {
-    "done": "job.done",
-    "failed": "job.failed",
-    "cancelled": "job.superseded",
-}
+#: How many of the latest finished renders `recent_render_seconds` reads.
+RECENT_RENDERS = 20
+#: The shortest render `recent_render_seconds` counts: piece-cache hits finish in well
+#: under a second and say nothing about how long a full queue takes to drain.
+MIN_COUNTED_RENDER_SECONDS = 1.0
+#: The event a settled job announces. A cancelled one is `_cancelled_kind`'s.
+_FINISHED_KINDS: dict[str, JobKind] = {"done": "job.done", "failed": "job.failed"}
+
+
+def _settled_kind(state: str, error: str | None) -> JobKind:
+    """``job.superseded`` only for a job a newer render replaced: a subscriber reads it
+    as "a replacement exists". A release with none is ``job.cancelled`` (#607)."""
+    if state != "cancelled":
+        return _FINISHED_KINDS[state]
+    return "job.superseded" if error == SUPERSEDED_ERROR else "job.cancelled"
 
 
 def workflow_id_for(job_id: str) -> str:
+    """A legacy job's workflow, from before renders were keyed by content (#1053)."""
     return f"render-{job_id}"
+
+
+def workflow_id_for_key(key: str) -> str:
+    """The execution every request for one render shares (spec 2026-10-01 §4.5)."""
+    return f"render-{key}"
 
 
 def _job(row: DictRow) -> Job:
@@ -93,6 +185,8 @@ class JobProjection:
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self.events = events
+        #: Where the activity record is written (set by the ACTIVITY component).
+        self.activity: ActivityIndex | None = None
         #: This process's LISTEN connection, which the event bus shares.
         self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
@@ -105,8 +199,12 @@ class JobProjection:
             name="scadbuddy-jobs",
         )
 
-    def open(self) -> None:
+    def open(self, *, migrate_schema: bool = True) -> None:
+        """Connect, and bring the schema up to date unless ``migrate_schema`` is False:
+        the render worker never migrates (#601, `render/worker_role.py`)."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
+        if not migrate_schema:
+            return
         with self._pool.connection() as conn:
             applied = migrate(conn)
         if applied:
@@ -127,43 +225,80 @@ class JobProjection:
         return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
+        # The activity row, then the event: `upsert_in` takes the event log's lock
+        # before the row (pg_events.py, "Lock order"), and the publish reuses it.
+        if self.activity is not None:
+            from scadbuddy.render.activity import row_of  # activity imports this module
+
+            self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
         if self.events is not None:
             self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
 
+    def _read_in(self, conn: Connection[Any], job_id: str) -> Job:
+        columns = ", ".join(PROJECTION_COLUMNS)
+        row = conn.execute(f"SELECT {columns} FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
+        if row is None:
+            raise JobNotFoundError(job_id)
+        return _job(row)
+
     # -- the API's writes -------------------------------------------------------
 
-    def submit(
-        self, job: Job, key: str, *, supersedes: str | None = None, max_pending: int = 0
-    ) -> Submitted:
-        superseded: Job | None = None
+    def accept(
+        self,
+        job: Job,
+        key: str,
+        *,
+        workflow_id: str,
+        run_id: str,
+        max_pending: int = 0,
+        orphaned: str | None = None,
+        supersedes: str | None = None,
+    ) -> Job:
+        """The first activity of `render-<render_key>` (#1053): the execution's row, or
+        `QueueFullError` with nothing written. A retried activity finds its row.
+        ``orphaned`` names the older build's row on the key that the caller found no
+        workflow will run (`LegacyPendingError`): it is failed, and this row goes in.
+        ``supersedes``, a pending job of the same slug the request replaces, is not
+        counted against ``max_pending``: its release follows the accept."""
         with self._pool.connection() as conn, conn.transaction():
-            if supersedes is not None:
-                previous = conn.execute(
-                    "SELECT * FROM render_jobs WHERE id = %s AND state IN ('pending', 'running')"
-                    " AND slug = %s FOR UPDATE",
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE workflow_id = %s AND workflow_run_id = %s",
+                (workflow_id, run_id),
+            ).fetchone()
+            if row is not None:
+                return _job(row)
+            # `render_jobs_pending_key` still holds one pending row per key (see its
+            # migration). Only this run of `render-<key>` is open, so another run's
+            # pending row is an orphan; an older build's row is that build's to run.
+            held = conn.execute(
+                "SELECT * FROM render_jobs WHERE render_key = %s AND state = 'pending' FOR UPDATE",
+                (key,),
+            ).fetchone()
+            legacy = held is not None and held["workflow_run_id"] is None
+            if held is not None and legacy and held["id"] != orphaned:
+                raise LegacyPendingError(_job(held))
+            if held is not None:
+                conn.execute(
+                    "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                    " WHERE id = %s",
+                    (LEGACY_UNSTARTED_ERROR if legacy else ORPHANED_ERROR, held["id"]),
+                )
+                self._announce(conn, held["id"], held["slug"], "job.failed")
+            if max_pending:
+                counted = conn.execute(
+                    "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
+                    " AND (id, slug) IS DISTINCT FROM (%s, %s)",
                     (supersedes, job.slug),
                 ).fetchone()
-                if previous is not None and previous["render_key"] == key:
-                    return Submitted(_job(previous), coalesced=True)
-                if previous is not None:
-                    superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)
-            if max_pending:
-                twin = conn.execute(
-                    "SELECT 1 FROM render_jobs WHERE state = 'pending' AND render_key = %s", (key,)
-                ).fetchone()
-                if twin is None:
-                    counted = conn.execute(
-                        "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
-                    ).fetchone()
-                    assert counted is not None
-                    if counted["pending"] >= max_pending:
-                        raise QueueFullError(counted["pending"])
+                assert counted is not None
+                if counted["pending"] >= max_pending:
+                    raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
-                " created_at, render_key, workflow_id, kind)"
-                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)"
-                " ON CONFLICT (render_key) WHERE state = 'pending'"
-                " DO UPDATE SET claims = render_jobs.claims + 1"
+                " created_at, render_key, workflow_id, workflow_run_id, kind, traceparent)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (workflow_id, workflow_run_id)"
+                " DO UPDATE SET claims = render_jobs.claims"
                 " RETURNING *, (xmax = 0) AS inserted",
                 (
                     job.id,
@@ -173,14 +308,90 @@ class JobProjection:
                     job.model_version,
                     job.created_at,
                     key,
-                    workflow_id_for(job.id),
+                    workflow_id,
+                    run_id,
                     job.kind,
+                    job.traceparent,
                 ),
             ).fetchone()
             assert row is not None
             if row["inserted"]:
+                if job.kind == "arrange":
+                    # Held from the insert, in its transaction: a source output deleted
+                    # while this waits must not let a sweep take the Parts it places.
+                    # `prune`/`delete` release them with the row.
+                    conn.cursor().executemany(
+                        "INSERT INTO blob_refs (key, holder_kind, holder_id)"
+                        " VALUES (%s, 'job', %s) ON CONFLICT DO NOTHING",
+                        [(piece, row["id"]) for piece in _piece_keys(job.inputs)],
+                    )
                 self._announce(conn, row["id"], row["slug"], "job.pending")
-        return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
+        return _job(row)
+
+    def set_claims(self, job_id: str, claims: int) -> None:
+        """The workflow's claim count, projected (#1053)."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE render_jobs SET claims = %s"
+                " WHERE id = %s AND state IN ('pending', 'running')",
+                (claims, job_id),
+            )
+
+    def legacy_unsettled(self, older_than: timedelta) -> list[Job]:
+        """Rows an older release inserted over ``older_than`` ago: pending ones past its
+        insert-then-start, and ones its worker moved to running (a pre-Temporal running
+        row, with no workflow, is `fail_legacy_running`'s). One whose workflow is not
+        running is orphaned (review #1066 (5) 2.1)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE workflow_run_id IS NULL"
+                " AND (state = 'pending' OR (state = 'running' AND workflow_id IS NOT NULL))"
+                " AND created_at < now() - %s ORDER BY created_at, id",
+                (older_than,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def fail_legacy(self, job_ids: list[str]) -> list[Job]:
+        """Fail legacy rows nothing will settle: a pending one never started, a running
+        one's workflow closed. Any other row is left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
+                " error = CASE state WHEN 'pending' THEN %s ELSE %s END"
+                " WHERE id = ANY(%s) AND workflow_run_id IS NULL"
+                " AND (state = 'pending' OR (state = 'running' AND workflow_id IS NOT NULL))"
+                " RETURNING *",
+                (LEGACY_UNSTARTED_ERROR, CLOSED_ERROR, job_ids),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
+
+    def unsettled(self, older_than: timedelta) -> list[Job]:
+        """The pending and running rows of ``render-<render_key>`` runs (#1053)
+        inserted over ``older_than`` ago."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state IN ('pending', 'running')"
+                " AND workflow_run_id IS NOT NULL AND created_at < now() - %s"
+                " ORDER BY created_at, id",
+                (older_than,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def fail_closed(self, job_ids: list[str]) -> list[Job]:
+        """Fail the rows of runs that closed without settling them (`run_closed`); a
+        row its run settled meanwhile is left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE id = ANY(%s) AND state IN ('pending', 'running')"
+                " AND workflow_run_id IS NOT NULL RETURNING *",
+                (CLOSED_ERROR, job_ids),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
 
     def _release(self, conn: Connection[Any], row: DictRow, *, error: str) -> Job | None:
         """Take one claim off an unfinished row; the last one cancels it. Returns the
@@ -194,10 +405,10 @@ class JobProjection:
             (now(), error, row["id"]),
         ).fetchone()
         assert dropped is not None
-        self._announce(conn, row["id"], row["slug"], "job.superseded")
+        self._announce(conn, row["id"], row["slug"], _settled_kind("cancelled", error))
         return _job(dropped)
 
-    def release_claim(self, job_id: str, *, slug: str) -> Job | None:
+    def release_claim(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT * FROM render_jobs WHERE id = %s AND slug = %s"
@@ -206,31 +417,11 @@ class JobProjection:
             ).fetchone()
             if row is None:
                 return None
-            return self._release(conn, row, error=CANCELLED_ERROR)
-
-    def adopt_legacy_pending(self) -> list[str]:
-        """At boot: give each row a pre-Temporal release's queue left pending the
-        workflow id the reconciler starts it under (`stale_pending` takes only rows
-        that name one). Returns their ids."""
-        with self._pool.connection() as conn, conn.transaction():
-            ids = [
-                row["id"]
-                for row in conn.execute(
-                    "SELECT id FROM render_jobs WHERE state = 'pending' AND workflow_id IS NULL"
-                    " ORDER BY created_at, id FOR UPDATE"
-                ).fetchall()
-            ]
-            for job_id in ids:
-                conn.execute(
-                    "UPDATE render_jobs SET workflow_id = %s WHERE id = %s",
-                    (workflow_id_for(job_id), job_id),
-                )
-        return ids
+            return self._release(conn, row, error=error)
 
     def fail_legacy_running(self) -> list[Job]:
         """At start-up: fail the rows a pre-Temporal release's queue left running (no
-        workflow), which nothing will finish. Its pending rows are
-        `adopt_legacy_pending`'s."""
+        workflow), which nothing will finish. Its pending rows are `fail_legacy`'s."""
         with self._pool.connection() as conn, conn.transaction():
             rows = conn.execute(
                 "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
@@ -274,7 +465,7 @@ class JobProjection:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"
-                " warnings = %s, steps = %s, pipeline_version = %s"
+                " warnings = %s, steps = %s, pipeline_version = %s, outputs = %s"
                 " WHERE id = %s AND state IN ('pending', 'running')",
                 (
                     job.state,
@@ -287,11 +478,12 @@ class JobProjection:
                     Jsonb(job.warnings),
                     Jsonb([s.model_dump(mode="json") for s in job.steps]),
                     job.pipeline_version,
+                    Jsonb([o.model_dump(mode="json") for o in job.outputs]),
                     job.id,
                 ),
             )
             if cursor.rowcount == 1:
-                self._announce(conn, job.id, job.slug, _FINISHED_KINDS[job.state])
+                self._announce(conn, job.id, job.slug, _settled_kind(job.state, job.error))
                 return True
             if job.state != "cancelled":
                 return False
@@ -311,24 +503,27 @@ class JobProjection:
 
     # -- reads ------------------------------------------------------------------
 
-    def stale_pending(self, older_than: float) -> list[Job]:
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                # Only rows a workflow owns: a legacy pending row (no workflow_id) is
-                # the legacy queue's during a rolling deploy, never the reconciler's.
-                "SELECT * FROM render_jobs WHERE state = 'pending' AND started_at IS NULL"
-                " AND workflow_id IS NOT NULL"
-                " AND created_at < now() - make_interval(secs => %s) ORDER BY created_at",
-                (older_than,),
-            ).fetchall()
-        return [_job(row) for row in rows]
-
     def read(self, job_id: str) -> Job:
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
         if row is None:
             raise JobNotFoundError(job_id)
         return _job(row)
+
+    def queue_position(self, job: Job) -> int | None:
+        """Where a pending ``job`` waits (#1638): 1 when no pending job was submitted
+        before it, None once it has started or settled. Render and arrange jobs share
+        the render workers, so every pending job counts."""
+        if job.state != "pending":
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS ahead FROM render_jobs WHERE state = 'pending'"
+                " AND (created_at, id) < (%s, %s)",
+                (job.created_at, job.id),
+            ).fetchone()
+        assert row is not None
+        return int(row["ahead"]) + 1
 
     def list_jobs(self) -> list[Job]:
         with self._pool.connection() as conn:
@@ -347,7 +542,9 @@ class JobProjection:
     def latest_finished(self, slug: str) -> Job | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                # An arrange row carries a source output's slug but is no render of it.
+                "SELECT * FROM render_jobs WHERE slug = %s AND kind = 'render'"
+                " AND state IN ('done', 'failed')"
                 " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
                 (slug,),
             ).fetchone()
@@ -365,6 +562,22 @@ class JobProjection:
         return QueueCounts(
             pending=row["pending"], running=row["running"], oldest_pending=row["oldest_pending"]
         )
+
+    def recent_render_seconds(self) -> float | None:
+        """The median time the latest `RECENT_RENDERS` finished renders took, from their
+        start to their end, or None before one has: what a full queue's `Retry-After`
+        says (#603). Renders under `MIN_COUNTED_RENDER_SECONDS` are left out."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY seconds) AS median"
+                " FROM (SELECT extract(epoch FROM finished_at - started_at) AS seconds"
+                "  FROM render_jobs WHERE state = 'done' AND started_at IS NOT NULL"
+                "  AND finished_at - started_at >= make_interval(secs => %s)"
+                "  ORDER BY finished_at DESC LIMIT %s) AS latest",
+                (MIN_COUNTED_RENDER_SECONDS, RECENT_RENDERS),
+            ).fetchone()
+        median = row["median"] if row is not None else None
+        return float(median) if median is not None else None
 
     def prune(self, ttl: float, *, now_: datetime | None = None) -> list[str]:
         cutoff = (now_ or now()) - timedelta(seconds=ttl)
@@ -388,3 +601,9 @@ class JobProjection:
             conn.execute(
                 "DELETE FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s", (job_id,)
             )
+
+
+def _piece_keys(inputs: dict[str, Any] | None) -> list[str]:
+    """The Parts an arrange's `ArrangeInputs` places, once each."""
+    items = (inputs or {}).get("items", [])
+    return list(dict.fromkeys(item["part"]["piece_key"] for item in items))

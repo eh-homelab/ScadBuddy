@@ -10,6 +10,7 @@ import type {
   CustomizerSchema,
   FontFamily,
   CatalogueLibrary,
+  ManifestObject,
   MediaView,
   ModelSummary,
   ModelVersion,
@@ -18,6 +19,7 @@ import type {
   ParamPreset,
   Plate,
   PrintDetail,
+  TimelapseFrames,
   PrintProgress,
   PrintSummary,
   Settings,
@@ -91,7 +93,8 @@ export const keychainSchema: CustomizerSchema = {
       name: 'text_depth',
       type: 'slider',
       initial: 1.6,
-      caption: 'Raised height',
+      // As long as real captions run (#1036): HistoryPage's diff must wrap it.
+      caption: 'How far the letters stand proud of the plate, mm',
       min: 0.4,
       max: 4,
       step: 0.2,
@@ -143,6 +146,70 @@ export const mazeSchema: CustomizerSchema = {
     param('Play', { name: 'ball_d', type: 'slider', initial: 6, caption: 'Ball diameter', min: 4, max: 12, step: 0.5 }),
     param('Colours', { name: 'wall_color', type: 'color', initial: '#006064', caption: 'Maze walls and border' }),
     param('Colours', { name: 'lid_color', type: 'color', initial: '#FFFFFF', caption: 'Lid, ball_lid mode only' }),
+  ],
+}
+
+/** #1737 — dollhouse-kit's parameters (models/dollhouse-kit/model.scad), enough of them
+ *  that its designer's side column is as long as the real one. */
+export const dollhouseSchema: CustomizerSchema = {
+  title: 'Dollhouse Kit',
+  source_sha256: 'd'.repeat(64),
+  groups: ['Piece', 'Grid', 'Exterior', 'Interior', 'Windows', 'Colours'],
+  parameters: [
+    param('Piece', {
+      name: 'piece',
+      type: 'select',
+      initial: 'wall_window',
+      caption: 'Piece',
+      options: [
+        { name: 'Wall', value: 'wall' },
+        { name: 'Wall with window', value: 'wall_window' },
+        { name: 'Door wall - lower course', value: 'wall_door_lower' },
+        { name: 'Door wall - upper course', value: 'wall_door_upper' },
+        { name: 'Door leaf - lower half', value: 'door_leaf_lower' },
+        { name: 'Door leaf - upper half', value: 'door_leaf_upper' },
+        { name: 'Corner post', value: 'corner_post' },
+        { name: 'Floor tile', value: 'floor_tile' },
+        { name: 'Roof panel', value: 'roof_panel' },
+        { name: 'Stairs - lower half', value: 'stairs_lower' },
+        { name: 'Stairs - upper half', value: 'stairs_upper' },
+        { name: 'Railing', value: 'railing' },
+        { name: 'Connectors (keys / pegs / hinge pins)', value: 'connectors' },
+      ],
+    }),
+    param('Piece', {
+      name: 'course',
+      type: 'select',
+      initial: 'upper',
+      caption: 'Course',
+      options: [
+        { name: 'Lower course', value: 'lower' },
+        { name: 'Upper course', value: 'upper' },
+      ],
+    }),
+    param('Grid', { name: 'module_size', type: 'slider', initial: 150, caption: 'Module size', min: 100, max: 150, step: 5 }),
+    param('Grid', { name: 'width_units', type: 'slider', initial: 1, caption: 'Width in modules', min: 0.5, max: 2, step: 0.5 }),
+    param('Grid', { name: 'depth_units', type: 'slider', initial: 2, caption: 'Depth in modules', min: 0.5, max: 2, step: 0.5 }),
+    param('Grid', { name: 'course_height', type: 'slider', initial: 210, caption: 'Course height', min: 180, max: 240, step: 5 }),
+    param('Exterior', {
+      name: 'exterior',
+      type: 'select',
+      initial: 'plain',
+      caption: 'Exterior',
+      options: ['plain', 'siding', 'brick', 'stone', 'stucco'].map((value) => ({ name: value, value })),
+    }),
+    param('Interior', {
+      name: 'wallpaper',
+      type: 'select',
+      initial: 'stripes',
+      caption: 'Wallpaper',
+      options: ['none', 'stripes', 'polka_dots', 'diamonds', 'hearts', 'stars'].map((value) => ({ name: value, value })),
+    }),
+    param('Interior', { name: 'wainscoting', type: 'boolean', initial: true, caption: 'Wainscoting' }),
+    param('Windows', { name: 'window_width', type: 'slider', initial: 70, caption: 'Window width', min: 40, max: 180, step: 5 }),
+    param('Windows', { name: 'shutters', type: 'boolean', initial: true, caption: 'Shutters' }),
+    param('Colours', { name: 'wall_color', type: 'color', initial: '#F3E9D2', caption: 'Walls' }),
+    param('Colours', { name: 'trim_color', type: 'color', initial: '#FFFFFF', caption: 'Trim' }),
   ],
 }
 
@@ -225,10 +292,18 @@ export const GALLERY_SLUG = 'creme-coaster'
 /** #425 — templates with their own interface: one that mounts, one that throws. */
 export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
-/** The commit `ui-demo`'s record is at: its UI loads pinned, from `/versions/{commit}/ui/`. */
+/** The commit `ui-demo`'s record is at. */
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
+/**
+ * The last commit to `ui-demo`'s `ui/` (#846), older than its record's: its UI loads
+ * pinned, from `/versions/{commit}/ui/`. Different from the version, so the mocked runs
+ * exercise `ui_version` and not the fallback to `version` (#1469).
+ */
+export const UI_DEMO_UI_VERSION = commit('e1d2c3b4a5f0')
 /** #425 — the bundled maze-puzzle, whose own panel hides the lid colour without a lid. */
 export const MAZE_SLUG = 'builtin:maze-puzzle'
+/** #1737 — the bundled dollhouse-kit, whose designer takes the whole page (slot `page`). */
+export const DOLLHOUSE_SLUG = 'builtin:dollhouse-kit'
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -270,7 +345,7 @@ export const media: Record<string, MediaView[]> = {
   ],
 }
 
-export const models: ModelSummary[] = [
+const modelsSeed: ModelSummary[] = [
   {
     slug: 'name-keychain',
     name: 'Name Keychain',
@@ -340,6 +415,7 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'mine',
     version: UI_DEMO_VERSION,
+    ui_version: UI_DEMO_UI_VERSION,
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
   {
@@ -369,9 +445,29 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'builtin',
     version: commit('9a8b7c6d5e4f'),
+    ui_version: commit('8b7c6d5e4f9a'),
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
+  {
+    slug: DOLLHOUSE_SLUG,
+    name: 'Dollhouse Kit',
+    description: 'A modular 1:6 playscale dollhouse printed as panels on one 150 mm grid.',
+    tags: ['custom-ui'],
+    updated_at: '2026-08-15T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'builtin',
+    version: commit('7d6c5b4a3f2e'),
+    ui_version: commit('6c5b4a3f2e7d'),
+    ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+  },
 ]
+
+/** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
+export const models: ModelSummary[] = modelsSeed.map((entry) => ({ inputs_version: 0, ...entry }))
 
 /**
  * #90 — the git history of `name-keychain`. Commit ids are the real shape (40 hex
@@ -387,9 +483,35 @@ export const versionIds = {
   raised: commit('c3d4e5f6a7b8'),
   synced: commit('d9e0f1a2b3c4'),
   builtinFirst: commit('e5f6a7b8c9d0'),
+  // The mocked assistant session's change to gridfinity-bin, and the version before it.
+  binTall: commit('3f9c2a1b7d4e'),
+  binFirst: commit('f0e1d2c3b4a5'),
 }
 
 export const versions: Record<string, ModelVersion[]> = {
+  'gridfinity-bin': [
+    {
+      commit: versionIds.binTall,
+      short: versionIds.binTall.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-10-03T09:00:00Z',
+      message: 'Edit gridfinity-bin source',
+      files: [{ status: 'M', path: 'model.scad' }],
+      current: true,
+    },
+    {
+      commit: versionIds.binFirst,
+      short: versionIds.binFirst.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-14T09:12:00Z',
+      message: 'Add gridfinity-bin',
+      files: [
+        { status: 'A', path: 'model.json' },
+        { status: 'A', path: 'model.scad' },
+      ],
+      current: false,
+    },
+  ],
   [BUILTIN_SLUG]: [
     {
       commit: versionIds.synced,
@@ -529,6 +651,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [UI_DEMO_SLUG]: keychainSchema,
   [UI_BROKEN_SLUG]: keychainSchema,
   [MAZE_SLUG]: mazeSchema,
+  [DOLLHOUSE_SLUG]: dollhouseSchema,
 }
 
 export const fonts: FontFamily[] = [
@@ -598,6 +721,8 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v2.0.761',
     licence: 'BSD-2-Clause',
     homepage: 'https://github.com/BelfrySCAD/BOSL2',
+    description: 'The Belfry OpenSCAD Library: shapes, attachments, rounding, threading, gears, hinges, paths and transforms.',
+    tags: ['general', 'shapes', 'attachments', 'rounding', 'threads', 'gears', 'screws'],
   },
   {
     name: 'dotSCAD',
@@ -605,13 +730,15 @@ export const libraries: CatalogueLibrary[] = [
     ref: 'v3.3',
     licence: 'LGPL-3.0',
     homepage: 'https://github.com/JustinSDK/dotSCAD',
+    description: 'Paths, curves, sweeps, polyhedra, turtle graphics, mazes and other generative shapes.',
+    tags: ['paths', 'curves', 'sweep', 'generative', 'turtle', 'maze'],
   },
 ]
 
 /** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
 export const MISSING_REF = 'v9.9.9'
 
-export const outputs: Output[] = [
+const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
   {
     id: 'a'.repeat(32),
     slug: 'name-keychain',
@@ -634,6 +761,23 @@ export const outputs: Output[] = [
     },
     bbox_mm: bbox(95.7, 34.6, 6.8),
     colors: ['#1B6CA8', '#E8532F'],
+    manifest: [
+      {
+        part: 'piece-wall',
+        file: 'model.scad',
+        slug: 'name-keychain',
+        revision: null,
+        bbox: { min: [0, 0, 0], max: [60, 20, 5], size: [60, 20, 5] },
+        footprint: [60, 20],
+        colours: ['#1B6CA8', '#E8532F'],
+        count: 2,
+        plates: 1,
+        bom_piece: 'wall',
+        source_output: null,
+        notes: [],
+      },
+    ],
+    arranged_from: [],
     parts: [],
     warnings: [],
     library_files: [{ id: 8812, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] }],
@@ -701,6 +845,40 @@ export const outputs: Output[] = [
   },
 ]
 
+/** #902 — what a re-render records for an output saved before Arrange: one object. */
+export function backfilledManifest(slug: string, colours: string[]): ManifestObject[] {
+  return [
+    {
+      part: 'piece-body',
+      file: 'model.scad',
+      slug,
+      revision: null,
+      bbox: { min: [0, 0, 0], max: [70, 30, 5], size: [70, 30, 5] },
+      footprint: [70, 30],
+      colours,
+      count: 1,
+      plates: 1,
+      bom_piece: 'body',
+      source_output: null,
+      notes: [],
+    } satisfies ManifestObject,
+  ]
+}
+
+/**
+ * Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null; and phase 5's
+ * manifest: [], arranged_from: [], as the API sends them for an output saved before Arrange.
+ */
+export const outputs: Output[] = outputsSeed.map((entry) => ({
+  bom: [],
+  files: [],
+  record: null,
+  manifest: [],
+  arranged_from: [],
+  failed_before_queueing: false,
+  ...entry,
+}))
+
 /**
  * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what
  * this mock deployment sets through `SCADBUDDY_*`. A reset goes back to the deployment's
@@ -712,7 +890,12 @@ export const settingsDefaults = {
   public_url: null,
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,
+  read_max_objects: 200,
+  read_max_visits: 20_000,
+  read_max_triangles: 0,
+  read_max_paint_digits: 20_000_000,
   render_timeout: 120,
+  template_activity_max_timeout: 1800,
   render_concurrency: 2,
   solid_concurrency: 0,
   render_queue_max: 0,
@@ -734,6 +917,7 @@ export const settingsDefaults = {
   worker_cache_max_bytes: 10_737_418_240,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
+  flow_approval_timeout_seconds: 0,
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
   temporal_ui_url: null,
@@ -775,9 +959,14 @@ export const settings: Settings = {
   printer_id: 1,
   default_plate: null,
   display_unit: 'mm',
+  print_run_retention_seconds: null,
+  operation_retention_seconds: null,
   last_project_id: null,
   render_timeout: 300,
   job_ttl: 3600,
+  activity_follow: null,
+  activity_ttl_seconds: null,
+  activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
@@ -818,6 +1007,31 @@ export const settings: Settings = {
       value: 'v0.42.0',
       source: 'env',
       reason: 'A build stamp that /healthz reports, not a setting.',
+    },
+    // #1035 — the two that ran the About table off the page: an unbroken comma-joined
+    // value and the longest variable name.
+    {
+      name: 'allowed_origins',
+      env_var: 'SCADBUDDY_ALLOWED_ORIGINS',
+      value: 'https://scadbuddy.internal.nullreference.io,https://scadbuddy.sso.nullreference.io',
+      source: 'env',
+      reason:
+        "Which pages may open the realtime socket and make writes. Like the agent's trusted proxies, it decides who can reach the server, so it belongs to the deployment.",
+    },
+    {
+      name: 'temporal_task_queue_render',
+      env_var: 'SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER',
+      value: 'scadbuddy-render',
+      source: 'default',
+      reason:
+        'Paired with the Temporal address: the API and the render workers must name the same queue, and only the deployment sets both.',
+    },
+    {
+      name: 'temporal_namespace',
+      env_var: 'SCADBUDDY_TEMPORAL_NAMESPACE',
+      value: 'default',
+      source: 'default',
+      reason: 'Paired with the Temporal address; set with it by the deployment.',
     },
   ],
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
@@ -991,8 +1205,27 @@ export const WARNED_NAME = 'nopic'
 
 export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
 
+/**
+ * #1743, #1744 — a name the mock renders fine with all three kinds of message at once:
+ * the template's notes, ScadBuddy's warnings and OpenSCAD's own, as a busy template's
+ * render can carry.
+ */
+export const CROWDED_NAME = 'crowded'
+
+export const CROWDED_DIAGNOSTICS = [
+  {
+    severity: 'warning' as const,
+    message: 'module cube() does not support child modules',
+    file: 'model.scad',
+    line: 6,
+  },
+]
+
 /** #408 — a name the mock fails the way a template drawing only a missing picture does. */
 export const PICTURELESS_NAME = 'nosvg'
+
+/** #361 — a name the mock renders, then fails to serve the preview of. */
+export const BROKEN_PREVIEW_NAME = 'noglb'
 
 export const FAILED_JOB_WARNINGS = ['OpenSCAD could not open pic.svg']
 
@@ -1077,8 +1310,10 @@ export const filamentOptions: FilamentOptions = {
   slots: [
     // A sliced plate, so the grams are real. `PrintPicker.test.tsx` overrides these to
     // null for the unsliced case, which is what an unmodified upload actually answers.
-    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8 },
-    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9 },
+    // `colour_matches`: the spools whose colour still fits the slot, so a remembered
+    // choice of one is kept (#933). Hot Pink (22) is too far from #FF1493 to be.
+    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8, colour_matches: [21, 26] },
+    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9, colour_matches: [27] },
   ],
   spools: [
     {
@@ -1246,6 +1481,9 @@ function printOf(
     archive_id,
     output_id: output.id,
     slug: output.slug,
+    library_file_id: null,
+    library_file_name: null,
+    queue_item_id: null,
     output_name: output.name ?? null,
     printer_id: 1,
     printer_name: '3DP-31B-598',
@@ -1253,7 +1491,7 @@ function printOf(
     completed_at: '2026-09-27T05:56:53.660315',
     actual_time_seconds: 6437,
     filament_used_grams: 16.36,
-    cover: { kind: 'thumbnail', url: `${prints}/thumbnail` },
+    cover: { kind: 'thumbnail', url: `${prints}/thumbnail`, full_url: `${prints}/thumbnail` },
     has_timelapse: false,
     attachment_count: 0,
     params_diff: { name: output.params?.['name'] ?? '' },
@@ -1289,6 +1527,41 @@ function printOf(
       runs: [],
     },
     printer_media: null,
+    slicing: {
+      sliced_for_model: 'H2C',
+      bed_type: 'Textured PEI Plate',
+      layer_height_mm: 0.08,
+      total_layers: 86,
+      nozzle_diameter_mm: 0.4,
+      nozzle_temperature_c: 230,
+      bed_temperature_c: 70,
+      objects: ['name-keychain'],
+      filament_used_mm: 3572.29,
+      filament_slots: [
+        { slot_id: 1, used_grams: 11.34, filament_type: 'PLA', color: '#00629B' },
+        { slot_id: 2, used_grams: 5.02, filament_type: 'PLA', color: '#FF9425' },
+      ],
+    },
+    record: {
+      project_id: 1,
+      project_name: '3 keychains',
+      designer: 'ScadBuddy',
+      makerworld_url: null,
+      external_url: null,
+      notes: null,
+      tags: null,
+      is_favorite: false,
+      quantity: 1,
+      created_at: '2026-09-27T03:45:32.515537',
+      last_run_at: '2026-09-27T04:09:36.529201',
+      successful_run_count: 1,
+      failed_run_count: 0,
+      time_accuracy_percent: 87.7,
+      filament_actual_grams: 16.3,
+      energy_kwh: null,
+      energy_cost: null,
+      other: { original_archive_id: null, time_accuracy_source: null },
+    },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
@@ -1336,7 +1609,11 @@ export const prints: PrintDetail[] = [
   ),
   printOf(35, reagan, {
     status: 'completed',
-    cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+    cover: {
+      kind: 'photo',
+      url: `/api/v1/prints/35/photos/${FINISH_PHOTO}?size=card&v=1`,
+      full_url: `/api/v1/prints/35/photos/${FINISH_PHOTO}`,
+    },
     has_timelapse: true,
   }, {
     media: {
@@ -1344,10 +1621,10 @@ export const prints: PrintDetail[] = [
       photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
-        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
-        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+        poster_url: '/api/v1/prints/35/timelapse/frames/0',
+        frames_url: '/api/v1/prints/35/timelapse/frames',
       },
-      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
     },
   }),
@@ -1357,6 +1634,14 @@ export const prints: PrintDetail[] = [
  * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
  * print 36 left a timelapse and a camera recording on the printer; the others nothing.
  */
+/** #2360 — each print's timelapse stills and probe, read after its detail. */
+export const timelapseFrames: Record<number, TimelapseFrames> = {
+  35: {
+    info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+    frames: [{ timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' }],
+  },
+}
+
 export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
   36: [
     {
@@ -1378,7 +1663,7 @@ export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media
 
 // #311 — print 35 printed twice: the first run was cancelled, the second completed.
 const reprinted = prints.find((print) => print.archive_id === 35)
-if (reprinted) {
+if (reprinted?.provenance) {
   reprinted.provenance.model_version = versionIds.edited
   reprinted.outcome.runs = [
     {
@@ -1393,6 +1678,7 @@ if (reprinted) {
       failure_reason: null,
       printer_id: 1,
       printer_name: '3DP-31B-598',
+      filament_reading_suspect: false,
     },
     {
       id: 72,
@@ -1406,6 +1692,7 @@ if (reprinted) {
       failure_reason: null,
       printer_id: 1,
       printer_name: '3DP-31B-598',
+      filament_reading_suspect: false,
     },
   ]
 }

@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { Button } from './ui/Button'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { LoadingLines, SwitchField } from './settings/form'
 import { Spinner } from './ui/Spinner'
 
 // Settings → "MCP sign-in (OIDC)" (#262). Talks to the agent service's
@@ -80,7 +84,7 @@ export function McpOidcSettings() {
         {error}
       </p>
     ) : (
-      <Spinner />
+      <LoadingLines label="Loading the sign-in settings" lines={['w-2/3', 'h-8 w-full', 'h-8 w-full']} />
     )
   }
 
@@ -121,51 +125,58 @@ export function McpOidcSettings() {
     }
   }
 
+  const field = (id: string, label: ReactNode, input: ReactNode, help?: ReactNode) => (
+    <div className="grid gap-1.5">
+      <Label htmlFor={id} className="font-normal">
+        {label}
+      </Label>
+      {input}
+      {help && <p className="text-xs text-muted-foreground">{help}</p>}
+    </div>
+  )
+
   return (
     <div className="space-y-4">
-      <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-        <input
-          type="checkbox"
+      <div className="space-y-1.5">
+        <SwitchField
+          id="oidc-enabled"
+          label="Let MCP clients sign in with this identity provider"
           checked={form.enabled}
           disabled={!view.can_enable && !form.enabled}
-          onChange={(event) => update({ enabled: event.target.checked })}
-          className="mt-0.5"
-          aria-describedby="oidc-enabled-help"
+          onCheckedChange={(enabled) => update({ enabled })}
+          describedBy="oidc-enabled-help"
         />
-        Let MCP clients sign in with this identity provider
-      </label>
-      <p id="oidc-enabled-help" className="text-[12px] text-muted">
-        Bearer tokens keep working. Switching this on runs a discovery check against the issuer
-        first, so a typo cannot lock every client out.
-        {view.cannot_enable_reason && <> {view.cannot_enable_reason}.</>}
-      </p>
+        <p id="oidc-enabled-help" className="text-xs text-muted-foreground">
+          Bearer tokens keep working. Switching this on runs a discovery check against the issuer
+          first, so a typo cannot lock every client out.
+          {view.cannot_enable_reason && <> {view.cannot_enable_reason}.</>}
+        </p>
+      </div>
 
-      <div>
-        <label htmlFor="oidc-issuer" className="block text-[13px]">
-          Issuer URL
-        </label>
-        <input
+      {field(
+        'oidc-issuer',
+        'Issuer URL',
+        <Input
           id="oidc-issuer"
           type="url"
           value={form.issuer}
           onChange={(event) => update({ issuer: event.target.value })}
-          className="sb-field sb-num mt-1.5"
-        />
-        <p className="mt-1.5 text-[12px] text-muted">Exactly as the IdP writes it, trailing slash included.</p>
-      </div>
+          className="sb-num"
+        />,
+        'Exactly as the IdP writes it, trailing slash included.',
+      )}
 
-      <div>
-        <label htmlFor="oidc-audience" className="block text-[13px]">
-          Audience
-        </label>
-        <input
+      {field(
+        'oidc-audience',
+        'Audience',
+        <Input
           id="oidc-audience"
           value={form.audience ?? ''}
           placeholder={view.resource ?? ''}
           onChange={(event) => update({ audience: blankToNull(event.target.value) })}
-          className="sb-field sb-num mt-1.5"
-        />
-        <p className="mt-1.5 text-[12px] text-muted">
+          className="sb-num"
+        />,
+        <>
           Leave empty to require this server&rsquo;s resource URI
           {view.resource && (
             <>
@@ -174,93 +185,100 @@ export function McpOidcSettings() {
             </>
           )}
           , as the MCP authorization spec asks.
-        </p>
-      </div>
+        </>,
+      )}
 
-      <div>
-        <label htmlFor="oidc-client-id" className="block text-[13px]">
-          Client ID for ScadBuddy&rsquo;s own login (optional)
-        </label>
-        <input
+      {field(
+        'oidc-client-id',
+        <>Client ID for ScadBuddy&rsquo;s own login (optional)</>,
+        <Input
           id="oidc-client-id"
           value={form.client_id ?? ''}
           onChange={(event) => update({ client_id: blankToNull(event.target.value) })}
-          className="sb-field sb-num mt-1.5"
-        />
-      </div>
+          className="sb-num"
+        />,
+      )}
 
       <fieldset>
-        <legend className="text-[13px]">Scope for each tier</legend>
+        <legend className="text-sm">Scope for each tier</legend>
         <div className="mt-1.5 grid gap-2 sm:grid-cols-3">
           {TIERS.map((tier) => (
-            <label key={tier} className="block text-[12px] text-muted">
-              {tier}
-              <input
+            <div key={tier} className="grid gap-1">
+              <Label htmlFor={`oidc-scope-${tier}`} className="text-xs font-normal text-muted-foreground">
+                {tier}
+              </Label>
+              <Input
+                id={`oidc-scope-${tier}`}
                 aria-label={`Scope for ${tier}`}
                 value={form.scopes[tier]}
                 onChange={(event) => update({ scopes: { ...form.scopes, [tier]: event.target.value } })}
-                className="sb-field sb-num mt-1"
+                className="sb-num"
               />
-            </label>
+            </div>
           ))}
         </div>
       </fieldset>
 
-      <div>
-        <label htmlFor="oidc-tier-claim" className="block text-[13px]">
-          Also read tiers from claim (optional)
-        </label>
-        <input
+      {field(
+        'oidc-tier-claim',
+        'Also read tiers from claim (optional)',
+        <Input
           id="oidc-tier-claim"
           value={form.tier_claim ?? ''}
           placeholder="groups"
           onChange={(event) => update({ tier_claim: blankToNull(event.target.value) })}
-          className="sb-field sb-num mt-1.5"
-        />
-      </div>
+          className="sb-num"
+        />,
+      )}
 
       <fieldset>
-        <legend className="text-[13px]">Allowed signing algorithms</legend>
-        <div className="mt-1.5 flex flex-wrap gap-3">
+        <legend className="text-sm">Allowed signing algorithms</legend>
+        <div className="mt-2 flex flex-wrap gap-4">
           {view.supported_algorithms.map((alg) => (
-            <label key={alg} className="flex items-center gap-1 text-[12px]">
-              <input
-                type="checkbox"
+            <div key={alg} className="flex items-center gap-2">
+              <Checkbox
+                id={`oidc-alg-${alg}`}
                 checked={form.algorithms.includes(alg)}
-                onChange={(event) =>
+                onCheckedChange={(next) =>
                   update({
-                    algorithms: event.target.checked
-                      ? [...form.algorithms, alg]
-                      : form.algorithms.filter((a) => a !== alg),
+                    algorithms: next === true ? [...form.algorithms, alg] : form.algorithms.filter((a) => a !== alg),
                   })
                 }
               />
-              <span className="sb-num">{alg}</span>
-            </label>
+              <Label htmlFor={`oidc-alg-${alg}`} className="sb-num text-xs font-normal">
+                {alg}
+              </Label>
+            </div>
           ))}
         </div>
       </fieldset>
 
       {view.resource_metadata_url && (
-        <p className="text-[12px] text-muted">
+        <p className="text-xs text-muted-foreground">
           MCP clients discover the IdP at{' '}
           <span className="sb-num">{view.resource_metadata_url}</span>.
         </p>
       )}
 
       {error && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-sm text-warn">
           {error}
         </p>
       )}
       {status && (
-        <p role="status" className="text-[12px] text-ok">
+        <p role="status" className="text-xs text-ok">
           {status}
         </p>
       )}
 
-      <div className="flex items-center gap-2">
-        <Button onClick={() => void test()} disabled={busy !== null} aria-busy={busy === 'test'} {...USER_ONLY}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          onClick={() => void test()}
+          disabled={busy !== null}
+          aria-busy={busy === 'test'}
+          {...USER_ONLY}
+        >
           {busy === 'test' && <Spinner />}
           Test discovery
         </Button>

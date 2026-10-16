@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from scadbuddy.api.params import require_valid_preset_params
+from scadbuddy.render.runner import format_scad_value
 from scadbuddy.render.schema import (
     CustomizerSchema,
     build_schema,
@@ -322,3 +326,122 @@ def test_a_retired_value_is_kept_on_its_select_only() -> None:
     assert by_name["count"].retired == [3]
     assert by_name["label"].retired == []
     assert [o.value for o in by_name["kind"].options] == ["auto", "png_threshold"]
+
+
+def test_a_plate_annotation_bounds_a_number_by_the_printer() -> None:
+    """`// plate <name> = x|y|z` (#81): the widget's max follows the printer's plate."""
+    source = (
+        "width = 120; // [10:400]\n"
+        "depth = 80;\n"
+        "tall = 10; // [1:50]\n"
+        'label = "x";\n'
+        "// plate width = x\n"
+        "// plate depth = Y\n"
+        "  //plate   tall=z\n"
+        "// plate label = x\n"
+        "// plate nothing = x\n"
+        "// plate depth = w\n"
+    )
+    param_json = {
+        "parameters": [
+            {"name": "width", "type": "number", "initial": 120, "min": 10, "max": 400},
+            {"name": "depth", "type": "number", "initial": 80},
+            {"name": "tall", "type": "number", "initial": 10, "min": 1, "max": 50},
+            {"name": "label", "type": "string", "initial": "x"},
+        ]
+    }
+    by_name = {p.name: p for p in build_schema(param_json, source).parameters}
+    assert by_name["width"].plate_max == "x"
+    assert by_name["depth"].plate_max == "y"
+    assert by_name["tall"].plate_max == "z"
+    # Only a number can be bounded by the plate.
+    assert by_name["label"].plate_max is None
+    # The declared range is kept: the plate only narrows it, in the browser.
+    assert (by_name["width"].min, by_name["width"].max) == (10, 400)
+
+
+def test_a_cache_entry_from_before_plate_bounds_is_rederived(tmp_path: Path) -> None:
+    source = "width = 120;\n// plate width = x\n"
+    schema = build_schema(
+        {"parameters": [{"name": "width", "type": "number", "initial": 120}]}, source
+    )
+    cache = tmp_path / "schema.json"
+    store_cached_schema(cache, schema)
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    body["format"] = 4
+    cache.write_text(json.dumps(body), encoding="utf-8")
+    assert load_cached_schema(cache, source_sha256(source)) is None
+
+
+MODELS = Path(__file__).resolve().parents[2] / "models"
+
+
+@pytest.mark.parametrize("slug", sorted(p.parent.name for p in MODELS.glob("*/model.scad")))
+def test_no_bundled_caption_talks_about_the_app(slug: str) -> None:
+    """A parameter's comment is the caption the customizer shows (#367): a note to
+    the template's maintainers ("the app fills this dropdown from the fonts installed
+    in the image") reads as noise to the person choosing a typeface."""
+    source = (MODELS / slug / "model.scad").read_text(encoding="utf-8")
+    assert "the app fills this dropdown" not in source
+
+
+#: The battery crate's `cell = "AA"; // [AAA, AA, C, D, 9V, 18650, CR2032]` (#356):
+#: OpenSCAD's export types the bare 18650 as a number, the rest as text.
+MIXED_PARAM = {
+    "parameters": [
+        {
+            "name": "cell",
+            "type": "string",
+            "initial": "AA",
+            "options": [
+                {"name": "AAA", "value": "AAA"},
+                {"name": "AA", "value": "AA"},
+                {"name": "9V", "value": "9V"},
+                {"name": "18650", "value": 18650.0},
+                {"name": "Half", "value": 1.5},
+            ],
+        },
+    ]
+}
+MIXED_SOURCE = 'cell = "AA"; // [AAA, AA, 9V, 18650, 1.5:Half]\n// retired cell = 14500\n'
+
+
+def test_a_select_mixing_text_and_numbers_serves_every_option_as_text() -> None:
+    """#356: the template compares `cell` against strings, so a number option is
+    offered as the text OpenSCAD's comment wrote, never as `18650.0`."""
+    (cell,) = build_schema(MIXED_PARAM, MIXED_SOURCE).parameters
+    assert cell.type == "select"
+    assert [(o.name, o.value) for o in cell.options] == [
+        ("AAA", "AAA"),
+        ("AA", "AA"),
+        ("9V", "9V"),
+        ("18650", "18650"),
+        ("Half", "1.5"),
+    ]
+    assert cell.retired == ["14500"]
+
+
+def test_a_mixed_select_number_option_renders_and_saves_as_a_preset() -> None:
+    """#356: the text value round-trips through a render and a preset."""
+    schema = build_schema(MIXED_PARAM, MIXED_SOURCE)
+    (cell,) = schema.parameters
+    assert format_scad_value(cell, "18650") == '"18650"'
+    assert format_scad_value(cell, "AA") == '"AA"'
+    require_valid_preset_params(schema, {"cell": "18650"})
+    require_valid_preset_params(schema, {"cell": "14500"})
+
+
+def test_an_all_number_select_keeps_its_numbers() -> None:
+    raw = {
+        "parameters": [
+            {
+                "name": "grid",
+                "type": "number",
+                "initial": 2,
+                "options": [{"name": "1", "value": 1.0}, {"name": "2", "value": 2.0}],
+            }
+        ]
+    }
+    (grid,) = build_schema(raw, "grid = 2; // [1, 2]\n").parameters
+    assert [o.value for o in grid.options] == [1.0, 2.0]
+    assert format_scad_value(grid, 2) == "2.0"

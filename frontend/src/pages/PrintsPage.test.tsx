@@ -1,11 +1,13 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output, PrintPage, PrintProgress } from '../api/types'
 import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
+import { fakeRealtime } from '../lib/realtime.fake'
 import { server } from '../mocks/server'
 import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
+import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
@@ -49,17 +51,25 @@ function location(): string {
   return screen.getByTestId('location').textContent ?? ''
 }
 
+/**
+ * The list, found by its label: a role query re-runs getComputedStyle over the whole
+ * page on every change while it loads (~0.25 s each in jsdom), which held the list past
+ * the 1 s wait under load (#1485).
+ */
+function list(): Promise<HTMLElement> {
+  return screen.findByLabelText('Prints', { selector: 'ul' })
+}
+
 /** The rendered prints, by archive id, in order. */
 async function shown(): Promise<string[]> {
-  const list = await screen.findByRole('list', { name: 'Prints' })
-  return within(list)
+  return within(await list())
     .getAllByRole('listitem')
     .map((item) => item.getAttribute('data-print') ?? '')
     .filter(Boolean)
 }
 
 async function item(archiveId: number): Promise<HTMLElement> {
-  await screen.findByRole('list', { name: 'Prints' })
+  await list()
   const found = document.querySelector(`[data-print="${archiveId}"]`)
   if (!(found instanceof HTMLElement)) throw new Error(`no print ${archiveId}`)
   return found
@@ -107,6 +117,31 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: 'Printer 3' })).toHaveValue('3')
   })
 
+  it('names a printing print’s printer once, even unnamed (#2363)', async () => {
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(37), status: 'printing', printer_id: 3, printer_name: null }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({
+          ...queuedSliceProgress,
+          stage: 'running',
+          copies_detail: [
+            { ...queuedSliceProgress.copies_detail![0]!, stage: 'running', message: 'Layer 42 of 180', waiting_reason: null },
+          ],
+        } satisfies PrintProgress),
+      ),
+    )
+    render()
+    const printing = await item(37)
+    expect(await within(printing).findByText('Layer 42 of 180')).toBeInTheDocument()
+    expect(printing).toHaveTextContent('Printer 3')
+    expect(printing).not.toHaveTextContent('3DP-31B-598')
+  })
+
   it('names the attachments a print has', async () => {
     server.use(
       http.get('/api/v1/prints', () =>
@@ -150,6 +185,40 @@ describe('PrintsPage (#310): the global print history', () => {
     await user.type(screen.getByLabelText('From'), '2026-09-27')
     await waitFor(async () => expect(await shown()).toEqual(['37', '35']))
     expect(location()).toBe('/prints?from=2026-09-27')
+  })
+
+  it("names a library print by its file, and filters to that file's prints (#1755)", async () => {
+    const library = {
+      ...summaryOf(35),
+      archive_id: 90,
+      output_id: null,
+      slug: null,
+      params_diff: null,
+      library_file_id: 89,
+      library_file_name: 'bracket.3mf',
+    }
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/prints', ({ request }) => {
+        const file = new URL(request.url).searchParams.get('library_file_id')
+        asked.push(file)
+        const items = file === '89' ? [library] : [library, summaryOf(35)]
+        return HttpResponse.json({ items, next_cursor: null } satisfies PrintPage)
+      }),
+    )
+    const { user } = render()
+    const row = await item(90)
+    await user.click(within(row).getByRole('link', { name: 'bracket.3mf' }))
+
+    expect(location()).toBe('/prints?file=89')
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(asked.at(-1)).toBe('89')
+    const chip = screen.getByRole('group', { name: 'Library file' })
+    expect(chip).toHaveTextContent('bracket.3mf')
+
+    await user.click(within(chip).getByRole('button', { name: "Show every file's prints" }))
+    expect(location()).toBe('/prints')
+    await waitFor(async () => expect(await shown()).toEqual(['90', '35']))
   })
 
   it('searches by text after a pause, and clears every filter', async () => {
@@ -307,6 +376,15 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(await screen.findByTestId('print-route')).toHaveTextContent('35')
   })
 
+  it('covers a card with the photo shrunk for it (#2355)', async () => {
+    render()
+    const done = await item(35)
+    expect(within(done).getByRole('button', { name: /^Open media of/ }).querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg?size=card&v=1',
+    )
+  })
+
   it('opens the lightbox on the image, with the photos and the timelapse', async () => {
     const { user } = render()
     const done = await item(35)
@@ -388,6 +466,7 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     expect(await within(list).findByText('Completed in Bambuddy')).toBeInTheDocument()
     expect(list).not.toHaveTextContent('No longer in Bambuddy')
   })
@@ -414,12 +493,210 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     )
     render('/m/name-keychain/prints')
     const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
     const [first, second] = within(list).getAllByRole('listitem')
     expect(first).toHaveTextContent('Acceptance')
     expect(await within(first as HTMLElement).findByText('No longer in Bambuddy')).toBeInTheDocument()
     expect(first).not.toHaveTextContent('Waiting for Bambuddy')
     expect(second).toHaveTextContent('Luna')
     expect(second).toHaveTextContent('Waiting for Bambuddy')
+  })
+
+  it('reads a waiting row\'s progress only once the row comes into view (#1014)', async () => {
+    const acceptance = sent('1', 'Acceptance', 104)
+    const luna = sent('2', 'Luna', 4500)
+    const read: string[] = []
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([acceptance, luna, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json({ ...queuedSliceProgress, queue_item_id: 4500 } satisfies PrintProgress)
+      }),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    const [first, second] = within(list).getAllByRole('listitem')
+    expect(second).toHaveTextContent('Waiting for Bambuddy')
+    const waited = () => read.filter((id) => id === acceptance.id || id === luna.id)
+    expect(waited()).toEqual([])
+
+    intersect(first as HTMLElement)
+    await waitFor(() => expect(waited()).toContain(acceptance.id))
+    // The row still out of view is not read. Both rows mounted in one pass, so a read on
+    // mount would have gone out before the one the intersection started: no timed wait.
+    expect(waited()).not.toContain(luna.id)
+    intersect(second as HTMLElement)
+    await waitFor(() => expect(waited()).toContain(luna.id))
+  })
+
+  it('follows a waiting row live, without a reload (#954)', async () => {
+    // Real time still passes, so the page's own waits run; `signal` advances the fakes.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const luna = sent('2', 'Luna', 4500)
+    let settled = false
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([luna, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json(
+          settled
+            ? ({ ...queuedSliceProgress, stage: 'failed', settled: true, queue_item_id: 4500 } satisfies PrintProgress)
+            : ({ ...queuedSliceProgress, queue_item_id: 4500 } satisfies PrintProgress),
+        ),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
+    await waitFor(() => expect(realtime.following()).toContain(`print:${luna.id}`))
+    expect(list).toHaveTextContent('Waiting for Bambuddy')
+
+    settled = true
+    await realtime.signal(`print:${luna.id}`, 'print.settled')
+    expect(await within(list).findByText('Failed in Bambuddy')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('Waiting for Bambuddy')
+  })
+})
+
+describe("a library file's print, as an output's (#1751)", () => {
+  const libraryPrint = (fields: Partial<PrintPage['items'][number]> = {}) => ({
+    ...summaryOf(35),
+    archive_id: 90,
+    output_id: null,
+    slug: null,
+    params_diff: null,
+    library_file_id: 89,
+    library_file_name: 'bracket.3mf',
+    queue_item_id: 51,
+    ...fields,
+  })
+  const only = (items: PrintPage['items']) =>
+    http.get('/api/v1/prints', () => HttpResponse.json({ items, next_cursor: null } satisfies PrintPage))
+  const queued = (item: number, fields: Partial<PrintProgress> = {}): PrintProgress => ({
+    ...queuedSliceProgress,
+    queue_item_id: item,
+    copies_detail: [{ ...queuedSliceProgress.copies_detail![0]!, queue_entry_id: item }],
+    ...fields,
+  })
+
+  it('shows where it is while it prints, from its own progress read (F7)', async () => {
+    const read: string[] = []
+    server.use(
+      only([libraryPrint({ status: 'printing', printer_name: null })]),
+      http.get('/api/v1/print/library/:id/progress', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json(
+          queued(51, {
+            stage: 'running',
+            copies_detail: [
+              { ...queuedSliceProgress.copies_detail![0]!, stage: 'running', message: 'Layer 7 of 90', waiting_reason: null },
+            ],
+          }),
+        )
+      }),
+    )
+    render()
+    const printing = await item(90)
+    expect(await within(printing).findByText('Layer 7 of 90')).toBeInTheDocument()
+    expect(read).toContain('89')
+  })
+
+  it("waits on the file's newest print until a listed print came from it, and follows it live (F9)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    let settled = false
+    server.use(
+      only([libraryPrint()]),
+      http.get('/api/v1/print/library/:id/progress', () =>
+        HttpResponse.json(settled ? queued(52, { stage: 'done', settled: true }) : queued(52)),
+      ),
+    )
+    render('/prints?file=89')
+    const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
+    expect(waiting).toHaveTextContent('bracket.3mf')
+    expect(waiting).toHaveTextContent('Waiting for Bambuddy')
+    await waitFor(() => expect(realtime.following()).toContain('print:library:89'))
+
+    settled = true
+    await realtime.signal('print:library:89', 'print.settled')
+    expect(await within(waiting).findByText('Completed in Bambuddy')).toBeInTheDocument()
+  })
+
+  it('shows no Waiting row once the newest print is listed, nor on every print', async () => {
+    server.use(
+      only([libraryPrint()]),
+      http.get('/api/v1/print/library/:id/progress', () => HttpResponse.json(queued(51))),
+    )
+    render('/prints?file=89')
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(screen.queryByRole('list', { name: 'Waiting for Bambuddy' })).not.toBeInTheDocument()
+  })
+
+  it('takes a print found by its hash as the done run’s, so no Waiting row stays beside it', async () => {
+    const read = vi.fn()
+    server.use(
+      only([libraryPrint({ queue_item_id: null })]),
+      http.get('/api/v1/print/library/:id/progress', () => {
+        read()
+        return HttpResponse.json(queued(52, { stage: 'done', settled: true }))
+      }),
+    )
+    render('/prints?file=89')
+    await waitFor(() => expect(read).toHaveBeenCalled())
+    await waitFor(async () => expect(await shown()).toEqual(['90']))
+    expect(screen.queryByRole('list', { name: 'Waiting for Bambuddy' })).not.toBeInTheDocument()
+  })
+})
+
+describe('an output whose newest run failed before queueing (#1831)', () => {
+  it('has a row that says the print failed, and why', async () => {
+    const refused: Output = {
+      ...(outputs[0] as Output),
+      id: '4'.repeat(32),
+      name: 'Refused',
+      created_at: '2026-09-28T10:00:00Z',
+      queue_item_id: null,
+      slice_job_id: null,
+      print_route: null,
+      plates: [],
+      failed_before_queueing: true,
+    }
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([refused, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', ({ params }) =>
+        HttpResponse.json(
+          params['id'] === refused.id
+            ? ({
+                route: 'run',
+                stage: 'failed',
+                settled: true,
+                copies: 1,
+                copies_completed: 0,
+                copies_failed: 0,
+                copies_cancelled: 0,
+                copies_in_progress: 0,
+                error_message: 'Slot 2 has no spool chosen.',
+                bambuddy_url: 'https://bambuddy.example/queue',
+              } satisfies PrintProgress)
+            : null,
+        ),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(list)
+    expect(list).toHaveTextContent('Refused')
+    expect(await within(list).findByText('Print failed: Slot 2 has no spool chosen.')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('Waiting for Bambuddy')
   })
 })
 
@@ -444,6 +721,7 @@ describe('waiting for Bambuddy, with more pages to load (#310)', () => {
     firstPage([summaryOf(37), summaryOf(38)])
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(waiting).toHaveTextContent('Luna')
     // Reagan was sent before the oldest print loaded: its print may be on a later page.
     expect(waiting).not.toHaveTextContent('Reagan')
@@ -453,6 +731,7 @@ describe('waiting for Bambuddy, with more pages to load (#310)', () => {
     firstPage([summaryOf(38)])
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(waiting).toHaveTextContent('Luna')
   })
 })
@@ -531,6 +810,7 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
     )
     render('/m/name-keychain/prints')
     const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    intersect(waiting)
     expect(within(waiting).getAllByRole('listitem')).toHaveLength(1)
     expect(waiting).toHaveTextContent('Luna')
     expect(waiting).toHaveTextContent('Waiting for Bambuddy')
@@ -540,9 +820,53 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
   })
 })
 
+describe('changed parameters markup (#2457)', () => {
+  it('keeps "+N more" out of the definition list, which holds only term groups', async () => {
+    const params = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(prints[0]!.archive_id), params_diff: params }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+    )
+    render()
+    const dl = await within(await list()).findByLabelText('Changed parameters')
+    expect(dl.tagName).toBe('DL')
+    for (const child of Array.from(dl.children)) {
+      expect(child.tagName).toBe('DIV')
+      expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
+    }
+    expect(dl).not.toHaveTextContent('more')
+    // Found as a user sees it, beside the list and outside the <dl> (#2457, #2878).
+    const more = within(dl.parentElement!).getByText('+2 more')
+    expect(dl).not.toContainElement(more)
+  })
+})
+
 function summaryOf(archiveId: number): PrintPage['items'][number] {
   const print = prints.find((p) => p.archive_id === archiveId)
   if (!print) throw new Error(`no fixture print ${archiveId}`)
   const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
   return summary
 }
+
+describe('now printing (#977)', () => {
+  it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
+    render()
+    const strip = await screen.findByRole('region', { name: 'Now printing' })
+    expect(await within(strip).findByTestId('printer-now-1')).toHaveTextContent('Bracket')
+    expect(await list()).toBeInTheDocument()
+  })
+})
+
+describe('up next (#2351)', () => {
+  it("shows Bambuddy's queue between what is printing and the history", async () => {
+    render()
+    const queue = await screen.findByRole('region', { name: 'Up next' })
+    expect(within(queue).getByTestId('queue-item-259')).toHaveTextContent('Luna keychain')
+    const now = await screen.findByRole('region', { name: 'Now printing' })
+    expect(now.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})

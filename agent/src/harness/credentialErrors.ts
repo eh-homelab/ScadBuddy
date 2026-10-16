@@ -4,15 +4,23 @@ import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http
 
 // Why a query failed, per credential (#1093). Claude Code reports a failed
 // model request three ways, all measured against test/support/fakeAnthropic.ts
-// on Claude Code 2.1.283 (test/fallback.e2e.test.ts):
+// on Claude Code 2.1.283, and again on 2.1.287 (test/fallback.e2e.test.ts):
 //
 //   - `system/api_retry` before each retry it makes, with `error_status` (null
 //     for a connection error) and an `error` category. It retries 401, 429
 //     without a long `retry-after`, 5xx and 529, up to CLAUDE_CODE_MAX_RETRIES.
 //   - a synthetic `assistant` message (model "<synthetic>") with `error` set,
 //     when it gives up. A 403, a 400 and a 429 whose `retry-after` is long are
-//     not retried at all: this is the only sign of them.
+//     not retried with an `api_retry`: this is the only sign of them.
 //   - the `result`, with `is_error` and `api_error_status`.
+//
+// New in 2.1.287 (#1540): a 400 that is not a billing refusal is sent once
+// more, on the same credential, without the `thinking-display-updates` beta
+// that version adds, in case the beta was what the endpoint refused (its
+// bundle: "retry:thinking-display-updates-unclaimed"). Measured through a
+// gateway, as the fake is configured: at most once per query, and the
+// messages above are exactly as before, so nothing here sees it. A refused
+// request is not billed, so it costs one more request, not money.
 //
 // Neither carries the response headers. A 429 with `retry-after: 60` is
 // reported as `api_retry` with `retry_delay_ms: 60000`, but one with
@@ -67,6 +75,35 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
   }
   if (status === 400 && BILLING_MESSAGE.test(message)) return 'permanent'
   return 'other'
+}
+
+/**
+ * What the user is told about a turn that ended on a failed model request
+ * (#1101), from the same evidence `classifyFailure` reads and, for a refusal,
+ * what the probe said of the credential (fallback.ts). Claude Code's own
+ * "API Error: …" text, when there is one, follows as the detail.
+ */
+export function describeApiFailure(
+  evidence: FailureEvidence,
+  judged: { probe?: ProbeVerdict['verdict'] | undefined } = {},
+): string {
+  const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
+  const text = evidence.message?.trim()
+  const detail = text ? `: ${text}` : ''
+  switch (classifyFailure(evidence)) {
+    case 'permanent':
+      // A refusal is the key's only once a probe confirms it (fallback.ts).
+      if (judged.probe === 'answered') return `the model endpoint refused this request (${http}); the credential itself works${detail}`
+      if (judged.probe === 'rate_limited') return `the Claude credential is rate limited (${http}); try again later${detail}`
+      if (judged.probe === 'refused') return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+      return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
+    case 'rate_limited':
+      return `the Claude credential is rate limited (${http}); try again later${detail}`
+    case 'transient':
+      return `the model endpoint failed (${http}); try again${detail}`
+    default:
+      return `the model API refused the request (${http})${detail}`
+  }
 }
 
 /** A rate limit that names no time is tried again after this long. */
@@ -192,6 +229,10 @@ export const CLEARED_COOLDOWN_MS = 1000
  */
 export async function probeCredential(credential: Credential, options: ProbeOptions): Promise<ProbeVerdict> {
   const now = options.now ?? Date.now
+  // How Claude Code presents an OAuth token to the Messages API is not measured, and
+  // in x-api-key Anthropic answers one with a 401 that would read as its own refusal:
+  // unknown, so a rate limit or refusal cools it down and never disables it.
+  if (credential.kind === 'claude_oauth_token') return { verdict: 'unknown', until: cooldownUntil(undefined, now()) }
   const doFetch = options.fetch ?? fetch
   const base = credential.kind === 'gateway' ? credential.baseUrl : ANTHROPIC_API
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 10_000)

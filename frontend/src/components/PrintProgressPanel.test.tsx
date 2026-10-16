@@ -104,6 +104,30 @@ describe('PrintProgressPanel', () => {
     )
   })
 
+  it('names a plate by what it holds when its name is known (#986)', () => {
+    const plate = fixtures.queuedSliceProgress.copies_detail![0]!
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies: 2,
+          copies_detail: [
+            { ...plate, plate_id: 1, queue_entry_id: 4470, stage: 'running' },
+            { ...plate, plate_id: 2 },
+          ],
+        }}
+        polling
+        plates={[
+          { index: 1, has_thumbnail: true, name: 'Base + Lid' },
+          { index: 2, has_thumbnail: true, name: null },
+        ]}
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress-copy-0')).toHaveTextContent('Base + Lid on 3DP-31B-598')
+    expect(screen.getByTestId('print-progress-copy-1')).toHaveTextContent('Plate 2 on 3DP-31B-598')
+  })
+
   it('says it is slicing before the queue entry exists', () => {
     render(
       <PrintProgressPanel
@@ -211,5 +235,33 @@ describe('PrintProgressPanel', () => {
     const { container } = render(<PrintProgressPanel progress={null} polling={false} />)
 
     expect(container).toBeEmptyDOMElement()
+  })
+
+  it('says a run that failed before queueing anything failed there, with its reason (#1049)', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          route: 'run',
+          stage: 'failed',
+          settled: true,
+          copies: 1,
+          copies_completed: 0,
+          copies_failed: 0,
+          copies_cancelled: 0,
+          copies_in_progress: 0,
+          error_message: 'Slot 2 has no spool chosen.',
+          fix: 'Nothing was queued. Fix what it says, then print again.',
+          bambuddy_url: 'https://bambuddy.internal.nullreference.io/queue',
+        }}
+        polling={false}
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('Print failed before it was queued')
+    expect(panel).not.toHaveTextContent('Slice')
+    expect(screen.getByTestId('print-progress-error')).toHaveTextContent(
+      'Slot 2 has no spool chosen.',
+    )
   })
 })

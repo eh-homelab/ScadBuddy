@@ -10,34 +10,18 @@ from __future__ import annotations
 
 import io
 import json
-import tempfile
 import zipfile
 from collections.abc import Sequence
-from pathlib import Path
 
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
-    ZIP_TIMESTAMP,
     cover_names,
     laid_out_plates,
+    rezipped,
 )
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.split import normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
-
-
-def _archive(entries: Sequence[tuple[str, bytes]]) -> bytes:
-    """The writer's own policy, so a file recoloured to the colours it already had
-    comes back byte for byte."""
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in entries:
-            info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-            info.compress_type = (
-                zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
-            )
-            out.writestr(info, data)
-    return buffer.getvalue()
 
 
 def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
@@ -46,38 +30,32 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
 
     ``colours`` is one per filament of the file, in filament order; a different count
     raises :class:`ValueError`, since the extruder numbers of every part index into it.
-    A file written without covers gets none.
+    A file written without covers gets none. Written in the writer's policy, every entry
+    it does not change copied as its compressed bytes (:func:`rezipped`, #3679).
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+        names = set(archive.namelist())
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
         plates = [each.index for each in laid_out_plates(archive)]
-    settings = json.loads(dict(entries)[PROJECT_SETTINGS_NAME])
     current = settings.get("filament_colour") or []
     if len(colours) != len(current):
         raise ValueError(
             f"the 3MF has {len(current)} filament colours, but {len(colours)} were given"
         )
     settings["filament_colour"] = [normalise_colour(colour) for colour in colours]
-    entries = [
-        (name, (json.dumps(settings, indent=4) + "\n").encode("utf-8"))
-        if name == PROJECT_SETTINGS_NAME
-        else (name, data)
-        for name, data in entries
-    ]
-
-    names = {name for name, _ in entries}
-    covers: dict[str, bytes] = {}
-    with tempfile.TemporaryDirectory() as scratch:
-        # `parts_from_3mf` reads a path, and reading the recoloured archive is what
-        # gives each part its new colour through its extruder number.
-        path = Path(scratch) / "model.3mf"
-        path.write_bytes(_archive(entries))
-        for index in plates:
-            cover = cover_names(index)
-            if cover[0] not in names:
-                continue
-            drawn = render_plate_thumbnails(parts_from_3mf(path, index))
-            covers.update(
-                zip(cover, (drawn.plate, drawn.plate_small, drawn.top, drawn.pick), strict=True)
+    changed = {PROJECT_SETTINGS_NAME: (json.dumps(settings, indent=4) + "\n").encode("utf-8")}
+    covered = [index for index in plates if cover_names(index)[0] in names]
+    if covered:
+        # Read from the recoloured archive, in memory: that is what gives each part its
+        # new colour through its extruder number.
+        recoloured = io.BytesIO(rezipped(payload, changed))
+        for index in covered:
+            drawn = render_plate_thumbnails(parts_from_3mf(recoloured, index))
+            changed.update(
+                zip(
+                    cover_names(index),
+                    (drawn.plate, drawn.plate_small, drawn.top, drawn.pick),
+                    strict=True,
+                )
             )
-    return _archive([(name, covers.get(name, data)) for name, data in entries])
+    return rezipped(payload, changed)

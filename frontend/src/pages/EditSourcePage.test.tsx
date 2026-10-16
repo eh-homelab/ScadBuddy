@@ -10,23 +10,42 @@ import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { EditSourcePage } from './EditSourcePage'
 
+// Monaco's diff editor does not run in jsdom: the two sides, as text.
+vi.mock('../components/SourceDiff', () => ({
+  SourceDiff: ({ original, modified }: { original: string; modified: string }) => (
+    <div data-testid="source-diff">
+      <pre data-testid="diff-original">{original}</pre>
+      <pre data-testid="diff-modified">{modified}</pre>
+    </div>
+  ),
+}))
+
 vi.mock('../components/SourceEditor', () => ({
   SourceEditor: ({
     value,
     onChange,
     label,
     readOnly,
+    onSave,
   }: {
     value: string
     onChange: (next: string) => void
     label: string
     readOnly?: boolean
+    onSave?: () => void
   }) => (
     <textarea
       aria-label={label}
       readOnly={readOnly}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      // The real editor binds Ctrl/Cmd+S to `onSave` (SourceEditor.test.tsx).
+      onKeyDown={(event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 's') {
+          event.preventDefault()
+          onSave?.()
+        }
+      }}
     />
   ),
 }))
@@ -45,6 +64,11 @@ function renderEdit(slug = 'name-keychain', query = '') {
 }
 
 describe('EditSourcePage', () => {
+  it('names the model in the breadcrumb, not its slug (#939)', async () => {
+    renderEdit()
+    expect(await screen.findByRole('link', { name: 'Name Keychain' })).toHaveAttribute('href', '/m/name-keychain')
+  })
+
   it('opens prefilled with the model source', async () => {
     renderEdit()
     expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
@@ -64,7 +88,25 @@ describe('EditSourcePage', () => {
     await user.click(save)
 
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
-    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube([10, 10, 10]);\n', false)
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube([10, 10, 10]);\n', false, undefined, undefined)
+    replace.mockRestore()
+  })
+
+  it('saves against the version it loaded (#1054)', async () => {
+    const { version } = await api.replaceSource('name-keychain', keychainSource)
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('cube(4);\n')
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(version).toBeTruthy()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube(4);\n', false, undefined, version)
     replace.mockRestore()
   })
 
@@ -146,6 +188,38 @@ describe('EditSourcePage', () => {
     expect(screen.queryByText('Could not load this model')).not.toBeInTheDocument()
   })
 
+  it('never offers a save without its version when only that read fails (review #1130 2)', async () => {
+    const { version } = await api.replaceSource('name-keychain', keychainSource)
+    // Only the first read fails: the one the page takes its save's `base` from.
+    let reads = 0
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        reads++ === 0
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('cube(5);\n')
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'cube(5);\n', false, undefined, version)
+    replace.mockRestore()
+  })
+
   it('shows a built-in template read-only, with nothing to save (#184)', async () => {
     renderEdit(encodeURIComponent(BUILTIN_SLUG))
     const editor = await screen.findByLabelText('OpenSCAD source')
@@ -155,7 +229,7 @@ describe('EditSourcePage', () => {
     expect(screen.getByRole('heading', { name: 'View source' })).toBeInTheDocument()
     expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
     expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: BUILTIN_SLUG })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: 'Keychain Template' })).toHaveAttribute(
       'href',
       '/m/builtin%3Akeychain-template',
     )
@@ -173,7 +247,10 @@ describe('EditSourcePage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
 
     expect(await screen.findByRole('heading', { name: 'Edit source' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'keychain-template-copy' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Keychain Template copy' })).toHaveAttribute(
+      'href',
+      '/m/keychain-template-copy',
+    )
     const editor = await screen.findByLabelText('OpenSCAD source')
     expect(editor).toHaveValue(keychainSource)
     expect(editor).not.toHaveAttribute('readonly')
@@ -244,7 +321,7 @@ describe('EditSourcePage', () => {
 
   it('opens the source as it is when there is no update left to resolve (#160)', async () => {
     const replace = vi.spyOn(api, 'replaceSource')
-    await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
+    const { version } = await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
     const { user } = renderEdit(COPY, '?merge')
 
     expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
@@ -253,7 +330,77 @@ describe('EditSourcePage', () => {
     await screen.findByText(/Parses cleanly/)
     await user.click(screen.getByRole('button', { name: 'Save source' }))
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
-    expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false)
+    expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false, undefined, version ?? undefined)
+    replace.mockRestore()
+  })
+})
+
+describe('EditSourcePage, unsaved edits (#997)', () => {
+  async function edit(user: ReturnType<typeof userEvent.setup>) {
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    return editor
+  }
+
+  it('asks before leaving with unsaved edits, and Stay keeps them', async () => {
+    const { user } = renderEdit()
+    const editor = await edit(user)
+
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(screen.queryByRole('heading', { name: 'Customizer' })).toBeNull()
+    expect(editor).toHaveValue('sphere(2);\n')
+
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+  })
+
+  it('leaves without asking when nothing was edited', async () => {
+    const { user } = renderEdit()
+    await screen.findByLabelText('OpenSCAD source')
+
+    await user.click(await screen.findByRole('link', { name: 'Name Keychain' }))
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('does not ask once the edits are saved', async () => {
+    const { user } = renderEdit()
+    await edit(user)
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('saves on Ctrl+S from the editor', async () => {
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit()
+    const editor = await edit(user)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save source' })).toBeEnabled())
+
+    editor.focus()
+    await user.keyboard('{Control>}s{/Control}')
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(replace).toHaveBeenCalledWith('name-keychain', 'sphere(2);\n', false, undefined, undefined)
+    replace.mockRestore()
+  })
+
+  it('does not save on Ctrl+S while Save is unavailable', async () => {
+    const replace = vi.spyOn(api, 'replaceSource')
+    const { user } = renderEdit(encodeURIComponent(BUILTIN_SLUG))
+    const editor = await screen.findByLabelText('OpenSCAD source')
+
+    editor.focus()
+    await user.keyboard('{Control>}s{/Control}')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(replace).not.toHaveBeenCalled()
     replace.mockRestore()
   })
 })
@@ -268,6 +415,26 @@ describe('EditSourcePage, live (#269)', () => {
     emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
     await waitFor(() => expect(editor).toHaveValue(THEIRS))
     expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
+  })
+
+  it('leaves history alone when an untouched buffer follows a change (#1683)', async () => {
+    renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    const push = vi.spyOn(window.history, 'pushState')
+    const back = vi.spyOn(window.history, 'back')
+    try {
+      await api.replaceSource('name-keychain', THEIRS)
+      emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+      await waitFor(() => expect(editor).toHaveValue(THEIRS))
+      // Never dirty, not even for the render before the buffer catches up: the leave
+      // guard would push its sentinel and take it back, dropping the Forward entries.
+      expect(push).not.toHaveBeenCalled()
+      expect(back).not.toHaveBeenCalled()
+    } finally {
+      // Restored even when an assertion fails, so later tests see the real history.
+      push.mockRestore()
+      back.mockRestore()
+    }
   })
 
   it('never overwrites an edited buffer, and offers theirs instead', async () => {
@@ -285,6 +452,58 @@ describe('EditSourcePage, live (#269)', () => {
     await user.click(within(banner).getByRole('button', { name: 'Load their version' }))
     expect(editor).toHaveValue(THEIRS)
     expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
+  })
+
+  it('refuses a save over a change it has not seen, and offers theirs (#1054)', async () => {
+    await api.replaceSource('name-keychain', keychainSource)
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    // Saved elsewhere, and this page was never told.
+    await api.replaceSource('name-keychain', THEIRS)
+
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
+    expect(await screen.findByText(/has moved on/)).toBeInTheDocument()
+    const banner = await screen.findByTestId('changed-elsewhere')
+    expect(editor).toHaveValue('sphere(2);\n')
+
+    // Keeping mine saves over theirs, now that it has been seen.
+    await user.click(within(banner).getByRole('button', { name: 'Keep editing' }))
+    await user.click(save)
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(await api.getSource('name-keychain')).toBe('sphere(2);\n')
+  })
+
+  it('compares their version with the buffer before choosing (#1287)', async () => {
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+    await api.replaceSource('name-keychain', THEIRS)
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    const banner = await screen.findByTestId('changed-elsewhere')
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
+
+    await user.click(within(banner).getByRole('button', { name: 'Compare' }))
+    expect(screen.getByTestId('diff-original')).toHaveTextContent(THEIRS.trim())
+    // The banner row is the live region, not the diff: typing must not re-announce it (#2194).
+    expect(screen.getByTestId('source-diff').closest('[role="status"]')).toBeNull()
+    expect(screen.getByTestId('diff-modified')).toHaveTextContent('sphere(2);')
+    // The buffer stays editable, and the diff follows it.
+    await user.type(editor, '// mine')
+    expect(screen.getByTestId('diff-modified')).toHaveTextContent('// mine')
+
+    await user.click(within(banner).getByRole('button', { name: 'Hide changes' }))
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
+    await user.click(within(banner).getByRole('button', { name: 'Compare' }))
+    await user.click(within(banner).getByRole('button', { name: 'Load their version' }))
+    expect(editor).toHaveValue(THEIRS)
+    expect(screen.queryByTestId('source-diff')).not.toBeInTheDocument()
   })
 
   it('takes a change that lands before the first read answers, with no banner', async () => {

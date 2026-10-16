@@ -93,6 +93,15 @@ parameter type means (main spec §5.1 and §5.2):
 - **Files.** `POST /api/v1/models/{slug}/assets` (multipart `file`, SVG or PNG,
   at most 8 MiB) stores a picture and returns its `id`. Pass that id as the
   value, never a path. A sample's value is its bare name (main spec §5.5).
+- **A file from elsewhere goes through your workspace** (#2329;
+  `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`). Save it
+  there first: `http_request` with `save_to_workspace`, or `workspace_save` for a
+  ScadBuddy file. Look at it
+  with `workspace_read` (an image comes back as an image), change a text file with
+  `workspace_edit`, then upload it with `upload_asset` giving `workspace_path` and
+  the `workspace_sha256` that `workspace_list` or `workspace_read` showed, instead
+  of `content_base64`. The bytes never pass through the conversation, and the upload
+  is refused if the file changed since you read it.
 - **Colours.** Two colour parameters with the same value share one extruder
   (main spec §7). Say so if the user sets two parts to the same colour and
   expects two filaments.
@@ -149,8 +158,25 @@ needs more than one view, for example `top` and `front`. Read measurements from
 the job's `bbox_mm`, not from the picture. This choice of view is judgement; the
 directions are the code's.
 
-`get_render_colours` takes the same `view`, so check a colour change from the
-view that shows the part it moved.
+When no named view shows the feature (a recess on an angled face, a hole drilled
+at an angle, a clip under a lip, anything on the back-left that `iso` hides), give
+a camera instead (`azimuth`, `elevation`, `zoom`, `target_x`/`_y`/`_z` on the same
+routes, #830; the conventions are in the routes' parameter descriptions in
+`backend/openapi.json`):
+
+- `azimuth` is degrees around +Z from the front: 0 stands at −Y (`front`), 90 at
+  +X (`right`), 180 at +Y (`back`), −90 at −X (`left`). `elevation` is degrees
+  above the XY plane, 90 straight down (`top`). An angle left out is the named
+  view's, so `front` with `elevation` 30 looks down at the front from 30°.
+- Stand on the side the feature faces: for a face whose outward normal points
+  toward +X and +Y, azimuth about 135; for a clip under a lip, a negative elevation.
+- `zoom` 2 shows half the width; `target` (model mm, from `bbox_mm` or the
+  source's coordinates) is what it centres on, so a small feature fills the
+  picture instead of a few pixels.
+- To compare a change, draw the same camera at both revisions.
+
+`get_render_colours` takes the same `view` and camera, so check a colour change
+from the angle that shows the part it moved.
 
 ## 5. Check the plate
 
@@ -190,6 +216,10 @@ settings are `outward`, and always need a human approval in the ScadBuddy UI
   ScadBuddy, `browser_pair` first gives a one-time code for the user to type into
   their tab, and `browser_status` says when it is attached. Without a paired tab,
   work through the render tools above and tell the user which values you chose.
+- Picking a preset in the tab over edits that no preset holds opens an "Apply
+  preset …?" dialog, and `fill` reports it in a `confirm` note. "Replace my
+  changes" discards those edits for good. Press it only if you made them; if the
+  user did, ask them first.
 - For a render that fails or warns, `get_render_diagnostics` gives OpenSCAD's
   warnings and errors with the file and line each names. `get_lsp_diagnostics`
   checks a source's syntax without rendering it. Fixing the template itself is the

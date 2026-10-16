@@ -18,7 +18,7 @@ plugin's [`authoring` skill](../../plugins/scadbuddy/skills/authoring/SKILL.md).
 | Check | `check_source` | read | `POST /api/v1/models/check` |
 | Edit | `apply_patch`, or `update_source` for a rewrite | write | `POST /api/v1/models/{slug}/source/patch`, `PUT /api/v1/models/{slug}/source` |
 | Render | `render_model`, `get_render_diagnostics` | write, read | `POST /api/v1/models/{slug}/render`, `GET /api/v1/models/{slug}/diagnostics` |
-| Look | `get_render_view` (7 views), `analyze_geometry` | read | `GET /api/v1/jobs/{job_id}/views/{view}.png`, `GET /api/v1/outputs/{output_id}/geometry` |
+| Look | `get_render_view` (7 named views, or any camera), `analyze_geometry` | read | `GET /api/v1/jobs/{job_id}/views/{view}.png`, `GET /api/v1/outputs/{output_id}/geometry` |
 | Back out | `restore_version` | write | `POST /api/v1/models/{slug}/versions/{commit}/restore` |
 
 Every edit, restore and create is one commit in the model's history
@@ -91,18 +91,14 @@ ScadBuddy-Agent-Session: 6f1c…
 ```
 
 `list_versions` (`GET /api/v1/models/{slug}/versions`) reports them as
-`agent: {principal, session}` beside `author`. A request from the headless browser
-(#349) carries the agent-actor marker, whose value is the session id, so its commits
-are the agent's too. The commit's subject is the tool's `message`; the `authoring`
+`agent: {principal, session}` beside `author`. The commit's subject is the tool's `message`; the `authoring`
 skill asks the agent to put the user's instruction there (#252: "carrying the user's
 instruction as the message").
 
 The headers are labels, not authentication: the backend trusts its callers (spec
 §4.3), and a forged header can only mislabel a revision. Each value must be printable
 ASCII with no spaces (the principal at most 300 characters, the session
-`[A-Za-z0-9_-]{1,64}`), so a trailer is one line; anything else is a 400. The tools'
-header is deliberately not the agent-actor marker, which would make the backend refuse
-the outward routes a human has already approved.
+`[A-Za-z0-9_-]{1,64}`), so a trailer is one line; anything else is a 400.
 
 ## 4. `checkpoint`
 

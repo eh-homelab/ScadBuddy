@@ -14,7 +14,8 @@ import {
   validateRef,
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
-import { type Endpoint, vetPackage } from './vet.js'
+import { builtInNamed } from './builtins.js'
+import { capProblems, type Endpoint, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
 // harness run (issue #297, "Installing a plugin"; the SDK "loads plugins by
@@ -38,7 +39,10 @@ import { type Endpoint, vetPackage } from './vet.js'
 //
 // Vetting (vet.ts, on top of src/harness/plugins.ts) runs at install, at
 // re-pin and at every load; a package the current rules refuse is not
-// loaded even if it was approved under older ones.
+// loaded even if it was approved under older ones, unless its pin was
+// approved with `allow_refused` (store.ts). Install and re-pin refuse only the
+// fatal problems (vet.ts `fatal`, the egress check, symlinks, the hash); the
+// rest are stored in the review for the admin to allow or not.
 
 export class PackageRefusedError extends Error {
   override name = 'PackageRefusedError'
@@ -47,6 +51,14 @@ export class PackageRefusedError extends Error {
     super(`the plugin package is refused: ${problems.join('; ')}`)
     this.problems = problems
   }
+}
+
+/**
+ * The package names a plugin that ships with the agent (builtins.ts): nothing to
+ * install, and not a refusal. Settings lists the built-in one instead.
+ */
+export class BuiltInPluginError extends Error {
+  override name = 'BuiltInPluginError'
 }
 
 export type InstallerOptions = {
@@ -132,6 +144,8 @@ export class PackageInstaller {
   private readonly leases = new Map<string, number>()
   /** Per package, the cached directory most recently materialised: kept by prune. */
   private readonly current = new Map<string, string>()
+  /** Per cached directory, the built-ins its last vetting found (vet.ts `builtin_tools`). */
+  private readonly builtins = new Map<string, string[]>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -171,9 +185,9 @@ export class PackageInstaller {
     return problems
   }
 
-  private async checkout(url: string, ref: string, into: string): Promise<Checkout> {
+  private async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
     try {
-      return await this.fetcher.checkout(url, ref, into)
+      return await this.fetcher.checkout(url, ref, into, signal)
     } catch (err) {
       if (err instanceof FetchError) throw new PluginError(err.message, 502)
       throw err
@@ -183,7 +197,8 @@ export class PackageInstaller {
   /**
    * Copies the plugin's directory out of a checkout into `dest`, refusing
    * symlinks and submodules, and hashes and vets it. Throws
-   * PackageRefusedError with every problem found.
+   * PackageRefusedError with every fatal problem found; what an admin may
+   * allow is in the review's `refused`.
    */
   private async extractAndVet(checkout: Checkout, subpath: string, dest: string, fallbackName: string) {
     const special = await this.fetcher.specialPaths(checkout, subpath)
@@ -204,21 +219,27 @@ export class PackageInstaller {
       throw err
     }
     const vetting = vetPackage(dest, fallbackName)
-    const problems = [...vetting.problems, ...(await this.endpointProblems(vetting.endpoints))]
-    if (problems.length || !vetting.review) throw new PackageRefusedError(problems)
+    const builtIn = vetting.review && builtInNamed(vetting.review.name)
+    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
+    const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
+    // A fatal problem refuses the package outright, but the refusal names
+    // every problem: the allowable ones are reasons too. Fatal first, so the
+    // cap never hides one.
+    if (fatal.length || !vetting.review) throw new PackageRefusedError(capProblems([...fatal, ...vetting.problems]))
     return { tree, review: vetting.review }
   }
 
   /**
    * Fetches `source`, pins its commit, and vets and hashes the plugin. Nothing
    * is stored: the caller stores the result (unapproved) for the admin to
-   * review. The fetched copy is kept in the cache for the first run.
+   * review. The fetched copy is kept in the cache for the first run. `signal` stops
+   * the fetch (an AgentOperation run that is cancelled).
    */
-  async prepare(source: PackageSource): Promise<PreparedPackage> {
+  async prepare(source: PackageSource, signal?: AbortSignal): Promise<PreparedPackage> {
     await this.egress(source.url, 'source url')
     const tmp = await this.tempDir()
     try {
-      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'))
+      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal)
       let checkout = repo
       let fetchUrl = source.url
       let fetchPath = source.kind === 'git' ? source.path : ''
@@ -236,7 +257,7 @@ export class PackageInstaller {
         fetchPath = target.path
         if (!target.sameRepo) {
           await this.egress(target.url, `marketplace entry "${source.entry}"`)
-          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'))
+          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal)
         }
         fallbackName = source.entry
       } else {
@@ -311,7 +332,7 @@ export class PackageInstaller {
    * (once the turn that loads it has ended): a newer version materialised
    * meanwhile does not delete it; it is pruned when its last lease goes.
    */
-  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void }> {
+  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void; builtinTools: string[] }> {
     const dir = await this.serial(pin.name, async () => {
       const ready = await this.materialiseNow(pin)
       this.leases.set(ready, (this.leases.get(ready) ?? 0) + 1)
@@ -331,7 +352,7 @@ export class PackageInstaller {
       this.leases.delete(dir)
       void this.serial(pin.name, () => this.prune(pin.name)).catch(() => undefined)
     }
-    return { dir, release }
+    return { dir, release, builtinTools: this.builtins.get(dir) ?? [] }
   }
 
   /** Runs `work` after every earlier queued step for package `name`. */
@@ -346,7 +367,19 @@ export class PackageInstaller {
     return next
   }
 
-  private async materialiseNow(pin: PackagePin): Promise<string> {
+  /**
+   * One file of `pin`, for review (#1029, routes/pluginPackages.ts): read from the
+   * copy that hashes to the pin, fetched again when it does not, but never vetted
+   * for loading, since a package the rules refuse is the one that most needs reading.
+   * `rel` must be a path in the pin's file list (the route checks). Runs in the
+   * package's queue, so a prune cannot remove the copy mid-read.
+   */
+  readFile(pin: PackagePin, rel: string): Promise<Buffer> {
+    return this.serial(pin.name, async () => readFile(path.join(await this.verifiedCopy(pin), rel)))
+  }
+
+  /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
+  private async verifiedCopy(pin: PackagePin): Promise<string> {
     const dir = this.cacheDir(pin)
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
@@ -373,13 +406,23 @@ export class PackageInstaller {
         throw new PluginError(`the cached copy of ${pin.name} does not match its pin after fetching`, 502)
       }
     }
-    // Re-vetted at every load: the rules may be stricter than when it was approved.
+    return dir
+  }
+
+  private async materialiseNow(pin: PackagePin): Promise<string> {
+    const dir = await this.verifiedCopy(pin)
+    // Re-vetted at every load: the rules may be stricter than when it was
+    // approved. A pin approved with `allow_refused` skips the allowable ones,
+    // including any a later rule adds: the admin allowed this exact content.
     const vetting = vetPackage(dir, pin.name)
-    const problems = [...vetting.problems, ...(await this.endpointProblems(vetting.endpoints))]
+    // Fatal first, as at install, so the cap never hides one.
+    const problems = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
     if (vetting.review && vetting.review.name !== pin.name) {
       problems.push(`the package names itself "${vetting.review.name}", not "${pin.name}"`)
     }
-    if (problems.length) throw new PackageRefusedError(problems)
+    if (!pin.allowRefused) problems.push(...vetting.problems)
+    if (problems.length) throw new PackageRefusedError(capProblems(problems))
+    this.builtins.set(dir, vetting.review?.builtin_tools ?? [])
     return dir
   }
 
@@ -408,8 +451,25 @@ export class PackageInstaller {
   }
 }
 
+export type LoadedPackage = {
+  name: string
+  contentHash: string
+  dir: string
+  /** Approved with `allow_refused`: loaded as it is. */
+  allowed: boolean
+  /** The Claude Code built-ins an allowed package names (vet.ts `builtin_tools`). */
+  builtinTools: string[]
+}
+
 export type PackagesForRun = {
+  /** Packages that pass the rules, which the harness checks again (harness/plugins.ts). */
   paths: string[]
+  /** Packages approved with `allow_refused`, loaded as they are. */
+  allowedPaths: string[]
+  /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
+  builtinTools: string[]
+  /** Each loaded package with its pin's hash, for a durable turn (temporal/turnPackages.ts). */
+  loaded: LoadedPackage[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */
   release: () => void
@@ -425,12 +485,27 @@ export async function loadPackagesForRun(
   installer: Pick<PackageInstaller, 'acquire'>,
 ): Promise<PackagesForRun> {
   const paths: string[] = []
+  const allowedPaths: string[] = []
+  const builtinTools = new Set<string>()
   const problems: string[] = []
   const releases: (() => void)[] = []
+  const loaded: LoadedPackage[] = []
   for (const pin of await store.enabledPins()) {
+    // A package stored under a built-in's name before builtins.ts (a reserved name
+    // was allowable) would shadow the built-in: never loaded, only removable.
+    if (builtInNamed(pin.name)) {
+      problems.push(`plugin package ${pin.name} was not loaded: "${pin.name}" is built in; remove the installed package`)
+      continue
+    }
     try {
-      const { dir, release } = await installer.acquire(pin)
-      paths.push(dir)
+      const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
+      if (pin.allowRefused) {
+        allowedPaths.push(dir)
+        for (const tool of wanted) builtinTools.add(tool)
+      } else {
+        paths.push(dir)
+      }
+      loaded.push({ name: pin.name, contentHash: pin.contentHash, dir, allowed: pin.allowRefused === true, builtinTools: pin.allowRefused ? [...wanted] : [] })
       releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
@@ -442,5 +517,12 @@ export async function loadPackagesForRun(
       }
     }
   }
-  return { paths, problems, release: () => releases.forEach((r) => r()) }
+  return {
+    paths,
+    allowedPaths,
+    builtinTools: [...builtinTools].sort(),
+    loaded,
+    problems,
+    release: () => releases.forEach((r) => r()),
+  }
 }

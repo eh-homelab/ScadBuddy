@@ -4,14 +4,28 @@ import { useLatest } from '../lib/useLatest'
 import { useSubscription, type RealtimeSignal } from '../lib/realtime'
 import type {
   CatalogueLibrary,
+  DependencyReport,
+  IncludeTarget,
   InvalidLibraryEntry,
   LibraryPinRequest,
   ModelLibrary,
   ModelSummary,
 } from '../api/types'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { LibraryBigIcon } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
 
 interface Props {
   slug: string
@@ -53,9 +67,29 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // or by a pin, would otherwise land late and put back what it replaced.
   const generation = useRef(0)
 
-  function showModel(model: ModelSummary) {
-    setPins(model.libraries ?? [])
-    setInvalid(model.invalid_libraries ?? [])
+  // #1285 — bumped when this model's pins change: the includes are checked again. Every
+  // `libraries` signal reads the model again, including signals for other models' pins,
+  // so a read that finds the same pins does not bump it (#2193).
+  const [pinsChanged, setPinsChanged] = useState(0)
+  const pinsSeen = useRef<string | null>(null)
+  // Bumped by a `libraries` signal whose read finds this model's pins unchanged: some
+  // other model's pins changed, and every model's pins feed an unresolved include's
+  // suggestion (backend `library/includes.py`), so those are checked again (#2219).
+  const [othersPinned, setOthersPinned] = useState(0)
+
+  /** Shows `model`'s pins, and says whether they differ from the last ones shown. */
+  function showModel(model: ModelSummary): boolean {
+    const libraries = model.libraries ?? []
+    const invalidLibraries = model.invalid_libraries ?? []
+    setPins(libraries)
+    setInvalid(invalidLibraries)
+    // Compared as JSON, so this rests on the backend serialising each pin's fields in one
+    // order, as Pydantic does for a model: a reordering alone would read as a change.
+    const seen = JSON.stringify([libraries, invalidLibraries])
+    if (seen === pinsSeen.current) return false
+    pinsSeen.current = seen
+    setPinsChanged((n) => n + 1)
+    return true
   }
 
   useEffect(() => {
@@ -101,7 +135,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
       if (generation.current !== started) return
-      showModel(model)
+      if (!showModel(model)) setOthersPinned((n) => n + 1)
       setCatalogue(libraries)
     } catch (caught) {
       // Otherwise the dialog keeps what it shows; the next change or reopen reads again.
@@ -157,49 +191,46 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => void show()}
-        className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-      >
-        Libraries
+      <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void show()}>
+        <LibraryBigIcon /> Libraries
         {pins.length + invalid.length > 0 && (
-          <span className={`sb-num ml-1.5 ${invalid.length > 0 ? 'text-warn' : 'text-faint'}`}>
+          <Badge variant={invalid.length > 0 ? 'destructive' : 'secondary'} className="sb-num">
             {pins.length + invalid.length}
-          </span>
+          </Badge>
         )}
-      </button>
-      <Dialog
-        open={open}
-        title={`Libraries for ${name}`}
-        description="Adding a library clones it at a tag or branch and pins the commit in this model's history. The model renders with only the libraries pinned here."
-        onClose={close}
-        footer={
-          <Button variant="ghost" onClick={close} disabled={running > 0}>
-            Done
-          </Button>
-        }
-      >
+      </Button>
+      <Dialog open={open} onOpenChange={(next) => !next && close()}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{`Libraries for ${name}`}</DialogTitle>
+          <DialogDescription>
+            Adding a library clones it at a tag or branch and pins the commit in this model&apos;s history. The model
+            renders with only the libraries pinned here.
+          </DialogDescription>
+        </DialogHeader>
         {error ? (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         ) : catalogue === null ? (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading libraries
-          </p>
+          <div role="status" aria-label="Loading libraries" className="space-y-2">
+            <span className="sr-only">Loading libraries</span>
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-14 w-full" />
+            <Skeleton className="h-14 w-full" />
+          </div>
         ) : (
           <div className="space-y-5">
             <section>
-              <h3 className="text-[13px] font-medium">Pinned</h3>
+              <h3 className="text-sm font-medium">Pinned</h3>
               {pins.length + invalid.length === 0 ? (
-                <p className="mt-1 text-[12px] text-muted">
+                <p className="mt-1 text-xs text-muted-foreground">
                   None yet. Add one from the catalogue or by URL.
                 </p>
               ) : (
                 <ul
                   aria-label="Pinned libraries"
-                  className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+                  className="mt-2 divide-y rounded-xl border"
                 >
                   {invalid.map((entry, index) => (
                     <InvalidRow
@@ -221,10 +252,10 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
             {offered.length > 0 && (
               <section>
-                <h3 className="text-[13px] font-medium">Add from catalogue</h3>
+                <h3 className="text-sm font-medium">Add from catalogue</h3>
                 <ul
                   aria-label="Catalogue"
-                  className="mt-2 divide-y divide-line rounded-[6px] border border-line"
+                  className="mt-2 divide-y rounded-xl border"
                 >
                   {offered.map((entry) => (
                     <CatalogueRow key={entry.name} slug={slug} entry={entry} apply={apply} />
@@ -233,9 +264,17 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
               </section>
             )}
 
+            <Includes slug={slug} checkAgain={pinsChanged} othersPinned={othersPinned} apply={apply} />
+
             <AddByUrl slug={slug} apply={apply} />
           </div>
         )}
+        <DialogFooter>
+          <Button variant="outline" onClick={close} disabled={running > 0}>
+            Done
+          </Button>
+        </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )
@@ -265,7 +304,7 @@ function useAction(apply: Apply) {
 
 function RowError({ error }: { error: string | null }) {
   return error ? (
-    <p role="alert" className="mt-2 text-[12px] text-warn">
+    <p role="alert" className="mt-2 text-xs text-destructive">
       {error}
     </p>
   ) : null
@@ -275,14 +314,14 @@ function RefInput({ value, onChange }: { value: string; onChange: (ref: string) 
   const id = useId()
   return (
     <>
-      <label htmlFor={id} className="sr-only">
+      <Label htmlFor={id} className="sr-only">
         Ref
-      </label>
-      <input
+      </Label>
+      <Input
         id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="sb-field sb-num h-7 w-28 text-[12px]"
+        className="sb-num h-7 w-28 text-xs"
       />
     </>
   )
@@ -296,8 +335,8 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
     <li aria-label={pin.name} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="text-[13px] font-medium">{pin.name}</span>
-          <p className="mt-0.5 truncate text-[12px] text-muted">
+          <span className="text-sm font-medium">{pin.name}</span>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
             Pinned to <span className="sb-num">{pin.ref}</span> at{' '}
             <span className="sb-num">{pin.commit.slice(0, 7)}</span>
           </p>
@@ -305,6 +344,7 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
         <div className="flex shrink-0 items-center gap-2">
           <RefInput value={ref} onChange={setRef} />
           <Button
+            variant="outline"
             size="sm"
             onClick={() =>
               void run('update', () => api.pinModelLibrary(slug, pin.name, { url: pin.url, ref }))
@@ -352,11 +392,11 @@ function InvalidRow({
     <li aria-label={`Invalid entry ${position}: ${name ?? 'unnamed'}`} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
-          <span className="text-[13px] font-medium">{name ?? 'Unnamed entry'}</span>
-          <span className="ml-2 text-[11px] text-warn">Invalid</span>
-          <p className="mt-0.5 text-[12px] text-muted">{entry.problem}</p>
+          <span className="text-sm font-medium">{name ?? 'Unnamed entry'}</span>
+          <Badge variant="destructive" className="ml-2">Invalid</Badge>
+          <p className="mt-0.5 text-xs text-muted-foreground">{entry.problem}</p>
           {name === null && (
-            <p className="mt-0.5 text-[12px] text-muted">
+            <p className="mt-0.5 text-xs text-muted-foreground">
               Remove it from this model's model.json to render the model.
             </p>
           )}
@@ -407,18 +447,19 @@ function CatalogueRow({
               href={entry.homepage}
               target="_blank"
               rel="noreferrer"
-              className="text-[13px] font-medium hover:text-accent"
+              className="text-sm font-medium hover:text-primary"
             >
               {entry.name}
             </a>
           ) : (
-            <span className="text-[13px] font-medium">{entry.name}</span>
+            <span className="text-sm font-medium">{entry.name}</span>
           )}
-          {entry.licence && <span className="ml-2 text-[11px] text-faint">{entry.licence}</span>}
+          {entry.licence && <Badge variant="outline" className="ml-2">{entry.licence}</Badge>}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <RefInput value={ref} onChange={setRef} />
           <Button
+            variant="outline"
             size="sm"
             onClick={() =>
               void run('add', () => api.pinModelLibrary(slug, entry.name, { url: entry.url, ref }))
@@ -455,22 +496,20 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
 
   const field = (key: keyof Draft, label: string, placeholder: string) => (
     <div>
-      <label htmlFor={`${id}-${key}`} className="block text-[13px]">
-        {label}
-      </label>
-      <input
+      <Label htmlFor={`${id}-${key}`}>{label}</Label>
+      <Input
         id={`${id}-${key}`}
         value={draft[key] ?? ''}
         placeholder={placeholder}
         onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
-        className="sb-field sb-num mt-1.5"
+        className="sb-num mt-2"
       />
     </div>
   )
 
   return (
-    <section className="rounded-[6px] border border-line">
-      <h3 className="border-b border-line px-3 py-2 text-[13px] font-medium">Add by URL</h3>
+    <section className="rounded-xl border">
+      <h3 className="border-b px-3 py-2 text-sm font-medium">Add by URL</h3>
       <form aria-label="Add by URL" onSubmit={(event) => void submit(event)} className="space-y-3 p-3">
         {field('name', 'Name', 'The directory a model uses, e.g. threads')}
         {field('url', 'Git URL', 'https://github.com/owner/repo.git')}
@@ -478,7 +517,6 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
         <div className="flex items-center gap-2">
           <Button
             type="submit"
-            variant="primary"
             disabled={busy !== null || !draft.name || !draft.url || !draft.ref}
             aria-busy={busy !== null}
           >
@@ -486,12 +524,247 @@ function AddByUrl({ slug, apply }: { slug: string; apply: Apply }) {
             Add
           </Button>
           {error && (
-            <p role="alert" className="text-[12px] text-warn">
+            <p role="alert" className="text-xs text-destructive">
               {error}
             </p>
           )}
         </div>
       </form>
     </section>
+  )
+}
+
+/**
+ * #1285 — the dependency check (`POST /models/{slug}/dependencies`): the saved source's
+ * includes that resolve nowhere, with the library that would provide each, and the
+ * `font = "…"` families that are not installed. Checked again whenever the pins change,
+ * and when another model's do while an include is unresolved: its suggestion may change.
+ */
+function Includes({
+  slug,
+  checkAgain,
+  othersPinned,
+  apply,
+}: {
+  slug: string
+  checkAgain: number
+  othersPinned: number
+  apply: Apply
+}) {
+  const [report, setReport] = useState<DependencyReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  // Bumped by a font install: the families it adds resolve now.
+  const [installed, setInstalled] = useState(0)
+  // A check is running. A re-check keeps the last report on screen until it answers, so
+  // this is what says that report is about to be replaced (#2193).
+  const [checking, setChecking] = useState(true)
+  // Another model's pins changed: checked again only when an include is unresolved, as
+  // a resolved one does not depend on them (#2219).
+  const [othersSeen, setOthersSeen] = useState(othersPinned)
+  const [suggestionsStale, setSuggestionsStale] = useState(0)
+  if (othersPinned !== othersSeen) {
+    setOthersSeen(othersPinned)
+    if (report?.includes?.some((include) => include.status === 'unresolved')) setSuggestionsStale((n) => n + 1)
+  }
+
+  useEffect(() => {
+    let live = true
+    setError(null)
+    setChecking(true)
+    api
+      .checkDependencies(slug)
+      .then((answer) => {
+        if (live) setReport(answer)
+      })
+      .catch((caught: unknown) => {
+        if (live) setError(message(caught))
+      })
+      .finally(() => {
+        if (live) setChecking(false)
+      })
+    return () => {
+      live = false
+    }
+  }, [slug, checkAgain, installed, suggestionsStale])
+
+  const unresolved = report?.includes?.filter((include) => include.status === 'unresolved') ?? []
+  const missingFonts = [...new Set((report?.fonts ?? []).flatMap((use) => use.missing))]
+  const missingCheckouts = report?.missing_checkouts ?? []
+
+  return (
+    <section aria-label="Includes" aria-busy={checking}>
+      <h3 className="flex items-center gap-2 text-sm font-medium">
+        Includes
+        {checking && report !== null && (
+          <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground">
+            <Spinner /> Checking again
+          </span>
+        )}
+      </h3>
+      {error ? (
+        <p role="alert" className="mt-1 text-xs text-destructive">
+          Could not check the includes: {error}
+        </p>
+      ) : report === null ? (
+        <div role="status" aria-label="Checking includes" className="mt-2 space-y-1.5">
+          <span className="sr-only">Checking includes</span>
+          <Skeleton className="h-3 w-3/4" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      ) : (
+        <>
+          {unresolved.length === 0 && missingFonts.length === 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {(report.includes ?? []).length === 0
+                ? 'The source has no include or use'
+                : 'Every include and use resolves'}
+              {report.fonts_checked && (report.fonts ?? []).length > 0
+                ? ', and every font it names is installed.'
+                : '.'}
+            </p>
+          )}
+          {unresolved.length + missingFonts.length > 0 && (
+            <ul
+              aria-label="Unresolved"
+              className="mt-2 divide-y rounded-xl border"
+            >
+              {unresolved.map((include) => (
+                <UnresolvedRow
+                  key={`${include.file}:${include.line}:${include.target}`}
+                  slug={slug}
+                  include={include}
+                  apply={apply}
+                />
+              ))}
+              {missingFonts.map((family) => (
+                <MissingFontRow
+                  key={family}
+                  family={family}
+                  onInstalled={() => setInstalled((n) => n + 1)}
+                />
+              ))}
+            </ul>
+          )}
+          {missingCheckouts.length > 0 && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Not on the volume yet: {missingCheckouts.join(', ')}. The next render clones{' '}
+              {missingCheckouts.length === 1 ? 'it' : 'them'} again; until then nothing inside{' '}
+              {missingCheckouts.length === 1 ? 'it' : 'them'} can be checked.
+            </p>
+          )}
+          {!report.fonts_checked && (report.fonts ?? []).length > 0 && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              The fonts were not checked: the server could not ask fontconfig.
+            </p>
+          )}
+          {report.truncated && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              The check stopped short: this model has more to follow than it reads, so not
+              everything is listed.
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function UnresolvedRow({
+  slug,
+  include,
+  apply,
+}: {
+  slug: string
+  include: IncludeTarget
+  apply: Apply
+}) {
+  const { busy, error, run } = useAction(apply)
+  const { suggestion } = include
+
+  return (
+    <li aria-label={`<${include.target}>`} className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <span className="sb-num text-sm">
+            {include.kind} &lt;{include.target}&gt;
+          </span>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            <span className="sb-num">
+              {include.file}:{include.line}
+            </span>
+            {include.reason ? ` — ${include.reason}` : ''}
+          </p>
+          {suggestion && (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {suggestion.source === 'catalogue'
+                ? `${suggestion.name} from the catalogue provides it`
+                : `${suggestion.name}, as ${suggestion.pinned_by ?? 'another model'} pins it, would provide it`}
+              {suggestion.has_file === false && ' (its checkout here has no such file)'}.
+            </p>
+          )}
+        </div>
+        {suggestion && (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                void run('pin', () =>
+                  api.pinModelLibrary(slug, suggestion.name, {
+                    url: suggestion.url,
+                    ref: suggestion.ref,
+                  }),
+                )
+              }
+              disabled={busy !== null}
+              aria-busy={busy !== null}
+            >
+              {busy && <Spinner />}
+              Pin {suggestion.name}
+            </Button>
+          </div>
+        )}
+      </div>
+      <RowError error={error} />
+    </li>
+  )
+}
+
+function MissingFontRow({ family, onInstalled }: { family: string; onInstalled: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function install() {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.installFont(family)
+      onInstalled()
+    } catch (caught) {
+      setError(message(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li aria-label={`Font ${family}`} className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <span className="text-sm font-medium">{family}</span>
+          <Badge variant="destructive" className="ml-2">Not installed</Badge>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            A render draws this font in the default font instead.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => void install()} disabled={busy} aria-busy={busy}>
+            {busy && <Spinner />}
+            Install {family}
+          </Button>
+        </div>
+      </div>
+      <RowError error={error} />
+    </li>
   )
 }

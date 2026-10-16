@@ -56,7 +56,9 @@ test.describe('print dialog', () => {
 
     // The suggestion for slot 2 is on a shelf, so it comes with a "load this in" advisory.
     await expect(dialog.getByTestId('filament-warnings-2')).toContainText('Load Elegoo')
-    // Swap it for the pink already in the AMS-HT.
+    // Swap it for the pink already in the AMS-HT: the slot shows only its spool until
+    // Change opens the list.
+    await dialog.getByTestId('change-slot-2').click()
     await slotTwo.getByTestId('spool-22').check()
     await expect(dialog.getByTestId('filament-warnings-2')).toBeHidden()
 
@@ -64,7 +66,7 @@ test.describe('print dialog', () => {
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
-  test('lists the checks with their sources, suppresses one, and still prints', async ({ page }) => {
+  test('lists the checks, previews a fix, suppresses one, and still prints', async ({ page }) => {
     const dialog = await openDialog(page)
     const checks = dialog.getByTestId('print-checks')
     await expect(checks.getByTestId('checks-headline')).toHaveText('2 suggestions')
@@ -76,6 +78,14 @@ test.describe('print dialog', () => {
       name: 'Bambu Studio PrintConfig.cpp: support_threshold_angle',
     })
     await expect(source).toHaveAttribute('target', '_blank')
+
+    // Its fix previews as a diff; every bundled fix still waits on a §3.2 item, so no Apply.
+    await overhang.getByRole('button', { name: 'Preview fix: Turn on supports' }).click()
+    const fix = overhang.getByTestId('fix-preview-enable-support')
+    await expect(fix.getByTestId('change-enable_support')).toContainText('Derived process preset')
+    await expect(fix.getByTestId('fix-blockers')).toContainText('/local-presets/')
+    await expect(fix.getByRole('button', { name: 'Apply' })).toBeDisabled()
+    await fix.getByRole('button', { name: 'Close' }).click()
 
     // Suppressed at a scope, with the reason a suppression requires.
     const edges = checks.getByTestId('diagnostic-SB1002:part-2')
@@ -104,12 +114,127 @@ test.describe('print dialog', () => {
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await dialog.getByLabel('Process').selectOption('0.24mm Standard @BBL H2C')
     await dialog.getByLabel('Preset for slot 1').selectOption({ label: 'Bambu ABS @BBL H2C' })
-    // High Flow is offered per side, and says it slices as Standard.
+    // High Flow is offered per side, and sliced as High Flow (#484): nothing says otherwise.
     await dialog.getByRole('radio', { name: 'Left High Flow' }).check()
-    await expect(dialog.getByText(/High Flow presets aren't supported/)).toBeVisible()
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toBeVisible()
-    await expect(dialog.getByTestId('run-warnings')).toContainText('slices this as Standard flow')
+    await expect(dialog.getByText(/slices this as Standard flow/)).toHaveCount(0)
+  })
+
+  // #3628 — a multi-colour print with the prime tower on and "No sparse layers".
+  test('turns the prime tower on with No sparse layers in Advanced, and prints with them', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await expect(dialog.getByLabel('Prime tower')).toHaveCount(0)
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    const tower = dialog.getByLabel('Prime tower')
+    await tower.selectOption('off')
+    await expect(dialog.getByRole('checkbox', { name: /No sparse layers/ })).toHaveCount(0)
+    await expect(dialog.getByText(/Without a tower/)).toBeVisible()
+    await tower.selectOption('on')
+    const noSparse = dialog.getByRole('checkbox', { name: /No sparse layers/ })
+    await noSparse.uncheck()
+    await noSparse.check()
+
+    const run = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/run'))
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    expect((await run).postDataJSON()).toMatchObject({
+      prime_tower: { enabled: true, no_sparse_layers: true },
+    })
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
+  // #1723 — at phone width, Advanced on and then off again must leave every control
+  // reachable: nothing past the screen's edge, and Print on screen, with the choices kept.
+  test('stays usable at phone width with Advanced on, and after it is switched off', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await dialog.getByTestId('change-slot-1').click()
+    await page.setViewportSize({ width: 390, height: 844 })
+    const fits = async (state: string) => {
+      const scrollWidth = Number(await page.evaluate('document.documentElement.scrollWidth'))
+      expect(scrollWidth, `${state}: nothing scrolls sideways`).toBeLessThanOrEqual(390)
+      const panel = (await dialog.boundingBox())!
+      expect(panel.y, `${state}: the title is on screen`).toBeGreaterThanOrEqual(0)
+      expect(panel.y + panel.height, `${state}: the dialog ends on screen`).toBeLessThanOrEqual(844)
+      await expect(dialog.getByRole('button', { name: 'Print', exact: true })).toBeInViewport({ ratio: 1 })
+    }
+    await fits('Advanced off')
+    // Headless Chromium has no toolbars, so dvh and vh measure the same here: pin the unit.
+    const cap = await dialog.evaluate((panel) => panel.className)
+    expect(cap, 'bounded by the visible height').toContain('100dvh')
+    const chosen = dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })
+    const spool = await chosen.getAttribute('value')
+    expect(spool, 'a spool is chosen for slot 1').not.toBeNull()
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toBeVisible()
+    await fits('Advanced on')
+
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
+    await fits('Advanced off again')
+    await expect(dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })).toHaveAttribute(
+      'value',
+      spool!,
+    )
+  })
+
+  // #1723 — the plate in 3D: Colors by default, Layers on the switch, over the dialog; on a
+  // phone it covers the screen, and closing it leaves every choice as it was.
+  test('previews the plate in 3D over the dialog at phone width, and keeps the choices', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const spool = await dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true }).getAttribute('value')
+    expect(spool, 'a spool is chosen for slot 1').not.toBeNull()
+
+    await dialog.getByTestId('plate-preview-open').click()
+    const preview = page.getByRole('dialog', { name: /in 3D$/ })
+    await expect(preview.getByRole('radio', { name: 'Colors' })).toHaveAttribute('aria-checked', 'true')
+    const canvas = preview.getByTestId('plate-scene').locator('canvas')
+    await expect(canvas).toBeVisible()
+    const box = (await preview.boundingBox())!
+    expect(box.x, 'the preview fits the screen').toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(390)
+    expect(box.y + box.height).toBeLessThanOrEqual(844)
+
+    await preview.getByRole('radio', { name: 'Layers' }).click()
+    const slider = preview.getByRole('slider', { name: 'Layer height' })
+    await expect(slider).toBeEnabled()
+    await slider.fill('2')
+    await expect(preview.getByText(/^Up to 2\.00 of /)).toBeVisible()
+
+    await preview.getByRole('button', { name: 'Close' }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(dialog.getByTestId('filament-slot-1').getByRole('radio', { checked: true })).toHaveAttribute(
+      'value',
+      spool!,
+    )
+    await expect(dialog.getByRole('button', { name: 'Print', exact: true })).toBeInViewport({ ratio: 1 })
+  })
+
+  // #944 — at phone width every slot's fieldset and spool rows ran past the screen's
+  // right edge, cutting off the grams, the "rests on" badge and the "prints in" colour.
+  test('keeps the slots and spool rows inside the screen at phone width', async ({ page }) => {
+    // Opened at desktop width: reaching the Print button on a phone is #362's problem.
+    const dialog = await openDialog(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const right = 390
+    for (const slot of await dialog.locator('[data-testid^="filament-slot-"]').all()) {
+      const box = (await slot.boundingBox())!
+      expect(box.x + box.width, 'the slot fits the screen').toBeLessThanOrEqual(right)
+    }
+    const printsIn = dialog.getByTestId('slot-prints-in-1')
+    const printsInBox = (await printsIn.boundingBox())!
+    expect(printsInBox.x + printsInBox.width, '"prints in" fits').toBeLessThanOrEqual(right)
+    const rows = dialog.getByTestId('filament-slot-1').getByRole('listitem')
+    for (const row of await rows.all()) {
+      for (const part of await row.locator('label > *').all()) {
+        const box = await part.boundingBox()
+        if (!box) continue
+        expect(box.x + box.width, `${await part.textContent()} fits`).toBeLessThanOrEqual(right)
+      }
+    }
   })
 })

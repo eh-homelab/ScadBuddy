@@ -1,5 +1,20 @@
 # msw's install script only copies its browser service worker into a web app's
 # public directory (package.json "msw.workerDirectory"). The agent uses msw from
 # node, in vitest (msw/node), and has no such directory, so the script is not run.
+# protobufjs (via @opentelemetry/sdk-node's gRPC exporters, #988, and @temporalio/worker,
+# #1055) runs a CLI version check on install; the agent never constructs a gRPC exporter.
+# @swc/core (via @temporalio/worker) only checks that its platform binding loaded (an
+# optional dependency, @swc/core-<platform>, ships it). Neither builds anything.
 allowBuilds:
+  '@swc/core': false
   msw: false
+  protobufjs: false
+# #3294: postgres.js 3.4.9 writes a dead transaction's ROLLBACK/COMMIT on a closed
+# connection and throws uncaught; the patch fails that query instead. It covers only
+# a connection with no socket: if index.js onclose has already reconnected the same
+# Connection (queries were queued) when the callback settles, the stray ROLLBACK or
+# COMMIT goes out on the new session, as it did before the patch. The key pins the
+# exact version, so a postgres bump fails install on the unused patch: check whether
+# upstream fixed begin's scope, then port the patch or drop it.
+patchedDependencies:
+  postgres@3.4.9: patches/postgres@3.4.9.patch

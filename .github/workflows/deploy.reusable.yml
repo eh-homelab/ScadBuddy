@@ -11,14 +11,25 @@ name: Deploy (reusable)
 #      CI, so the required checks that gate auto-merge would never report.
 #   2. Rewrite applications/scadbuddy/scadbuddy.yaml (the API) and, once it
 #      exists in clusters, applications/scadbuddy/scadbuddy-render.yaml (the
-#      render worker, same image; #547): in each, the image line to
+#      render worker, same image; #547), scadbuddy-print.yaml (the print
+#      worker, same image; #1060) and scadbuddy-projects.yaml (the flow runs'
+#      worker, same image; #1057): in each, the image line to
 #      `ghcr.io/eh-homelab/scadbuddy:<version>@sha256:<digest>` and the three
 #      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
 #      The agent sidecar's line in the API manifest (#738) is pinned to
 #      `ghcr.io/eh-homelab/scadbuddy-agent:<version>@sha256:<its digest>`, the
 #      same build's agent image, so the two containers never drift apart.
+#      Once clusters runs it, the durable sessions worker's line (#1056) is
+#      pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`,
+#      in scadbuddy-agent-durable.yaml (its own Deployment) or, before that
+#      file exists, in the API's manifest (where it first ran as a sidecar).
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
+#      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
+#      resource line in clusters/prod/scadbuddy/kustomization.yaml that pulls
+#      in this repo's deploy/grafana dashboard (#988), to the same `revision`,
+#      so the dashboard shown is the one written for the build that serves.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
 #      supersedes an older open one: it closes that PR and replaces the branch.
@@ -77,18 +88,31 @@ env:
   # The render worker's Deployment (#547, clusters#1454): same image, same pin.
   # Optional until that file lands in clusters; pinned whenever it exists.
   MANIFEST_WORKER: applications/scadbuddy/scadbuddy-render.yaml
+  # The print worker's Deployment (#1060): same image, same pin.
+  MANIFEST_PRINT: applications/scadbuddy/scadbuddy-print.yaml
+  # The flow runs' worker's Deployment (#1057, `--queue projects`): same image, same pin.
+  MANIFEST_PROJECTS: applications/scadbuddy/scadbuddy-projects.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
   # tags, and pinned in $MANIFEST beside the API (#738).
   AGENT_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent
+  # The durable sessions worker (#1056), same run, same tags, pinned once
+  # clusters runs it: in its own Deployment's file, or in $MANIFEST while it
+  # is still a sidecar there. Never both.
+  AGENT_DURABLE_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent-durable
+  MANIFEST_AGENT_DURABLE: applications/scadbuddy/scadbuddy-agent-durable.yaml
+  # The overlay that pulls in deploy/grafana as a remote kustomize resource,
+  # and that resource without its `?ref=` (spec 2026-10-01 §7, #988).
+  KUSTOMIZATION: clusters/prod/scadbuddy/kustomization.yaml
+  DASHBOARD_RESOURCE: https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 
 jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    # The agent wait below can take up to 10 of these.
-    timeout-minutes: 25
+    # The agent wait below can take up to 10 of these, the agent-durable one 20.
+    timeout-minutes: 45
     # The one place the two callers can race: this job closes the previous
     # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
     # Job-level, so only these few seconds serialise — deploy-release's image
@@ -181,6 +205,65 @@ jobs:
           fetch-depth: 1
           path: clusters
 
+      # The durable sessions worker (#1056), resolved like the agent, but only
+      # when a manifest runs it: one without its line needs no image,
+      # so a build from before 5e, or a still-private package, costs no wait.
+      # Its job builds the agent-build chain plus the stage and can finish well
+      # after the API's, so it waits up to 20 minutes. The pin step fails when
+      # the manifest names the image and this found nothing.
+      - name: Resolve the agent-durable image
+        id: agent-durable
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -sqE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "clusters/${MANIFEST}" "clusters/${MANIFEST_AGENT_DURABLE}"; then
+            echo "neither clusters/${MANIFEST} nor clusters/${MANIFEST_AGENT_DURABLE} runs agent-durable; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${AGENT_DURABLE_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 120); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest')"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # The dashboard's ref= may only move to a revision that has the
+      # kustomization it points at: one without it (a rollback to a build from
+      # before #988) would fail the whole overlay's sync, the images included.
+      # Only a 404 means "absent". Any other failure is retried with a
+      # backoff, and one that persists is `unknown`: the edit step fails on it
+      # only when the overlay pins the dashboard, so until then a GitHub API
+      # error cannot stop an image deploy (#1179). deploy-pin.test.sh runs this.
+      - name: Check deploy/grafana exists at the revision
+        id: grafana
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if err=$(gh api "repos/${GITHUB_REPOSITORY}/contents/deploy/grafana/kustomization.yaml?ref=${REVISION}" --silent 2>&1); then
+              echo "present=true" >> "$GITHUB_OUTPUT"; exit 0
+            elif grep -q 'HTTP 404' <<< "$err"; then
+              echo "present=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "attempt ${attempt}: ${err}"
+            [ "$attempt" -eq 5 ] || sleep $((attempt * 10))
+          done
+          echo "::warning::could not tell whether ${REVISION} has deploy/grafana: ${err}"
+          echo "present=unknown" >> "$GITHUB_OUTPUT"
+
       # sed against anchored lines rather than a YAML rewrite: yq would
       # reflow the whole document and bury the one-line change in noise. Each
       # target must match exactly once, before and after, or the edit aborts.
@@ -190,9 +273,11 @@ jobs:
         env:
           DIGEST: ${{ inputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
+          AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
+          DASHBOARD_AT_REVISION: ${{ steps.grafana.outputs.present }}
         run: |
           set -euo pipefail
           expect_one() { # manifest pattern description
@@ -270,9 +355,163 @@ jobs:
             expect_one "$target" "^\s*image: ${AGENT_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DIGEST}\$" "pinned agent image"
           }
 
+          # The durable sessions worker's line (#1056). Optional until clusters
+          # runs it: a manifest with no line deploys without it. A manifest that
+          # names it gets this build's image or fails, never a stale pin beside
+          # a new agent (the two share the tool manifest). Sets $durable to
+          # `pinned` when it rewrote the line.
+          durable=none
+          pin_agent_durable() { # manifest
+            local target=$1 n
+            local durable_line="^(\s*)image: ${AGENT_DURABLE_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            n=$(grep -cE "$durable_line" "$target" || true)
+            if [ "$n" -eq 0 ]; then
+              # An image line for it that the pattern misses (no tag or
+              # digest, a trailing comment) is a near miss, not "not run yet".
+              if grep -qE "^\s*(- )?image:.*${AGENT_DURABLE_IMAGE//./\\.}" "$target"; then
+                echo "::error file=$target::has an image line for ${AGENT_DURABLE_IMAGE} that is not exactly 'image: ${AGENT_DURABLE_IMAGE}:<tag>@<digest>'"; exit 1
+              fi
+              echo "::notice::${target} does not run agent-durable yet; not pinning it"
+              return 0
+            fi
+            expect_one "$target" "$durable_line" "agent-durable image"
+            [[ "${AGENT_DURABLE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error file=$target::runs ${AGENT_DURABLE_IMAGE}, but no image was published for ${VERSION}"; exit 1; }
+            sed -i -E "s|${durable_line}|\1image: ${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${AGENT_DURABLE_IMAGE//./\\.}:${VERSION//./\\.}@${AGENT_DURABLE_DIGEST}\$" "pinned agent-durable image"
+            durable=pinned
+          }
+
+          # True when transformers[] holds a NamespaceTransformer with
+          # `unsetOnly` the YAML boolean true: as a map, as an inline YAML
+          # string, or as a relative path (resolved against the overlay's
+          # directory) to a file that parses to the same or to a directory
+          # whose kustomization lists one in its resources (#1210).
+          ns_check='select(.kind == "NamespaceTransformer" and (.unsetOnly | tag) == "!!bool" and .unsetOnly == true)'
+          ns_path_ok() { # path
+            local path=$1 k r
+            if [ -f "$path" ]; then
+              yq -e "$ns_check" "$path" > /dev/null 2>&1; return
+            fi
+            for k in kustomization.yaml kustomization.yml Kustomization; do
+              [ -f "$path/$k" ] || continue
+              while IFS= read -r r; do
+                case "$r" in /* | *..* | *:*) continue ;; esac
+                ns_path_ok "$path/$r" && return 0
+              done < <(yq '(.resources // [])[] | select(tag == "!!str")' "$path/$k" 2>/dev/null)
+              return 1
+            done
+            return 1
+          }
+          ns_transformer_ok() { # kustomization
+            local target=$1 dir entry s
+            dir=$(dirname "$target")
+            while IFS= read -r entry; do
+              if printf '%s\n' "$entry" | yq -p=json -e 'tag == "!!map"' > /dev/null 2>&1; then
+                printf '%s\n' "$entry" | yq -p=json -e "$ns_check" > /dev/null 2>&1 && return 0
+              else
+                s=$(printf '%s\n' "$entry" | yq -p=json '.' 2>/dev/null) || continue
+                case "$s" in
+                  *$'\n'* | *:* | /* | *..*) printf '%s\n' "$s" | yq -e "$ns_check" > /dev/null 2>&1 && return 0 ;;
+                  *) ns_path_ok "$dir/$s" && return 0 ;;
+                esac
+              fi
+            done < <(yq -o=json -I=0 '(.transformers // [])[]' "$target" 2>/dev/null)
+            return 1
+          }
+
+          # The dashboard's `ref=` (#988, spec 2026-10-01 §7). Optional, unlike
+          # the agent: until clusters#1596 Phase 5 adds the line, the overlay
+          # does not mention deploy/grafana at all and the images deploy alone.
+          # A line that mentions it but does not match the anchor exactly (a
+          # short SHA, a branch, a trailing comment, other casing or spacing,
+          # commented out) is an error, never "not configured": read that way,
+          # the dashboard would stay pinned to an old build without a word.
+          # Sets $dashboard to `pinned` when it rewrote the line; a global, not
+          # a printed value, so its ::error lines reach the log instead of a
+          # command substitution.
+          #
+          # The one suffix allowed after the SHA is `&timeout=<n>s|m|h`:
+          # kustomize's per-git-command timeout, 27s by default, which
+          # `git checkout FETCH_HEAD` of this repo (its LFS test fixtures) now
+          # outlasts, failing clusters' CI and ArgoCD's render of the overlay.
+          # Any other parameter or shape is still a near miss. The rewrite
+          # moves only the SHA and carries the suffix over byte for byte.
+          dashboard=none
+          pin_dashboard() { # kustomization
+            local target=$1 n mentions suffix
+            local suffix_re='(&timeout=[0-9]+[smh])?'
+            local line="^(\s*)- ${DASHBOARD_RESOURCE//./\\.}\?ref=[0-9a-f]{40}${suffix_re}\$"
+            [ -f "$target" ] || { echo "::error::${target} is not in clusters; cannot tell whether it pins the dashboard"; exit 1; }
+            # Only an entry of `.resources[]` is the pin: the same text under
+            # transformers: or elsewhere is a mention, which the count below
+            # turns into the near-miss error.
+            n=$(DRE="^${DASHBOARD_RESOURCE//./\\.}\\?ref=[0-9a-f]{40}${suffix_re}\$" yq '[(.resources // [])[] | select(tag == "!!str") | select(test(strenv(DRE)))] | length' "$target")
+            # YAML ignores a trailing comment and extra spacing, but the
+            # rewrite below is by line: an entry that is not also exactly the
+            # line is a near miss, not a pin.
+            [ "$n" -eq 0 ] || [ "$(grep -cE "$line" "$target" || true)" -eq "$n" ] || n=0
+            mentions=$(grep -ciE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' "$target" || true)
+            if [ "$n" -eq 0 ]; then
+              if [ "$mentions" -gt 0 ]; then
+                echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>[&timeout=<n>s|m|h]'"; exit 1
+              fi
+              echo "::notice::${target} has no dashboard pin yet (clusters#1596 Phase 5); pinning the images only"
+              return 0
+            fi
+            [ "$n" -eq 1 ] || { echo "::error file=$target::expected at most one dashboard line, found $n"; exit 1; }
+            # A second, unpinned mention beside the exact line is a near miss too.
+            if [ "$mentions" -ne "$n" ]; then
+              echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana $mentions times but only $n line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>[&timeout=<n>s|m|h]'"; exit 1
+            fi
+            # A top-level namespace: would move the ConfigMap out of
+            # cattle-dashboards, where the sidecar never sees it.
+            if yq -e '.namespace' "$target" > /dev/null 2>&1; then
+              echo "::error file=$target::has a top-level namespace:, which moves the dashboard ConfigMap out of cattle-dashboards; use a NamespaceTransformer with unsetOnly: true (clusters#1596 Phase 5)"; exit 1
+            fi
+            if ! ns_transformer_ok "$target"; then
+              echo "::error file=$target::pins the dashboard but has no NamespaceTransformer with unsetOnly: true (a YAML boolean; the string \"true\" does not count) in transformers, inline, as a file or as a directory (clusters#1596 Phase 5)"; exit 1
+            fi
+            if [ "${DASHBOARD_AT_REVISION:-}" = unknown ]; then
+              echo "::error file=$target::could not tell whether ${REVISION} has deploy/grafana (see the step before), so the dashboard's ref cannot move"; exit 1
+            fi
+            # A rollback past #988: the images move, the dashboard stays where it is.
+            if [ "${DASHBOARD_AT_REVISION:-}" != true ]; then
+              echo "::warning file=$target::${REVISION} has no deploy/grafana/kustomization.yaml; the dashboard stays at its current ref"
+              dashboard=kept
+              return 0
+            fi
+            # The suffix's characters are all literal in an ERE, so it goes
+            # into expect_one's pattern unescaped.
+            suffix=$(grep -E "$line" "$target" | sed -E "s|${line}|\2|")
+            sed -i -E "s|${line}|\1- ${DASHBOARD_RESOURCE}?ref=${REVISION}\2|" "$target"
+            expect_one "$target" "^\s*- ${DASHBOARD_RESOURCE//./\\.}\?ref=${REVISION}${suffix}\$" "pinned dashboard"
+            dashboard=pinned
+          }
+
           manifests=("$MANIFEST")
           pin "$MANIFEST" scadbuddy
           pin_agent "$MANIFEST"
+          pin_agent_durable "$MANIFEST"
+          # Its own Deployment (it first ran as a sidecar in $MANIFEST). Once
+          # the file exists it must run agent-durable, and $MANIFEST must not:
+          # two pollers of one queue from two places is a half-done move.
+          if [ -f "$MANIFEST_AGENT_DURABLE" ]; then
+            if [ "$durable" = pinned ]; then
+              echo "::error file=$MANIFEST::runs agent-durable, but ${MANIFEST_AGENT_DURABLE} exists; it belongs in one of them"; exit 1
+            fi
+            pin_agent_durable "$MANIFEST_AGENT_DURABLE"
+            if [ "$durable" != pinned ]; then
+              echo "::error file=$MANIFEST_AGENT_DURABLE::has no image line for ${AGENT_DURABLE_IMAGE}"; exit 1
+            fi
+            manifests+=("$MANIFEST_AGENT_DURABLE")
+          fi
+          echo "durable=$durable" >> "$GITHUB_OUTPUT"
+          pin_dashboard "$KUSTOMIZATION"
+          echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"
+          if [ "$dashboard" = pinned ]; then
+            manifests+=("$KUSTOMIZATION")
+          fi
           # Conditional until clusters#1454 adds the worker's file: without it
           # this still deploys the API alone, as before #547.
           if [ -f "$MANIFEST_WORKER" ]; then
@@ -280,6 +519,20 @@ jobs:
             manifests+=("$MANIFEST_WORKER")
           else
             echo "::notice::${MANIFEST_WORKER} is not in clusters yet; pinning ${MANIFEST} only"
+          fi
+          # Conditional until clusters adds the print worker's file (#1060).
+          if [ -f "$MANIFEST_PRINT" ]; then
+            pin "$MANIFEST_PRINT" scadbuddy-print
+            manifests+=("$MANIFEST_PRINT")
+          else
+            echo "::notice::${MANIFEST_PRINT} is not in clusters yet; not pinning it"
+          fi
+          # Conditional until clusters adds the flow runs' worker's file (#1057).
+          if [ -f "$MANIFEST_PROJECTS" ]; then
+            pin "$MANIFEST_PROJECTS" scadbuddy-projects
+            manifests+=("$MANIFEST_PROJECTS")
+          else
+            echo "::notice::${MANIFEST_PROJECTS} is not in clusters yet; not pinning it"
           fi
 
           if git diff --quiet -- "${manifests[@]}"; then
@@ -301,11 +554,14 @@ jobs:
           GH_REPO: ${{ env.CLUSTERS_REPO }}
           DIGEST: ${{ inputs.digest }}
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
+          AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
+          DURABLE: ${{ steps.edit.outputs.durable }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
           KIND: ${{ inputs.source_kind }}
           FILES: ${{ steps.edit.outputs.files }}
+          DASHBOARD: ${{ steps.edit.outputs.dashboard }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -323,6 +579,17 @@ jobs:
           read -ra manifest_files <<< "$FILES"
           listed=""
           for f in "${manifest_files[@]}"; do listed+="\`${f}\` "; done
+          # The dashboard moves with the image, or the overlay has no pin yet.
+          case "$DASHBOARD" in
+            pinned) dashboard_note="deploy/grafana at ${REVISION}" ;;
+            kept)   dashboard_note="left at its current ref: ${REVISION} has no deploy/grafana" ;;
+            *)      dashboard_note="not pinned in clusters yet (clusters#1596 Phase 5)" ;;
+          esac
+          if [ "$DURABLE" = pinned ]; then
+            durable_note="\`${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}\`"
+          else
+            durable_note="not run in clusters yet (#1056)"
+          fi
           git checkout -B "$DEPLOY_BRANCH"
           git add -- "${manifest_files[@]}"
           git commit -q -F - <<EOF
@@ -330,6 +597,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
+          (agent-durable: ${durable_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -349,6 +617,8 @@ jobs:
 
           - **Image:** \`${IMAGE}:${VERSION}@${DIGEST}\`
           - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
+          - **Agent-durable:** ${durable_note}
+          - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}
           - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)
           - **Path:** ${KIND}

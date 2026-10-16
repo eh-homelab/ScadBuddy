@@ -18,10 +18,11 @@ test.describe('MCP authentication', () => {
     await expect(auth.getByRole('radio', { name: /Require an access token/ })).toBeChecked()
 
     await auth.getByRole('radio', { name: /Allow calls without a token/ }).check()
-    await auth.getByLabel('Access without a token').selectOption('write')
+    await auth.getByLabel('Access without a token').click()
+    await page.getByRole('option', { name: 'Read and write' }).click()
     await auth.getByRole('button', { name: 'Save' }).click()
 
-    const dialog = page.getByRole('dialog', { name: 'Allow MCP calls without a token?' })
+    const dialog = page.getByRole('alertdialog', { name: 'Allow MCP calls without a token?' })
     await expect(dialog).toContainText('read and write')
     await dialog.getByRole('button', { name: 'Cancel' }).click()
     await expect(dialog).toBeHidden()
@@ -36,12 +37,22 @@ test.describe('MCP authentication', () => {
     await expect(tokens.getByTestId('mcp-auth-note')).toContainText(
       'MCP authentication is turned off',
     )
+    // #1921: one banner at the top of Settings, and one in the assistant panel.
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    // The panel is closed, so the one banner is Settings' own.
+    await expect(page.getByTestId('mcp-auth-banner')).toContainText('with read and write access')
+    await page.keyboard.press('Control+Backquote')
+    await expect(panel.getByTestId('mcp-auth-banner')).toContainText('MCP authentication is off')
+    await expect(panel.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+    await page.keyboard.press('Escape')
+    await expect(panel).toBeHidden()
 
     // Back on: no confirmation, and both warnings go.
     await auth.getByRole('radio', { name: /Require an access token/ }).check()
     await auth.getByRole('button', { name: 'Save' }).click()
-    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByRole('alertdialog')).toHaveCount(0)
     await expect(auth.getByTestId('mcp-auth-disabled-warning')).toHaveCount(0)
     await expect(tokens.getByTestId('mcp-auth-note')).toHaveCount(0)
+    await expect(page.getByTestId('mcp-auth-banner')).toHaveCount(0)
   })
 })

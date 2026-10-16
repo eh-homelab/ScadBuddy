@@ -13,22 +13,30 @@ from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 
+from scadbuddy.bambuddy import linking as linking_module
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import (
     ARCHIVE_OVERLAP,
     ARCHIVE_PAGE,
+    LIBRARY_LINK_BACKSTOP,
+    LIBRARY_SCANS_PER_CALL,
     MAX_ARCHIVE_PAGES,
     SCAN_AFTER,
     SCAN_BEFORE,
     link_by_hash,
+    link_library_prints,
+    link_subject_by_hash,
+    scan_library_by_hash,
 )
-from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
-from scadbuddy.bambuddy.progress import progress_for
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.progress import library_progress, progress_for
 from scadbuddy.bambuddy.projects import attach_results
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
@@ -46,8 +54,10 @@ pytestmark = pytest.mark.requires_postgres
 def _no_recent_scans() -> Iterator[None]:
     """Each test starts with no output scanned by hash lately."""
     progress_module._last_hash_scan.clear()
+    linking_module._last_library_scan.clear()
     yield
     progress_module._last_hash_scan.clear()
+    linking_module._last_library_scan.clear()
 
 
 @pytest.fixture
@@ -103,7 +113,7 @@ async def test_a_dispatched_queue_item_links_its_archive(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by, link.queue_item_id) == (18, "queue_item", 34)
     assert (link.printer_id, link.plate_id) == (1, 1)
 
@@ -118,7 +128,7 @@ async def test_an_item_not_yet_dispatched_links_nothing(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 async def _sliced(uploads: BambuddyUploadStore, sliced_id: int = 80) -> None:
@@ -159,7 +169,9 @@ async def test_a_settled_print_is_not_scanned_for_again_once_it_is_linked(
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
     assert scan.call_count == 1
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -170,7 +182,8 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
     and the read still scans for plate 2's archive, whichever plate is read first."""
     await _sliced(uploads)
     await links.record(
-        OUTPUT, PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1)
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1),
     )
     for entry in (51, 52):
         respx.get(f"{API}/queue/{entry}").mock(
@@ -198,7 +211,9 @@ async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_f
 
     await progress_for(bambuddy, plates, uploads=uploads, links=links)
 
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [17, 18]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [17, 18]
 
 
 @respx.mock
@@ -206,7 +221,10 @@ async def test_an_item_linked_before_it_went_is_not_scanned_for(
     bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
 ) -> None:
     await _sliced(uploads)
-    await links.record(OUTPUT, PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34))
+    await links.record(
+        PrintSubject.output(OUTPUT),
+        PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34),
+    )
     respx.get(f"{API}/queue/34").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
     scan = archives_page(archive_row(18, HASH))
 
@@ -230,7 +248,7 @@ async def test_a_queue_item_gone_by_the_first_poll_is_found_by_hash(
 
     await progress_for(bambuddy, queued(), uploads=uploads, links=links)
 
-    [link] = await links.for_output(OUTPUT)
+    [link] = await links.for_subject(PrintSubject.output(OUTPUT))
     assert (link.archive_id, link.matched_by) == (18, "content_hash")
     # The window is the days around the output's sends, and the hash is kept so it is
     # read only once.
@@ -256,7 +274,9 @@ async def test_one_sliced_file_printed_three_times_links_three_archives(
     found = await link_by_hash(bambuddy, uploads, links, meta())
 
     assert sorted(link.archive_id for link in found) == [16, 17, 23]
-    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [16, 17, 23]
+    assert sorted(
+        link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))
+    ) == [16, 17, 23]
 
 
 @respx.mock
@@ -276,7 +296,9 @@ async def test_the_hash_scan_pages_until_bambuddy_runs_out(
     await link_by_hash(bambuddy, uploads, links, meta())
 
     assert [call.request.url.params.get("offset") for call in scan.calls] == [None, "90"]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 def shifting_archives(rows: list[dict[str, Any]], shift: int) -> respx.Route:
@@ -337,7 +359,9 @@ async def test_archives_deleted_between_page_reads_do_not_hide_a_print(
 
     assert scan.call_count == 2
     assert [link.archive_id for link in found] == [18]
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        18
+    ]
 
 
 @respx.mock
@@ -368,7 +392,9 @@ async def test_attaching_to_a_project_records_the_archives_it_found(
         bambuddy, 7, queue_item_ids=[90, 91], output_id=OUTPUT, links=links, linkable={90}
     )
 
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [32]
+    assert [link.archive_id for link in await links.for_subject(PrintSubject.output(OUTPUT))] == [
+        32
+    ]
 
 
 @respx.mock
@@ -384,7 +410,7 @@ async def test_attaching_links_nothing_the_output_does_not_own(
     result = await attach_results(bambuddy, 7, queue_item_ids=[91], output_id=OUTPUT, links=links)
 
     assert result.archive_ids == [77], "still filed under the project"
-    assert await links.for_output(OUTPUT) == []
+    assert await links.for_subject(PrintSubject.output(OUTPUT)) == []
 
 
 @respx.mock
@@ -416,3 +442,437 @@ async def test_a_scan_that_runs_out_of_pages_stops_inside_its_window(
         assert call.request.url.params["date_from"] == (window[0] - SCAN_BEFORE).date().isoformat()
         assert call.request.url.params["date_to"] == (window[1] + SCAN_AFTER).date().isoformat()
     assert "stopped scanning archives" in caplog.text
+
+
+async def _library_items(links: PrintLinkStore, *ids: int) -> None:
+    for queue_item_id in ids:
+        await links.record_sends(
+            PrintSubject.library(89),
+            [PrintSend(queue_item_id=queue_item_id, plate_id=1, printer_id=1)],
+        )
+
+
+async def _pending(links: PrintLinkStore) -> set[int]:
+    return {
+        row.queue_item_id for row in await links.pending_library(50, max_age=LIBRARY_LINK_BACKSTOP)
+    }
+
+
+@respx.mock
+async def test_a_library_run_queued_long_ago_is_still_linked_once_dispatched(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    """#1664: nothing ages an item out; it is read until Bambuddy is done with it."""
+    await _library_items(links, 51)
+    with pool_store.pool.connection() as conn:
+        conn.execute("UPDATE print_sends SET first_seen = now() - interval '60 days'")
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    linked = await links.linked(90)
+    assert linked is not None and linked.library_file_id == 89
+    assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_item_settled_without_an_archive_is_not_read_again(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1705: Bambuddy commits a library item's ``archive_id`` before the item can be
+    ``printing``, so one that settles without it failed or was cancelled before
+    dispatch. The status is read the way `stages.stage_of` reads it, any case (#1704)."""
+    statuses = {
+        51: "cancelled",
+        52: "pending",
+        53: "Completed",
+        54: " FAILED ",
+        55: "Aborted",
+        56: "printing",
+    }
+    await _library_items(links, *statuses)
+    for item_id, item_status in statuses.items():
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
+
+    await link_library_prints(bambuddy, links)
+
+    assert await _pending(links) == {52, 56}
+
+
+@respx.mock
+async def test_a_skipped_library_item_is_read_on_and_linked_once_resumed(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1704/#1705: Bambuddy's resume-after-failure puts a skipped item back to
+    ``pending``, so ``skipped``, in any case, does not mark it gone."""
+    await _library_items(links, 51, 52)
+    routes = {
+        item_id: respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status=item_status, archive_id=None)
+            )
+        )
+        for item_id, item_status in ((51, "skipped"), (52, "Skipped"))
+    }
+
+    await link_library_prints(bambuddy, links)
+
+    assert await _pending(links) == {51, 52}
+    routes[51].mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="printing", archive_id=90))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    linked = await links.linked(90)
+    assert linked is not None and linked.library_file_id == 89
+    assert await _pending(links) == {52}
+
+
+@respx.mock
+async def test_a_library_item_past_the_backstop_is_marked_gone_without_a_read(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    """#1703: an item that never settles stops costing a read once it is older than
+    `LIBRARY_LINK_BACKSTOP`; one just inside it is still read."""
+    await _library_items(links, 51, 52)
+    days = LIBRARY_LINK_BACKSTOP.days
+    with pool_store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 51",
+            (days + 1,),
+        )
+        conn.execute(
+            "UPDATE print_sends SET first_seen = now() - make_interval(days => %s)"
+            " WHERE queue_item_id = 52",
+            (days - 1,),
+        )
+    old = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="pending", archive_id=None))
+    )
+    recent = respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="pending", archive_id=None))
+    )
+
+    await link_library_prints(bambuddy, links)
+
+    assert not old.called
+    assert recent.called
+    assert await _pending(links) == {52}
+    with pool_store.pool.connection() as conn:
+        row = conn.execute("SELECT gone FROM print_sends WHERE queue_item_id = 51").fetchone()
+    assert row is not None and row["gone"] is True
+
+
+@respx.mock
+async def test_a_database_error_on_one_library_item_does_not_stop_the_others(
+    bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1662: it is logged and the item is left to the next call."""
+    await _library_items(links, 51, 52)
+    for item_id, archive_id in ((51, 90), (52, 91)):
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(
+                200, json=queue_item(item_id, status="printing", archive_id=archive_id)
+            )
+        )
+    real = links.link_library
+
+    async def failing(queue_item_id: int, archive_id: int, name: str | None) -> None:
+        if queue_item_id == 51:
+            raise psycopg.OperationalError("connection lost")
+        await real(queue_item_id, archive_id, name)
+
+    monkeypatch.setattr(links, "link_library", failing)
+
+    await link_library_prints(bambuddy, links)
+
+    assert await links.linked(90) is None
+    assert await links.linked(91) is not None
+    assert await _pending(links) == {51}
+
+
+async def test_a_database_error_reading_the_library_items_links_nothing_and_raises_nothing(
+    bambuddy: BambuddyClient, links: PrintLinkStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing(limit: int, *, max_age: object) -> list[object]:
+        raise psycopg.OperationalError("connection lost")
+
+    monkeypatch.setattr(links, "pending_library", failing)
+
+    await link_library_prints(bambuddy, links)
+
+
+# --- a library file's reprints, by hash (#1755, H3) -------------------------------
+
+LIBRARY = PrintSubject.library(89)
+
+
+async def _library_sliced(uploads: BambuddyUploadStore, sliced_id: int = 81) -> None:
+    """A library print's copy and slice, recorded under its subject as the pipeline
+    records them (`PrintPipeline.record`, #1882)."""
+    await uploads.record(LIBRARY.run_subject, LibraryCopy(id=12, folder_id=2, target_key="H2C"))
+    await uploads.record_sliced(LIBRARY.run_subject, 12, SlicedCopy(id=sliced_id))
+
+
+@respx.mock
+async def test_a_library_files_slice_reprinted_inside_bambuddy_is_linked_by_hash(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """As an output's: every archive of the slice's hash is a print of the file."""
+    await _library_sliced(uploads)
+    respx.get(f"{API}/library/files/81").mock(
+        return_value=httpx.Response(
+            200, json={"id": 81, "filename": "a.gcode.3mf", "file_hash": HASH}
+        )
+    )
+    archives_page(archive_row(17, "other"), archive_row(18, HASH), archive_row(24, HASH))
+
+    found = await link_subject_by_hash(bambuddy, uploads, links, LIBRARY)
+
+    assert sorted(link.archive_id for link in found) == [18, 24]
+    linked = await links.linked(24)
+    assert linked is not None and linked.library_file_id == 89
+    assert linked.matched_by == "content_hash"
+
+
+@respx.mock
+async def test_a_library_file_with_no_slice_recorded_reads_no_archives(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    scan = archives_page(archive_row(18, HASH))
+
+    assert await link_subject_by_hash(bambuddy, uploads, links, LIBRARY) == []
+    assert not scan.called
+
+
+@respx.mock
+async def test_a_library_item_gone_from_bambuddy_has_its_file_scanned_by_hash_once(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """As an output's gone queue item is (`progress._Linker.gone`): the print may have
+    run, and been reprinted, before the item went. At most once per
+    `HASH_SCAN_INTERVAL` per file, however many of its items went."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    await _library_items(links, 51, 52)
+    for item_id in (51, 52):
+        respx.get(f"{API}/queue/{item_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "gone"})
+        )
+    scan = archives_page(archive_row(18, HASH))
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    linked = await links.linked(18)
+    assert linked is not None and linked.library_file_id == 89
+    assert scan.call_count == 1
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+    assert scan.call_count == 1
+
+
+@respx.mock
+async def test_one_call_scans_a_bounded_number_of_library_files_and_leaves_the_rest(
+    bambuddy: BambuddyClient,
+    links: PrintLinkStore,
+    uploads: BambuddyUploadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2120: the prints list waits for these scans, so many items gone at once (a
+    queue cleared in Bambuddy) are scanned `LIBRARY_SCANS_PER_CALL` files per call;
+    the rest stay pending and are scanned by the next calls."""
+    files = range(100, 100 + 2 * LIBRARY_SCANS_PER_CALL + 1)
+    for file_id in files:
+        await links.record_sends(
+            PrintSubject.library(file_id),
+            [PrintSend(queue_item_id=file_id, plate_id=1, printer_id=1)],
+        )
+        respx.get(f"{API}/queue/{file_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "gone"})
+        )
+    scanned: list[int] = []
+
+    async def scan(
+        client: BambuddyClient,
+        uploads: BambuddyUploadStore,
+        links: PrintLinkStore,
+        file_id: int,
+    ) -> None:
+        scanned.append(file_id)
+
+    monkeypatch.setattr(linking_module, "scan_library_by_hash", scan)
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    assert len(scanned) == LIBRARY_SCANS_PER_CALL
+    assert await _pending(links) == set(files) - set(scanned)
+
+    await link_library_prints(bambuddy, links, uploads=uploads)
+    await link_library_prints(bambuddy, links, uploads=uploads)
+
+    assert sorted(scanned) == list(files)
+    assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_scan_that_fails_can_be_tried_again_at_once(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """It found nothing, so it does not hold the file's interval."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    scan = respx.get(f"{API}/archives/").mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json=[archive_row(18, HASH)])]
+    )
+
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+    assert await links.linked(18) is None
+    await scan_library_by_hash(bambuddy, uploads, links, 89)
+
+    assert scan.call_count == 2
+    assert await links.linked(18) is not None
+
+
+# --- A library file's print, read as its follow reads it (#1073) ---
+
+
+async def _plates(links: PrintLinkStore, *ids: int) -> None:
+    await links.record_sends(
+        PrintSubject.library(89),
+        [
+            PrintSend(queue_item_id=queue_item_id, plate_id=plate, printer_id=1)
+            for plate, queue_item_id in enumerate(ids, start=1)
+        ],
+    )
+
+
+async def test_a_library_file_never_printed_has_no_progress(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    assert await library_progress(bambuddy, PrintSubject.library(89), links) is None
+
+
+@respx.mock
+async def test_a_library_print_settles_once_every_plate_has_and_links_each_archive(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await _plates(links, 51, 52)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="completed", archive_id=90))
+    )
+    plate_2 = respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="printing", archive_id=91))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and not progress.settled
+    assert [(c.plate_id, c.stage) for c in progress.copies_detail] == [
+        (1, "done"),
+        (2, "running"),
+    ]
+    assert {link.archive_id for link in await links.for_subject(PrintSubject.library(89))} == {
+        90,
+        91,
+    }
+
+    plate_2.mock(
+        return_value=httpx.Response(200, json=queue_item(52, status="failed", archive_id=91))
+    )
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.settled and progress.stage == "failed"
+
+
+@respx.mock
+async def test_a_library_print_bambuddy_dropped_reads_as_done(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.settled and progress.stage == "done"
+    assert await _pending(links) == set()
+
+
+@respx.mock
+async def test_a_library_print_bambuddy_dropped_is_found_by_hash_as_an_outputs_is(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """#1755: the follow's read looks for the file's archives by hash, as an output's
+    read does once its queue item is gone."""
+    await _library_sliced(uploads)
+    await uploads.record_slice_hash(LIBRARY.run_subject, 81, HASH)
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    archives_page(archive_row(18, HASH))
+
+    await library_progress(bambuddy, LIBRARY, links, uploads=uploads)
+
+    linked = await links.linked(18)
+    assert linked is not None and linked.library_file_id == 89
+
+
+@respx.mock
+async def test_a_library_print_follows_its_newest_run_not_one_long_settled(
+    bambuddy: BambuddyClient, links: PrintLinkStore, pool_store: JobProjection
+) -> None:
+    await _plates(links, 50)
+    with pool_store.pool.connection() as conn:
+        conn.execute("UPDATE print_sends SET first_seen = now() - interval '3 days'")
+    await _plates(links, 51)
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="pending", archive_id=None))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.queue_item_id == 51 and not progress.settled
+
+
+@respx.mock
+async def test_a_library_print_follows_its_own_run_not_an_earlier_one_that_never_settles(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    """#1751: an earlier run's queue item that never settles does not hold a later run's
+    follow open: the follow reads the newest run's own sends."""
+    await links.record_sends(
+        PrintSubject.library(89), [PrintSend(queue_item_id=50, plate_id=1, run_id="run-a")]
+    )
+    await links.record_sends(
+        PrintSubject.library(89), [PrintSend(queue_item_id=51, plate_id=1, run_id="run-b")]
+    )
+    respx.get(f"{API}/queue/50").mock(
+        return_value=httpx.Response(200, json=queue_item(50, status="pending", archive_id=None))
+    )
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item(51, status="completed", archive_id=91))
+    )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.queue_item_id == 51 and progress.settled
+
+
+@respx.mock
+async def test_a_library_runs_plates_are_followed_together(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    await links.record_sends(
+        PrintSubject.library(89),
+        [
+            PrintSend(queue_item_id=51, plate_id=1, run_id="run-b"),
+            PrintSend(queue_item_id=52, plate_id=2, run_id="run-b"),
+        ],
+    )
+    for item in (51, 52):
+        respx.get(f"{API}/queue/{item}").mock(
+            return_value=httpx.Response(200, json=queue_item(item, status="printing"))
+        )
+
+    progress = await library_progress(bambuddy, PrintSubject.library(89), links)
+    assert progress is not None and progress.copies == 2

@@ -25,11 +25,12 @@ import math
 import struct
 import time
 import zlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import trimesh
 
 from scadbuddy.render.split import ColourPart
 
@@ -61,6 +62,10 @@ LIGHT_DIRECTION = (0.35, 0.45, 1.0)
 # temporary.
 BATCH_PIXELS = 1 << 22
 
+# Triangles projected at a time (#2573). An arranged plate is many pieces joined, so
+# the plate's triangles all at once were the sum of every piece's; this bounds them.
+CHUNK_TRIANGLES = 1 << 18
+
 
 @dataclass(frozen=True)
 class PlateThumbnails:
@@ -77,15 +82,26 @@ def _unit(vector: Sequence[float] | np.ndarray) -> np.ndarray:
     return array / np.linalg.norm(array)
 
 
-def _basis(forward: Sequence[float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _basis(
+    forward: Sequence[float], vertical_up: Sequence[float] | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Right, up and forward for a camera looking along `forward`.
 
-    World up is Z, except for the top view, which looks straight down it and
-    would make the cross product degenerate; that one takes +Y as up, which puts
-    the model's +Y at the top of the image.
+    World up is Z, except for a view straight down or up it, which would make the
+    cross product degenerate; that one takes `vertical_up` as up. Left out, it is the
+    limit of a front view tilted over the model: +Y looking down (the named top view,
+    the model's back at the top of the image), -Y looking up (the named bottom view,
+    its front at the top), so a view just short of straight down or up frames the
+    same way (#2153).
     """
     ahead = _unit(forward)
-    world_up = np.array([0.0, 1.0, 0.0]) if abs(ahead[2]) > 0.999 else np.array([0.0, 0.0, 1.0])
+    if vertical_up is None:
+        vertical_up = (0.0, 1.0 if ahead[2] <= 0 else -1.0, 0.0)
+    world_up = (
+        np.asarray(vertical_up, dtype=np.float64)
+        if abs(ahead[2]) > 0.999
+        else np.array([0.0, 0.0, 1.0])
+    )
     right = _unit(np.cross(ahead, world_up))
     up = np.cross(right, ahead)
     return right, up, ahead
@@ -98,87 +114,129 @@ def _rasterise(
     *,
     shaded: bool,
     colours: Sequence[tuple[int, int, int]],
+    look: _Look | None = None,
 ) -> np.ndarray:
     """A size x size x 4 uint8 RGBA image of `parts`, transparent behind them.
 
     Orthographic rather than perspective on purpose: this image is read as "which
     colour is which part", and perspective on a plate-sized object adds
-    foreshortening without adding information.
+    foreshortening without adding information. `look` frames it on another point
+    than the bounding box's centre, closer in, or with another up for a vertical view.
     """
-    right, up, ahead = _basis(forward)
+    right, up, ahead = _basis(forward) if look is None else _basis(forward, look.vertical_up)
 
     bounds = np.array([part.mesh.bounds for part in parts])
     low = bounds[:, 0, :].min(axis=0)
     high = bounds[:, 1, :].max(axis=0)
     centre = (low + high) / 2
+    if look is not None:
+        centre = np.array(
+            [c if t is None else t for c, t in zip(centre, look.target, strict=True)],
+            dtype=np.float64,
+        )
 
     # Every corner of the model's AABB, projected: what has to fit in the frame
     # is the extent of the PROJECTION, not of the box.
     corners = np.array(np.meshgrid(*zip(low, high, strict=True))).reshape(3, -1).T - centre
     span = float(np.abs(corners @ np.column_stack((right, up))).max()) * 2
     scale = (size * (1 - 2 * MARGIN)) / span if span > 0 else 1.0
+    if look is not None:
+        scale *= look.zoom
 
     light = _unit(np.asarray(LIGHT_DIRECTION) @ np.array([right, up, -ahead]))
 
-    triangles: list[np.ndarray] = []
-    shades: list[np.ndarray] = []
+    canvas = _Canvas(size)
     for part, rgb in zip(parts, colours, strict=True):
         base = np.asarray(rgb, dtype=np.float64) / 255
-        vertices = np.asarray(part.mesh.vertices, dtype=np.float64) - centre
-        screen = np.column_stack(
-            (
-                size / 2 + (vertices @ right) * scale,
-                size / 2 - (vertices @ up) * scale,
-                vertices @ ahead,
-            )
-        )
+        vertices = np.asarray(part.mesh.vertices, dtype=np.float64)
         faces = np.asarray(part.mesh.faces)
-        triangles.append(screen[faces])
-        if shaded:
-            normals = np.asarray(part.mesh.face_normals, dtype=np.float64)
-            lit = AMBIENT + (1 - AMBIENT) * np.clip(normals @ light, 0.0, 1.0)
-        else:
-            lit = np.ones(len(faces))
-        shades.append(base * lit[:, None])
+        # A chunk at a time (#2573): an arranged plate joins every copy of a colour
+        # into one part, so a whole part's triangles, normals and fragments at once
+        # were the sum of every piece on the plate.
+        for start in range(0, len(faces), CHUNK_TRIANGLES):
+            corners = vertices[faces[start : start + CHUNK_TRIANGLES]]
+            if shaded:
+                lit = AMBIENT + (1 - AMBIENT) * np.clip(_normals(corners) @ light, 0.0, 1.0)
+            else:
+                lit = np.ones(len(corners))
+            moved = corners - centre
+            screen = np.stack(
+                (
+                    size / 2 + (moved @ right) * scale,
+                    size / 2 - (moved @ up) * scale,
+                    moved @ ahead,
+                ),
+                axis=-1,
+            )
+            canvas.draw(screen, base * lit[:, None])
+    return canvas.image()
 
-    return _draw(
-        np.concatenate(triangles).astype(np.float64),
-        np.concatenate(shades),
-        size,
-    )
+
+def _normals(corners: np.ndarray) -> np.ndarray:
+    """Each triangle's unit normal, zero for a degenerate one, computed from the
+    triangles' winding for one chunk rather than cached on the mesh, where it (and the
+    triangles it is made from) would outlive the render. It never reads the
+    ``face_normals`` a loaded mesh carries; the two agree for the meshes ScadBuddy
+    writes (#2853)."""
+    normals, valid = trimesh.triangles.normals(corners)
+    if valid.all():
+        return np.asarray(normals, dtype=np.float64)
+    padded = np.zeros((len(corners), 3), dtype=np.float64)
+    padded[valid] = normals
+    return padded
 
 
-def _draw(triangles: np.ndarray, colours: np.ndarray, size: int) -> np.ndarray:
-    """Depth-test every triangle at once and compose the RGBA image.
+class _Canvas:
+    """A depth buffer and the colour of what is nearest in each pixel, drawn into a
+    batch of triangles at a time.
 
     Rasterising one triangle per Python iteration is the obvious shape and costs
     ~140 us a triangle almost regardless of the triangle's size — numpy call
     overhead, not pixels — which puts an 80k-face model at half a minute for
-    three views. So fragments are generated for every triangle first
+    three views. So fragments are generated for many triangles at once
     (`_fragments` batches triangles by the size of their pixel bounding box, so
-    one set of numpy calls covers thousands of them) and resolved here with a
-    painter's pass: sort the fragments far-to-near and scatter-assign, because
-    numpy's fancy-index assignment keeps the LAST write to a repeated index.
-    That is a depth test with no per-pixel loop.
+    one set of numpy calls covers thousands of them), and each batch is resolved
+    into the buffer before the next is made: only the nearest fragment of each pixel
+    is kept, so memory follows the batch (:data:`BATCH_PIXELS`), never the mesh
+    (#2573). Of equally deep fragments the one drawn last wins, so the image stays a
+    pure function of the mesh.
 
     There is no backface cull. It would halve the work on a closed part, but this
     also renders the open split mesh (`UNCOLOURED_WARNING` in `render.jobs`),
     where culling punches holes straight through the model.
     """
-    image = np.zeros((size * size, 4), dtype=np.uint8)
-    pixels, depth, owner = _fragments(triangles, size)
-    if len(pixels) == 0:
-        return image.reshape(size, size, 4)
-    # Stable, so equally deep fragments resolve as a function of the mesh alone
-    # and the PNG bytes stay reproducible.
-    order = np.argsort(-depth, kind="stable")
-    image[pixels[order], :3] = np.rint(np.clip(colours[owner[order]], 0, 1) * 255).astype(np.uint8)
-    image[pixels, 3] = 255
-    return image.reshape(size, size, 4)
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.depth = np.full(size * size, np.inf)
+        self.colour = np.zeros((size * size, 3), dtype=np.uint8)
+
+    def draw(self, triangles: np.ndarray, colours: np.ndarray) -> None:
+        for pixels, depth, owner in _fragments(triangles, self.size):
+            # Pixel by pixel, nearest first: the first of each pixel is its nearest,
+            # the last-listed of equally deep ones, as a later batch beats an earlier.
+            order = np.lexsort((-np.arange(len(pixels)), depth, pixels))
+            pixels, depth, owner = pixels[order], depth[order], owner[order]
+            first = np.ones(len(pixels), dtype=bool)
+            first[1:] = pixels[1:] != pixels[:-1]
+            pixels, depth, owner = pixels[first], depth[first], owner[first]
+            nearer = depth <= self.depth[pixels]
+            pixels, owner = pixels[nearer], owner[nearer]
+            self.depth[pixels] = depth[nearer]
+            self.colour[pixels] = np.rint(np.clip(colours[owner], 0, 1) * 255).astype(np.uint8)
+
+    def image(self) -> np.ndarray:
+        image = np.zeros((self.size * self.size, 4), dtype=np.uint8)
+        image[:, :3] = self.colour
+        image[np.isfinite(self.depth), 3] = 255
+        return image.reshape(self.size, self.size, 4)
 
 
-def _fragments(triangles: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Covered pixel index, depth and triangle index, for every triangle.
+def _fragments(
+    triangles: np.ndarray, size: int
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Covered pixel index, depth and triangle index, a batch of triangles at a time,
+    each batch covering at most :data:`BATCH_PIXELS` candidate pixels.
 
     Triangles are grouped by their pixel bounding box rounded up to a power of
     two on each axis, so every member of a group rasterises in one broadcast
@@ -197,27 +255,19 @@ def _fragments(triangles: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray
     area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 
     live = np.flatnonzero((width > 0) & (height > 0) & (area != 0))
-    empty = np.zeros(0, dtype=np.int64)
     if len(live) == 0:
-        return empty, np.zeros(0, dtype=np.float64), empty
+        return
 
     block_w = 1 << np.ceil(np.log2(width[live])).astype(np.int64)
     block_h = 1 << np.ceil(np.log2(height[live])).astype(np.int64)
 
-    pixels: list[np.ndarray] = []
-    depths: list[np.ndarray] = []
-    owners: list[np.ndarray] = []
     for key in np.unique(block_w * (size + 1) + block_h):
         member = (block_w * (size + 1) + block_h) == key
         group = live[member]
         bw, bh = int(block_w[member][0]), int(block_h[member][0])
         batches = max(1, -(-len(group) * bw * bh // BATCH_PIXELS))
         for batch in np.array_split(group, batches):
-            found = _block(triangles, batch, (x0, x1, y0, y1), (bw, bh), size, area)
-            pixels.append(found[0])
-            depths.append(found[1])
-            owners.append(found[2])
-    return np.concatenate(pixels), np.concatenate(depths), np.concatenate(owners)
+            yield _block(triangles, batch, (x0, x1, y0, y1), (bw, bh), size, area)
 
 
 def _block(
@@ -348,18 +398,122 @@ VIEW_DIRECTIONS: dict[ViewName, tuple[float, float, float]] = {
 }
 
 
-def render_view(parts: Sequence[ColourPart], view: ViewName, size: int = PLATE_PNG_SIZE) -> bytes:
-    """One named view of ``parts`` as a shaded, antialiased RGBA PNG: the plate
-    cover's rasteriser pointed along :data:`VIEW_DIRECTIONS`, so a client -- or a
-    vision model -- can check the geometry from more than one side."""
-    if not parts:
-        raise ValueError("a view needs at least one colour part")
+# ── an explicit camera (#830) ────────────────────────────────────────────────
+
+#: The named views as angles, in degrees. Azimuth turns around +Z from the front
+#: (0: standing at -Y, looking +Y), counter-clockwise seen from above, so 90 is the
+#: right side (+X), 180 the back and -90 (or 270) the left; elevation is above the
+#: XY plane, 90 straight down from above. A camera that gives only one angle keeps
+#: the named view's other one.
+VIEW_ANGLES: dict[ViewName, tuple[float, float]] = {
+    "iso": (
+        math.degrees(math.atan2(VIEW_POSITION[0], -VIEW_POSITION[1])),
+        math.degrees(math.atan2(VIEW_POSITION[2], math.hypot(VIEW_POSITION[0], VIEW_POSITION[1]))),
+    ),
+    "front": (0.0, 0.0),
+    "back": (180.0, 0.0),
+    "left": (-90.0, 0.0),
+    "right": (90.0, 0.0),
+    "top": (0.0, 90.0),
+    "bottom": (0.0, -90.0),
+}
+
+MAX_AZIMUTH = 360.0
+MAX_ELEVATION = 90.0
+#: How far in a view may come; 1 frames the whole model around the target.
+MAX_ZOOM = 64.0
+
+
+@dataclass(frozen=True)
+class Camera:
+    """Where a view stands and what it frames, beyond its name.
+
+    ``azimuth`` and ``elevation`` replace the named view's angles (:data:`VIEW_ANGLES`);
+    either left out keeps the named view's. ``zoom`` magnifies the fitted frame (2 shows
+    half the width). ``target`` is the point, in model mm, the view centres on, each
+    coordinate left out taken from the bounding box's centre; at zoom 1 the frame
+    still holds the whole model around it. The view is orthographic, so distance
+    from the model changes nothing but the framing, which is ``zoom``.
+    """
+
+    azimuth: float | None = None
+    elevation: float | None = None
+    zoom: float = 1.0
+    target: tuple[float | None, float | None, float | None] = (None, None, None)
+
+    def check(self) -> None:
+        """ValueError naming what is out of range."""
+        if self.azimuth is not None and not -MAX_AZIMUTH <= self.azimuth <= MAX_AZIMUTH:
+            raise ValueError(
+                f"azimuth must be between {-MAX_AZIMUTH:g} and {MAX_AZIMUTH:g} degrees"
+            )
+        if self.elevation is not None and not -MAX_ELEVATION <= self.elevation <= MAX_ELEVATION:
+            raise ValueError(
+                f"elevation must be between {-MAX_ELEVATION:g} and {MAX_ELEVATION:g} degrees"
+            )
+        if not 1.0 <= self.zoom <= MAX_ZOOM:
+            raise ValueError(f"zoom must be between 1 and {MAX_ZOOM:g}")
+        if any(t is not None and not math.isfinite(t) for t in self.target):
+            raise ValueError("the target must be a finite point")
+
+
+@dataclass(frozen=True)
+class _Look:
+    #: Up for a view straight down or up; None for the named view's own (`_basis`).
+    vertical_up: tuple[float, float, float] | None
+    zoom: float
+    target: tuple[float | None, float | None, float | None]
+
+
+def _snap(value: float) -> float:
+    # cos(90 deg) is 6e-17, not 0: snapped, the axis-aligned angles draw exactly
+    # what the named views do. `+ 0.0` turns -0.0 into 0.0.
+    return (0.0 if abs(value) < 1e-12 else value) + 0.0
+
+
+def _aim(view: ViewName, camera: Camera | None) -> tuple[tuple[float, float, float], _Look | None]:
+    """The direction ``view`` through ``camera`` looks, and how it frames."""
     if view not in VIEW_DIRECTIONS:
         raise ValueError(f"unknown view {view!r}")
+    if camera is None:
+        return VIEW_DIRECTIONS[view], None
+    camera.check()
+    if camera.azimuth is None and camera.elevation is None:
+        return VIEW_DIRECTIONS[view], _Look(None, camera.zoom, camera.target)
+    named_azimuth, named_elevation = VIEW_ANGLES[view]
+    azimuth = math.radians(named_azimuth if camera.azimuth is None else camera.azimuth)
+    elevation = math.radians(named_elevation if camera.elevation is None else camera.elevation)
+    # It stands at `position` from the target and looks back along it. Looking
+    # straight down, the image's up is away from where it stands; straight up, toward
+    # it: each the limit of the Z-up framing as the view tilts that far, so a camera
+    # just past `_basis`'s threshold frames as one just short of it (#2153).
+    position = (
+        math.sin(azimuth) * math.cos(elevation),
+        -math.cos(azimuth) * math.cos(elevation),
+        math.sin(elevation),
+    )
+    forward = (_snap(-position[0]), _snap(-position[1]), _snap(-position[2]))
+    away = -1.0 if elevation < 0 else 1.0
+    vertical_up = (_snap(-away * math.sin(azimuth)), _snap(away * math.cos(azimuth)), 0.0)
+    return forward, _Look(vertical_up, camera.zoom, camera.target)
+
+
+def render_view(
+    parts: Sequence[ColourPart],
+    view: ViewName,
+    size: int = PLATE_PNG_SIZE,
+    camera: Camera | None = None,
+) -> bytes:
+    """One view of ``parts`` as a shaded, antialiased RGBA PNG: the plate cover's
+    rasteriser pointed along :data:`VIEW_DIRECTIONS`, or ``camera``'s angles, so a
+    client -- or a vision model -- can check the geometry from more than one side."""
+    if not parts:
+        raise ValueError("a view needs at least one colour part")
+    forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_VIEW_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_VIEW_SIZE}")
     image = _rasterise(
-        parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts)
+        parts, forward, size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts), look=look
     )
     return encode_png(_downsample(image, size))
 
@@ -403,6 +557,7 @@ def render_colour_breakdown(
     order: Sequence[str] = (),
     *,
     deadline: float | None = None,
+    camera: Camera | None = None,
 ) -> ColourBreakdown:
     """One tile per colour, in a near-square grid: the whole model from ``view``, with
     that colour's parts in their colour and every other part in :data:`GHOST_COLOUR`.
@@ -412,11 +567,11 @@ def render_colour_breakdown(
 
     ``deadline`` (a :func:`time.monotonic` value) is checked before each tile, and
     TimeoutError raised past it: a caller's timeout cannot stop the worker thread
-    this runs in, so this stops itself within one tile of it (review of #750)."""
+    this runs in, so this stops itself within one tile of it (review of #750).
+    ``camera`` turns and frames every tile as :func:`render_view`'s does."""
     if not parts:
         raise ValueError("a breakdown needs at least one colour part")
-    if view not in VIEW_DIRECTIONS:
-        raise ValueError(f"unknown view {view!r}")
+    forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_BREAKDOWN_TILE_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_BREAKDOWN_TILE_SIZE}")
     colours = breakdown_colours(parts, order)
@@ -435,9 +590,7 @@ def render_colour_breakdown(
             rgb if part.colour == colour else GHOST_COLOUR
             for part, rgb in zip(parts, actual, strict=True)
         ]
-        lit = _rasterise(
-            parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=tinted
-        )
+        lit = _rasterise(parts, forward, size * SUPERSAMPLE, shaded=True, colours=tinted, look=look)
         row, column = divmod(index, columns)
         sheet[row * size : (row + 1) * size, column * size : (column + 1) * size] = _downsample(
             lit, size

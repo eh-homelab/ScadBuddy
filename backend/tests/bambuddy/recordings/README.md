@@ -70,6 +70,22 @@ Added for #469 on 2026-09-28, over the ingress (a `GET`, no auth). AMS and nozzl
   AMS's inlet instead (`{"0":"B","1":"B","128":"A","2":"A"}`). Inlet A feeds the left
   extruder and B the right, and `nozzles[0]` is the right extruder, `nozzles[1]` the left.
 
+Added for #1912 on 2026-10-09, from the live Bambuddy **1.2.6b1** over the ingress (all
+`GET`, no auth). Nothing was redacted: neither body carries a serial, a tag or a user.
+
+| File | Source |
+|---|---|
+| `queue.json` | four rows of `GET /api/v1/queue/` (printing, pending, failed, completed) |
+| `archive-stats.json` | `GET /api/v1/archives/stats` |
+| `archives-full.json` | `GET /api/v1/archives/?limit=3`, the whole `ArchiveResponse` (an oversized `extra_data` nulled) |
+
+- **`GET /queue/` keeps finished items**: 222 rows on the day, five of them pending or
+  printing. It has no limit; `status` narrows it.
+- **Reading the queue and the stats needs only `can_read_status`** (`QUEUE_READ` and
+  `STATS_READ` in Bambuddy's `auth.py`); `can_queue` is for changing the queue.
+- An archive's `status` can be `archived`, beside `printing`, `completed`, `failed` and
+  `cancelled`.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
@@ -117,6 +133,14 @@ Added for #469 on 2026-09-28, over the ingress (a `GET`, no auth). AMS and nozzl
   `/printers`.
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
+- **A move and a rename keep the file's id; there is no copy** (#2670, read off
+  Bambuddy's `routes/library.py` on 2026-10-13). `POST /api/v1/library/files/move`
+  (`FileMoveRequest {file_ids, folder_id}`, `null` for the root) updates each row's
+  `folder_id`, and answers `{moved, skipped, skipped_reasons: [{file_id, code, reason}]}`;
+  an id it does not have is in neither count. `PUT /api/v1/library/files/{file_id}`
+  takes `filename` (rejected with a 400 by `validate_print_filename`). A project's files
+  are those directly in a folder whose `project_id` is the project's, so a move out of
+  such a folder takes the file out of the project.
 
 - **Bambuddy computes `ams_mapping` itself, and ScadBuddy therefore sends none.**
   `print_scheduler.py`'s `_compute_ams_mapping_for_printer` is "called when a queue

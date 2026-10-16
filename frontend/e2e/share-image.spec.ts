@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { expect, test } from '@playwright/test'
+import { settled } from './canvas'
 
 /** A PNG's width and height, from its IHDR chunk. */
 function pngSize(bytes: Buffer): { width: number; height: number } {
@@ -36,9 +37,14 @@ test.describe('rendered image', () => {
   test('frames the image in the dialog without moving the viewer (#722)', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    // The bounding box is known before the model's GLB has loaded: until it has, the
+    // canvas shows only the plate and the Rendering chip, so a screenshot taken then
+    // differs from any taken later without the camera having moved (#1778).
+    await expect(page.getByTestId('preview-rendering')).toHaveCount(0)
     const canvas = page.getByTestId('preview-canvas').locator('canvas')
     const view = (await canvas.boundingBox())!
-    const before = await canvas.screenshot()
+    // The chip goes as the model loads; the frame that draws it can land a tick later.
+    const before = await settled(canvas)
 
     await page.getByTestId('generate-menu').click()
     await page.getByTestId('generate-image').click()

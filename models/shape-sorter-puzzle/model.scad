@@ -13,8 +13,10 @@
 // the piece furthest from any edge (a table measured from the font, below).
 //
 // The tray and the pieces lay out side by side on one 300 x 320 plate. If
-// they do not fit together, the tray is printed alone and the render log says
-// (NOTE:) to print the pieces with layout = pieces.
+// they do not fit together, the pieces go on a second plate of the same 3MF:
+// the model echoes `plates = 2` and draws only plate $plate when ScadBuddy
+// sets it (0, the default, draws both, side by side), and the render log
+// says so (NOTE:).
 //
 // Prints flat, as it lies, with no supports.
 //
@@ -36,9 +38,6 @@ letters = "ANNA"; // 12
 
 // Size of each piece in mm (smaller if the tray would not fit the plate)
 piece_size = 55; // [35:5:80]
-
-// Which parts to print (both, or the tray and the pieces on separate plates)
-layout = "both"; // [both:Tray and pieces, tray:Tray only, pieces:Pieces only]
 
 /* [Pieces] */
 
@@ -115,6 +114,8 @@ piece_color_12 = "#F4511E"; // color
 /* [Hidden] */
 
 $fn = 64;
+// ScadBuddy's plate convention: 0 draws every plate, N only plate N.
+$plate = 0;
 
 // Letters and numbers use this face: the knob table below is measured on it.
 font = "DejaVu Sans:style=Bold";
@@ -196,16 +197,19 @@ PW = PC * P_PITCH - piece_gap;
 PD = PR * P_PITCH - piece_gap;
 
 BOTH_FIT = TD + piece_gap + PD <= bed_d && max(TW, PW) <= bed_w;
-SHOW_TRAY = layout != "pieces";
-SHOW_PIECES = layout == "pieces" || (layout == "both" && BOTH_FIT);
+// The tray is plate 1; the pieces share it when they fit, else plate 2.
+PIECES_PLATE = BOTH_FIT ? 1 : 2;
+function on_plate(n) = $plate == 0 || $plate == n;
 
 // Centre of hole k, tray corner at the origin.
 function hole_c(k) = [tray_wall + (k % TC) * (S + tray_wall) + S / 2,
                       TD - tray_wall - floor(k / TC) * (S + tray_wall) - S / 2];
-// Centre of piece k on the plate: above the tray when both print.
-PIECES_Y0 = SHOW_TRAY ? TD + piece_gap : 0;
-function piece_c(k) = [(k % PC) * P_PITCH + S / 2,
-                       PIECES_Y0 + PD - floor(k / PC) * P_PITCH - S / 2];
+// Corner of the pieces' grid: above the tray on one plate; on a plate of
+// their own, where the tray would be, or, drawn with everything ($plate = 0),
+// to the right of the tray, past the edge of the bed.
+PIECES_XY0 = BOTH_FIT ? [0, TD + piece_gap] : $plate == 2 ? [0, 0] : [TW + piece_gap, 0];
+function piece_c(k) = PIECES_XY0 + [(k % PC) * P_PITCH + S / 2,
+                                    PD - floor(k / PC) * P_PITCH - S / 2];
 
 // ---------------------------------------------------------------- outlines
 
@@ -407,8 +411,8 @@ if (set == "letters" && len(WORD) == 0)
     echo("NOTE: the word has no letters or numbers; one A piece is made");
 if (S < piece_size)
     echo(str("NOTE: pieces are ", S, " mm (", piece_size, " asked) so the tray fits the plate"));
-if (layout == "both" && !BOTH_FIT)
-    echo(str("NOTE: the tray and the pieces do not fit one plate together; this is the tray only - print the pieces with layout = pieces"));
+if (!BOTH_FIT)
+    echo(str("NOTE: the tray and the pieces do not fit one plate together; the pieces are on plate 2"));
 if (len(NO_KNOB) > 0)
     echo(str("NOTE: ", len(NO_KNOB), " piece(s) have no room for a knob and are made without one"));
 if (len(NARROW) > len(NO_KNOB))
@@ -417,11 +421,14 @@ if (len(NARROW) > len(NO_KNOB))
 
 echo(str("SB_SORTER n=", N, " size=", S, " tray=[", TW, ", ", TD, "] grid=[", TC, ", ", TR,
          "] pieces=[", PW, ", ", PD, "] pgrid=[", PC, ", ", PR, "] both_fit=", BOTH_FIT,
-         " tray_shown=", SHOW_TRAY, " pieces_shown=", SHOW_PIECES, " piece_h=", PT,
+         " pieces_plate=", PIECES_PLATE, " piece_h=", PT,
          " knobs=[", [for (k = [0:N - 1]) has_knob(k) ? knob_d(k) : 0], "]",
          " holes=[", [for (k = [0:N - 1]) hole_c(k)], "]"));
 
 // ---------------------------------------------------------------- output
+
+// ScadBuddy reads this line and renders each plate with $plate = 1 .. plates.
+echo(plates = PIECES_PLATE);
 
 if (export_hole >= 0) {
     hole_2d(export_hole);
@@ -452,9 +459,9 @@ if (export_hole >= 0) {
     }
     translate([-1000, 0, 0]) cube(1);
 } else {
-    if (SHOW_TRAY) {
+    if (on_plate(1)) {
         color(tray_color) tray();
         if (color_hints) for (k = [0:N - 1]) color(pcol(k)) hint(k);
     }
-    if (SHOW_PIECES) for (k = [0:N - 1]) color(pcol(k)) translate(piece_c(k)) piece(k);
+    if (on_plate(PIECES_PLATE)) for (k = [0:N - 1]) color(pcol(k)) translate(piece_c(k)) piece(k);
 }
