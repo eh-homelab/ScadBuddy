@@ -572,25 +572,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     it("leaves a newer turn's approvals alone when its claim goes after the lost check (#2981 review)", async () => {
       const paths = await tempPaths()
-      let release!: () => void
-      const held = new Promise<void>((resolve) => (release = resolve))
-      const { runner } = scriptedRunner(() => ({ reply: 'nearly done', holdAfterResult: held }))
-      // No renewals while it is held: nothing tells this turn its claim went.
+      const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
+      // No renewals: nothing tells this turn its claim went.
       const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
       const { session } = await m.start(agentA, { origin: 'mcp' })
+      // Its result is in and runTurn's lost check passed: finish() has begun (its first
+      // step is this cancel). Before its own check, another replica's turn takes the
+      // session and parks a call. Here, not on a timer: a turn that finished first
+      // would make this race the test's to lose.
+      const cancelQuestions = m.questions.cancelPending.bind(m.questions)
+      vi.spyOn(m.questions, 'cancelPending').mockImplementationOnce(async (...args) => {
+        await db.sql`
+          UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
+          WHERE id = ${session.id}`
+        await db.sql`
+          INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                    requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+          SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
+                 'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+          FROM ai_sessions WHERE id = ${session.id}`
+        return cancelQuestions(...args)
+      })
       const running = await m.send(session.id, agentA, 'job')
-      // Its result is in; before it finishes, another replica's turn takes the session and parks a call.
-      await expect.poll(async () => (await m.events.read(session.id)).some((e) => e.event.type === 'assistant.text.done')).toBe(true)
-      await db.sql`
-        UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
-        WHERE id = ${session.id}`
-      await db.sql`
-        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
-        SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
-               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
-        FROM ai_sessions WHERE id = ${session.id}`
-      release()
 
       expect(await running.done).toEqual({ kind: 'lost_claim' })
       const approvals = await db.sql<{ decision: string | null }[]>`
