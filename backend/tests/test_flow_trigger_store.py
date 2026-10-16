@@ -131,6 +131,33 @@ async def test_an_admitted_fire_whose_workflow_ended_stops_counting(
     assert await triggers.admit(trigger.id, "late", 2, checked, True) is None
 
 
+async def test_a_fire_that_began_starting_counts_however_long_its_start_takes(
+    triggers: TriggerStore, jobs: JobProjection
+) -> None:
+    """#3347: an attempt that began its start before `FIRE_TIMEOUT` may still start its
+    run after it, so the fire keeps counting toward the rate cap; one past it may not
+    begin at all."""
+    trigger = await make(triggers, overlap="allow_all")
+    assert await admit_all(triggers, trigger, 2, cap=2) == [None, None]
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_trigger_fires SET fired_at = now() - %s WHERE trigger_id = %s",
+            (FIRE_TIMEOUT - timedelta(minutes=1), trigger.id),
+        )
+    assert await triggers.begin_start(trigger.id, "fire-0")
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE flow_trigger_fires SET fired_at = now() - %s WHERE trigger_id = %s",
+            (FIRE_TIMEOUT + timedelta(minutes=1), trigger.id),
+        )
+    # fire-1 never began: its workflow has ended, so it may start nothing now.
+    assert not await triggers.begin_start(trigger.id, "fire-1")
+    checked = state_hash(trigger, None)
+    assert await triggers.claim_fire(trigger.id, "late", "run-late", None) is not None
+    assert await triggers.admit(trigger.id, "late", 1, checked, True) == "rate"
+    assert await triggers.admit(trigger.id, "late", 2, checked, True) is None
+
+
 async def test_an_admitted_fire_is_admitted_again_on_a_retry(triggers: TriggerStore) -> None:
     trigger = await make(triggers)
     [first] = await admit_all(triggers, trigger, 1, cap=60)

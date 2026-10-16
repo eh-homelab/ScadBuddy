@@ -58,7 +58,8 @@ _CURRENT_GRANT = (
 STARTING_GRACE = timedelta(minutes=10)
 #: An `admitted` fire with no run this long after it fired is dead: its workflow has
 #: ended (`FIRE_TIMEOUT`), say after its last attempt timed out, with nothing settling
-#: it. It no longer counts toward the rate cap.
+#: it. Unless an attempt began starting its run first (`begin_start`), it no longer
+#: counts toward the rate cap, and no attempt may begin one after.
 ADMITTED_DEAD = FIRE_TIMEOUT
 _HOUR = timedelta(hours=1)
 #: What an edit may change: never who made it, nor its pause.
@@ -216,12 +217,19 @@ class TriggerStore:
         start its run (marked `admitted`; one admitted already stays so), else why not:
         `deleted`, `paused`, `overlap` (with `overlap: skip`, another admitted or started
         fire's run is open) or `rate` (`rate_cap` fires admitted or started in the last
-        hour, less any admitted one `ADMITTED_DEAD` old with no run), or `changed` when
+        hour, less any admitted one `ADMITTED_DEAD` old with no run that never began
+        starting), or `changed` when
         the trigger is no longer the `checked` one (`state_hash` without its grant), or
         `not a schedule trigger` / `not an event trigger` when a Schedule's fire
         (`scheduled`) or an event's reaches a trigger of the other kind (a stale Schedule
         left by an edit while Temporal was away)."""
         return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked, scheduled)
+
+    async def begin_start(self, trigger_id: str, fire_key: str) -> bool:
+        """Mark the admitted fire as starting its run, under the trigger's row lock (#3347):
+        False, and nothing may start, once it is `ADMITTED_DEAD` old. Marked, it counts
+        toward the rate cap however long its start then takes."""
+        return await self._call(self._begin_start, trigger_id, fire_key)
 
     # -- implementation -------------------------------------------------------------
 
@@ -606,7 +614,7 @@ class TriggerStore:
             if fire is not None and fire["outcome"] in ("admitted", "started"):
                 return None  # a retry of a fire admitted already, neither paused nor changed since
             others = conn.execute(
-                "SELECT f.outcome, r.status, now() - f.fired_at AS age"
+                "SELECT f.outcome, f.starting_at, r.status, now() - f.fired_at AS age"
                 " FROM flow_trigger_fires f LEFT JOIN workflow_runs r ON r.id = f.run_id"
                 " WHERE f.trigger_id = %s AND f.fire_key <> %s"
                 " AND f.outcome IN ('admitted', 'started')"
@@ -615,12 +623,15 @@ class TriggerStore:
                 " OR (r.status IS NOT NULL AND r.status <> ALL(%s)))",
                 (trigger_id, fire_key, sorted(TERMINAL)),
             ).fetchall()
-            # An admitted fire whose workflow ended without a run started nothing.
+            # An admitted fire whose workflow ended before it began a start started nothing.
             others = [
                 o
                 for o in others
                 if not (
-                    o["outcome"] == "admitted" and o["status"] is None and o["age"] >= ADMITTED_DEAD
+                    o["outcome"] == "admitted"
+                    and o["status"] is None
+                    and o["starting_at"] is None
+                    and o["age"] >= ADMITTED_DEAD
                 )
             ]
             if trigger.overlap == "skip" and any(
@@ -637,3 +648,17 @@ class TriggerStore:
                 (trigger_id, fire_key),
             )
         return None
+
+    def _begin_start(self, trigger_id: str, fire_key: str) -> bool:
+        with self._pool.connection() as conn, conn.transaction():
+            if self._locked_trigger(conn, trigger_id) is None:
+                return False
+            # The clock once the lock is held, not the transaction's start: an `_admit`
+            # that held it and found the fire dead must find this refused too.
+            row = conn.execute(
+                "UPDATE flow_trigger_fires SET starting_at = clock_timestamp()"
+                " WHERE trigger_id = %s AND fire_key = %s AND outcome = 'admitted'"
+                " AND clock_timestamp() - fired_at < %s RETURNING 1",
+                (trigger_id, fire_key, ADMITTED_DEAD),
+            ).fetchone()
+        return row is not None
