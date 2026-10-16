@@ -476,6 +476,10 @@ jobs:
           set -euo pipefail
           total=$(pnpm exec playwright test --list | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
           selected=$(pnpm exec playwright test --list --shard=${{ matrix.shard }}/3 | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
+          if [ -z "$total" ] || [ -z "$selected" ]; then
+            echo "::error::playwright test --list printed no 'Total: N tests in M files' line"
+            exit 1
+          fi
           echo "shard ${{ matrix.shard }} selects ${selected} of ${total}"
           mkdir -p counts
           echo "${{ matrix.shard }} ${selected} ${total}" > counts/selected.txt
@@ -499,8 +503,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # No selection: an earlier step of this shard failed and says why, and the
+          # split job names this shard as the one with no count.
+          [ -f counts/selected.txt ] || exit 0
           ran=0
-          if [ -f results/junit.xml ]; then ran=$(grep -o '<testcase ' results/junit.xml | wc -l); fi
+          # `|| true`: grep finds no testcase in an empty suite and exits 1, which
+          # pipefail would turn into no count at all rather than "ran 0".
+          if [ -f results/junit.xml ]; then ran=$( (grep -o '<testcase ' results/junit.xml || true) | wc -l); fi
           echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.shard }}.txt
           cat counts/shard-${{ matrix.shard }}.txt
 
@@ -510,6 +519,7 @@ jobs:
         with:
           name: frontend-e2e-count-${{ matrix.shard }}
           path: frontend/counts/shard-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
 
       - name: Upload the Playwright report
         if: ${{ failure() }}
@@ -538,9 +548,15 @@ jobs:
       - name: Check the counts
         run: |
           set -euo pipefail
+          missing=()
+          for shard in 1 2 3; do
+            [ -f "counts/shard-${shard}.txt" ] || missing+=("${shard}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::no count from shard ${missing[*]}: see that shard's first failed step"
+            exit 1
+          fi
           cat counts/shard-*.txt
-          files=(counts/shard-*.txt)
-          [ "${#files[@]}" -eq 3 ] || { echo "::error::expected 3 shard counts, got ${#files[@]}"; exit 1; }
           totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards listed different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
