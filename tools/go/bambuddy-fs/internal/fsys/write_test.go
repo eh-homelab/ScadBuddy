@@ -993,6 +993,25 @@ func TestAWriteOpenOverATypeChangingRenameReplacesTheRenamedFile(t *testing.T) {
 	}
 }
 
+// retypes's truth table: only an untyped name becoming a typed one is sent again.
+func TestRetypes(t *testing.T) {
+	for _, c := range []struct {
+		from, to string
+		want     bool
+	}{
+		{"x.3mf.tmp", "x.3mf", true},
+		{"x.tmp", "x.gcode.3mf", true},
+		{"x.stl", "x.3mf", false},
+		{"x.3mf", "x.gcode.3mf", false},
+		{"x.3mf", "x.3mf.bak", false},
+		{"x.txt", "x.md", false},
+	} {
+		if got := retypes(c.from, c.to); got != c.want {
+			t.Errorf("%s -> %s: %v, want %v", c.from, c.to, got, c.want)
+		}
+	}
+}
+
 func TestFileTypes(t *testing.T) {
 	for name, want := range map[string]string{"a.3mf": "3mf", "A.3MF.tmp": "tmp", "b.gcode.3mf": "gcode.3mf", "c.STL": "stl", "noext": ""} {
 		if got := fileType(name); got != want {
