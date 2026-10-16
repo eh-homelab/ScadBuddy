@@ -87,3 +87,25 @@ test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
   await expect(page.getByTestId('ui-origin')).toHaveText('Custom interface · built-in')
   expect(await violations(page)).toEqual([])
 })
+
+// #3777 — laid out, not only classed: in a short window the page slot's read-only view of
+// inputs that would not migrate keeps its textarea inside the 30vh alert, and at three
+// lines at least however long the error.
+test('keeps the unmigrated inputs inside their alert, three lines tall, in a short window', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 300 })
+  await page.goto('/m/ui-unmigrated')
+  await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old')
+
+  const saved = page.getByRole('textbox', { name: 'Saved inputs' })
+  await expect(saved).toBeVisible()
+  const alert = page.getByRole('alert').filter({ has: saved })
+  await expect(alert).toContainText('defines no migrate')
+
+  const box = (await alert.boundingBox())!
+  const area = (await saved.boundingBox())!
+  expect(area.y + area.height).toBeLessThanOrEqual(box.y + box.height + 0.5)
+  const line = await saved.evaluate((el) =>
+    parseFloat(el.ownerDocument.defaultView!.getComputedStyle(el).lineHeight),
+  )
+  expect(area.height).toBeGreaterThanOrEqual(3 * line - 0.5)
+})

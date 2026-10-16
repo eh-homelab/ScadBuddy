@@ -32,3 +32,5 @@ export function mount(root, host) {
   // Copies of models/dollhouse-kit/ui/ (#1737), kept byte-identical the same way.
   'builtin:dollhouse-kit': { 'index.js': dollhouseUi, 'pieces.js': dollhousePieces },
 }
+// #3777 — the unmigrated template's page slot shows the ui-demo interface.
+UI_MODULES['ui-unmigrated'] = UI_MODULES['ui-demo']!
