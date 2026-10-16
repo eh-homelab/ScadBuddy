@@ -150,14 +150,17 @@ async function showAdvanced() {
 
 /** Every `watch` of the running test: `afterEach` waits until each request it saw has ended.
  *  Only these: a request no `watch` matches (the ad-hoc `request:start` listeners below,
- *  any route not watched) can still outlive its test. */
+ *  any route not watched) can still outlive its test. The two tests with such listeners
+ *  (#2292, #2891) end on "Arranged onto 1 plate.", shown once the arrange and its save
+ *  have been answered. */
 const watching: { urls: string[]; ended: number }[] = []
 
 /** The matching requests' URLs and bodies as they start, in order, and how many have
  *  been answered (under `/print/` by default; `/analyzers/run` is not one). A request
  *  still in flight when a test ends is aborted at teardown and the next test's fetch
  *  can miss MSW (it showed "could not reach its server"), so `afterEach` waits for
- *  every watched request to end. */
+ *  every watched request to end. A watched route must therefore always end: never watch
+ *  one held by `delay('infinite')` or a request the component aborts. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0, ended: 0 }
   watching.push(seen)
@@ -181,6 +184,9 @@ function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
 }
 
 beforeEach(() => resetMockState())
+// Runs before Testing Library's cleanup unmounts the dialog (registered earlier, in
+// vitest.setup.ts): vitest's default `sequence.hooks: 'stack'` runs afterEach hooks in
+// reverse order. Under another order the wait would come after the unmount.
 afterEach(async () => {
   try {
     // The wait is `asyncUtilTimeout` (3 s, vitest.setup.ts), as for any find in a test.
