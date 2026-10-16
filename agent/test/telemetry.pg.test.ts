@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../src/db.js'
+import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { SpanStatusCode } from '@opentelemetry/api'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -46,6 +47,44 @@ describe.skipIf(!TEST_DATABASE_URL)(`turn tracing${TEST_DATABASE_URL ? '' : ` (s
     expect(turn.spanContext().traceId).toBe(TRACE_ID)
     expect(turn.parentSpanContext?.spanId).toBe(PARENT_SPAN_ID)
     expect(turn.attributes).toMatchObject({ 'scadbuddy.segment': 0, 'scadbuddy.outcome': 'success' })
+  })
+
+  it('the steps before Claude Code starts are spans under the turn (#2375)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    await (await m.send(session.id, browser, 'hi')).done
+    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
+    const steps = spans
+      .getFinishedSpans()
+      .filter((s) => s.name.startsWith('agent.turn.') && s.parentSpanContext?.spanId === turn.spanContext().spanId)
+      .map((s) => s.name)
+    expect(steps).toEqual(expect.arrayContaining(['agent.turn.credentials', 'agent.turn.session']))
+    // Only when the turn has them: none of these is configured here (#3321).
+    for (const absent of ['agent.turn.remote_plugins', 'agent.turn.memory', 'agent.turn.packages']) {
+      expect(steps).not.toContain(absent)
+    }
+  })
+
+  it('the remote plugins and the automatic memory are spans too, when the turn has them (#2981 review)', async () => {
+    m.abortAll()
+    const hindsight: CheckedPlugin = {
+      plugin: { name: 'hindsight', url: 'http://hindsight.invalid:1/mcp/b/', toolTiers: {}, disabledTools: [] },
+      address: '127.0.0.1',
+    }
+    m = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scriptedRunner(() => ({ reply: 'ok' })).runner,
+      pollMs: 20,
+      remotePlugins: () => Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} }),
+    })
+    const { session } = await m.start(browser, { origin: 'chat' })
+    await (await m.send(session.id, browser, 'hi')).done
+    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
+    const steps = spans
+      .getFinishedSpans()
+      .filter((s) => s.parentSpanContext?.spanId === turn.spanContext().spanId)
+      .map((s) => s.name)
+    expect(steps).toEqual(expect.arrayContaining(['agent.turn.remote_plugins', 'agent.turn.memory']))
   })
 
   it('a garbage traceparent is ignored: the message is handled and the turn is a root', async () => {

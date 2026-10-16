@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
@@ -14,6 +14,7 @@ import {
   SessionError,
   SETTING_SESSION_BUDGET_USD,
   SETTING_SESSION_MAX_TURNS,
+  TAKEN_OVER,
   TITLE_MAX,
   titleFrom,
   type TurnOutcome,
@@ -21,6 +22,7 @@ import {
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { AuditLog } from '../src/audit/log.js'
+import { MemoryAudit } from './support/memoryAudit.js'
 import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -457,6 +459,201 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       await m.interrupt(live.id, agentA)
       await running.done
+    })
+
+    it('says what it can tell of why it reaped a turn, and writes the turn its audit row (#2375)', async () => {
+      const paths = await tempPaths()
+      const audit = new MemoryAudit()
+      // No renewals: this replica's turn stops renewing, as a stalled process's does.
+      const { runner } = scriptedRunner(() => ({ hang: true }))
+      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000 })
+      const elsewhere = (await m.start(agentA, { origin: 'mcp' })).session
+      const here = (await m.start(agentA, { origin: 'mcp' })).session
+      // A turn another replica was running, and one running on this replica.
+      const [dead] = await db.sql<{ turn_id: string }[]>`
+        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE id = ${elsewhere.id} RETURNING turn_id::text`
+      const deadTurn = dead!.turn_id
+      const running = await m.send(here.id, agentA, 'long job')
+      await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${here.id}`
+
+      expect((await m.reapExpired()).sort()).toEqual([elsewhere.id, here.id].sort())
+      const error = async (id: string) =>
+        (await m.events.read(id)).map((e) => e.event).find((e) => e.type === 'error' && e.code === 'interrupted')
+      expect(await error(elsewhere.id)).toMatchObject({
+        message: 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)',
+      })
+      expect(await error(here.id)).toMatchObject({
+        message: 'the turn was stopped: it could not renew its claim on the session for a minute, though its replica is running',
+      })
+      expect(JSON.stringify(await m.events.read(elsewhere.id))).not.toContain('restarted')
+      // This replica's turn is stopped too, not left running without its claim.
+      await running.done
+      expect(audit.entries.filter((e) => e.kind === 'turn' && e.action === 'lost_claim')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: elsewhere.id,
+            turnId: deadTurn,
+            outcome: 'error',
+            actor: { kind: agentA.kind, id: agentA.id, label: agentA.label },
+          }),
+          expect.objectContaining({ sessionId: here.id, outcome: 'error' }),
+        ]),
+      )
+    })
+
+    it('gives a lapsed turn its one turn row whether a send takes its session or the reaper does (#3320)', async () => {
+      const paths = await tempPaths()
+      const audit = new MemoryAudit()
+      const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
+      const m = manager({ sql: db.sql, paths, run: runner, audit })
+      const taken = (await m.start(agentA, { origin: 'mcp' })).session
+      const reaped = (await m.start(agentA, { origin: 'mcp' })).session
+      // Two turns whose replica stopped renewing their claims.
+      const lapsed = await db.sql<{ id: string; turn_id: string }[]>`
+        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE id IN ${db.sql([taken.id, reaped.id])} RETURNING id::text, turn_id::text`
+      const turnOf = (id: string) => lapsed.find((r) => r.id === id)!.turn_id
+
+      // A send takes one before any reap; the reaper takes the other, then a send follows.
+      await (await m.send(taken.id, agentA, 'hello')).done
+      expect(await m.reapExpired()).toEqual([reaped.id])
+      await (await m.send(reaped.id, agentA, 'hello')).done
+
+      const rows = audit.entries.filter((e) => e.kind === 'turn' && e.action === 'lost_claim')
+      expect(rows).toHaveLength(2)
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: taken.id,
+            turnId: turnOf(taken.id),
+            outcome: 'error',
+            detail: TAKEN_OVER,
+            actor: { kind: agentA.kind, id: agentA.id, label: agentA.label },
+          }),
+          expect.objectContaining({ sessionId: reaped.id, turnId: turnOf(reaped.id), outcome: 'error' }),
+        ]),
+      )
+    })
+
+    it('a resumed approval that takes a lapsed turn\'s session writes that turn its row (#2981 review)', async () => {
+      const paths = await tempPaths()
+      const audit = new MemoryAudit()
+      const { runner } = scriptedRunner(() => ({ reply: 'done' }))
+      const m = manager({ sql: db.sql, paths, run: runner, audit })
+      const { session } = await m.start(browser, { origin: 'chat' })
+      // A turn that parked an outward call, then whose replica stopped renewing its claim.
+      const [lapsed] = await db.sql<{ turn_id: string }[]>`
+        UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(),
+          lease_until = now() - interval '1 second'
+        WHERE id = ${session.id} RETURNING turn_id::text`
+      const approval = await m.approvals.create({
+        sessionId: session.id,
+        turnId: lapsed!.turn_id,
+        toolUseId: 'toolu_out',
+        tool: 'mcp__stub__print',
+        input: { job: 'box.3mf' },
+        tier: 'outward',
+        requestedBy: browser,
+      })
+      // Approved after its turn was lost: the decision starts the turn that re-runs it.
+      await m.approvals.decide(browser, approval.id, true)
+      const [bound] = await db.sql<{ resume_turn_id: string | null }[]>`
+        SELECT resume_turn_id::text FROM ai_approvals WHERE id = ${approval.id}`
+      expect(bound!.resume_turn_id).not.toBeNull()
+
+      await expect
+        .poll(() => audit.entries.filter((e) => e.kind === 'turn' && e.action === 'lost_claim'))
+        .toEqual([expect.objectContaining({ sessionId: session.id, turnId: lapsed!.turn_id, detail: TAKEN_OVER })])
+    })
+
+    it("leaves a newer turn's approvals alone when its claim goes after the lost check (#2981 review)", async () => {
+      const paths = await tempPaths()
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const { runner } = scriptedRunner(() => ({ reply: 'nearly done', holdAfterResult: held }))
+      // No renewals while it is held: nothing tells this turn its claim went.
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      const running = await m.send(session.id, agentA, 'job')
+      // Its result is in; before it finishes, another replica's turn takes the session and parks a call.
+      await expect.poll(async () => (await m.events.read(session.id)).some((e) => e.event.type === 'assistant.text.done')).toBe(true)
+      await db.sql`
+        UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
+        WHERE id = ${session.id}`
+      await db.sql`
+        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+        SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
+               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+        FROM ai_sessions WHERE id = ${session.id}`
+      release()
+
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      const approvals = await db.sql<{ decision: string | null }[]>`
+        SELECT decision FROM ai_approvals WHERE session_id = ${session.id}`
+      expect(approvals).toEqual([{ decision: null }])
+      // Nor is its process kept for a session another turn owns now (#2981 review).
+      await expect.poll(() => m.warm.size()).toBe(0)
+      await m.warm.close()
+    })
+
+    it('attributes a dead turn to the local one only when it is that turn (#2981 review)', async () => {
+      const paths = await tempPaths()
+      const { runner, runs } = scriptedRunner(() => ({ hang: true }))
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      const running = await m.send(session.id, agentA, 'long job')
+      // The claim the reaper finds is another turn's: this replica's turn is not the one that died.
+      await db.sql`
+        UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE id = ${session.id}`
+      expect(await m.reapExpired()).toEqual([session.id])
+      const error = (await m.events.read(session.id)).map((e) => e.event).find((e) => e.type === 'error')
+      expect(error).toMatchObject({
+        message: 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)',
+      })
+      // Not this replica's turn that died: the reaper never stopped it.
+      expect(runs[0]!.signal?.aborted).toBe(false)
+      m.abortAll()
+      await running.done
+    })
+
+    it("leaves a turn sent after the reap its approval: the reaped turn's own ending cancels nothing (#2981 review)", async () => {
+      const paths = await tempPaths()
+      const { runner } = scriptedRunner(() => ({ hang: true }))
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      const running = await m.send(session.id, agentA, 'long job')
+      await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
+      // The reaped turn's ending is held until the newer turn has parked its approval,
+      // so a session-wide cancel from it, if any, lands after.
+      let parked!: () => void
+      const newerParked = new Promise<void>((resolve) => (parked = resolve))
+      const cancel = m.approvals.cancelPending.bind(m.approvals)
+      vi.spyOn(m.approvals, 'cancelPending').mockImplementation(async (...args) => {
+        await newerParked
+        return cancel(...args)
+      })
+
+      expect(await m.reapExpired()).toEqual([session.id])
+      // Sent again, on another replica: it claims the session and parks an outward call.
+      await db.sql`
+        UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(),
+          lease_until = now() + interval '1 minute'
+        WHERE id = ${session.id}`
+      await db.sql`
+        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+        SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
+               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+        FROM ai_sessions WHERE id = ${session.id}`
+      parked()
+
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      const approvals = await db.sql<{ decision: string | null }[]>`
+        SELECT decision FROM ai_approvals WHERE session_id = ${session.id}`
+      expect(approvals).toEqual([{ decision: null }])
     })
 
     it('on a restart, lets a running turn finish, then aborts the rest and waits for them to record it', async () => {
