@@ -61,7 +61,7 @@ describe('Grep matches line by line, as ripgrep does', () => {
     expect((await grep(ctx, { pattern: 'hello\\\\n', output_mode: 'content' })).text).toBe('No matches found')
     // Every other way of writing a newline is refused too, and one in a positive class
     // inside what looks like a negated one ([a[^\n]] is the class [a[^\n] then "]").
-    for (const pattern of ['a\\x0ab', 'a\\u000Ab', 'a\\cJb', 'a\\012b', '[a[^\\n]]']) {
+    for (const pattern of ['a\\x0ab', 'a\\u000Ab', 'a\\cJb', 'a\\012b', 'a\\12b', 'a\\0123', '[a[^\\n]]']) {
       expect(await grep(ctx, { pattern, output_mode: 'content' })).toMatchObject({ isError: true })
     }
     // \N is the letter N, not a newline.

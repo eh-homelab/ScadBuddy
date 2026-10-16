@@ -279,9 +279,11 @@ function matchesOf(text: string, re: RegExp, whole: boolean, deadline: number): 
   }
 }
 
-// A newline written in a pattern: \n, \x0a, \u000a, \cJ or \012 (hex digits and the
-// control letter in either case; \N is just N), or the character itself.
-const NEWLINE_ESCAPE = /^(?:n|x0[aA]|u000[aA]|c[jJ]|012)/
+// A newline written in a pattern: \n, \x0a, \u000a, \cJ, or octal \012 or \12 (hex
+// digits and the control letter in either case; \N is just N), or the character itself.
+// A class range that spans a newline without naming it ([\t-\r]) is not caught; it can
+// only answer "No matches found".
+const NEWLINE_ESCAPE = /^(?:n|x0[aA]|u000[aA]|c[jJ]|012|12(?!\d))/
 
 /** Whether pattern can match a newline by naming one: anywhere but in a negated class
  * ([^\n] never matches one). Read token by token, so an escaped \\ or \[ is literal,
