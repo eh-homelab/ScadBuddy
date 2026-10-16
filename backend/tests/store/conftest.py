@@ -39,5 +39,5 @@ def s3() -> Iterator[S3Settings]:
         yield settings
     finally:
         # moto's state is the process's, not the server's: the next test starts empty.
-        httpx.post(f"{settings.endpoint}/moto-api/reset")
+        httpx.post(f"{settings.endpoint}/moto-api/reset").raise_for_status()
         server.stop()

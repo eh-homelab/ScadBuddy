@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, BinaryIO
 
 from aiobotocore.config import AioConfig
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 _CHUNK = 1 << 20
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
+_OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
 
 
 def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
@@ -68,6 +70,15 @@ class S3ContentBackend:
         self._exits = AsyncExitStack()
         self._client: S3Client | None = None
         self._opening = asyncio.Lock()
+
+    def _key(self, backend_id: str) -> str:
+        prefix = f"{self.settings.prefix}/"
+        # fullmatch: `$` would also accept a key ending in a newline.
+        if not (
+            backend_id.startswith(prefix) and _OBJECT.fullmatch(backend_id.removeprefix(prefix))
+        ):
+            raise ValueError(f"not an S3 object key: {backend_id!r}")
+        return backend_id
 
     async def _s3(self) -> S3Client:
         async with self._opening:
@@ -132,9 +143,10 @@ class S3ContentBackend:
             raise
 
     async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        key = self._key(backend_id)
         client = await self._s3()
         try:
-            response = await client.get_object(Bucket=self.settings.bucket, Key=backend_id)
+            response = await client.get_object(Bucket=self.settings.bucket, Key=key)
         except ClientError as error:
             if _missing(error):
                 raise BlobMissingError(backend_id) from None
@@ -145,9 +157,10 @@ class S3ContentBackend:
                 yield chunk
 
     async def exists(self, backend_id: str) -> bool:
+        key = self._key(backend_id)
         client = await self._s3()
         try:
-            await client.head_object(Bucket=self.settings.bucket, Key=backend_id)
+            await client.head_object(Bucket=self.settings.bucket, Key=key)
         except ClientError as error:
             if _missing(error):
                 return False
@@ -155,20 +168,27 @@ class S3ContentBackend:
         return True
 
     async def remove(self, backend_id: str) -> None:
+        key = self._key(backend_id)
         client = await self._s3()
-        await client.delete_object(Bucket=self.settings.bucket, Key=backend_id)
+        await client.delete_object(Bucket=self.settings.bucket, Key=key)
 
     async def sweep_unrecorded(self, *, cutoff: datetime, recorded: Callable[[str], bool]) -> int:
         """Delete every object under the prefix last written before ``cutoff`` that
-        ``recorded`` (given the object's key) says no `store_blobs` row names."""
+        ``recorded`` (given the object's key) says no `store_blobs` row names. A naive
+        ``cutoff`` is UTC; an object whose key is not one this backend writes is left."""
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
+        prefix = f"{self.settings.prefix}/"
         client = await self._s3()
         removed = 0
         pages = client.get_paginator("list_objects_v2").paginate(
-            Bucket=self.settings.bucket, Prefix=f"{self.settings.prefix}/"
+            Bucket=self.settings.bucket, Prefix=prefix
         )
         async for page in pages:
             for item in page.get("Contents", []):
                 key = item["Key"]
+                if not _OBJECT.fullmatch(key.removeprefix(prefix)):
+                    continue
                 if item["LastModified"] < cutoff and not recorded(key):
                     await client.delete_object(Bucket=self.settings.bucket, Key=key)
                     removed += 1

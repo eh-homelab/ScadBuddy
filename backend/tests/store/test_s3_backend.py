@@ -159,6 +159,36 @@ async def test_a_failed_abort_keeps_the_original_error(
     await backend.aclose()
 
 
+@pytest.mark.parametrize(
+    "backend_id",
+    [
+        "other/asset/" + "0" * 64,
+        "asset/" + "0" * 64,
+        "t/model/" + "0" * 64,
+        "t/asset/" + "0" * 63,
+        "t/asset/" + "0" * 64 + "\n",
+        "t/asset/../" + "0" * 64,
+    ],
+)
+async def test_a_key_outside_the_store_is_refused(backend_id: str) -> None:
+    backend = S3ContentBackend(
+        S3Settings(
+            endpoint="http://127.0.0.1:1",
+            bucket="sb-test",
+            prefix="t",
+            access_key_id="testing",
+            secret_access_key="testing",
+        )
+    )
+    with pytest.raises(ValueError, match="not an S3 object key"):
+        await backend.exists(backend_id)
+    with pytest.raises(ValueError, match="not an S3 object key"):
+        [c async for c in backend.download(backend_id)]
+    with pytest.raises(ValueError, match="not an S3 object key"):
+        await backend.remove(backend_id)
+    await backend.aclose()
+
+
 async def test_remove_is_idempotent(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3)
     try:
@@ -198,6 +228,8 @@ async def test_sweep_unrecorded_removes_old_unrecorded_objects_only(s3: S3Settin
     backend = S3ContentBackend(s3)
     try:
         kept = await backend.upload("piece", b"recorded", name="a", scope=SCOPE)
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key="t/stray.txt", Body=b"not ours")
         swept = await backend.upload("piece", b"orphan", name="b", scope=SCOPE)
         cutoff = datetime.now(UTC)
         # S3's LastModified is whole seconds: the next upload must land in a later one.
@@ -209,10 +241,13 @@ async def test_sweep_unrecorded_removes_old_unrecorded_objects_only(s3: S3Settin
             seen.append(key)
             return key == kept
 
-        assert await backend.sweep_unrecorded(cutoff=cutoff, recorded=recorded) == 1
+        naive = cutoff.replace(tzinfo=None)
+        assert await backend.sweep_unrecorded(cutoff=naive, recorded=recorded) == 1
         assert await backend.exists(kept)
         assert not await backend.exists(swept)
         assert await backend.exists(young)
         assert young not in seen
+        assert "t/stray.txt" not in seen
+        assert "Contents" in await client.list_objects_v2(Bucket=s3.bucket, Prefix="t/stray")
     finally:
         await backend.aclose()
