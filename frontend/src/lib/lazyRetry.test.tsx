@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { Suspense } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { lazyRetry, retryFailedPages } from './lazyRetry'
 
@@ -9,6 +9,11 @@ function Page() {
 }
 
 describe('lazyRetry (#3241)', () => {
+  // Restored even when an assertion fails, so console.error is never left silenced (#3753).
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('imports again on the next visit after a rejected import, not replaying its error', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const load = vi
@@ -35,6 +40,5 @@ describe('lazyRetry (#3241)', () => {
     visit()
     expect(await screen.findByRole('heading', { name: 'the page' })).toBeInTheDocument()
     expect(load).toHaveBeenCalledTimes(2)
-    vi.restoreAllMocks()
   })
 })

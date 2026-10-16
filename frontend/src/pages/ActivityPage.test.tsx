@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { server } from "../mocks/server";
 import { fakeRealtime } from "../lib/realtime.fake";
-import { seedActivity } from "../mocks/features/activity";
+import { seedActivity, setActivityFacets } from "../mocks/features/activity";
 import { resetMockState } from "../mocks/handlers";
 import { renderPage } from "../test/utils";
 import type { Activity } from "../api/types";
-import { principalLabel, sinceTime } from "../components/activity/labels";
+import { CHIPS_SHOWN, principalLabel, sinceTime } from "../components/activity/labels";
 import { ActivityPage } from "./ActivityPage";
 
 function Location() {
@@ -108,6 +108,31 @@ describe("ActivityPage", () => {
     ).toBeInTheDocument();
     // Started by takes one value: its chips are radios.
     expect(screen.getByRole("radio", { name: /^You/ })).toBeInTheDocument();
+  });
+
+  it("is its own scroll container, so rows below the filters can be reached (#3747)", async () => {
+    render();
+    await screen.findAllByTestId(/^activity-row-/);
+    expect(screen.getByTestId("activity-page")).toHaveClass("h-full", "overflow-y-auto");
+  });
+
+  it("shows the most frequent subjects, keeps a chosen one, and shows the rest on asking (#3747)", async () => {
+    const subjects = Array.from({ length: CHIPS_SHOWN + 5 }, (_, i) => ({
+      value: `subject-${String(i).padStart(2, "0")}`,
+      count: 100 - i,
+    }));
+    const facets = await (await fetch("/api/v1/activity/facets")).json();
+    setActivityFacets({ ...facets, subjects });
+    const { user } = render(`/activity?subject=subject-${CHIPS_SHOWN + 3}`);
+    const group = await screen.findByLabelText("Subject");
+    await waitFor(() => expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 1));
+    expect(within(group).getByRole("radio", { name: /^subject-00/ })).toBeInTheDocument();
+    expect(within(group).getByRole("radio", { name: /^subject-13/, checked: true })).toBeInTheDocument();
+    expect(within(group).queryByRole("radio", { name: /^subject-14/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Subject: show 4 more" }));
+    expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 5);
+    await user.click(screen.getByRole("button", { name: "Subject: show fewer" }));
+    expect(within(group).getAllByRole("radio")).toHaveLength(CHIPS_SHOWN + 1);
   });
 
   it("filters by status and keeps it in the URL", async () => {

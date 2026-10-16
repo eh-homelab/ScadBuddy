@@ -10,14 +10,18 @@ export const APP_TITLE = 'ScadBuddy'
  *
  * The heading's whole `textContent` is taken, nested markup included (WorkflowRunPage's
  * `name vN` link): a badge or button put inside a page's `<h1>` changes its tab title too
- * (usePageTitle.test.tsx pins it).
+ * (usePageTitle.test.tsx pins it). Rendered Markdown (`data-markdown`) is skipped, so a
+ * README's own heading never names the tab (#3392).
+ *
+ * `main` must be the always-rendered `<main>`: the effect runs once, on mount, so a
+ * `<main>` rendered later would leave the title `ScadBuddy` with nothing to say why.
  */
 export function usePageTitle(main: RefObject<HTMLElement | null>): string {
   const [heading, setHeading] = useState('')
   useEffect(() => {
     const element = main.current
     if (!element) return
-    const read = () => setHeading(element.querySelector('h1')?.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+    const read = () => setHeading(pageHeading(element)?.textContent?.replace(/\s+/g, ' ').trim() ?? '')
     read()
     // Every change under <main> reads the heading again, the Customize page's frequent
     // ones included. Considered and kept: one querySelector, and React drops a setState
@@ -27,4 +31,9 @@ export function usePageTitle(main: RefObject<HTMLElement | null>): string {
     return () => observer.disconnect()
   }, [main])
   return heading ? `${heading} · ${APP_TITLE}` : APP_TITLE
+}
+
+function pageHeading(main: HTMLElement): HTMLHeadingElement | undefined {
+  for (const h1 of main.querySelectorAll('h1')) if (!h1.closest('[data-markdown]')) return h1
+  return undefined
 }

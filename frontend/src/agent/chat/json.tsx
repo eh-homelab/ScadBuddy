@@ -18,7 +18,7 @@ export function prettyJson(value: unknown): string | undefined {
 const TOKEN = /("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false)\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g
 
 function tokenClass(match: string, key: boolean): string {
-  if (key) return 'text-accent'
+  if (key) return 'text-primary'
   if (match.startsWith('"')) return 'text-ok'
   if (match === 'null') return 'text-faint'
   if (match === 'true' || match === 'false') return 'text-warn'

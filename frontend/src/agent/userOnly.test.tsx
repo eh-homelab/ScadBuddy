@@ -4,8 +4,7 @@ import { join } from 'node:path'
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { Button } from '../components/ui/Button'
-import { Dialog } from '../components/ui/Dialog'
+import { Button } from '../components/ui/button'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,11 +26,11 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from '../components/ui/
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import {
-  Dialog as RadixDialog,
-  DialogContent as RadixDialogContent,
-  DialogTitle as RadixDialogTitle,
-  DialogTrigger as RadixDialogTrigger,
-} from '../components/ui/shadcn-dialog'
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from '../components/ui/dialog'
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '../components/ui/sheet'
 import { renderPage as render } from '../test/utils'
 import { bridge } from './bridge'
@@ -72,18 +71,13 @@ function OpenedContextMenuTrigger() {
 }
 
 const WRAPPED: Record<string, () => ReactNode> = {
-  'the legacy Dialog': () => (
-    <Dialog open title="Send" onClose={() => {}} footer={<Action />}>
-      body
-    </Dialog>
-  ),
-  'a Radix Dialog': () => (
-    <RadixDialog open>
-      <RadixDialogContent>
-        <RadixDialogTitle>Send</RadixDialogTitle>
+  'a Dialog': () => (
+    <Dialog open>
+      <DialogContent>
+        <DialogTitle>Send</DialogTitle>
         <Action />
-      </RadixDialogContent>
-    </RadixDialog>
+      </DialogContent>
+    </Dialog>
   ),
   'an AlertDialog': () => (
     <AlertDialog open>
@@ -161,14 +155,14 @@ const WRAPPED: Record<string, () => ReactNode> = {
 
 /** The mark on the trigger alone, the content its sibling. */
 const TRIGGERED: Record<string, () => ReactNode> = {
-  'a Radix Dialog': () => (
-    <RadixDialog open>
-      <RadixDialogTrigger {...USER_ONLY}>Send</RadixDialogTrigger>
-      <RadixDialogContent>
-        <RadixDialogTitle>Send</RadixDialogTitle>
+  'a Dialog': () => (
+    <Dialog open>
+      <DialogTrigger {...USER_ONLY}>Send</DialogTrigger>
+      <DialogContent>
+        <DialogTitle>Send</DialogTitle>
         <Action />
-      </RadixDialogContent>
-    </RadixDialog>
+      </DialogContent>
+    </Dialog>
   ),
   'an AlertDialog': () => (
     <AlertDialog open>

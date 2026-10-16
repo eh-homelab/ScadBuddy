@@ -123,11 +123,36 @@ describe('WorkflowRunPage', () => {
 
   // #2482 — a call outside the run's grant: where it waits, why, and its way up.
   it('says a call waits at the starting session first, why it is outside the grant, and that you may decide now', async () => {
-    render('run-escalated')
-    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
-    expect(card).toHaveTextContent('With the session that started the run until')
-    expect(card).toHaveTextContent('Outside the grant: print limit reached')
-    expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    // The fixture's hop runs to 09:11 on 2026-10-10.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-10T09:05:00Z'))
+    try {
+      render('run-escalated')
+      const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+      expect(card).toHaveTextContent('With the session that started the run until')
+      expect(card).toHaveTextContent('Outside the grant: print limit reached')
+      expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // #3350: not left saying so until the next read moves the call on.
+  it("drops the starting session's notice once its hop's time is up", async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-10-10T09:10:50Z'))
+    try {
+      render('run-escalated')
+      const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+      expect(card).toHaveTextContent('With the session that started the run until')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(card).not.toHaveTextContent('With the session that started the run until')
+      expect(card).toHaveTextContent('Outside the grant: print limit reached')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("shows a parent's proposal beside the call it narrows, and approves exactly what was shown", async () => {
@@ -139,6 +164,8 @@ describe('WorkflowRunPage', () => {
       'request.objects[0].count32',
       'request.objects[1]{"output_id":"b"}(removed)',
     ])
+    // Its header row is muted like every other table's on the page (#3494 review).
+    expect(proposal.querySelector('thead')).toHaveClass('text-muted-foreground')
     expect(card).toHaveTextContent('Narrowed by the starting session')
     // A person's to see and to approve: the assistant can neither read nor click it.
     expect(proposal.closest('[data-agent-user-only]')).not.toBeNull()
@@ -147,6 +174,28 @@ describe('WorkflowRunPage', () => {
     await user.click(approve)
     await waitFor(() => expect(flowRequests()).toHaveLength(1))
     expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
+  })
+
+  // #3350: a proposal that changes nothing says so, not an empty table.
+  it('says a proposal that changes nothing changes nothing', async () => {
+    const same = { request: { objects: [{ output_id: 'a', count: 3 }], goal: 'fewest_plates' } }
+    server.use(
+      http.get('/api/v1/workflow-runs/:id/proposals/:callId', () =>
+        HttpResponse.json({
+          call_id: 'call-narrowed',
+          fn: 'arrange',
+          tool: null,
+          original: same,
+          proposed: same,
+          proposal_hash: 'f'.repeat(64),
+          proposed_by: 'session:sess-escalated',
+        }),
+      ),
+    )
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    expect(await within(card).findByText('The proposal changes nothing.')).toBeInTheDocument()
+    expect(within(card).queryByRole('table', { name: 'Proposed change' })).toBeNull()
   })
 
   it('sends the reason typed with an approval as proposed, as Approve and Deny do', async () => {

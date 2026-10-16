@@ -344,7 +344,7 @@ function SlideMedia({
   // A skeleton's pulse until the picture is in (#3670).
   const [loaded, setLoaded] = useState<string | null>(null)
   const frame = cn(
-    'relative block aspect-[4/3] w-full overflow-hidden rounded-lg bg-ui-muted',
+    'relative block aspect-[4/3] w-full overflow-hidden rounded-lg bg-muted',
     src && loaded !== src && 'animate-pulse',
   )
   const picture = (

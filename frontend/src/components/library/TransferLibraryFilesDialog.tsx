@@ -3,7 +3,7 @@ import { USER_ONLY } from '../../agent/dom'
 import { ApiError } from '../../api/client'
 import type { LibraryEntry, LibraryFolderView } from '../../api/types'
 import { folderLabel, projectLosses } from '../../lib/libraryTransfer'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { LibraryTree } from './LibraryTree'
 import { Button } from '@/components/ui/button'
 import {

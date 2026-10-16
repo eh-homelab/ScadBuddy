@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { FlowPending, FlowQueueEntry, FlowQueueStep, FlowRunView, FlowStep } from '../api/types'
@@ -8,7 +8,7 @@ import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
 import { GrantPanel } from '../components/flows/GrantPanel'
 import { ResetPanel } from '../components/flows/ResetPanel'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { ChevronRightIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -38,7 +38,7 @@ import { usePollWhile, usePollWhileUnavailable } from '../lib/usePollWhileUnavai
 import { ATTENTION_POLL_MS } from '../agent/attention'
 
 /** A box of text set apart: a result, a proposal, what a session wrote. */
-const INSET = 'rounded-lg bg-ui-muted/50 p-2 ring-1 ring-foreground/10'
+const INSET = 'rounded-lg bg-muted/50 p-2 ring-1 ring-foreground/10'
 
 /** A call waiting on the person: a card marked as needing them. */
 const WAITING = 'mb-3 ring-destructive/40'
@@ -225,7 +225,7 @@ function Images({ runId, images }: { runId: string; images: NonNullable<FlowRunV
                       src={url}
                       alt={label}
                       loading="lazy"
-                      className="size-24 rounded-lg bg-ui-muted object-contain ring-1 ring-foreground/10"
+                      className="size-24 rounded-lg bg-muted object-contain ring-1 ring-foreground/10"
                     />
                   </a>
                 </TooltipTrigger>
@@ -394,12 +394,35 @@ type EscalationInfo = Pick<FlowPending, 'hop' | 'hop_until' | 'reason' | 'propos
   hops: readonly { hop: string; action: string; actor: string }[]
 }
 
+/**
+ * Whether `at` has passed, re-rendering when it does (#3350); false for no time. By the
+ * browser's clock, which the agent no longer trusts for the hop itself (#3411): a fast one
+ * hides the "you may decide it now" notice early. It says nothing the run page's decision
+ * does not, so that is accepted.
+ */
+function usePassed(at: string | null | undefined): boolean {
+  const due = at ? Date.parse(at) : Number.NaN
+  const [passed, setPassed] = useState(() => Number.isFinite(due) && due <= Date.now())
+  useEffect(() => {
+    if (!Number.isFinite(due)) return setPassed(false)
+    const left = due - Date.now()
+    setPassed(left <= 0)
+    if (left <= 0) return
+    // A hop lasts minutes; the cap only keeps setTimeout's 32-bit delay from overflowing.
+    const timer = setTimeout(() => setPassed(true), Math.min(left, 2 ** 31 - 1))
+    return () => clearTimeout(timer)
+  }, [due])
+  return passed
+}
+
 /** #2482 — where a call outside the run's grant waits, why, and what happened to it on the way. */
 function Escalation({ entry }: { entry: EscalationInfo }) {
+  // Gone once the hop's time is up (#3350), not left until the next read moves it on.
+  const hopOver = usePassed(entry.hop_until)
   if (!entry.hop && !entry.reason) return null
   return (
     <div className="text-[12px] text-muted-foreground">
-      {entry.hop === 'parent' && entry.hop_until && (
+      {entry.hop === 'parent' && entry.hop_until && !hopOver && (
         <p>
           With the session that started the run until {hopUntilText(entry.hop_until)}; you may decide
           it now.
@@ -417,6 +440,31 @@ function Escalation({ entry }: { entry: EscalationInfo }) {
         </ol>
       )}
     </div>
+  )
+}
+
+/** A proposal's changes, field by field; a line, not an empty table, when it changes nothing (#3350). */
+function ProposedChange({ changes }: { changes: ReturnType<typeof proposalDiff> }) {
+  if (changes.length === 0) return <p className="mb-2 text-[12px] text-muted-foreground">The proposal changes nothing.</p>
+  return (
+    <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
+      <thead className="text-muted-foreground">
+        <tr>
+          <th className="pr-2 font-medium">Field</th>
+          <th className="pr-2 font-medium">As called</th>
+          <th className="font-medium">As proposed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((c) => (
+          <tr key={c.path}>
+            <td className="pr-2 font-mono">{c.path}</td>
+            <td className="pr-2 font-mono">{c.was}</td>
+            <td className="font-mono">{c.now}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 
@@ -449,24 +497,7 @@ function Proposal({ runId, callId, reason, busy, act }: ProposalProps) {
         </div>
       ) : (
         <>
-          <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="pr-2 font-medium">Field</th>
-                <th className="pr-2 font-medium">As called</th>
-                <th className="font-medium">As proposed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {proposalDiff(data.original, data.proposed).map((c) => (
-                <tr key={c.path}>
-                  <td className="pr-2 font-mono">{c.path}</td>
-                  <td className="pr-2 font-mono">{c.was}</td>
-                  <td className="font-mono">{c.now}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <ProposedChange changes={proposalDiff(data.original, data.proposed)} />
           <Button
             size="sm"
             disabled={busy}

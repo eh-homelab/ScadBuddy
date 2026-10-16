@@ -19,7 +19,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /** A checkbox and its label, side by side. */
 function Check({

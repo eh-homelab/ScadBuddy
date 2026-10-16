@@ -32,7 +32,7 @@ import { useAsync } from '../lib/useAsync'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Hint } from './Hint'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,

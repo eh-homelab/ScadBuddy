@@ -6,20 +6,34 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils'
 import { CollapseContext, foldsAround, readCollapsed, useCollapsible, useReveal, writeCollapsed } from './collapseState'
 
-/** The Settings page's folded sections and sub-sections, remembered per browser. */
-export function SettingsCollapseProvider({ children }: { children: ReactNode }) {
+/**
+ * The Settings page's folded sections and sub-sections, remembered per browser. With
+ * `known`, the stored list keeps only those ids, so a renamed or removed fold's id does
+ * not stay in it forever (#3415). It is every fold the page can render, not those it
+ * renders now: a group shown only with the agent's database keeps its fold without it.
+ */
+export function SettingsCollapseProvider({ children, known }: { children: ReactNode; known?: readonly string[] }) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
+  const knownIds = useMemo(() => (known ? new Set(known) : undefined), [known])
   const [empty, setEmptyIds] = useState<ReadonlySet<string>>(new Set())
+  // Pruned once on mount too, so a browser that never toggles a fold drops stale ids
+  // as well (#3415 review).
+  useEffect(() => {
+    if (!knownIds) return
+    const stored = readCollapsed()
+    const kept = new Set([...stored].filter((fold) => knownIds.has(fold)))
+    if (kept.size !== stored.size) writeCollapsed(kept)
+  }, [knownIds])
   const setOpen = useCallback((id: string, open: boolean) => {
     setCollapsed((current) => {
       if (current.has(id) !== open) return current
       const next = new Set(current)
       if (open) next.delete(id)
       else next.add(id)
-      writeCollapsed(next)
+      writeCollapsed(knownIds ? new Set([...next].filter((fold) => knownIds.has(fold))) : next)
       return next
     })
-  }, [])
+  }, [knownIds])
   const setEmpty = useCallback((id: string, isEmpty: boolean) => {
     setEmptyIds((current) => {
       if (current.has(id) === isEmpty) return current
@@ -75,7 +89,7 @@ export function SubSection({ id, title, children }: { id: string; title: string;
         <h3 id={headingId} className="text-sm font-medium">
           <CollapsibleTrigger
             aria-controls={`${id}-body`}
-            className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left hover:bg-ui-muted/50"
+            className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left hover:bg-muted/50"
           >
             <ChevronRightIcon
               aria-hidden="true"

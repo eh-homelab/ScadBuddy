@@ -13,7 +13,7 @@ export function PrintsPage() {
       <div className="mx-auto max-w-5xl px-4 py-6">
         <div className="mb-5">
           <h1 className="text-lg font-semibold tracking-tight">Print history</h1>
-          <p className="mt-0.5 text-[13px] text-muted">
+          <p className="mt-0.5 text-[13px] text-subtle">
             Every print of a ScadBuddy output, as Bambuddy archived it.
           </p>
         </div>
@@ -33,11 +33,11 @@ export function TemplatePrintsPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
         <div className="mb-5 flex items-baseline gap-2">
-          <Link to="/" className="text-[12px] text-muted hover:text-ink">
+          <Link to="/" className="text-[12px] text-subtle hover:text-ink">
             Models
           </Link>
           <span className="text-faint">/</span>
-          <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
+          <Link to={modelPath(slug)} className="text-[12px] text-subtle hover:text-ink">
             {model.data?.name ?? slug}
           </Link>
           <span className="text-faint">/</span>

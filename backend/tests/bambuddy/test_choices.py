@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import cast
 
 from scadbuddy.bambuddy.choices import (
     installed_nozzles,
@@ -6,8 +7,11 @@ from scadbuddy.bambuddy.choices import (
     nozzle_warning,
     plate_warning,
 )
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.hardware import plate_unlisted_warning
-from scadbuddy.bambuddy.models import Archive, PrinterStatus
+from scadbuddy.bambuddy.models import Archive, NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.print_run import PreparedPlates, _hardware_warnings
+from scadbuddy.bambuddy.resolver import PrintChoices
 from tests.bambuddy.conftest import recording
 
 
@@ -91,6 +95,40 @@ def test_a_plate_the_printers_model_does_not_take_warns() -> None:
         assert plate_unlisted_warning(chosen, "H2C", "x") is None, chosen
     # A model the profiles do not know is offered every plate, so nothing is claimed.
     assert plate_unlisted_warning("Cool Plate", "Elegoo Neptune", "x") is None
+
+
+def test_a_run_accepted_before_the_model_was_carried_says_nothing_of_its_plate() -> None:
+    """#3024 review: a PreparedPlates from an older workflow history has no
+    printer_model, and plan_run's plate check then claims nothing."""
+    old = PreparedPlates.model_validate({"plate_ids": [1], "printer_id": 1})
+    assert old.printer_model is None
+    assert plate_unlisted_warning("Cool Plate", old.printer_model, "x") is None
+
+
+class _NoArchives:
+    async def archives(self, *, printer_id: int) -> list[Archive]:
+        return []
+
+
+async def test_plan_runs_plate_check_takes_the_runs_printer_model() -> None:
+    """#3783 review: ``_hardware_warnings``, the path plan_run takes, forwards the run's
+    printer model: none claims nothing of the plate, and the H2C's warns. (That an older
+    run carries none is the test above's.)"""
+    choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")], bed_type="Cool Plate")
+
+    async def kinds(model: str | None) -> list[str]:
+        found = await _hardware_warnings(
+            cast(BambuddyClient, _NoArchives()),
+            1,
+            choices,
+            None,
+            printer_name="x",
+            printer_model=model,
+        )
+        return [warning.kind for warning in found]
+
+    assert await kinds(None) == []
+    assert await kinds("H2C") == ["plate-not-listed"]
 
 
 def test_a_size_not_in_the_rack_warns() -> None:

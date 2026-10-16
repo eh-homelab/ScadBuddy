@@ -107,7 +107,8 @@ describe('ParameterPanel', () => {
       await user.click(screen.getByRole('tab', { name: 'Plate' }))
 
       const panel = screen.getByRole('tabpanel', { name: 'Plate' })
-      const items = within(within(panel).getByRole('list')).getAllByRole('listitem')
+      // The panel's own list, the first: a widget may render a list of its own (#3394).
+      const items = within(within(panel).getAllByRole('list')[0]!).getAllByRole('listitem')
       expect(items.length).toBeGreaterThan(0)
       expect(items.map((item) => item.dataset.param)).toEqual(
         [...panel.querySelectorAll('[data-param]')].map((item) => (item as HTMLElement).dataset.param),

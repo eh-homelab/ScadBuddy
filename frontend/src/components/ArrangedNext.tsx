@@ -14,7 +14,7 @@ export function ArrangedNext({ output, sent, onPrint }: { output: Output; sent: 
     <>
       <ArrangedPlates outputId={output.id} />
       <div role="group" aria-label="Next step" className="mt-1.5 flex flex-wrap items-center gap-2">
-        {!sent && <span className="text-[12px] text-muted">Not sent to Bambuddy yet: nothing is queued or in its library.</span>}
+        {!sent && <span className="text-[12px] text-subtle">Not sent to Bambuddy yet: nothing is queued or in its library.</span>}
         <Button type="button" size="sm" onClick={onPrint}>
           Print
         </Button>

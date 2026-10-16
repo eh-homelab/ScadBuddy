@@ -77,7 +77,7 @@ export function McpConnectSnippet({ publicUrl, authMode, token }: Props) {
         {header && !token && <>Create a token below, then paste it where the snippet says {PLACEHOLDER}. </>}
         {!header && <>Authentication is off, so the snippets send no token. </>}
         For ScadBuddy&rsquo;s skills and subagents too, install the{' '}
-        <a href={PLUGIN_DOC} {...NEW_TAB} className="text-accent underline">
+        <a href={PLUGIN_DOC} {...NEW_TAB} className="text-primary underline">
           ScadBuddy Claude plugin ↗
         </a>{' '}
         instead; it asks for this address without <code className="sb-num">/mcp</code> and the token.
@@ -123,7 +123,7 @@ function Snippet({ id, title, copyLabel, text }: { id: string; title: string; co
           ref={ref}
           data-testid={id}
           onClick={(event) => selectContents(event.currentTarget)}
-          className="sb-num cursor-text overflow-x-auto rounded-md bg-ui-muted px-2.5 py-2 text-xs break-all whitespace-pre-wrap"
+          className="sb-num cursor-text overflow-x-auto rounded-md bg-muted px-2.5 py-2 text-xs break-all whitespace-pre-wrap"
           {...USER_ONLY}
         >
           {text}

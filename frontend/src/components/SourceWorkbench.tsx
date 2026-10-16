@@ -9,7 +9,7 @@ import { refusedCheck } from '../lib/problems'
 import { useDebounced } from '../lib/useDebounced'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 import { SourceEditor, type SourceEditHandle } from './SourceEditor'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,

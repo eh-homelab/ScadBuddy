@@ -16,7 +16,7 @@ import {
   type Skipped,
 } from '../lib/modelFolder'
 import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { FileUpIcon, FolderUpIcon, XIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -223,7 +223,7 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         data-testid="upload-dropzone"
         className={cn(
           'flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors',
-          dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+          dragging ? 'border-primary bg-primary/10' : 'bg-muted/40',
         )}
       >
         <p className="text-sm text-muted-foreground">

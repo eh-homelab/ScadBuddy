@@ -285,7 +285,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
       onPointerLeave={() => (hovered.current = false)}
     >
       {builtin && (
-        <p className="rounded-lg border bg-ui-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           What this built-in template ships is read-only. Images and videos you add come after
           it, and can be captioned, reordered, removed or made the cover.
         </p>
@@ -428,7 +428,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={Math.round(upload.fraction * 100)}
-                className="h-1.5 w-32 overflow-hidden rounded-full bg-ui-muted"
+                className="h-1.5 w-32 overflow-hidden rounded-full bg-muted"
               >
                 <div
                   className="h-full bg-primary"
@@ -452,7 +452,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
         onDrop={onDropFiles}
         className={cn(
           'flex flex-col items-center gap-2 rounded-xl border-2 border-dashed px-4 py-5 text-center transition-colors',
-          dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+          dragging ? 'border-primary bg-primary/10' : 'bg-muted/40',
         )}
       >
         <ImagePlusIcon aria-hidden className="size-5 text-muted-foreground" />
@@ -516,7 +516,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
 /** A small preview of one item: the image, a video's poster, or a plain tile. */
 function Thumb({ slug, item, index }: { slug: string; item: MediaView; index: number }) {
   const tile =
-    'flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-ui-muted text-xs text-muted-foreground'
+    'flex h-14 w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted text-xs text-muted-foreground'
   if (item.missing) return <div className={tile}>Missing</div>
   const src = item.kind === 'image' ? api.mediaUrl(slug, item) : api.mediaPosterUrl(slug, item)
   if (!src) return <div className={tile}>Video</div>

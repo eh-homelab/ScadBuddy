@@ -16,7 +16,7 @@ export function ModelThumbnail({ src, alt }: { src?: string; alt: string }) {
           alt={alt}
           onLoad={() => setLoaded(src)}
           onError={() => setLoaded(src)}
-          className="aspect-[4/3] w-full rounded-lg bg-ui-muted object-cover"
+          className="aspect-[4/3] w-full rounded-lg bg-muted object-cover"
         />
         {loaded !== src && <Skeleton aria-hidden className="absolute inset-0 rounded-lg" />}
       </span>
@@ -26,7 +26,7 @@ export function ModelThumbnail({ src, alt }: { src?: string; alt: string }) {
     <div
       role="img"
       aria-label={`${alt} — not generated yet`}
-      className="flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-ui-muted/60"
+      className="flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-muted/60"
     >
       <svg viewBox="0 0 120 72" className="h-full w-full text-border" aria-hidden="true">
         <defs>

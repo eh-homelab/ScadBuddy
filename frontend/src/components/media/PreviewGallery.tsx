@@ -131,7 +131,7 @@ function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
       type="button"
       aria-label={`Open ${slide.alt}`}
       onClick={onOpen}
-      className="relative block h-14 w-[4.5rem] cursor-zoom-in overflow-hidden rounded-md bg-ui-muted ring-1 ring-foreground/10 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+      className="relative block h-14 w-[4.5rem] cursor-zoom-in overflow-hidden rounded-md bg-muted ring-1 ring-foreground/10 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
     >
       {src ? (
         <img

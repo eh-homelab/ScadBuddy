@@ -56,25 +56,25 @@ import { Swatch } from './print/Swatch'
  */
 const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'no-choice': 'text-warn',
-  'not-loaded': 'text-muted',
-  'low-filament': 'text-muted',
-  'no-preset': 'text-muted',
-  'no-fan-out': 'text-muted',
+  'not-loaded': 'text-subtle',
+  'low-filament': 'text-subtle',
+  'no-preset': 'text-subtle',
+  'no-fan-out': 'text-subtle',
   // spec 2026-09-27 — the spool-first resolver's own kinds (task 5-7). None of these
   // are ever produced by this picker's own `warningsFor`, but the type is shared with
   // `PrintRunResult.warnings`, so the map still has to be exhaustive over it.
   'mixed-sizes': 'text-warn',
   'no-process': 'text-warn',
   'not-installed': 'text-warn',
-  'plate-differs': 'text-muted',
+  'plate-differs': 'text-subtle',
   // #2366 — a plate the printer's model does not take: it sets the bed temperature.
   'plate-not-listed': 'text-warn',
-  'hf-unsupported': 'text-muted',
+  'hf-unsupported': 'text-subtle',
   'hf-mounted': 'text-warn',
   // spec 2026-10-01 (#836) — the rack pick's own kinds; plate-wide, from PrintRunResult/check.
   'rack-unsafe-material': 'text-warn',
-  'rack-left-to-bambuddy': 'text-muted',
-  'rack-manual-partial': 'text-muted',
+  'rack-left-to-bambuddy': 'text-subtle',
+  'rack-manual-partial': 'text-subtle',
   // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
   'sequence-clearance': 'text-warn',
   'profile-not-applied': 'text-warn',
@@ -88,8 +88,12 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'sliced-other-model': 'text-warn',
   'sliced-nozzle-missing': 'text-warn',
   'sliced-plate-missing': 'text-warn',
+  // #3436 — a sliced file whose settings could not be read: nothing was checked, so it is held.
+  'sliced-unchecked': 'text-warn',
+  // #2956 — sliced for another model of the same G-code family, which prints it.
+  'sliced-same-family': 'text-subtle',
   // #2955 — ScadBuddy's own earlier slice queued: said, so a missing slice job reads as intended.
-  'slice-reused': 'text-muted',
+  'slice-reused': 'text-subtle',
 }
 
 /**
@@ -426,7 +430,7 @@ export function FilamentPicker({
                         key={spool.spool_id}
                         className={cn(
                           'flex cursor-pointer flex-wrap items-center gap-x-2.5 gap-y-1 border-b px-2.5 py-2 transition-colors last:border-b-0',
-                          chosen === spool.spool_id ? 'bg-ui-accent' : 'hover:bg-ui-muted',
+                          chosen === spool.spool_id ? 'bg-accent' : 'hover:bg-muted',
                         )}
                       >
                         <RadioGroupItem value={String(spool.spool_id)} data-testid={`spool-${spool.spool_id}`} />

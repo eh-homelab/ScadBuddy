@@ -1,5 +1,6 @@
 import {
   type AuditContext,
+  type AuditDeps,
   type AuditEntry,
   type AuditFilter,
   type AuditPage,
@@ -12,11 +13,20 @@ import {
 } from '../../src/audit/log.js'
 
 /** An in-memory audit log for tests that have no Postgres; the real one is audit/log.ts AuditLog. */
-export class MemoryAudit implements AuditRepo {
+export class MemoryAudit implements AuditRepo, AuditDeps {
   readonly entries: AuditEntry[] = []
   readonly filters: AuditFilter[] = []
   retention = DEFAULT_AUDIT_RETENTION_DAYS
   readonly retentionWrites: { days: number; context: AuditContext }[] = []
+
+  /** Not the keyed HMAC AuditLog takes: a readable stand-in, the same for the same input. */
+  hash(tool: string, input: Record<string, unknown>): string {
+    return `hash:${tool}:${JSON.stringify(input)}`
+  }
+
+  summarise(tool: string, input: Record<string, unknown>): string {
+    return `${tool} ${JSON.stringify(input)}`
+  }
 
   async record(entry: AuditEntry): Promise<void> {
     this.entries.push(entry)

@@ -80,7 +80,7 @@
       "id": 2,
       "type": "table",
       "title": "Turns with cost and tokens",
-      "description": "agent.turn spans (one per segment between parks) with what each cost: scadbuddy.cost_usd, tokens and tool calls. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "description": "agent.turn spans (one per segment between parks) with what each cost: scadbuddy.cost_usd (the turn's own since #2376; older traces carry the session's running total), scadbuddy.session_cost_usd (the chat's total), tokens and tool calls. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 1, "w": 16, "h": 10 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },

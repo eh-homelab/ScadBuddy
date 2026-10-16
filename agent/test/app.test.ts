@@ -138,12 +138,21 @@ describe('/api/v1/ai/credentials', () => {
     expect(current.headers.get('link')).toBeNull()
   })
 
-  // A guard's refusal is an answer from a deprecated route too.
+  // A guard's refusal is an answer from a deprecated route too: the read guard's and the
+  // write guard's (#3557).
   it('marks a legacy route deprecated even when a guard refuses it', async () => {
-    const res = await createApp(deps()).request('/api/v1/ai/credentials')
-    expect(res.status).toBe(403)
-    expect(res.headers.get('deprecation')).toBe(LEGACY_CREDENTIALS_DEPRECATED)
-    expect(res.headers.get('link')).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+    const app = createApp(deps())
+    const refused = [
+      await app.request('/api/v1/ai/credentials'),
+      await app.request('/api/v1/ai/credentials', { method: 'PUT', body: '{}' }),
+      await app.request('/api/v1/ai/credentials/test', { method: 'POST' }),
+      await app.request('/api/v1/ai/credentials', { method: 'DELETE' }),
+    ]
+    for (const res of refused) {
+      expect(res.status, res.url).toBe(403)
+      expect(res.headers.get('deprecation'), res.url).toBe(LEGACY_CREDENTIALS_DEPRECATED)
+      expect(res.headers.get('link'), res.url).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+    }
   })
 
   it('reads as unconfigured, and says whether saving is possible', async () => {

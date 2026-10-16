@@ -303,18 +303,17 @@ is `classifyFailure()` in
 | Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code first sends a refused 400 or 422 once more on the same credential without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only that field still answers the turn, at the cost of one refused request a turn. |
 
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
-fails mid-way (after tool calls ran) resumes the session on the next
-credential with a short "continue" prompt, so no tool runs twice and the prompt is not
-sent twice. Each credential is tried at most once per turn. In a durable session,
-while another credential could still take the segment over, the assistant's text
-reaches the transcript only at the next tool call or at the end of the segment, not
-block by block, so a refused credential's notice never shows (#2945). Every disable,
-cooldown,
+fails mid-way (after tool calls ran) resumes the session on the next credential with a
+short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
+credential is tried at most once per turn. In a durable session, while another
+credential could still take the segment over, the assistant's text reaches the
+transcript only at the next tool call or at the end of the segment, not block by
+block, so a refused credential's notice never shows (#2945). Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
-is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with
-`ai` set to one of:
+is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with `ai`
+set to one of:
 
 - `unavailable (every Claude credential is rate limited)`, with `recovers_at`: every
   credential is cooling down and will be usable again on its own;
@@ -722,6 +721,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
+
+The agent also reads the backend's flow tables, which the backend migrates. Its
+database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
+reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
+Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
+tool call, as a lookup error the activity retries until it gives up.
 
 ## 8. Per-query limits
 

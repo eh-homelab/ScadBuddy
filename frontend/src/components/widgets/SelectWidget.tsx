@@ -1,8 +1,8 @@
 import { useRef } from 'react'
 import type { Param, ParamValue } from '../../api/types'
+import { paramLabel } from '../../lib/params'
 import { useFillable } from '../../agent/useFillable'
 import { Field } from './Field'
-import { paramLabel } from '../../lib/params'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 /** Radix refuses an item whose value is "", which an OpenSCAD option may well be. */

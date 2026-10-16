@@ -30,6 +30,10 @@ REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
 PLATE_FIT_PROBLEM = "https://scadbuddy.dev/problems/plate-does-not-fit"
+#: Several library files asked by id and Bambuddy has none: a misrouted base URL more
+#: likely than every file deleted (the names route, #2349). Its own type, so a client can
+#: tell it from a 502 for a Bambuddy that failed (UNAVAILABLE_PROBLEM).
+LIBRARY_FILES_MISSING_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-library-files-missing"
 
 
 class Scope(StrEnum):

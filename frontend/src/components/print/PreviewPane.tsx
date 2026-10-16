@@ -248,8 +248,10 @@ export function PreviewPane({
                   Undo
                 </Button>
               )}
-              {sliced.get(slot.slot_id)?.side && (
-                <span className={`shrink-0 text-muted-foreground ${stale ? 'opacity-60' : ''}`} data-testid={`preview-side-${slot.slot_id}`}>
+              {/* #3500 review: a side is a claim about the sliced plate, as the moved-nozzle
+                  note is, so it is hidden while stale with it; the grams only dim. */}
+              {!stale && sliced.get(slot.slot_id)?.side && (
+                <span className="shrink-0 text-muted-foreground" data-testid={`preview-side-${slot.slot_id}`}>
                   {sliced.get(slot.slot_id)?.side === 'L' ? 'left nozzle' : 'right nozzle'}
                 </span>
               )}
@@ -264,11 +266,11 @@ export function PreviewPane({
         <div className="flex items-center justify-between gap-2">
           <span className="font-medium text-foreground">Slice</span>
           {slicing ? (
-            <span className="text-[12px] text-muted" data-testid="slice-status">
+            <span className="text-[12px] text-subtle" data-testid="slice-status">
               {slice ? 'Reslicing for your changes…' : 'Slicing…'}
             </span>
           ) : stale ? (
-            <span className="text-[12px] text-muted" data-testid="slice-status">
+            <span className="text-[12px] text-subtle" data-testid="slice-status">
               Out of date
             </span>
           ) : null}
@@ -277,7 +279,7 @@ export function PreviewPane({
           <dl className={`mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 ${stale ? 'opacity-60' : ''}`} data-stale={stale}>
             {slice.print_time_seconds != null && (
               <>
-                <dt className="text-muted">Time</dt>
+                <dt className="text-subtle">Time</dt>
                 <dd className="sb-num" data-testid="slice-time">
                   {formatDuration(slice.print_time_seconds)}
                 </dd>
@@ -285,7 +287,7 @@ export function PreviewPane({
             )}
             {slice.filament_used_g != null && (
               <>
-                <dt className="text-muted">Filament</dt>
+                <dt className="text-subtle">Filament</dt>
                 <dd className="sb-num" data-testid="slice-grams">
                   {grams(slice.filament_used_g)}
                 </dd>
@@ -293,7 +295,7 @@ export function PreviewPane({
             )}
             {slice.filament_changes != null && (
               <>
-                <dt className="text-muted">Filament changes (purges)</dt>
+                <dt className="text-subtle">Filament changes (purges)</dt>
                 <dd className="sb-num" data-testid="slice-changes">
                   {slice.filament_changes === 0 ? 'none' : slice.filament_changes}
                 </dd>
@@ -301,9 +303,10 @@ export function PreviewPane({
             )}
           </dl>
         ) : (
-          !slicing && !sliceError && <p className="mt-1 text-[12px] text-muted">Sliced once the choices are made.</p>
+          !slicing && !sliceError && <p className="mt-1 text-[12px] text-subtle">Sliced once the choices are made.</p>
         )}
-        {/* #3208: hidden while stale, as the grams are: the next slice may say otherwise. */}
+        {/* #3208: hidden while stale, where the grams only dim: the next slice may
+            contradict them. */}
         {!stale && departures.length > 0 && (
           <ul className="mt-1 space-y-0.5 text-[12px] text-warn" data-testid="slice-departures">
             {departures.map((note) => (

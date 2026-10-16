@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
+import { CLAIM_LEASE_S, Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { SessionError } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -143,6 +143,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent).toHaveLength(1)
   })
 
+  it('never asks about an entry a deny holds, and the tick goes on with the rest (#3517)', async () => {
+    const claimed = await park()
+    const waiting = await park()
+    // A parent's deny in flight: `infinity` until it lands, which postgres.js reads as an
+    // Invalid Date, so a tick that selected it threw on toISOString and sent nothing.
+    await db.sql`UPDATE ai_pending_input SET hop_until = 'infinity', hop_claimed_at = now() WHERE request_id = ${claimed}`
+    expect(await escalations.deliver()).toBe(1)
+    const data = JSON.parse(sent[0]!.text.slice(sent[0]!.text.indexOf('{'))) as { untrusted_data: { content: { request_id: string }[] } }
+    expect(data.untrusted_data.content.map((c) => c.request_id)).toEqual([waiting])
+    expect(await hop(claimed)).toEqual({ hop: 'parent', delivered: false })
+  })
+
   it('a busy starter session gets them on a later tick', async () => {
     const id = await park()
     refuse = new SessionError('busy', 'a turn is running')
@@ -167,6 +179,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent).toEqual([])
   })
 
+  it('a skip leaves an entry a deny claimed meanwhile at the parent, and the lease hands it on (#3910)', async () => {
+    const id = await park()
+    // The owner's tiers are read after the waiting entries were selected: a deny that
+    // claims the entry then, as the parent's own deny would, races the skip that follows.
+    const racing = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send,
+      currentTiers: async () => {
+        await db.sql`UPDATE ai_pending_input SET hop_until = 'infinity', hop_claimed_at = now() WHERE request_id = ${id}`
+        return ['read']
+      },
+    })
+    expect(await racing.deliver()).toBe(0)
+    expect(await hop(id)).toMatchObject({ hop: 'parent' })
+    expect(sent).toEqual([])
+    // Once the claim's lease is over, the sweep hands it to the person.
+    await db.sql`
+      UPDATE ai_pending_input SET hop_claimed_at = now() - make_interval(secs => ${CLAIM_LEASE_S + 1})
+      WHERE request_id = ${id}`
+    expect(await escalations.moveDue()).toBe(1)
+    expect(await hop(id)).toMatchObject({ hop: 'person' })
+  })
+
   it('a handed-off starter session, or a revoked token, is no parent', async () => {
     const handed = await park()
     await db.sql`UPDATE ai_sessions SET owner_kind = 'browser', owner_id = 'browser' WHERE id = ${parent}`
@@ -179,6 +215,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await escalations.deliver()).toBe(0)
     expect(await hop(revoked)).toMatchObject({ hop: 'person' })
     expect(sent).toEqual([])
+  })
+
+  it("reads a token owner's tiers through the session manager's own lookup (#3349)", async () => {
+    // The lookup says read and write, though the token row says 'outward': it, not a query
+    // of the delivery's own, decides the turn's tiers.
+    const asked: Owner[] = []
+    const shared = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send,
+      currentTiers: async (owner) => (asked.push(owner), owner.id === TOKEN ? ['read', 'write'] : undefined),
+    })
+    await park()
+    expect(await shared.deliver()).toBe(1)
+    expect(asked.map((o) => o.id)).toEqual([TOKEN])
+    expect(sent[0]!.tiers).toEqual(['read', 'write'])
   })
 
   // Spec §4.4: a script that asks the very session that started the run. That session
@@ -319,6 +371,56 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const newer = await flowRun()
     expect(await escalations.deliver()).toBe(1)
     expect(sent[0]!.text).toContain(newer)
+  })
+
+  it("runs whose parent-hop calls timed out do not keep a newer run's call out of the batch (#3411)", async () => {
+    // Timed out but not moved on yet (moveDue runs on its own tick): they yield nothing.
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() - 60_000).toISOString(), hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    // One statement, not 200: keeps this test quick under CI load.
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      SELECT id, 'd1', 1, 'swap', 'waiting', 'flow-' || id, 'wr1',
+             ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour'
+      FROM (SELECT gen_random_uuid()::text AS id FROM generate_series(1, 200)) runs`
+    const newer = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(newer)
+  })
+
+  // #3494 review: a malformed hop_until skips that call, never the scan of every run.
+  it('skips a call whose hop_until is malformed and still delivers the others', async () => {
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    const bad = randomUUID()
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: 'not a time', hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      VALUES (${bad}, 'd1', 1, 'swap', 'waiting', ${`flow-${bad}`}, 'wr1',
+              ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+    const good = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(good)
+  })
+
+  it("judges a call's hop and its grace by Postgres's clock, not a skewed replica's (#3411)", async () => {
+    const ownCall = await flowRun()
+    const unlogged = await park(parent, child, TOKEN, `toolu_${randomUUID()}`, false)
+    // This replica's clock runs 15 minutes fast: past the own call's hop (10 minutes) and
+    // the unlogged call's grace, though neither has passed.
+    const now = Date.now()
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000)
+    try {
+      expect(await escalations.deliver()).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(sent[0]!.text).toContain(ownCall)
+    expect(sent[0]!.text).not.toContain(unlogged)
+    expect(await hop(unlogged)).toMatchObject({ hop: 'parent', delivered: false })
   })
 
   it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {

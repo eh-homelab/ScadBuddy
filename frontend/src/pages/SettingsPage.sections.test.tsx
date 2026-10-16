@@ -23,6 +23,22 @@ async function seeded() {
   )
 }
 
+/**
+ * Moves the fake clock 20 ms at a time until `check` passes, at most half of SETTLE_MS
+ * in all, so a timer due at SETTLE_MS cannot fire before the test means it to.
+ */
+async function stepUntil(check: () => void): Promise<void> {
+  for (let moved = 0; ; moved += 20) {
+    try {
+      check()
+      return
+    } catch (error) {
+      if (moved >= SETTLE_MS / 2) throw error
+    }
+    await act(() => vi.advanceTimersByTimeAsync(20))
+  }
+}
+
 /** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
 async function enter(user: UserEvent, field: HTMLElement, text: string) {
   await user.click(field)
@@ -145,18 +161,23 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
     const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
-    const timeouts = vi.spyOn(window, 'setTimeout')
+    // Time itself, not one timer picked out by its closure's text (#3247 review), and
+    // only the time the test moves (#3804 review): a clock that also followed the wall
+    // could pass SETTLE_MS on a loaded machine before the first check.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
-      await seeded()
-      await waitFor(() => expect(scrolls).toContain(4992))
-      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
-      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
-      expect(settle).toBeDefined()
-      act(() => (settle![0] as () => void)())
+      // The page's loads wait on timers too (the mock API's delays), so move the clock
+      // in small steps, never near SETTLE_MS, until each step shows.
+      await stepUntil(() =>
+        expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
+      )
+      await stepUntil(() => expect(scrolls).toContain(4992))
+      expect(observers[0]!.disconnected).toBe(false)
+      act(() => vi.advanceTimersByTime(SETTLE_MS))
       expect(observers[0]!.disconnected).toBe(true)
     } finally {
-      timeouts.mockRestore()
+      vi.useRealTimers()
       restore()
       vi.unstubAllGlobals()
     }
@@ -222,6 +243,31 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       expect(window.location.pathname).toBe('/settings')
     } finally {
       restore()
+    }
+  })
+
+  it('unfolds a deep-linked group inside a folded section, and scrolls to it once laid out (#3414)', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['assistant', 'assistant-mcp']))
+    const tops: Record<string, number> = {}
+    const { scrolls, restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#assistant-mcp' })
+      await seeded()
+      const group = await screen.findByRole('group', { name: 'MCP access' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'MCP access' })).toHaveAttribute('aria-expanded', 'true'))
+      expect(group.closest('section')!.querySelector('h2 button')).toHaveAttribute('aria-expanded', 'true')
+      // Measured while its section was folded, the group had no box; laid out, it has one,
+      // and the section nav's resize follow-up scrolls the pane there.
+      tops['assistant-mcp'] = 7000
+      act(() => {
+        for (const observer of observers) if (!observer.disconnected) observer.fire()
+      })
+      expect(scrolls.at(-1)).toBe(6992)
+    } finally {
+      restore()
+      vi.unstubAllGlobals()
+      localStorage.clear()
     }
   })
 
@@ -1081,6 +1127,23 @@ describe('SettingsPage folded sections (#2173)', () => {
     await user.click(fold('Rendering'))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
     localStorage.clear()
+  })
+
+  it('keeps every fold the page renders in the stored list (#3415 review)', async () => {
+    // A Section or SubSection whose id is missing from FOLD_IDS would be pruned as stale.
+    const first = renderPage(<SettingsPage />)
+    await seeded()
+    const ids = [...document.querySelectorAll('[data-collapsible]')].map((fold) => fold.id)
+    expect(ids.length).toBeGreaterThan(0)
+    first.unmount()
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(ids))
+    try {
+      renderPage(<SettingsPage />)
+      await seeded()
+      expect(JSON.parse(localStorage.getItem('scadbuddy.settings.collapsed') ?? '[]')).toEqual(ids)
+    } finally {
+      localStorage.clear()
+    }
   })
 
   it('unfolds the section a link or the nav goes to', async () => {

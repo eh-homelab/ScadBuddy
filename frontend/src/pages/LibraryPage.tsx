@@ -27,6 +27,7 @@ import type {
   LibraryMoveResult,
   LibraryRenameResult,
   LibrarySearch,
+  PrintBatch,
 } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
@@ -39,11 +40,12 @@ import {
 } from '../components/library/LibraryFolderDialogs'
 import { MoreMenu, RowContextMenu, type MenuEntry } from '../components/library/LibraryMenus'
 import { LibraryTree } from '../components/library/LibraryTree'
+import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -125,6 +127,8 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  /** #2672 — the batch print open, by id: a reload resumes it. */
+  const batchParam = search.get('batch')
   // #3630 — the search, kept in the URL so Back returns to its results.
   const query = search.get('q') ?? ''
   const searching = query.trim() !== ''
@@ -164,6 +168,9 @@ export function LibraryPage() {
         ? printParam
         : null
   if (seenPrint !== listedPrint) setListedPrint(seenPrint)
+  // `listedPrint` outlives the link: it stays set once the dialog closes, and across a
+  // folder change until that listing arrives. Comparing with `printParam` here is what
+  // makes the held value safe; it never stands in for a link that is not there (#3458).
   const printListed = printParam !== null && seenPrint === printParam
   const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
@@ -346,6 +353,54 @@ export function LibraryPage() {
     }
   }
 
+  /** #2672 — a batch print of the ticked printable files, in the order they were ticked. */
+  const [batchError, setBatchError] = useState<string | null>(null)
+  const [startingBatch, setStartingBatch] = useState(false)
+  async function startBatch(files: LibraryEntry[]) {
+    setStartingBatch(true)
+    setBatchError(null)
+    try {
+      const batch = await api.createPrintBatch(
+        files.map((file) => ({ library_file_id: file.id, filename: file.filename, sliced: file.sliced ?? false })),
+      )
+      setPicked([])
+      const next = new URLSearchParams(search)
+      next.set('batch', batch.id)
+      setSearch(next)
+    } catch (cause) {
+      setBatchError(cause instanceof ApiError ? cause.detail : 'Could not start the batch print.')
+    } finally {
+      setStartingBatch(false)
+    }
+  }
+
+  function closeBatch() {
+    const next = new URLSearchParams(search)
+    next.delete('batch')
+    setSearch(next, { replace: true })
+  }
+
+  // #2718 review — a batch closed while a file was still being checked is kept, so its
+  // Queue all follows that run rather than a new batch queueing the file twice. Read
+  // whenever no batch is open, so a batch just closed shows here.
+  const [kept, setKept] = useState<PrintBatch[]>([])
+  useEffect(() => {
+    if (batchParam !== null) return
+    let live = true
+    api
+      .listPendingPrintBatches()
+      .then((list) => live && setKept(list))
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [batchParam])
+  function resumeBatch(batchId: string) {
+    const next = new URLSearchParams(search)
+    next.set('batch', batchId)
+    setSearch(next)
+  }
+
   async function deleteFiles(files: LibraryEntry[]) {
     const ids = files.map((file) => file.id)
     // Library actions are user actions in Tempo (#2292), each request its child.
@@ -482,6 +537,8 @@ export function LibraryPage() {
   // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
   // a change to this filter, or to what the server calls `printable`, changes that too.
   const printable = picked.filter((file) => file.printable && !file.sliced)
+  // #2672 — any printable file, sliced or not, prints in a batch.
+  const batchable = picked.filter((file) => file.printable)
   const printing =
     printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
@@ -698,6 +755,14 @@ export function LibraryPage() {
             </Button>
             <Button
               size="sm"
+              data-testid="library-print-selected"
+              disabled={batchable.length < 2 || startingBatch}
+              onClick={() => void startBatch(batchable)}
+            >
+              <PrinterIcon /> Print {batchable.length} files
+            </Button>
+            <Button
+              size="sm"
               variant="destructive"
               data-testid="library-delete-selected"
               disabled={picked.length === 0}
@@ -735,6 +800,21 @@ export function LibraryPage() {
               Advanced lists every file, sliced files and STLs too.
             </span>
           </header>
+          {batchError && (
+            <p role="alert" className="text-[13px] text-warn">
+              {batchError}
+            </p>
+          )}
+          {batchParam === null &&
+            kept.map((batch) => (
+              <p key={batch.id} className="text-[13px] text-subtle" data-testid={`library-kept-batch-${batch.id}`}>
+                {`A batch print of ${batch.items.filter((item) => !item.removed).length} files has a file still being checked. `}
+                <button type="button" className="text-primary underline" onClick={() => resumeBatch(batch.id)}>
+                  Resume it
+                </button>
+                {' to follow that file, rather than starting it again.'}
+              </p>
+            ))}
 
           {!searching && (
             <WhereHeader
@@ -877,6 +957,7 @@ export function LibraryPage() {
           onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
           onRan={() => (printing ? undefined : setArrangedSent(true))}
         />
+        {batchParam !== null && <BatchPrintDialog key={batchParam} batchId={batchParam} onClose={closeBatch} />}
         <ArrangeDialog
           open={arranging !== null}
           sources={fromFiles(arranging ?? [])}
@@ -1055,7 +1136,7 @@ function ProjectList({
     <ul aria-label="Projects" className="grid grid-cols-[repeat(auto-fill,minmax(min(220px,100%),1fr))] gap-3">
       {projects.map((project) => (
         <li key={project.id}>
-          <Card size="sm" className="h-full gap-2 px-3 transition-colors hover:bg-ui-muted/40">
+          <Card size="sm" className="h-full gap-2 px-3 transition-colors hover:bg-muted/40">
             <button
               type="button"
               onClick={() => onSelect(project.id)}
@@ -1359,7 +1440,7 @@ function Subfolders({
           return (
             <li key={folder.id}>
               <RowContextMenu label={folder.name} entries={menu(folder)}>
-                <Card size="sm" className="flex-row items-center gap-1 py-0 pr-1 pl-0 transition-colors hover:bg-ui-muted/50">
+                <Card size="sm" className="flex-row items-center gap-1 py-0 pr-1 pl-0 transition-colors hover:bg-muted/50">
                   <button
                     type="button"
                     data-testid={`library-subfolder-${folder.id}`}
@@ -1439,10 +1520,10 @@ function FileCard({
                 src={api.libraryThumbnailUrl(file.id)}
                 alt=""
                 loading="lazy"
-                className="aspect-square w-full rounded-lg bg-ui-muted/50 object-contain"
+                className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
               />
             ) : (
-              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-ui-muted/50">
+              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
                 <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
                   {nameParts(file.filename).extension || 'file'}
                 </span>

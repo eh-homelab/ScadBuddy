@@ -5,7 +5,7 @@ import { SourceFileTabs } from '../components/SourceFileTabs'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { Hint } from '../components/Hint'
 import { PageLoading, PageProblem } from '../components/PageState'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,

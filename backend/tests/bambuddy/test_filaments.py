@@ -1031,6 +1031,19 @@ def test_with_no_loaded_spools_the_anchor_family_matches_the_most_slots() -> Non
     assert _undeclared(shelf, [], "#1A1A1A", "#C12E1F", "#3F8E43") == {2: 1, 3: 2}
 
 
+def test_a_material_less_anchor_suggests_only_material_less_spools() -> None:
+    """#3776: spools with no material are the family ``""``. When it wins the anchor,
+    an undeclared slot takes a material-less spool even beside a closer PLA one."""
+    shelf = [
+        _spool(1, "1A1A1AFF", ""),
+        _spool(2, "F0F0F0FF", ""),
+        _spool(3, "909090FF", ""),  # near the third slot's grey
+        _spool(4, "808080FF"),  # PLA, the third slot's exact grey
+    ]
+    assert _undeclared(shelf, [], "#1A1A1A", "#F0F0F0", "#808080") == {1: 1, 2: 2, 3: 3}
+    assert _undeclared(shelf[::-1], [], "#1A1A1A", "#F0F0F0", "#808080") == {1: 1, 2: 2, 3: 3}
+
+
 def test_on_a_slot_count_tie_the_anchor_family_has_the_best_single_match() -> None:
     """#3028 review: equal loaded and matched slots, so the exact PETG black beats the
     near PLA black. Both shelf orders (#3497 review): `min` keeps the first family it

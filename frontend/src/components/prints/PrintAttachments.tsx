@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 type Upload = { id: number; name: string; fraction: number }
 
@@ -87,7 +87,7 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
         onDrop={dropped}
         className={cn(
           'flex flex-wrap items-center gap-2 rounded-xl border border-dashed p-3 text-[13px] text-muted-foreground transition-colors',
-          over && 'border-primary bg-ui-muted',
+          over && 'border-primary bg-muted',
         )}
       >
         <span className="mr-auto">Drop photos or videos of the finished print here, or</span>

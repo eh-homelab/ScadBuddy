@@ -124,7 +124,7 @@ export function activeDialog(root: ParentNode = document): Element | null {
   const modal = dialogs.filter(
     (dialog) =>
       isVisible(dialog) &&
-      // `data-modal`: ui/Dialog, which drops aria-modal beside the assistant (#798) and
+      // `data-modal`: ui/dialog, which drops aria-modal beside the assistant (#798) and
       // is no less modal to the agent for it.
       (dialog.getAttribute('aria-modal') === 'true' || dialog.hasAttribute('data-modal') || dialog.tagName === 'DIALOG'),
   )
@@ -171,7 +171,7 @@ function normalise(text: string): string {
  * wrapper around it or on its trigger. `isUserOnly` therefore also counts as an
  * ancestor
  *   - every element the React tree renders it inside (React's own ancestry, which a
- *     portal keeps: `createPortal`, the legacy `ui/Dialog` and every Radix Portal), and
+ *     portal keeps: `createPortal` and every Radix Portal), and
  *   - every element whose `aria-controls` names it or one of those ancestors (Radix's
  *     link from a Dialog, AlertDialog, Sheet, DropdownMenu, Popover or Select trigger
  *     to its content).

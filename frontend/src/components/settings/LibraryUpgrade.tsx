@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { ChoiceSelect, LoadingLines } from './form'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /**
  * Settings → Libraries (#169): move a library to another ref across the models that pin
@@ -58,6 +58,8 @@ export function LibraryUpgrade() {
   // A running move re-pins every row to the ref it started with, so the field is held
   // until it ends. A check leaves it open: its result is marked stale on a change.
   const [moving, setMoving] = useState(false)
+  // A removal's re-list that failed: the removed checkout may still be listed, so say so.
+  const [relistFailed, setRelistFailed] = useState(false)
   const selectId = useId()
   const refId = useId()
 
@@ -117,8 +119,19 @@ export function LibraryUpgrade() {
           Could not read the models, so rows show slugs: {models.error.message}
         </p>
       )}
+      {relistFailed && (
+        <p role="alert" className="text-[13px] text-warn">
+          Could not re-list the checkouts, so the list may still show one that was removed.
+        </p>
+      )}
       {/* A refresh, not a reload: the panel keeps its library, checks and ticks on screen. */}
-      <UnusedCheckouts installed={installed} onRemoved={() => libraries.refresh()} />
+      <UnusedCheckouts
+        installed={installed}
+        onRemoved={() => {
+          setRelistFailed(false)
+          libraries.refresh(undefined, () => setRelistFailed(true))
+        }}
+      />
       {/* Keyed by library: another library's checks and ticks never carry over. */}
       {library && (
         <LibraryUsers
@@ -455,7 +468,7 @@ function LogFold({ log }: { log: readonly string[] }) {
         OpenSCAD log
       </CollapsibleTrigger>
       <CollapsibleContent forceMount hidden={!open}>
-        <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-md bg-ui-muted p-2 text-[11px] whitespace-pre-wrap">
+        <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px] whitespace-pre-wrap">
           {log.join('\n')}
         </pre>
       </CollapsibleContent>

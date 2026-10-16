@@ -9,15 +9,15 @@
 const LINE_STYLE: { prefix: string; className: string }[] = [
   { prefix: 'diff --git', className: 'text-faint' },
   { prefix: 'index ', className: 'text-faint' },
-  { prefix: '--- ', className: 'text-muted' },
-  { prefix: '+++ ', className: 'text-muted' },
-  { prefix: '@@', className: 'text-accent' },
+  { prefix: '--- ', className: 'text-subtle' },
+  { prefix: '+++ ', className: 'text-subtle' },
+  { prefix: '@@', className: 'text-primary' },
   { prefix: '+', className: 'text-ok bg-ok/8' },
   { prefix: '-', className: 'text-warn bg-warn/8' },
 ]
 
 function classFor(line: string): string {
-  return LINE_STYLE.find((style) => line.startsWith(style.prefix))?.className ?? 'text-muted'
+  return LINE_STYLE.find((style) => line.startsWith(style.prefix))?.className ?? 'text-subtle'
 }
 
 export function UnifiedDiff({ patch }: { patch: string }) {

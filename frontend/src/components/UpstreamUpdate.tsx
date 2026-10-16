@@ -5,7 +5,7 @@ import type { MergePreview, UpstreamState } from '../api/types'
 import { countConflicts, resolvePath } from '../lib/upstream'
 import { useAsync } from '../lib/useAsync'
 import { UnifiedDiff } from './UnifiedDiff'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -235,7 +235,7 @@ function UpdatePreview({ preview }: { preview: MergePreview }) {
     <div className="flex flex-col gap-4">
       <section>
         <h3 className="mb-1.5 text-sm font-medium">Upstream changes</h3>
-        <div className="max-h-56 overflow-y-auto rounded-lg border bg-ui-muted/40">
+        <div className="max-h-56 overflow-y-auto rounded-lg border bg-muted/40">
           {/* From the upstream at `base`, where it lived then, to now (#236). */}
           <UnifiedDiff patch={preview.patch} />
         </div>
@@ -255,7 +255,7 @@ function UpdatePreview({ preview }: { preview: MergePreview }) {
         )}
         <pre
           data-testid="merge-result"
-          className="sb-num max-h-56 overflow-auto rounded-lg border bg-ui-muted/40 p-3 text-xs leading-[1.5] whitespace-pre"
+          className="sb-num max-h-56 overflow-auto rounded-lg border bg-muted/40 p-3 text-xs leading-[1.5] whitespace-pre"
         >
           {preview.merged}
         </pre>

@@ -2916,9 +2916,20 @@ export const handlers = [
 
   // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
   // the inputs come back as they are, at the version they carry.
-  http.post(`${base}/models/:slug/inputs/migrate`, async ({ request }) => {
+  // A template with a pipeline but no `migrate` (#3777) refuses inputs not at its version,
+  // as the agent does: 422 with the worker's message.
+  http.post(`${base}/models/:slug/inputs/migrate`, async ({ params, request }) => {
     const body = (await request.json()) as { inputs: Record<string, unknown> }
     const v = typeof body.inputs.v === 'number' ? body.inputs.v : 0
+    const slug = String(params['slug'])
+    const current = state.models.find((m) => m.slug === slug)?.inputs_version ?? 0
+    if (fixtures.PIPELINE_WITHOUT_MIGRATE.has(slug) && v !== current) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `inputs at version ${v} cannot be brought up to version ${current}: the template's pipeline defines no migrate`,
+      )
+    }
     return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),
 

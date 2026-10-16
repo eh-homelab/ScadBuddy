@@ -15,7 +15,7 @@ import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
-import { Dialog } from '../ui/Dialog'
+import { Dialog, DialogContent, DialogFooter, DialogTitle } from '../ui/dialog'
 import { ResourceSessions } from './ResourceSessions'
 
 /** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
@@ -113,6 +113,8 @@ describe('assistant panel', () => {
     expect(screen.getByRole('button', { name: 'Assistant' })).toBeInTheDocument()
     act(() => availability.set({ available: false, state: 'unavailable' }))
     expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    // #2962 review: an outage is not a close, so a reload during it still reopens the panel.
+    expect(window.sessionStorage.getItem('scadbuddy.assistant.open')).toBe('1')
 
     // Its chat gate refuses this address: off for this page.
     act(() => availability.set({ available: false, state: 'unavailable', chat: 'refused' }))
@@ -858,8 +860,14 @@ function DialogPage({ startOpen = false }: { startOpen?: boolean }) {
       <button type="button" onClick={() => setOpen(true)}>
         Print…
       </button>
-      <Dialog open={open} title="Print" onClose={() => setOpen(false)} footer={<button type="button">Print it</button>}>
-        <input aria-label="Copies" />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogTitle>Print</DialogTitle>
+          <input aria-label="Copies" />
+          <DialogFooter>
+            <button type="button">Print it</button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )

@@ -23,9 +23,11 @@ from scadbuddy.bambuddy.library_view import (
     library_geometry,
     library_preview,
 )
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import read_glb
+from scadbuddy.render.objects3mf import PlateRead
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store.download_cache import DownloadCache
 from tests.bambuddy.conftest import BASE_URL
@@ -225,6 +227,18 @@ def test_a_prune_tolerates_files_another_prune_removed(
 
 def _out_of_memory(*_: object, **__: object) -> object:
     raise MemoryError
+
+
+@pytest.mark.parametrize("step", ["read_plate_parts", "write_glb"])
+def test_a_plate_glb_out_of_memory_is_a_read_out_of_memory_error(
+    monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """#2767: plate_glb maps a MemoryError itself, so no route has to (an output's plate,
+    a job's): reading the plate, or writing its GLB."""
+    monkeypatch.setattr(library_view, "read_plate_parts", lambda *_: PlateRead([], 1))
+    monkeypatch.setattr(library_view, step, _out_of_memory)
+    with pytest.raises(ReadOutOfMemoryError):
+        library_view.plate_glb(b"", 1)
 
 
 @respx.mock

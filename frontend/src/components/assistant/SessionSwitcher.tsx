@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { statusLabel } from '../../agent/chat/labels'
-import { type HandoffOffer, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { type HandoffOffer, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import { timeAgo } from '../../lib/format'
 import { ArchiveIcon, CheckIcon, EllipsisIcon, PencilIcon, Undo2Icon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -34,10 +34,8 @@ interface Props {
   onCancelOffer: (id: string) => Promise<void>
 }
 
-const RUNNING: ReadonlySet<SessionState['status']> = new Set(['running', 'waiting_approval', 'waiting_input'])
-
 function outOfBudget(s: SessionState): boolean {
-  return !!s.budget && s.budget.costUsd >= s.budget.budgetUsd && !RUNNING.has(s.status)
+  return !!s.budget && s.budget.costUsd >= s.budget.budgetUsd && !isBusy(s)
 }
 
 /**
@@ -165,9 +163,9 @@ function SessionRow({
   const open = s.id === activeId
   const offer = useLiveOffer(s.offer)
   const mine = isOwnedByBrowser(s)
-  const canFinish = mine && s.status !== 'done' && !RUNNING.has(s.status)
+  const canFinish = mine && s.status !== 'done' && !isBusy(s)
   // The agent refuses an archive while a turn runs or anything waits on the user (409).
-  const canArchive = mine && !RUNNING.has(s.status)
+  const canArchive = mine && !isBusy(s)
 
   const stopEditing = () => {
     refocus.current = true
@@ -220,7 +218,7 @@ function SessionRow({
   return (
     <li>
       <div
-        className={`group/row flex items-start gap-0.5 rounded-md hover:bg-ui-muted ${open ? 'bg-ui-muted' : ''}`}
+        className={`group/row flex items-start gap-0.5 rounded-md hover:bg-muted ${open ? 'bg-muted' : ''}`}
       >
         <button
           type="button"

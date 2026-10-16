@@ -50,7 +50,7 @@ from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
-from scadbuddy.render.split import MaterialSplitError
+from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.worker import make_current_until_polled
@@ -66,6 +66,7 @@ from scadbuddy.workflows.activities import (
     _scope,
     _stage,
     _write_piece,
+    require_whole_3mf,
 )
 from scadbuddy.workflows.client import make_current, render_worker
 from scadbuddy.workflows.models import (
@@ -343,6 +344,30 @@ async def test_a_stage_that_fails_the_same_every_time_is_not_retried(
     assert raised.value.message == str(error)
 
 
+async def test_a_raw_3mf_whose_model_does_not_parse_fails_render_solids_at_once(
+    tmp_path: Path,
+) -> None:
+    """#2997 review: the real stage, not a stand-in. A whole zip whose model is not XML
+    escapes `split_by_material` as its own error, so the piece fails at once (#604)."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+    raw = acts.deps.blobs.dir_for(req.piece_key) / jobs.RAW_RENDER_NAME
+    with zipfile.ZipFile(raw) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members[MODEL_ENTRY] = b"<model"
+    with zipfile.ZipFile(raw, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(acts.render_solids, req, prepared, main)
+    assert raised.value.non_retryable
+    assert raised.value.type == "ParseError"
+
+
 async def test_a_main_render_that_left_a_short_3mf_is_retried_not_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -364,6 +389,17 @@ async def test_a_main_render_that_left_a_short_3mf_is_retried_not_published(
     monkeypatch.setattr(jobs, "_render_main", short)
     with pytest.raises(IncompleteRenderError):
         await env.run(acts.render_main, req, prepared)
+
+
+def test_a_3mf_without_its_model_is_not_whole(tmp_path: Path) -> None:
+    """#2997 review: the check reads the model `render_solids` parses, so a zip that
+    opens but holds no model (where `testzip` found nothing wrong) is refused too."""
+    path = tmp_path / "render.3mf"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+
+    with pytest.raises(IncompleteRenderError, match=r"no 3D/3dmodel\.model"):
+        require_whole_3mf(path)
 
 
 async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:

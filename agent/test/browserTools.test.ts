@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
-import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import { type BrowserTabs, MAX_SESSION_TABS, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import type { TabRelay } from '../src/bridge/relay.js'
@@ -593,6 +593,103 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect((await here.sessionTab('s-new')).tabId).toBeUndefined()
     a.close()
     b.close()
+  })
+
+  it("keeps a pairing this replica made while its compare-and-set was out (#3478 review)", async () => {
+    const { rows } = sharedRows()
+    let release!: () => void
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        await new Promise<void>((resolve) => (release = resolve))
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(here, OTHER_TAB)
+    const paired = here.pairSessionIfStill('s-new', TAB, undefined)
+    await tick()
+    here.pairSession('s-new', OTHER_TAB) // a send from another tab, while the write is out
+    release()
+    expect(await paired).toBe(true)
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB) // its write was queued after the compare-and-set
+    rows.delete('s-new')
+    expect((await here.sessionTab('s-new')).tabId).toBe(OTHER_TAB)
+  })
+
+  it('keeps a re-pairing to the same tab made while its compare-and-set was out (#3787 review)', async () => {
+    const { rows } = sharedRows()
+    let release!: () => void
+    const writes: string[] = []
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        writes.push(`set ${tabId}`)
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        await new Promise<void>((resolve) => (release = resolve))
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        writes.push(`setIf ${tabId}`)
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(here, OTHER_TAB)
+    here.pairSession('s-aba', OTHER_TAB)
+    await tick()
+    const paired = here.pairSessionIfStill('s-aba', TAB, OTHER_TAB)
+    await tick()
+    here.pairSession('s-aba', OTHER_TAB) // the same tab again, while the write is out
+    release()
+    expect(await paired).toBe(true)
+    await tick()
+    expect(rows.get('s-aba')).toBe(OTHER_TAB) // its write was queued after the compare-and-set
+    // The order the map's choice rests on: the compare-and-set landed, then the re-pairing's write (#3825 review).
+    expect(writes).toEqual([`set ${OTHER_TAB}`, `setIf ${TAB}`, `set ${OTHER_TAB}`])
+    rows.delete('s-aba')
+    expect((await here.sessionTab('s-aba')).tabId).toBe(OTHER_TAB)
+  })
+
+  it('pairs a session evicted while its compare-and-set was out once the write lands (#3825 review)', async () => {
+    const { rows } = sharedRows()
+    let release!: () => void
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (sessionId === 's-evicted') await new Promise<void>((resolve) => (release = resolve))
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(here, OTHER_TAB)
+    here.pairSession('s-evicted', OTHER_TAB)
+    await tick()
+    const paired = here.pairSessionIfStill('s-evicted', TAB, OTHER_TAB)
+    await tick()
+    // Enough other sessions paired here to evict it from the map while the write is out.
+    for (let i = 0; i < MAX_SESSION_TABS; i++) here.pairSession(`s-other-${i}`, OTHER_TAB)
+    release()
+    expect(await paired).toBe(true)
+    await tick()
+    expect(rows.get('s-evicted')).toBe(TAB)
+    rows.delete('s-evicted')
+    expect((await here.sessionTab('s-evicted')).tabId).toBe(TAB)
   })
 
   it('pairs only here when the compare-and-set fails, and queues no write that could land later (#3478 review)', async () => {

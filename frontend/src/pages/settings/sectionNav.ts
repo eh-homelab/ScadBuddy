@@ -111,7 +111,9 @@ export function useSectionNav(
   /**
    * A section link's activation. With `inPlace` (the page has unsaved changes) it only
    * scrolls and focuses: a pushed `#hash` would land above the leave guard's sentinel
-   * entry, so Back would pop into the sentinel and seem to do nothing.
+   * entry, so Back would pop into the sentinel and seem to do nothing. The trade-off:
+   * the address keeps the section it had, so a reload or a copied URL while editing
+   * opens that one, not the section followed in place.
    */
   const go = (id: string, { inPlace = false }: { inPlace?: boolean } = {}) => {
     if (inPlace || sectionId(hash) === id) showSection(pane.current, nav.current, id, true)

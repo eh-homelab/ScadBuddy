@@ -29,7 +29,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Tip } from './Tip'
 
 const KIND_LABEL: Record<AiCredentialKind, string> = {
