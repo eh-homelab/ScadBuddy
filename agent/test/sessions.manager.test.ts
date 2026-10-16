@@ -676,15 +676,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const stuck = (await m.start(agentA, { origin: 'mcp' })).session
       const first = await m.send(finishing.id, agentA, 'a')
       const second = await m.send(stuck.id, agentA, 'b')
+      // The grace period ends when the test says, not after a wall-clock wait a loaded
+      // runner can outlast: its timer is the one set for GRACE_MS, held until called.
+      const GRACE_MS = 987_654
+      let endGrace: (() => void) | undefined
+      const realSetTimeout = globalThis.setTimeout
+      const timers = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms?: number,
+        ...args: unknown[]
+      ) => {
+        if (ms !== GRACE_MS) return realSetTimeout(fn, ms, ...args)
+        endGrace = () => fn(...args)
+        return realSetTimeout(() => {}, 2 ** 31 - 1)
+      }) as typeof setTimeout)
 
-      const stopping = m.stopTurns({ graceMs: 300, abortWaitMs: 5_000 })
+      const stopping = m.stopTurns({ graceMs: GRACE_MS, abortWaitMs: 5_000 })
       // Draining: nothing new starts here.
       await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
       release()
-      await stopping
-      // The one that could finish did; the other was aborted and recorded it
-      // before stopTurns returned, so the pool can close now.
+      // The one that could finish did, inside the grace period.
       expect(await first.done).toMatchObject({ kind: 'result' })
+      expect(endGrace).toBeDefined()
+      endGrace!()
+      await stopping
+      timers.mockRestore()
+      // The other was aborted and recorded it before stopTurns returned, so the pool can close now.
       expect(await second.done).toEqual({ kind: 'interrupted' })
       expect(await m.get(stuck.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
       const events = (await m.events.read(stuck.id)).map((e) => e.event)
