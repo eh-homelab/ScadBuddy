@@ -465,8 +465,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const paths = await tempPaths()
       const audit = new MemoryAudit()
       // No renewals: this replica's turn stops renewing, as a stalled process's does.
-      const { runner } = scriptedRunner(() => ({ hang: true }))
-      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000 })
+      // It still reports what it spent once stopped: the requests were billed (#2981 review).
+      const { runner } = scriptedRunner(() => ({ hang: true, resultOnAbortUsd: 0.02 }))
+      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000, leaseMs: 90_000 })
       const elsewhere = (await m.start(agentA, { origin: 'mcp' })).session
       const here = (await m.start(agentA, { origin: 'mcp' })).session
       // A turn another replica was running, and one running on this replica.
@@ -484,11 +485,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         message: 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)',
       })
       expect(await error(here.id)).toMatchObject({
-        message: 'the turn was stopped: it could not renew its claim on the session for a minute, though its replica is running',
+        message: 'the turn was stopped: it could not renew its claim on the session for 90 seconds, though its replica is running',
       })
       expect(JSON.stringify(await m.events.read(elsewhere.id))).not.toContain('restarted')
       // This replica's turn is stopped too, not left running without its claim.
-      await running.done
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      const [spent] = await db.sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${here.id}`
+      expect(spent!.cost_usd).toBeCloseTo(0.02)
       expect(audit.entries.filter((e) => e.kind === 'turn' && e.action === 'lost_claim')).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -593,6 +596,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const approvals = await db.sql<{ decision: string | null }[]>`
         SELECT decision FROM ai_approvals WHERE session_id = ${session.id}`
       expect(approvals).toEqual([{ decision: null }])
+      // Its result's spend is the session's all the same (#2981 review).
+      const [spent] = await db.sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${session.id}`
+      expect(spent!.cost_usd).toBeCloseTo(0.01)
       // Nor is its process kept for a session another turn owns now (#2981 review).
       await expect.poll(() => m.warm.size()).toBe(0)
       await m.warm.close()
