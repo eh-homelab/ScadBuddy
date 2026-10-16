@@ -72,8 +72,16 @@ function withoutHeadMessage(stacktrace: string, message: string): string {
   return stacktrace
 }
 
-/** A short code that names a failure and quotes nothing: a SQLSTATE, an errno name. */
+/**
+ * A short code that names a failure and quotes nothing: a SQLSTATE, an errno name, a
+ * Node `ERR_*` code. Those last run to 28 characters (`ERR_SCRIPT_EXECUTION_TIMEOUT`),
+ * so the cap is 32, not an errno's 16.
+ */
 const ERROR_CODE = /^[A-Z0-9_]{1,32}$/
+
+function isHttpStatus(status: unknown): status is number {
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+}
 
 /**
  * What a log line may say of an error (#1814): its name, never its message, which can
@@ -89,7 +97,7 @@ export function errorName(err: unknown): string {
   return [
     err.name,
     ...(typeof code === 'string' && ERROR_CODE.test(code) ? [code] : []),
-    ...(Number.isInteger(status) && (status as number) >= 100 && (status as number) <= 599 ? [String(status)] : []),
+    ...(isHttpStatus(status) ? [String(status)] : []),
   ].join(' ')
 }
 
