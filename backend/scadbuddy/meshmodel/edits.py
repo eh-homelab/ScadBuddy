@@ -35,7 +35,6 @@ from scadbuddy.meshmodel.scene import (
     Cut,
     Exposed,
     Joint,
-    Num,
     Op,
     Point,
     Scene,
@@ -49,15 +48,16 @@ from scadbuddy.meshmodel.scene import (
     value,
 )
 from scadbuddy.meshmodel.section import OpenSectionError, cut_points, kept, measure
-
-#: Two 0.4 mm walls around a socket (spec §5).
-WALL = 0.8
-MeshOf = Callable[[str], trimesh.Trimesh]
-
-
-class SceneEditError(ValueError):
-    """An edit the scene refuses; the route's 422."""
-
+from scadbuddy.meshmodel.shared import (
+    WALL,
+    JointSpec,
+    MeshOf,
+    SceneEditError,
+    transform_matrix,
+)
+from scadbuddy.meshmodel.shared import (
+    floats as _floats,
+)
 
 #: A colour as callers may send it: either case (`Part.colour` stores it upper case).
 COLOUR_IN = r"^#[0-9A-Fa-f]{6}\Z"
@@ -69,15 +69,6 @@ class _Edit(BaseModel):
     # python-re, as `scene._Strict`: `IDENT`'s lookaheads, and ``\Z`` (scene.py).
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, regex_engine="python-re")
     object: str = Field(pattern=OBJECT_ID)
-
-
-class JointSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    diameter: float | None = Field(default=None, gt=0, le=100)
-    depth: float = Field(default=6.0, gt=0, le=100)
-    clearance: float = Field(default=0.2, ge=0, le=2)
-    key: Literal["none", "flat", "hex"] = "flat"
-    peg_on: Literal["above", "below"] = "above"
 
 
 class TransformEdit(_Edit):
@@ -181,10 +172,6 @@ Edit = Annotated[
 ]
 
 
-def _floats(v: Sequence[Num]) -> list[float]:
-    return [value(x) for x in v]
-
-
 def _cuts(
     obj: SceneObject,
 ) -> list[tuple[Sequence[float], Sequence[float], Literal["above", "below"]]]:
@@ -201,10 +188,6 @@ def object_mesh(obj: SceneObject, mesh_of: MeshOf) -> trimesh.Trimesh:
     merged = trimesh.util.concatenate(printed)
     assert isinstance(merged, trimesh.Trimesh)
     return merged
-
-
-def _matrix(t: Transform) -> tuple[np.ndarray, np.ndarray]:
-    return linear(_floats(t.rotate), _floats(t.scale)), np.asarray(_floats(t.translate))
 
 
 def _needs_plane(obj: SceneObject, what: str) -> None:
@@ -388,7 +371,7 @@ def _added_points(obj: SceneObject) -> list[np.ndarray]:
                 )
             )
             corners = np.array(list(itertools.product(*[(-h, h) for h in half])))
-            m, translate = _matrix(op.transform)
+            m, translate = transform_matrix(op.transform)
             out.append((m @ corners.T).T + translate)
     return out
 
@@ -427,7 +410,7 @@ def _primitive(scene: Scene, edit: AddEdit | SubtractEdit) -> Scene:
     centre: Point = (0.0, 0.0, 0.0)
     if edit.at is not None:
         _needs_plane(obj, "frame to place a shape in")
-        m, translate = _matrix(obj.transform)
+        m, translate = transform_matrix(obj.transform)
         local = np.linalg.solve(m, np.asarray(edit.at) - translate)
         centre = (round(float(local[0]), 6), round(float(local[1]), 6), round(float(local[2]), 6))
     shape: dict[str, Any] = {

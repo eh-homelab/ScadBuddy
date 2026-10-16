@@ -29,25 +29,39 @@ import (
 )
 
 type config struct {
-	// Command is "mount" or "unsent".
-	Command    string
-	API        string
-	ReadOnly   bool
-	All        bool
-	AllowOther bool
-	TTL        time.Duration
-	CacheDir   string
-	CacheMax   byteSize
-	StateDir   string
-	Mountpoint string
-	Telemetry  telemetry.Config
+	// Command is "mount", "umount", "status" or "unsent".
+	Command      string
+	API          string
+	ReadOnly     bool
+	All          bool
+	AllowOther   bool
+	NoAllowOther bool
+	Background   bool
+	TTL          time.Duration
+	CacheDir     string
+	CacheMax     byteSize
+	StateDir     string
+	Mountpoint   string
+	Telemetry    telemetry.Config
 }
 
-const usageText = `Usage: bambuddy-fs mount --api <url> [flags] <mountpoint>
-       bambuddy-fs unsent [--state-dir <dir>]
+// DefaultAPI is the deployed ScadBuddy's API root, the default of --api.
+const DefaultAPI = "https://scadbuddy.internal.nullreference.io/api/v1"
 
-mount mounts Bambuddy's print library, through ScadBuddy's API, as a filesystem.
+const usageText = `Usage: bambuddy-fs mount [flags] [<mountpoint>]
+       bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
+       bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
+       bambuddy-fs unsent [--state-dir <dir>]
+       bambuddy-fs allow-other
+
+mount mounts Bambuddy's print library, through ScadBuddy's API, as a filesystem, at
+<mountpoint> (default $BAMBUDDY_FS_DIR, else ~/bambuddy). It stays in the foreground
+unless --background.
+umount unmounts it and stops its process.
+status says whether it is mounted and its process running.
 unsent lists the writes whose upload failed, kept to be sent again, and exits.
+allow-other turns on user_allow_other in /etc/fuse.conf (through sudo), so mounts let
+other users and Windows Explorer (\\wsl$) see them.
 
 Flags:
 `
@@ -55,10 +69,12 @@ Flags:
 func newFlagSet(cfg *config) *flag.FlagSet {
 	set := flag.NewFlagSet("mount", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
-	set.StringVar(&cfg.API, "api", "", "ScadBuddy's API root, like http://host/api/v1 (required)")
+	set.StringVar(&cfg.API, "api", defaultAPI(), "ScadBuddy's API root, like http://host/api/v1 (default $BAMBUDDY_FS_API, else the deployed ScadBuddy)")
 	set.BoolVar(&cfg.ReadOnly, "ro", false, "refuse every write with EROFS")
 	set.BoolVar(&cfg.All, "all", false, "list every file, not only unsliced 3MFs")
-	set.BoolVar(&cfg.AllowOther, "allow-other", false, "let other users and processes see the mount (FUSE allow_other)")
+	set.BoolVar(&cfg.AllowOther, "allow-other", false, "fail unless other users and processes may see the mount (FUSE allow_other; on by default whenever "+fuseConf+" has user_allow_other)")
+	set.BoolVar(&cfg.NoAllowOther, "no-allow-other", false, "only the mounting user sees the mount")
+	set.BoolVar(&cfg.Background, "background", false, "run detached, output appended to <state-dir>/mount.log; return once mounted")
 	set.DurationVar(&cfg.TTL, "attr-ttl", 5*time.Second, "how long listings and kernel entries and attributes are kept")
 	set.StringVar(&cfg.CacheDir, "cache-dir", defaultCacheDir(), "where downloaded contents and files being written are kept")
 	cfg.CacheMax = 2 << 30
@@ -115,6 +131,35 @@ func cacheName(apiURL string) string {
 	return strings.NewReplacer(":", "_", "/", "_", "[", "", "]", "").Replace(u.Host)
 }
 
+func defaultAPI() string {
+	if v := os.Getenv("BAMBUDDY_FS_API"); v != "" {
+		return v
+	}
+	return DefaultAPI
+}
+
+func defaultMountpoint() string {
+	if v := os.Getenv("BAMBUDDY_FS_DIR"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "bambuddy"
+	}
+	return filepath.Join(home, "bambuddy")
+}
+
+// mountpointArg is a command's one optional argument, the mountpoint.
+func mountpointArg(fl *flag.FlagSet) (string, error) {
+	switch fl.NArg() {
+	case 0:
+		return defaultMountpoint(), nil
+	case 1:
+		return fl.Arg(0), nil
+	}
+	return "", errors.New("at most one mountpoint")
+}
+
 func defaultCacheDir() string { return xdgDir("XDG_CACHE_HOME", ".cache") }
 
 // defaultStateDir holds the unsent writes, the only copy of what was written, so it is
@@ -155,6 +200,23 @@ func parse(args []string) (config, error) {
 			return cfg, errors.New("unsent takes no arguments")
 		}
 		return cfg, nil
+	case "allow-other":
+		cfg.Command = "allow-other"
+		if len(args) > 1 {
+			return cfg, errors.New("allow-other takes no arguments")
+		}
+		return cfg, nil
+	case "umount", "unmount", "status":
+		cfg.Command = strings.Replace(args[0], "unmount", "umount", 1)
+		fl := flag.NewFlagSet(cfg.Command, flag.ContinueOnError)
+		fl.SetOutput(io.Discard)
+		stateDirFlag(fl, &cfg)
+		if err := fl.Parse(args[1:]); err != nil {
+			return cfg, err
+		}
+		var err error
+		cfg.Mountpoint, err = mountpointArg(fl)
+		return cfg, err
 	default:
 		return cfg, fmt.Errorf("unknown command %q", args[0])
 	}
@@ -164,13 +226,14 @@ func parse(args []string) (config, error) {
 		return cfg, err
 	}
 	if cfg.API == "" {
-		return cfg, errors.New("--api is required")
+		return cfg, errors.New("--api is empty")
 	}
-	if fl.NArg() != 1 {
-		return cfg, errors.New("exactly one mountpoint is required")
+	if cfg.AllowOther && cfg.NoAllowOther {
+		return cfg, errors.New("--allow-other and --no-allow-other contradict each other")
 	}
-	cfg.Mountpoint = fl.Arg(0)
-	return cfg, nil
+	var err error
+	cfg.Mountpoint, err = mountpointArg(fl)
+	return cfg, err
 }
 
 func main() {
@@ -185,12 +248,22 @@ func main() {
 		fmt.Fprintln(os.Stderr, "run bambuddy-fs --help for usage")
 		os.Exit(2)
 	}
-	if cfg.Command == "unsent" {
+	switch cfg.Command {
+	case "unsent":
 		if err := listUnsent(os.Stdout, cfg.StateDir); err != nil {
 			fmt.Fprintf(os.Stderr, "bambuddy-fs: %v\n", err)
 			os.Exit(1)
 		}
 		return
+	case "umount":
+		os.Exit(umount(cfg, os.Stdout, os.Stderr))
+	case "status":
+		os.Exit(status(cfg, os.Stdout))
+	case "allow-other":
+		os.Exit(allowOtherCommand(fuseConf, os.Stdout, os.Stderr))
+	}
+	if cfg.Background && os.Getenv(detachedEnv) == "" {
+		os.Exit(background(cfg, os.Args[1:], os.Stdout, os.Stderr))
 	}
 	os.Exit(run(cfg))
 }
@@ -235,6 +308,18 @@ func run(cfg config) int {
 		log.Printf("bambuddy-fs: %v", err)
 		return 2
 	}
+	allow, err := allowOther(cfg, fuseConf)
+	if err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 2
+	}
+	if !allow && !cfg.NoAllowOther {
+		log.Printf("bambuddy-fs: only you see the mount; bambuddy-fs allow-other turns on user_allow_other in %s, so Windows (\\\\wsl$) and other users see it", fuseConf)
+	}
+	if err := os.MkdirAll(cfg.Mountpoint, 0o755); err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 1
+	}
 	// Contents are cached by file ID, which another ScadBuddy numbers differently, so
 	// each API has its own cache under --cache-dir.
 	cacheDir := filepath.Join(cfg.CacheDir, cacheName(cfg.API))
@@ -251,6 +336,13 @@ func run(cfg config) int {
 		return 1
 	}
 	defer stateLock.Close()
+	// umount and status find the mount's process by this file.
+	removePid, err := writePid(cfg.StateDir)
+	if err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 1
+	}
+	defer removePid()
 	cacheLock, err := fsys.LockCache(cacheDir)
 	if err != nil {
 		log.Printf("bambuddy-fs: %v", err)
@@ -271,7 +363,7 @@ func run(cfg config) int {
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{
 		EntryTimeout: &ttl,
 		AttrTimeout:  &ttl,
-		MountOptions: fuse.MountOptions{FsName: "bambuddy", Name: "bambuddy-fs", AllowOther: cfg.AllowOther},
+		MountOptions: fuse.MountOptions{FsName: "bambuddy", Name: "bambuddy-fs", AllowOther: allow},
 	})
 	if err != nil {
 		log.Printf("bambuddy-fs: mount: %v", err)

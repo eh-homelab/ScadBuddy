@@ -50,6 +50,7 @@ const STAGE_LABELS: Record<RenderStage, string> = {
   render: 'running OpenSCAD',
   split: 'colouring the preview',
   solids: 'building each colour',
+  paint: 'carrying the painting over',
   thumbnail: 'drawing the covers',
   write: 'writing the 3MF',
 }
