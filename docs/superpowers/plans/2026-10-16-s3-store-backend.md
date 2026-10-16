@@ -408,6 +408,6 @@ git commit -m "docs: deploying the blob store on S3"
 
 ## Self-review
 
-- Spec coverage: §4.1 protocol, key, idempotency, multipart (Task 2); §4.2 settings, readiness, view (Task 1); §4.3 migration, cross-backend miss (Task 5); §4.4 docs (Task 8); §4.5 local unchanged (Task 3 parametrisation shows it). Streaming `read` callers are deferred to the Rust transfer work per §4.1, not this plan.
+- Spec coverage: §4.1 protocol, key, idempotency, multipart (Task 2); §4.2 settings, readiness, view (Task 1); §4.3 migration, cross-backend miss (Task 5); §4.4 docs (Task 8); §4.6 local unchanged (Task 3 parametrisation shows it). §4.5, the native library over the store that `bambuddy-fs` mounts, is its own plan (#3827) and depends on this one's `S3ContentBackend` and `BlobKind` only. Streaming `read` callers are deferred to the Rust transfer work per §4.1, not this plan.
 - Types: `S3Settings` (Task 1) is what `S3ContentBackend` and `build_backend` take; `UnrecordedSweeper.sweep_unrecorded(*, cutoff, recorded)` is the signature both backends implement (Task 4 changes the Bambuddy one's signature by a keyword with a default, so its existing tests pass unchanged).
 - Review Focus 1 to 5 each name their task and test.

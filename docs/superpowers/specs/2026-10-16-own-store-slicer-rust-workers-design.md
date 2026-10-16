@@ -32,6 +32,9 @@ that UI; everything in it is a precondition for it.
 
 - A render never waits on Bambuddy. Pieces, previews, snapshots, assets and fonts live
   in a store ScadBuddy owns.
+- The library a person browses and mounts (`bambuddy-fs`, the desktop's way into
+  ScadBuddy's files) is served from that store through the same `/print/library/*`
+  routes, so the mount changes nothing and a desktop Bambu Studio opens the files.
 - A slice is a ScadBuddy activity with live progress, running the Bambu Studio CLI
   under ScadBuddy's control, with ScadBuddy's own preset files, so a validation failure
   comes back as the slicer's message and not a 502.
@@ -83,6 +86,7 @@ Three tiers, each shippable alone, each leaving Bambuddy selectable.
 
 ```
 tier 1   store      ContentBackend "s3"  (Garage / MinIO / any S3)      Python first, Rust transfers later
+         library    /print/library/* served from the store (§4.5)      bambuddy-fs mounts it unchanged
 tier 2   slicer     Rust worker: bambu-slice activity, CLI + fifo       presets as files, progress as heartbeats
 tier 3   printers   printer registry by serial; LAN path (MQTT+FTPS)    Bambuddy path and native path behind one id
 cross    rust       scadbuddy-worker crate: thumbnail, split, archive, store, slice, later RenderPiece
@@ -157,7 +161,36 @@ not this repo's. This repo documents the settings in `README.md` "Deploying" and
 the compose file a MinIO service for a local run. Backups of the bucket are the
 operator's; the design does not prescribe them.
 
-### 4.5 What `local` does
+### 4.5 The library a person sees, over the store
+
+The blob store holds pieces, snapshots, assets and fonts: internal bytes. What a person
+browses, copies in and out, renames and mounts on their desktop is the *library*:
+today Bambuddy's, reached through ScadBuddy's `/print/library/*` routes
+(`api/library_print.py`: list, mkdir, upload, download, rename, move, delete), which
+`bambuddy-fs` (`tools/go/bambuddy-fs`, spec 2026-10-13) mounts over FUSE so a desktop
+Bambu Studio can open the files. That mount is a ScadBuddy API client and must not
+change.
+
+So ScadBuddy gets a library of its own, served by the same routes with the same
+shapes, chosen by a `library_backend` setting (`bambuddy` | `native`, restart): the
+tables `library_folders` (id, parent_id, name, created_at) and `library_files` (id,
+folder_id, name, size, sha256, blob key, media type, created_at, updated_at), with the
+bytes as `library` blobs in the content store (a fifth `BlobKind`, never swept while a
+`library_files` row names it; the row's delete releases it). The folder ids and file
+ids the routes return are the native rows' ids on `native` and Bambuddy's on
+`bambuddy`; a client sees one id space at a time. Saved outputs, the sliced 3MFs the
+native slicer produces and the files a native print uploads are filed into it (the
+output's folder is `<Template title>/`, as the Bambuddy inbox layout is today), so what
+a person prints is what they can mount. `bambuddy-fs` needs no change: its README's
+"Mounts Bambuddy's print library" becomes "Mounts ScadBuddy's print library", and its
+mount tests run against both backends in CI.
+
+The native library does not replace Bambuddy's for a Bambuddy print: the Bambuddy path
+still uploads its copy to Bambuddy's library (`send.py`), as today. With
+`library_backend=native`, the Bambuddy inbox and `Work/` folders are no longer
+required for the store to start.
+
+### 4.6 What `local` does
 
 Nothing changes for `store_backend=local`. It stays the single-replica, shared-volume
 store with no `ContentStore`.
@@ -460,6 +493,7 @@ nothing.
 |---|---|---|---|
 | `store_backend` | `local` / `bambuddy` / `s3` | restart | unchanged |
 | `store_s3_*` | §4.2 | restart | unset |
+| `library_backend` | `bambuddy` / `native` | restart | `bambuddy` |
 | `slicer_backend` | `bambuddy` / `native` | live | `bambuddy` |
 | `render_rust_stages` | subset of `thumbnail, split, solids, store` | live | empty |
 | per printer `preferred_path` | `bambuddy` / `native` / `auto` | live | `bambuddy` for a row created from a Bambuddy id, `auto` otherwise |
