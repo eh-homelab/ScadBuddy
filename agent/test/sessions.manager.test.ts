@@ -465,8 +465,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const paths = await tempPaths()
       const audit = new MemoryAudit()
       // No renewals: this replica's turn stops renewing, as a stalled process's does.
-      const { runner } = scriptedRunner(() => ({ hang: true }))
-      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000 })
+      // It still reports what it spent once stopped: the requests were billed (#2981 review).
+      const { runner } = scriptedRunner(() => ({ hang: true, resultOnAbortUsd: 0.02 }))
+      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000, leaseMs: 90_000 })
       const elsewhere = (await m.start(agentA, { origin: 'mcp' })).session
       const here = (await m.start(agentA, { origin: 'mcp' })).session
       // A turn another replica was running, and one running on this replica.
@@ -484,11 +485,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         message: 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)',
       })
       expect(await error(here.id)).toMatchObject({
-        message: 'the turn was stopped: it could not renew its claim on the session for a minute, though its replica is running',
+        message: 'the turn was stopped: it could not renew its claim on the session for 90 seconds, though its replica is running',
       })
       expect(JSON.stringify(await m.events.read(elsewhere.id))).not.toContain('restarted')
       // This replica's turn is stopped too, not left running without its claim.
-      await running.done
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      const [spent] = await db.sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${here.id}`
+      expect(spent!.cost_usd).toBeCloseTo(0.02)
       expect(audit.entries.filter((e) => e.kind === 'turn' && e.action === 'lost_claim')).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -569,30 +572,36 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     it("leaves a newer turn's approvals alone when its claim goes after the lost check (#2981 review)", async () => {
       const paths = await tempPaths()
-      let release!: () => void
-      const held = new Promise<void>((resolve) => (release = resolve))
-      const { runner } = scriptedRunner(() => ({ reply: 'nearly done', holdAfterResult: held }))
-      // No renewals while it is held: nothing tells this turn its claim went.
+      const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
+      // No renewals: nothing tells this turn its claim went.
       const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
       const { session } = await m.start(agentA, { origin: 'mcp' })
+      // Its result is in and runTurn's lost check passed: finish() has begun (its first
+      // step is this cancel). Before its own check, another replica's turn takes the
+      // session and parks a call. Here, not on a timer: a turn that finished first
+      // would make this race the test's to lose.
+      const cancelQuestions = m.questions.cancelPending.bind(m.questions)
+      vi.spyOn(m.questions, 'cancelPending').mockImplementationOnce(async (...args) => {
+        await db.sql`
+          UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
+          WHERE id = ${session.id}`
+        await db.sql`
+          INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                    requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+          SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
+                 'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+          FROM ai_sessions WHERE id = ${session.id}`
+        return cancelQuestions(...args)
+      })
       const running = await m.send(session.id, agentA, 'job')
-      // Its result is in; before it finishes, another replica's turn takes the session and parks a call.
-      await expect.poll(async () => (await m.events.read(session.id)).some((e) => e.event.type === 'assistant.text.done')).toBe(true)
-      await db.sql`
-        UPDATE ai_sessions SET status = 'waiting_approval', turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute'
-        WHERE id = ${session.id}`
-      await db.sql`
-        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
-        SELECT gen_random_uuid(), id, turn_id, 't2', 'send_to_bambuddy', 'send', 'h', 'outward',
-               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
-        FROM ai_sessions WHERE id = ${session.id}`
-      release()
 
       expect(await running.done).toEqual({ kind: 'lost_claim' })
       const approvals = await db.sql<{ decision: string | null }[]>`
         SELECT decision FROM ai_approvals WHERE session_id = ${session.id}`
       expect(approvals).toEqual([{ decision: null }])
+      // Its result's spend is the session's all the same (#2981 review).
+      const [spent] = await db.sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${session.id}`
+      expect(spent!.cost_usd).toBeCloseTo(0.01)
       // Nor is its process kept for a session another turn owns now (#2981 review).
       await expect.poll(() => m.warm.size()).toBe(0)
       await m.warm.close()
@@ -667,15 +676,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const stuck = (await m.start(agentA, { origin: 'mcp' })).session
       const first = await m.send(finishing.id, agentA, 'a')
       const second = await m.send(stuck.id, agentA, 'b')
+      // The grace period ends when the test says, not after a wall-clock wait a loaded
+      // runner can outlast: its timer is the one set for GRACE_MS, held until called.
+      const GRACE_MS = 987_654
+      let endGrace: (() => void) | undefined
+      const realSetTimeout = globalThis.setTimeout
+      const timers = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+        fn: (...args: unknown[]) => void,
+        ms?: number,
+        ...args: unknown[]
+      ) => {
+        if (ms !== GRACE_MS) return realSetTimeout(fn, ms, ...args)
+        endGrace = () => fn(...args)
+        return realSetTimeout(() => {}, 2 ** 31 - 1)
+      }) as typeof setTimeout)
 
-      const stopping = m.stopTurns({ graceMs: 300, abortWaitMs: 5_000 })
+      const stopping = m.stopTurns({ graceMs: GRACE_MS, abortWaitMs: 5_000 })
       // Draining: nothing new starts here.
       await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
       release()
-      await stopping
-      // The one that could finish did; the other was aborted and recorded it
-      // before stopTurns returned, so the pool can close now.
+      // The one that could finish did, inside the grace period.
       expect(await first.done).toMatchObject({ kind: 'result' })
+      expect(endGrace).toBeDefined()
+      endGrace!()
+      await stopping
+      timers.mockRestore()
+      // The other was aborted and recorded it before stopTurns returned, so the pool can close now.
       expect(await second.done).toEqual({ kind: 'interrupted' })
       expect(await m.get(stuck.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
       const events = (await m.events.read(stuck.id)).map((e) => e.event)

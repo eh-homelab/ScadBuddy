@@ -359,6 +359,14 @@ function abortMessage(signal: AbortSignal): string {
 }
 
 export const DEFAULT_LEASE_MS = 60_000
+
+/** A lease's length for a person: "a minute", "90 seconds". */
+export function leaseWords(ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  if (seconds === 60) return 'a minute'
+  if (seconds % 60 === 0) return `${seconds / 60} minutes`
+  return seconds === 1 ? 'a second' : `${seconds} seconds`
+}
 /** A lapsed turn's `turn` row when a new turn took its session before the reaper ran (#3320). */
 export const TAKEN_OVER =
   'the turn was stopped: its claim on the session lapsed and a new turn took the session (the replica running it stopped, or could not reach the database)'
@@ -1520,6 +1528,8 @@ export class SessionManager {
     query: string,
     params: (string | number)[],
   ): Promise<ClaimRow | undefined> {
+    // FOR UPDATE is what keeps a lapsed turn to one `turn` row, not a tuning: without it
+    // the reaper's UPDATE and this one could both read the turn and both write its row.
     const [row] = await this.deps.sql.unsafe<(ClaimRow & { prev_turn_id: string | null })[]>(
       `WITH prev AS (SELECT turn_id::text AS prev_turn_id FROM ai_sessions WHERE id = $1 FOR UPDATE)
        ${query}`,
@@ -1992,13 +2002,19 @@ export class SessionManager {
       // `last-prompt` and `cost-state` entries arrive after the `result`
       // message), so releasing the claim here means the next turn, on any
       // replica, resumes from a complete transcript.
+      const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
+      const turnUsd = attempts?.spentUsd() ?? 0
+      // Only a turn that did not end on its own can be cut off mid-request;
+      // one that did has every request priced in its result. WebFetch's own
+      // model calls are in no result, so they are added the same way.
+      const cutUsd = (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd
       if (local.lost) {
         outcome = { kind: 'lost_claim' }
+        await this.chargeLostTurn(session.id, result, turnUsd, cutUsd)
         // Another turn owns the session now, wherever it runs: this process is not kept for it.
         for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
         return outcome
       }
-      const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
       // A turn stopped after its refusal was reported is still the caller's.
       outcome = await this.finish(
         session,
@@ -2009,11 +2025,8 @@ export class SessionManager {
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
-        attempts?.spentUsd() ?? 0,
-        // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result. WebFetch's own
-        // model calls are in no result, so they are added the same way.
-        (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd,
+        turnUsd,
+        cutUsd,
       )
       // A claim that went after the lost check above: its process is not kept either (#2981 review).
       if (outcome.kind === 'lost_claim') for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
@@ -2092,7 +2105,10 @@ export class SessionManager {
     // the cancel would serialise it with every claim, and the cancel runs on its own
     // connection, so a lock taken here could wait on itself.
     const [held] = await this.deps.sql`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_id = ${turnId}`
-    if (!held) return { kind: 'lost_claim' }
+    if (!held) {
+      await this.chargeLostTurn(id, result, turnUsd, cutUsd)
+      return { kind: 'lost_claim' }
+    }
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
@@ -2163,14 +2179,19 @@ export class SessionManager {
     if (keepWaiting) status = 'waiting_approval'
     tail.push(event({ type: 'session.status', sessionId: id, status }))
 
+    // Added, not set: a turn that lost this session's claim earlier may have added its
+    // spend since this one read the row (chargeLostTurn).
     const [released] = await this.deps.sql<{ id: string }[]>`
       UPDATE ai_sessions
-      SET status = ${status}, cost_usd = ${costUsd}, turns = ${turns},
+      SET status = ${status}, cost_usd = cost_usd + ${costUsd - session.ownCostUsd}, turns = ${turns},
           unpriced_cost_usd = unpriced_cost_usd + ${cutUsd},
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
-    if (!released) return { kind: 'lost_claim' }
+    if (!released) {
+      await this.chargeLostTurn(id, result, turnUsd, cutUsd)
+      return { kind: 'lost_claim' }
+    }
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
     await this.deps.audit?.record(
       turnCostEntry(
@@ -2669,6 +2690,20 @@ export class SessionManager {
   }
 
   /**
+   * What a turn that lost its claim spent, added to its session all the same (#2981
+   * review): the requests were billed whoever owns the session now. Counted as finish()
+   * counts it, without the claim, and added to the row rather than set, since the turn
+   * that took it over may be writing its own.
+   */
+  private async chargeLostTurn(id: string, result: SDKResultMessage | undefined, turnUsd: number, cutUsd: number): Promise<void> {
+    const usd = (result ? turnUsd : 0) + cutUsd
+    if (usd <= 0) return
+    await this.deps.sql`
+      UPDATE ai_sessions SET cost_usd = cost_usd + ${usd}, unpriced_cost_usd = unpriced_cost_usd + ${cutUsd}
+      WHERE id = ${id}`
+  }
+
+  /**
    * Ends the turns whose lease ran out. Usually their process died before
    * finish() (a SIGKILL, an OOM, a pool closed under them), so nothing else
    * would say the turn stopped. A send could already take such a session over
@@ -2709,7 +2744,7 @@ export class SessionManager {
       const local = this.active.get(id)
       const here = local?.turnId === dead_turn ? local : undefined
       const message = here
-        ? 'the turn was stopped: it could not renew its claim on the session for a minute, though its replica is running'
+        ? `the turn was stopped: it could not renew its claim on the session for ${leaseWords(this.leaseMs)}, though its replica is running`
         : 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)'
       if (here) {
         // Lost before aborted: its runTurn then skips finish(), which would cancel the
