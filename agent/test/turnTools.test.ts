@@ -15,7 +15,7 @@ import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
-import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.js'
 import { CALL_ID_META } from '../src/builtins/callId.js'
 import {
   connectInProcess,
@@ -104,6 +104,7 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
+    lapsed?: (requestId: string, inputHash: string | undefined) => boolean
     callIds?: boolean
   } = {},
 ) {
@@ -141,6 +142,9 @@ function harness(
         bindings.push(binding?.inputHash)
         return requestId.endsWith(':toolu_approved')
       },
+      ...(options.lapsed
+        ? { lapsed: async (requestId: string, binding?: { inputHash?: string }) => options.lapsed!(requestId, binding?.inputHash) }
+        : {}),
     },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
@@ -450,6 +454,23 @@ describe('turn tools in a durable session', () => {
     const reported = harness({ problems: [`plugin x failed with header ${SECRET}`] })
     await env(TURN_TOOLS_ACTIVITY).run(reported.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)
     expect(reported.reported).toEqual(['plugin x failed with header [redacted]'])
+  })
+
+  it("refuses a session's call whose approval lapsed as GrantRevoked, before it runs (#2871)", async () => {
+    const asked: (string | undefined)[] = []
+    const h = harness({
+      lapsed: (requestId, inputHash) => {
+        asked.push(inputHash)
+        return requestId.endsWith(':toolu_lapsed')
+      },
+    })
+    const lapsed = await failure(env('turn:notes__post', 'tool-toolu_lapsed').run(h.call, { method: 'POST', body: 'x' }))
+    expect(lapsed.type).toBe(GRANT_REVOKED)
+    // Bound to the call's input, as the approved check is (#3471 review).
+    expect(asked[0]).toBe(fakeHash('notes__post', { method: 'POST', body: 'x' }))
+    const never = await failure(env('turn:notes__post', 'tool-toolu_other').run(h.call, { method: 'POST', body: 'x' }))
+    expect(never.type).toBe('NotApproved')
+    expect(h.calls).toEqual([])
   })
 
   describe("from a flow's tool(name, args) (#2320 phase 8)", () => {
