@@ -950,6 +950,49 @@ func TestARenameThatChangesTheTypeSendsTheFileAgain(t *testing.T) {
 	}
 }
 
+// A write still open on a file a type-changing rename sent again follows it to its new
+// ID, so it replaces that file instead of landing beside it as a conflict copy, sent
+// at once or queued.
+func TestAWriteOpenOverATypeChangingRenameReplacesTheRenamedFile(t *testing.T) {
+	for _, down := range []bool{false, true} {
+		lib := newFakeLibrary()
+		lib.file(10, "x.3mf.tmp", 0, []byte("old"))
+		state := t.TempDir()
+		dir, released := retrying(t, lib, Options{StateDir: state, All: true})
+		logs(t)
+		f, err := os.OpenFile(filepath.Join(dir, "x.3mf.tmp"), os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte("new")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(dir, "x.3mf.tmp"), filepath.Join(dir, "x.3mf")); err != nil {
+			t.Fatal(err)
+		}
+		lib.setDown(down)
+		if err := f.Close(); err != nil {
+			t.Fatalf("down %v: close: %v", down, err)
+		}
+		waitRelease(t, released)
+		if down {
+			q := queued(t, state)
+			if len(q) != 1 || q[0].Name != "x.3mf" {
+				t.Fatalf("queue: %+v", q)
+			}
+			lib.setDown(false)
+		}
+		eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"0/x.3mf": "new"}) })
+		eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+		lib.locked(func() {
+			if !lib.deleted[10] {
+				t.Fatalf("down %v: the old file was kept: %+v", down, lib.files)
+			}
+		})
+	}
+}
+
 func TestFileTypes(t *testing.T) {
 	for name, want := range map[string]string{"a.3mf": "3mf", "A.3MF.tmp": "tmp", "b.gcode.3mf": "gcode.3mf", "c.STL": "stl", "noext": ""} {
 		if got := fileType(name); got != want {
