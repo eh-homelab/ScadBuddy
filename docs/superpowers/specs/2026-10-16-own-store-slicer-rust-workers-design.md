@@ -312,9 +312,9 @@ the sliced blob replaces the "sliced library file" in `print_record` and
 `slice_plate` as its own one-activity workflow (`SliceWorkflow`, one activity, no
 other logic, until Temporal 1.31's standalone activities let it be the bare activity)
 and `read_preview` reads the workflow's heartbeat details for progress. The browser
-polls as it does today; a `slice:<job>` realtime topic carrying the heartbeat's
-`total_percent` is the one UI addition, so the pane shows a progress bar instead of
-"Slicing…".
+polls as it does today (every 2 s), and the heartbeat's `total_percent` rides that
+answer, so the pane shows a progress bar instead of "Slicing…"; no realtime topic
+(realtime events carry ids, not content).
 
 Filament requirements (grams per slot, side) and filament changes today come from
 Bambuddy's `filament-requirements` and ScadBuddy's own G-code parse. With the native
