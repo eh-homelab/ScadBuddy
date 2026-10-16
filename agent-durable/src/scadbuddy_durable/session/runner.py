@@ -733,6 +733,8 @@ class ScadBuddyRunner:
                     len(error_text(err).encode()),
                 )
                 if _BUDGET_REACHED.match(str(err)):
+                    # Ahead of credentials_fault on purpose (#3569): a cap is never the
+                    # credential's fault, so a capped segment must not go on to the next.
                     # The cap raised rather than returned: today the plugin returns it,
                     # but a raised one is the same cap, charged and ended the same way
                     # as the returned one above, never a failure (#3356).
