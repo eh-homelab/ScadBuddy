@@ -59,6 +59,18 @@ export function besideNow(companion: HTMLElement | null): companion is HTMLEleme
 /** Escapes a dialog left to the companion beside it, with whether anyone took them since. */
 const leftToCompanion = new WeakMap<Event, () => boolean>()
 
+/** Prevents `event`'s default now, and tells whether anyone else prevents it later. */
+function holdBack(event: Event): () => boolean {
+  event.preventDefault()
+  let taken = false
+  const prevent = event.preventDefault.bind(event)
+  event.preventDefault = () => {
+    taken = true
+    prevent()
+  }
+  return () => taken
+}
+
 /**
  * #3653 — an Escape pressed in the companion beside a dialog is the companion's (it
  * closes the assistant), not the dialog's. Radix closes the topmost dialog on any
@@ -67,19 +79,29 @@ const leftToCompanion = new WeakMap<Event, () => boolean>()
  * the two apart.
  */
 export function leaveToCompanion(event: Event): void {
-  event.preventDefault()
-  let taken = false
-  const prevent = event.preventDefault.bind(event)
-  event.preventDefault = () => {
-    taken = true
-    prevent()
-  }
-  leftToCompanion.set(event, () => taken)
+  leftToCompanion.set(event, holdBack(event))
 }
 
 /** Whether something already handled this key: `defaultPrevented`, but not by a dialog leaving it to the companion. */
 export function escapeTaken(event: Event): boolean {
   return leftToCompanion.get(event)?.() ?? event.defaultPrevented
+}
+
+/**
+ * #3636 — Radix hears Escape on `document` in the capture phase, before anything in the
+ * dialog does, so an open list inside it could not keep Escape for itself. The dialog
+ * waits instead: it holds the key back from Radix now (and it stays taken to anyone
+ * else, the covered companion included), and `close`s only once the key reaches
+ * `document` with nothing having stopped or taken it, as the legacy dialog did.
+ */
+export function closeOnUntakenEscape(event: KeyboardEvent, close: () => void): void {
+  const taken = holdBack(event)
+  const reached = (seen: Event) => {
+    if (seen === event && !taken()) close()
+  }
+  // Added while `document` hears the capture phase, so it hears this key's bubble phase.
+  document.addEventListener('keydown', reached)
+  setTimeout(() => document.removeEventListener('keydown', reached), 0)
 }
 
 /**

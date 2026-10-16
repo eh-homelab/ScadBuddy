@@ -4,7 +4,14 @@ import * as React from "react"
 import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import { Dialog as DialogPrimitive } from "radix-ui"
-import { ModalCompanionContext, besideNow, keepOpenOnCompanionToggle, leaveToCompanion, roomFor } from "@/lib/modal"
+import {
+  ModalCompanionContext,
+  besideNow,
+  closeOnUntakenEscape,
+  keepOpenOnCompanionToggle,
+  leaveToCompanion,
+  roomFor,
+} from "@/lib/modal"
 
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
@@ -26,7 +33,17 @@ function Dialog({
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   const [uncontrolled, setUncontrolled] = React.useState(defaultOpen)
   const open = openProp ?? uncontrolled
-  const mode = React.useMemo(() => ({ open, modal }), [open, modal])
+  const mode = React.useMemo(
+    () => ({
+      open,
+      modal,
+      close: () => {
+        if (openProp === undefined) setUncontrolled(false)
+        onOpenChange?.(false)
+      },
+    }),
+    [open, modal, openProp, onOpenChange]
+  )
   return (
     <DialogModeContext.Provider value={mode}>
       <DialogPrimitive.Root
@@ -48,7 +65,11 @@ function Dialog({
  * the same commit that opens it, as Radix's portal does not (that mounts a render
  * later), so a caller's effect on opening finds what is in it (#350: a field to select).
  */
-const DialogModeContext = React.createContext({ open: false, modal: false })
+const DialogModeContext = React.createContext<{ open: boolean; modal: boolean; close: () => void }>({
+  open: false,
+  modal: false,
+  close: () => {},
+})
 
 function DialogTrigger({
   ...props
@@ -135,6 +156,7 @@ function DialogLayer({
 }) {
   const overlay = React.useRef<HTMLDivElement>(null)
   const companion = React.useContext(ModalCompanionContext)
+  const { close } = React.useContext(DialogModeContext)
   const reserve = useCompanionReserve(companion)
   const beside = companion !== null && reserve !== 0
   const content = React.useRef<HTMLDivElement>(null)
@@ -201,6 +223,8 @@ function DialogLayer({
           // The companion's own Escape (closing the assistant) is not this dialog's while
           // it is usable beside it; covered by the dialog, it is no one else's.
           if (besideNow(companion) && companion.contains(event.target as Node)) leaveToCompanion(event)
+          // Closed once what has focus has not kept the key for itself (#3636).
+          else closeOnUntakenEscape(event, close)
         }}
         onInteractOutside={(event) => {
           // A press on the shell's Assistant button opens the panel beside it (#1897).
