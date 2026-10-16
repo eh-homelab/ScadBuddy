@@ -307,21 +307,22 @@ function RenderSection({ print }: { print: PrintDetail }) {
   const meshAsked = meshAskedFor === glb.url
   const library = print.library_file_id
   const plate = Number(new URL(glb.url, window.location.origin).searchParams.get('plate') ?? '1')
+  const thumbnail = library !== null ? api.libraryPlateThumbnailUrl(library, plate) : null
   return (
     <Section title={print.output_id !== null ? 'ScadBuddy render' : 'Library file'}>
       <div className="relative aspect-[4/3] overflow-hidden rounded-lg">
         {library !== null && !meshAsked ? (
           <>
-            {brokenImage === api.libraryPlateThumbnailUrl(library, plate) ? (
+            {brokenImage === thumbnail ? (
               <p className="flex size-full items-center justify-center bg-muted text-xs text-muted-foreground">
                 No image of plate {plate}
               </p>
             ) : (
               <img
-                src={api.libraryPlateThumbnailUrl(library, plate)}
+                src={thumbnail ?? undefined}
                 alt={`Plate ${plate} of the library file`}
                 className="size-full bg-muted object-contain"
-                onError={() => setBrokenImage(api.libraryPlateThumbnailUrl(library, plate))}
+                onError={() => setBrokenImage(thumbnail)}
               />
             )}
             <Button

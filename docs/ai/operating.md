@@ -723,6 +723,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
 
+The agent also reads the backend's flow tables, which the backend migrates. Its
+database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
+reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
+Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
+tool call, as a lookup error the activity retries until it gives up.
+
 ## 8. Per-query limits
 
 Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 USD)

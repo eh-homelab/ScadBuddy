@@ -35,6 +35,19 @@ describe('usePageTitle (#2454)', () => {
     expect(title).toBe('Library · ScadBuddy')
   })
 
+  it("skips rendered Markdown's own h1 before the page's (#3392)", () => {
+    let title = ''
+    render(
+      <Titled onTitle={(t) => (title = t)}>
+        <div data-markdown="">
+          <h1>README</h1>
+        </div>
+        <h1>keychain</h1>
+      </Titled>,
+    )
+    expect(title).toBe('keychain · ScadBuddy')
+  })
+
   it('is the bare name with no main', () => {
     const { result } = renderHook(() => usePageTitle({ current: null }))
     expect(result.current).toBe('ScadBuddy')

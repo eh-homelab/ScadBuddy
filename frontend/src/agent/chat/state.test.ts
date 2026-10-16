@@ -448,6 +448,15 @@ describe('chatReducer', () => {
       listed,
     )
     expect(replayed.sessions.x).toMatchObject({ title: 'Renamed', status: 'done' })
+    // A real log always follows with its status: the title stays, the status is the log's.
+    const followed = run(
+      [
+        server({ type: 'session.started', sessionId: 'x', origin: 'chat', owner: you, title: 'The first prompt' }),
+        server({ type: 'session.status', sessionId: 'x', status: 'waiting_input' }),
+      ],
+      listed,
+    )
+    expect(followed.sessions.x).toMatchObject({ title: 'Renamed', status: 'waiting_input' })
     // A session the panel has not heard of takes the event's title, and is running.
     const fresh = run([server({ type: 'session.started', sessionId: 'y', origin: 'chat', owner: you, title: 'Hello' })], listed)
     expect(fresh.sessions.y).toMatchObject({ title: 'Hello', status: 'running' })

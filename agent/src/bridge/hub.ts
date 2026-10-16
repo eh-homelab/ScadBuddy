@@ -327,6 +327,9 @@ export class TabHub implements BrowserTabs {
       // Compared and written in one statement, queued behind this replica's own
       // writes: no pairing, here or on another replica, lands between the two.
       const setIf = store.setIf.bind(store)
+      // This replica's own pairing as the write leaves: one made here while it is out
+      // is newer, and its write is queued after this one, so it keeps the map.
+      const before = this.#sessionTabs.get(sessionId)
       const written = this.#sessionTabWrites.then(() => setIf(sessionId, tabId, seen))
       this.#sessionTabWrites = written.then(
         () => {},
@@ -344,10 +347,14 @@ export class TabHub implements BrowserTabs {
         this.#pairHere(sessionId, tabId)
         return true
       }
-      this.#pairHere(sessionId, tabId)
+      if (this.#sessionTabs.get(sessionId) === before) this.#pairHere(sessionId, tabId)
       return true
     }
     if (store) {
+      // A session whose last write here failed is this replica's map's until a write
+      // lands (#2211), so it is compared with that map's answer and paired as a send
+      // pairs it. A pairing on another replica between the read and the write can
+      // still be overwritten here: the row is not trusted for it, so cannot compare.
       const now = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
       if (now !== seen) return false
       this.pairSession(sessionId, tabId)

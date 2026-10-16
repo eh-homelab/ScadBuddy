@@ -29,18 +29,23 @@ from fastapi.testclient import TestClient
 from temporalio.api.enums.v1 import EventType
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api import commands as commands_api
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
+from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     CommandClosedError,
+    CommandResendError,
+    CommandStillAcceptingError,
     TemporalUnavailableError,
     TemporalUnreachableError,
     temporal_failure,
@@ -55,7 +60,8 @@ from tests.api.test_print_run_choices import (
     run_request,
     run_routes,
 )
-from tests.api.test_send import died_after_the_upload, stored_files, upload_route
+from tests.api.test_send import configure, died_after_the_upload, stored_files, upload_route
+from tests.bambuddy.conftest import recording
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
@@ -1276,3 +1282,233 @@ def test_a_cancel_while_the_last_plate_is_queued_still_ends_succeeded(
     assert ended["error"] is None
     assert ended["result"]["queue_item_ids"] == [51]
     assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2793 (spec 2026-10-13): with `Prefer: respond-async` a run whose `accepted`
+    Update has not answered within `FAST_ACCEPT` is a 202 to follow, not a 503 to send
+    again; following that Update answers the run once it is recorded, and it prints
+    once. The check's printer read is held to keep the Update from answering."""
+    monkeypatch.setattr(printing_api, "FAST_ACCEPT", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    held = threading.Event()
+    printers = recording("printers.json")
+
+    async def held_printers(request: httpx.Request) -> httpx.Response:
+        while not held.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json=printers)
+
+    respx.get(f"{API}/printers/").mock(side_effect=held_printers)
+    request_id = uuid.uuid4().hex
+    try:
+        posted = client.post(
+            f"/api/v1/print/outputs/{output_id}/run",
+            json={**body(), "request_id": request_id},
+            headers={"Prefer": "respond-async"},
+        )
+        assert posted.status_code == 202, posted.text
+        accepting = posted.json()
+        assert accepting["status"] == "accepting"
+        assert accepting["update_id"] == request_id
+        assert accepting["workflow_id"].startswith("print-")
+
+        still = client.post(accepting["follow_url"])
+        assert still.status_code == 202, still.text
+    finally:
+        held.set()
+    answered = client.post(accepting["follow_url"])
+
+    assert answered.status_code == 200, answered.text
+    run = answered.json()
+    assert run["status"] == "running" and run["repeated"] is False
+    assert follow_run(client, run["id"])["status"] == "succeeded"
+    assert queued.call_count == 1
+
+
+def test_only_a_press_with_a_request_id_is_offered_the_202(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: without a `request_id`, a repeat of an ended run must start anew
+    (`ended`), which a follow cannot tell from this request's own run. Such a request
+    keeps the 503 re-send even when it asks to follow."""
+    output_id = prepared(client, model)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    prefer = {"Prefer": "respond-async"}
+    anonymous = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body(), headers=prefer)
+    pressed = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "request_id": "r" * 32},
+        headers=prefer,
+    )
+
+    assert anonymous.status_code == 503, anonymous.text
+    assert anonymous.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+    assert pressed.status_code == 202, pressed.text
+    assert pressed.json()["update_id"] == "r" * 32
+
+
+@pytest.mark.parametrize("request_id", ["press/1", ".", ".."])
+def test_a_request_id_a_follow_url_cannot_carry_keeps_the_resend(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, request_id: str
+) -> None:
+    """#3078: the `request_id` is the follow URL's last segment, and Starlette asserts on a
+    `/` in one, so such a press is the 503 re-send it was, not a 500. A dot-only one is
+    collapsed out of the path by clients and proxies (review #2834)."""
+    output_id = prepared(client, model)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "request_id": request_id},
+        headers={"Prefer": "respond-async"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_a_followed_run_is_the_whole_run_and_attributed_as_the_route_does(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: the follow answers a `PrintRun` with every field (not some other
+    member of its response union), and attributes it in Activity as the run route does."""
+    run = PrintRun(
+        id="run-followed",
+        subject="output:x",
+        status="succeeded",
+        created_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )
+
+    async def answered(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        return AcceptAnswer(run=run)
+
+    attributed: list[str] = []
+
+    async def attribute(index: object, activity_id: str) -> None:
+        attributed.append(activity_id)
+
+    monkeypatch.setattr(printing_api, "follow_update", answered)
+    monkeypatch.setattr(commands_api, "attribute_request", attribute)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == run.model_dump(mode="json")
+    assert attributed == ["print_run:run-followed"]
+
+
+def test_following_a_refused_run_answers_the_refusal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The follow answers a refusal as the run route would have (review #2834)."""
+
+    async def refused(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        return AcceptAnswer(
+            refusal=PrintRunError(
+                type="about:blank", status=422, title="Unprocessable", detail="no 0.2 nozzle"
+            )
+        )
+
+    monkeypatch.setattr(printing_api, "follow_update", refused)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "no 0.2 nozzle"
+
+
+def test_following_a_run_temporal_does_not_know_says_to_send_it_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unknown(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandResendError("print-x")
+
+    monkeypatch.setattr(printing_api, "follow_update", unknown)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+    assert response.status_code == 409, response.text
+    assert response.json()["type"] == COMMAND_RESEND_PROBLEM
+
+
+def test_a_library_press_with_a_request_id_is_offered_the_202(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: the library route hands its request to `accept_run` as the output
+    route does, so a slow start of a library file's run is a 202 to follow too."""
+    configure(client)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    pressed = client.post(
+        "/api/v1/print/library/89/run",
+        json={**body(), "request_id": "r" * 32},
+        headers={"Prefer": "respond-async"},
+    )
+
+    assert pressed.status_code == 202, pressed.text
+    assert pressed.json()["update_id"] == "r" * 32
+    assert pressed.headers["preference-applied"] == "respond-async"
+
+
+@respx.mock
+def test_a_followed_run_the_check_refuses_answers_the_refusal(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834, end to end on a real worker: a run answered 202 whose check then
+    refuses it (Bambuddy has no such printer) is that refusal when followed, and
+    nothing is sent to the printer."""
+    monkeypatch.setattr(printing_api, "FAST_ACCEPT", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    held = threading.Event()
+
+    async def no_printers(request: httpx.Request) -> httpx.Response:
+        while not held.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{API}/printers/").mock(side_effect=no_printers)
+    try:
+        posted = client.post(
+            f"/api/v1/print/outputs/{output_id}/run",
+            json={**body(), "request_id": uuid.uuid4().hex},
+            headers={"Prefer": "respond-async"},
+        )
+        assert posted.status_code == 202, posted.text
+    finally:
+        held.set()
+    answered = client.post(posted.json()["follow_url"])
+    for _ in range(10):
+        if answered.status_code != 202:
+            break
+        answered = client.post(posted.json()["follow_url"])
+
+    assert answered.status_code == 422, answered.text
+    assert "has no printer 1" in answered.json()["detail"]
+    assert queued.call_count == 0
+
+
+def test_a_print_follow_refuses_a_supersedes(client: TestClient) -> None:
+    """Review #2834: `supersedes` is a render's; on a print's follow it is refused, not
+    silently ignored."""
+    response = client.post("/api/v1/commands/print-x/updates/r1", params={"supersedes": "j"})
+    assert response.status_code == 422, response.text

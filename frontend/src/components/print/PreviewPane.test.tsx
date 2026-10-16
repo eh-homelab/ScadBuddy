@@ -59,6 +59,9 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
       true,
     )
     expect(screen.queryByTestId('slice-departures')).toBeNull()
+    // Nor the per-slot sides, which say the same as the moved-nozzle note (#3500 review).
+    expect(screen.queryByTestId('preview-side-1')).toBeNull()
+    expect(screen.queryByTestId('preview-side-3')).toBeNull()
   })
 
   it('names a planned colour the sliced plate dropped, and a filament moved to the other nozzle', () => {
@@ -77,6 +80,7 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
       'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left as planned: it groups filaments itself to cut purging.',
     )
     expect(notes).toHaveTextContent('The slicer put Inland Black (slot 3) on the left nozzle, not the right as planned: it groups')
+    expect(screen.getByTestId('preview-side-1')).toHaveTextContent('right nozzle')
   })
 
   it('says a side chosen by hand was not kept (#2703)', () => {

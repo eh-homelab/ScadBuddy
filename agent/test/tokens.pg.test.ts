@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hashToken, liveTokenTiers, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { migrate } from '../src/db/migrations.js'
@@ -132,6 +132,18 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const tiers = liveTokenTiers(store)
       expect(await tiers({ kind: 'bearer', id: `token:${expiring.record.id}` })).toEqual([])
       expect(await tiers({ kind: 'oidc', id: 'oidc:https://idp.example/#alice' })).toBeUndefined()
+    })
+
+    it("judges a live tier's expiry by Postgres's clock when no time is given (#3494)", async () => {
+      const soon = await store.mint({ name: 's', tier: 'write', expiresAt: new Date(Date.now() + 5 * 60_000) })
+      // This replica's clock runs 15 minutes fast: past the expiry, which has not passed.
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(Date.now() + 15 * 60_000)
+      try {
+        expect(await store.liveTier(soon.record.id)).toBe('write')
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('records last use, and never moves it backwards', async () => {

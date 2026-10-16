@@ -664,7 +664,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // The save's key is kept only when its save may have started (no answer, or a start
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
-      // one; the finished job is kept, since nothing of it was saved.
+      // one; the finished job is kept, since nothing of it was saved. The start's key is
+      // renewed for the same reason: a failed or cancelled arrange job is recorded under
+      // it, so Try again under the old key would be answered with that same failure (#3659).
+      // When the finished job is kept, no start is sent and the new key goes unused.
       if (attempt.current && !mayHaveRun(cause)) {
         attempt.current.key = newRequestId()
         attempt.current.arrangeKey = newRequestId()

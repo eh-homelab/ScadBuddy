@@ -288,17 +288,23 @@ class ActivityIndex:
         with self.pool.connection() as conn, conn.transaction():
             if self.events is not None:
                 hold_event_log(conn)  # before the row, as upsert_in does
-            conn.execute(
+            # Only a row this fills in is written and announced: a follow that answers
+            # again finds it attributed, and fans out no event for it (#3566).
+            changed = conn.execute(
                 "INSERT INTO activity"
                 " (id, kind, principal, session, via_tool, status, title, source, source_id)"
                 " VALUES (%s, '', %s, %s, %s, 'queued', '', '', '')"
                 " ON CONFLICT (id) DO UPDATE SET"
                 " principal = coalesce(activity.principal, EXCLUDED.principal),"
                 " session = coalesce(activity.session, EXCLUDED.session),"
-                " via_tool = coalesce(activity.via_tool, EXCLUDED.via_tool)",
+                " via_tool = coalesce(activity.via_tool, EXCLUDED.via_tool)"
+                " WHERE (activity.principal IS NULL AND EXCLUDED.principal IS NOT NULL)"
+                " OR (activity.session IS NULL AND EXCLUDED.session IS NOT NULL)"
+                " OR (activity.via_tool IS NULL AND EXCLUDED.via_tool IS NOT NULL)"
+                " RETURNING id",
                 (activity_id, principal, session, via_tool),
-            )
-            if self.events is not None:
+            ).fetchone()
+            if changed is not None and self.events is not None:
                 self.events.publish_in(
                     conn, ActivityEvent(activity_id=activity_id, principal=principal)
                 )

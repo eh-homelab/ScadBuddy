@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { ChevronRightIcon, FolderIcon, FolderOpenIcon, LibraryIcon } from 'lucide-react'
 import type { LibraryFolderView } from '../../api/types'
 import { ancestry } from '../../lib/libraryPath'
@@ -79,6 +79,8 @@ export function LibraryTree({
     }
     return map
   }, [folders])
+  // The count's description id: unique per tree, whatever its test ids (#3029 review).
+  const countId = useId()
   const hasChildren = (id: number) => (children.get(id)?.length ?? 0) > 0
 
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
@@ -226,7 +228,7 @@ export function LibraryTree({
             <Badge aria-hidden variant="secondary" className="sb-num ml-auto h-4.5 px-1.5 text-[10px] tabular-nums">
               {folder.file_count}
             </Badge>
-            <span id={`${testIdPrefix}-count-${folder.id}`} className="sr-only">
+            <span id={`${countId}-${folder.id}`} className="sr-only">
               {fileCountText(folder)}
             </span>
           </>
@@ -242,7 +244,7 @@ export function LibraryTree({
           aria-selected={isSelected}
           aria-expanded={branch ? open : undefined}
           aria-label={folder.name}
-          aria-describedby={folder.file_count ? `${testIdPrefix}-count-${folder.id}` : undefined}
+          aria-describedby={folder.file_count ? `${countId}-${folder.id}` : undefined}
           tabIndex={tabStop === folder.id ? 0 : -1}
           data-testid={`${testIdPrefix}-${folder.id}`}
           onKeyDown={(event) => onKeyDown(event, folder.id)}
