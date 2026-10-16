@@ -1,4 +1,11 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator } from '@playwright/test'
+
+/** How far `left`'s right edge reaches past `right`'s left edge, in CSS pixels. */
+async function overlap(left: Locator, right: Locator): Promise<number> {
+  const [a, b] = [await left.boundingBox(), await right.boundingBox()]
+  if (!a || !b) throw new Error('not laid out')
+  return a.x + a.width - b.x
+}
 
 test.describe('assistant panel (#256)', () => {
   // Driven by the scripted mock agent (src/mocks/agent.ts), which only the mocked
@@ -289,11 +296,9 @@ test.describe('the assistant beside a dialog (#798)', () => {
     const dialog = page.getByRole('dialog', { name: 'Print' })
     await expect(dialog).toBeVisible()
 
-    // Side by side, not on top of each other, and nothing covers the chat.
-    const dialogBox = await dialog.boundingBox()
-    const panelBox = await panel.boundingBox()
-    if (!dialogBox || !panelBox) throw new Error('not laid out')
-    expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
+    // Side by side, not on top of each other, and nothing covers the chat. Polled: the
+    // dialog's open animation and the panel's first layout settle after it shows.
+    await expect.poll(() => overlap(dialog, panel)).toBeLessThanOrEqual(0)
     const composerBox = await composer.boundingBox()
     if (!composerBox) throw new Error('composer not laid out')
     const [x, y] = [composerBox.x + composerBox.width / 2, composerBox.y + composerBox.height / 2]
@@ -326,10 +331,7 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(dialog).toBeVisible()
 
     // Then as when it was open first: side by side, and the chat takes typing.
-    const dialogBox = await dialog.boundingBox()
-    const panelBox = await panel.boundingBox()
-    if (!dialogBox || !panelBox) throw new Error('not laid out')
-    expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
+    await expect.poll(() => overlap(dialog, panel)).toBeLessThanOrEqual(0)
     await composer.fill('Which spool is the grey one?')
     await expect(composer).toHaveValue('Which spool is the grey one?')
     await expect(dialog).toBeVisible()

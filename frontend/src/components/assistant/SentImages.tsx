@@ -66,7 +66,7 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
       {/* A lightbox covers the assistant panel too, rather than sitting beside it as a
           page's dialog does (#798): it is the panel's own, and modal. Its Escape is its
           own (Radix marks it handled), so the panel's Escape does not close the panel. */}
-      <Dialog open={image !== undefined && shown !== null} onOpenChange={(next) => !next && close()}>
+      <Dialog modal open={image !== undefined && shown !== null} onOpenChange={(next) => !next && close()}>
         {image && shown !== null && (
           <DialogContent
             data-modal=""

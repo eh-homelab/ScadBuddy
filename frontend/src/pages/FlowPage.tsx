@@ -6,8 +6,13 @@ import { FlowActions } from '../components/flows/FlowActions'
 import { FlowScript } from '../components/flows/FlowScript'
 import { StartRun } from '../components/flows/StartRun'
 import { FlowTriggers } from '../components/flows/Triggers'
-import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 import { parseSchemaText, schemaText } from '../lib/flowInputs'
 import { timeAgo } from '../lib/format'
 import { actorText, flowPath, FLOWS_PATH, flowStateText } from '../lib/flows'
@@ -84,22 +89,25 @@ export function FlowPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
         <div className="mb-5 flex flex-wrap items-baseline gap-2">
-          <Link to="/workflows" className="text-[12px] text-muted hover:text-ink">
+          <Link to="/workflows" className="text-[12px] text-muted-foreground hover:text-foreground">
             Workflows
           </Link>
-          <span className="text-faint">/</span>
-          <Link to={FLOWS_PATH} className="text-[12px] text-muted hover:text-ink">
+          <span className="text-muted-foreground">/</span>
+          <Link to={FLOWS_PATH} className="text-[12px] text-muted-foreground hover:text-foreground">
             Flows
           </Link>
-          <span className="text-faint">/</span>
+          <span className="text-muted-foreground">/</span>
           <h1 className="text-[13px] font-medium">{flow.data ? `${flow.data.name} v${flow.data.version}` : id}</h1>
         </div>
         {flow.error ? (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-[13px] text-destructive">
             {flow.error instanceof ApiError && flow.error.status === 404 ? 'No such flow.' : flow.error.message}
           </p>
         ) : !flow.data ? (
-          <p className="text-[13px] text-muted">Loading…</p>
+          <div role="status" aria-label="Loading" className="flex flex-col gap-4 md:flex-row-reverse">
+            <Skeleton className="h-40 md:w-60" />
+            <Skeleton className="h-[28rem] flex-1 rounded-xl" />
+          </div>
         ) : (
           <div className="flex flex-col gap-4 md:flex-row-reverse md:items-start">
             <aside className="flex flex-col gap-4 md:w-60 md:shrink-0">
@@ -113,23 +121,29 @@ export function FlowPage() {
                   withGrant
                 />
                 {!phone && !deleted && viewed && !viewed.current && (
-                  <Button onClick={() => void restore(flow.data!.name, viewed)} disabled={restoring}>
-                    {restoring ? <Spinner /> : `Restore v${viewed.version}`}
+                  <Button
+                    variant="outline"
+                    onClick={() => void restore(flow.data!.name, viewed)}
+                    disabled={restoring}
+                    aria-busy={restoring}
+                  >
+                    {restoring && <Spinner />}
+                    {`Restore v${viewed.version}`}
                   </Button>
                 )}
               </div>
               {error && (
-                <p role="alert" className="text-[13px] text-warn">
+                <p role="alert" className="text-[13px] text-destructive">
                   {error}
                 </p>
               )}
               {state && (
-                <p className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5 text-[12.5px] text-muted">
+                <Card size="sm" className="px-3 text-[12.5px] text-muted-foreground">
                   {state}, {timeAgo((flow.data.deleted_at ?? flow.data.archived_at)!)}.{' '}
                   {deleted
                     ? 'Its versions stay in its history: restore one to run it again.'
                     : 'Unarchive it to run it again.'}
-                </p>
+                </Card>
               )}
               <FlowActions
                 flow={flow.data}
@@ -137,31 +151,32 @@ export function FlowPage() {
                 onRestored={(restored) => void navigate(flowPath(restored.id))}
                 restore={viewed ? { commit: viewed.commit, version: viewed.version } : null}
               />
-              <p className="text-[12.5px] text-muted">
+              <p className="text-[12.5px] text-muted-foreground">
                 Registered by {actorText(flow.data.created_by)}, {timeAgo(flow.data.created_at)}.
               </p>
               <section aria-label="Versions">
-                <h2 className="mb-1 text-[13px] font-medium">Versions</h2>
+                <h2 className="mb-1.5 text-[13px] font-medium">Versions</h2>
                 {versions.data ? (
-                  <ul className="flex flex-col gap-1">
+                  <ul className="flex flex-col gap-0.5">
                     {versions.data.map((v) => (
-                      <li key={v.id} className="text-[12px] leading-snug">
-                        {v.id === id ? (
-                          <span aria-current="page" className="text-[13px] font-medium">
-                            v{v.version}
-                          </span>
-                        ) : (
-                          <Link to={flowPath(v.id)} className="text-[13px] text-accent hover:underline">
-                            v{v.version}
-                          </Link>
-                        )}{' '}
-                        <span className="text-muted">{actorText(v.created_by)}</span>{' '}
-                        <span className="text-faint">{timeAgo(v.created_at)}</span>
+                      <li key={v.id}>
+                        <Link
+                          to={flowPath(v.id)}
+                          aria-current={v.id === id ? 'page' : undefined}
+                          className="flex items-baseline gap-2 rounded-md px-2 py-1 text-[12px] leading-snug hover:bg-ui-muted aria-[current=page]:bg-ui-muted"
+                        >
+                          <span className="text-[13px] font-medium">v{v.version}</span>{' '}
+                          <span className="min-w-0 truncate text-muted-foreground">{actorText(v.created_by)}</span>{' '}
+                          <span className="ml-auto shrink-0 text-muted-foreground">{timeAgo(v.created_at)}</span>
+                        </Link>
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="text-[12.5px] text-muted">Loading…</p>
+                  <div role="status" aria-label="Loading the versions" className="flex flex-col gap-1.5">
+                    <Skeleton className="h-6" />
+                    <Skeleton className="h-6" />
+                  </div>
                 )}
               </section>
             </aside>
@@ -173,7 +188,7 @@ export function FlowPage() {
                     <FlowScript script={flow.data.script} />
                     {flow.data.inputs_schema && (
                       <>
-                        <h2 className="mb-1 mt-3 text-[13px] font-medium">Inputs</h2>
+                        <h2 className="mt-3 mb-1 text-[13px] font-medium">Inputs</h2>
                         <FlowScript script={schemaText(flow.data.inputs_schema)} label="Inputs" />
                       </>
                     )}
@@ -290,7 +305,7 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
 
   return (
     <div className="flex flex-col gap-2">
-      <Suspense fallback={<p className="text-[13px] text-muted">Loading the editor</p>}>
+      <Suspense fallback={<Skeleton role="status" aria-label="Loading the editor" className="h-[28rem] w-full rounded-xl" />}>
         <FlowEditor
           version={flow.id}
           name={flow.name}
@@ -302,29 +317,31 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
           label="Script"
         />
       </Suspense>
-      <label className="mt-1 flex flex-col gap-1 text-[13px] font-medium">
+      <Label htmlFor={`${flow.id}-inputs`} className="mt-1">
         Inputs (JSON Schema)
-        <textarea
-          className="min-h-24 rounded-[6px] border border-line bg-surface px-2 py-1.5 font-mono text-[12px] font-normal"
-          rows={schemaDraft ? Math.min(16, schemaDraft.split('\n').length + 1) : 3}
-          spellCheck={false}
-          placeholder='{"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}'
-          aria-describedby={`${flow.id}-inputs-help`}
-          value={schemaDraft}
-          onChange={(event) => setSchemaDraft(event.target.value)}
-        />
-      </label>
-      <p id={`${flow.id}-inputs-help`} className="text-[12px] text-faint">
+      </Label>
+      <Textarea
+        id={`${flow.id}-inputs`}
+        className="min-h-24 font-mono text-[12px]"
+        rows={schemaDraft ? Math.min(16, schemaDraft.split('\n').length + 1) : 3}
+        spellCheck={false}
+        placeholder='{"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}'
+        aria-describedby={`${flow.id}-inputs-help`}
+        value={schemaDraft}
+        onChange={(event) => setSchemaDraft(event.target.value)}
+      />
+      <p id={`${flow.id}-inputs-help`} className="text-[12px] text-muted-foreground">
         Optional, saved as inputs.json beside the script. Each property is a string, integer, number, boolean or an
         array of one, with an optional default and description. The script reads them with <code>inputs()</code>;
         blank, its runs take none.
       </p>
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving}>
-          {saving ? <Spinner /> : 'Save'}
+        <Button onClick={() => void save()} disabled={!dirty || saving} aria-busy={saving}>
+          {saving && <Spinner />}
+          Save
         </Button>
-        <span className="text-[12.5px] text-muted">{dirty ? 'Unsaved changes' : `v${flow.version}, as saved`}</span>
-        <span role="status" className="text-[12.5px] text-muted">
+        <span className="text-[12.5px] text-muted-foreground">{dirty ? 'Unsaved changes' : `v${flow.version}, as saved`}</span>
+        <span role="status" className="text-[12.5px] text-muted-foreground">
           {checkError
             ? `Could not check: ${checkError}`
             : !checkResult || checkResult.script !== both
@@ -334,17 +351,17 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
                 : `${checkResult.problems.length} ${checkResult.problems.length === 1 ? 'problem' : 'problems'}`}
         </span>
       </div>
-      <p className="text-[12px] text-faint">Saving adds a new version; this one never changes.</p>
+      <p className="text-[12px] text-muted-foreground">Saving adds a new version; this one never changes.</p>
       {saveError && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-[13px] text-destructive">
           {saveError}
         </p>
       )}
       {problems && problems.length > 0 && (
         <ul aria-label="Problems" className="flex flex-col gap-1.5">
           {problems.map((problem, i) => (
-            <li key={i} className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5">
-              <span className="mr-2 text-[12px] font-medium text-warn">
+            <li key={i} className="rounded-lg bg-card px-3 py-2 text-card-foreground ring-1 ring-foreground/10">
+              <span className="mr-2 text-[12px] font-medium text-destructive">
                 {problem.file === INPUTS_FILE ? 'Inputs' : problem.line != null ? `Line ${problem.line}` : 'Script'}
               </span>
               <span className="whitespace-pre-wrap font-mono text-[11.5px]">{problem.message}</span>
@@ -375,35 +392,37 @@ function Compare({
   const [head, setHead] = useState(versions[at]!.commit)
   const [shown, setShown] = useState<{ base: string; head: string } | null>(null)
   const label = (commit: string) => `v${versions.find((v) => v.commit === commit)?.version ?? '?'}`
-  const select = 'rounded-[6px] border border-line bg-surface px-1.5 py-1 text-[13px]'
+  const versionSelect = (which: string, value: string, onChange: (next: string) => void, text: string) => (
+    <div className="flex flex-col gap-1">
+      <Label htmlFor={`compare-${which}`} className="text-[12px] font-normal text-muted-foreground">
+        {text}
+      </Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger id={`compare-${which}`} size="sm" className="min-w-20">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {versions.map((v) => (
+            <SelectItem key={v.commit} value={v.commit}>
+              v{v.version}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
 
   return (
     <section aria-label="Compare versions" className="flex flex-col gap-2">
       <h2 className="text-[13px] font-medium">Compare versions</h2>
       <div className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-0.5 text-[12px] text-muted">
-          From
-          <select className={select} value={base} onChange={(event) => setBase(event.target.value)}>
-            {versions.map((v) => (
-              <option key={v.commit} value={v.commit}>
-                v{v.version}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-0.5 text-[12px] text-muted">
-          To
-          <select className={select} value={head} onChange={(event) => setHead(event.target.value)}>
-            {versions.map((v) => (
-              <option key={v.commit} value={v.commit}>
-                v{v.version}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Button onClick={() => setShown({ base, head })}>Compare</Button>
+        {versionSelect('base', base, setBase, 'From')}
+        {versionSelect('head', head, setHead, 'To')}
+        <Button variant="outline" size="sm" onClick={() => setShown({ base, head })}>
+          Compare
+        </Button>
         {shown && (
-          <Button variant="ghost" onClick={() => setShown(null)}>
+          <Button variant="ghost" size="sm" onClick={() => setShown(null)}>
             Close
           </Button>
         )}
@@ -433,19 +452,19 @@ function VersionDiff({
     [name, base, head],
   )
   return (
-    <div className="rounded-[6px] border border-line">
-      <h3 className="px-3 py-1.5 text-[12.5px] font-medium">{title}</h3>
+    <Card size="sm" className="gap-2 pb-0">
+      <h3 className="px-3 text-[12.5px] font-medium">{title}</h3>
       {sources.error ? (
-        <p role="alert" className="px-3 pb-2 text-[13px] text-warn">
+        <p role="alert" className="px-3 pb-3 text-[13px] text-destructive">
           {sources.error.message}
         </p>
       ) : !sources.data ? (
-        <p className="px-3 pb-2 text-[13px] text-muted">Loading…</p>
+        <Skeleton role="status" aria-label="Loading the diff" className="mx-3 mb-3 h-40" />
       ) : (
-        <Suspense fallback={<p className="px-3 pb-2 text-[13px] text-muted">Loading the diff…</p>}>
+        <Suspense fallback={<Skeleton role="status" aria-label="Loading the diff" className="mx-3 mb-3 h-40" />}>
           <SourceDiff original={sources.data[0]} modified={sources.data[1]} language="python" sideBySide={sideBySide} />
         </Suspense>
       )}
-    </div>
+    </Card>
   )
 }

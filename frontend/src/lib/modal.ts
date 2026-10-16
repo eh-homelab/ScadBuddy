@@ -18,9 +18,9 @@ export function focusables(root: HTMLElement): HTMLElement[] {
   )
 }
 
-/** The topmost open dialog: one opened from inside another comes later in the document. */
+/** The topmost open dialog (or alert dialog, as agent/dom `activeDialog` counts them): one opened from inside another comes later in the document. */
 export function topmostDialog(): HTMLElement | null {
-  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]')
+  const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]')
   return dialogs[dialogs.length - 1] ?? null
 }
 
@@ -51,14 +51,68 @@ export function roomFor(companion: HTMLElement): number | null {
   return left >= MIN_BESIDE ? window.innerWidth - left : 0
 }
 
+/** Whether `companion` is usable beside a dialog, measured now. */
+export function besideNow(companion: HTMLElement | null): companion is HTMLElement {
+  return companion !== null && roomFor(companion) !== 0
+}
+
+/** Escapes a dialog left to the companion beside it, with whether anyone took them since. */
+const leftToCompanion = new WeakMap<Event, () => boolean>()
+
+/** Prevents `event`'s default now, and tells whether anyone else prevents it later. */
+function holdBack(event: Event): () => boolean {
+  event.preventDefault()
+  let taken = false
+  const prevent = event.preventDefault.bind(event)
+  event.preventDefault = () => {
+    taken = true
+    prevent()
+  }
+  return () => taken
+}
+
+/**
+ * #3653 — an Escape pressed in the companion beside a dialog is the companion's (it
+ * closes the assistant), not the dialog's. Radix closes the topmost dialog on any
+ * Escape it is not stopped from taking, and the only way to stop it is
+ * `preventDefault`, which the companion reads as "taken": {@link escapeTaken} tells
+ * the two apart.
+ */
+export function leaveToCompanion(event: Event): void {
+  leftToCompanion.set(event, holdBack(event))
+}
+
+/** Whether something already handled this key: `defaultPrevented`, but not by a dialog leaving it to the companion. */
+export function escapeTaken(event: Event): boolean {
+  return leftToCompanion.get(event)?.() ?? event.defaultPrevented
+}
+
+/**
+ * #3636 — Radix hears Escape on `document` in the capture phase, before anything in the
+ * dialog does, so an open list inside it could not keep Escape for itself. The dialog
+ * waits instead: it holds the key back from Radix now (and it stays taken to anyone
+ * else, the covered companion included), and `close`s only once the key reaches
+ * `document` with nothing having stopped or taken it, as the legacy dialog did.
+ */
+export function closeOnUntakenEscape(event: KeyboardEvent, close: () => void): void {
+  const taken = holdBack(event)
+  const reached = (seen: Event) => {
+    if (seen === event && !taken()) close()
+  }
+  // Added while `document` hears the capture phase, so it hears this key's bubble phase.
+  document.addEventListener('keydown', reached)
+  setTimeout(() => document.removeEventListener('keydown', reached), 0)
+}
+
 /**
  * #1897 — a Radix dialog's `onInteractOutside`: a press on the shell's Assistant button
  * (raised above an open dialog, `data-modal-companion-toggle`) opens the assistant beside
  * the dialog rather than closing it. ui/sheet and ui/dialog content call it for every
- * dialog, but that alone leaves the panel unusable: a dialog that stays modal traps focus
- * and hides the panel from assistive tech. A dialog meant to sit beside the assistant also
- * takes `ModalCompanionContext` and `roomFor`, sets `modal={!beside}`, and leaves the
- * companion's focus and Escape alone (`onOpenAutoFocus`, `onEscapeKeyDown`), as
+ * dialog. ui/dialog also sits beside the assistant by itself (unless `<Dialog modal>`);
+ * a sheet does not: alone this leaves the panel unusable, since a modal sheet traps
+ * focus and hides the panel from assistive tech. A sheet meant to sit beside the
+ * assistant also takes `ModalCompanionContext` and `roomFor`, sets `modal={!beside}`, and
+ * leaves the companion's focus and Escape alone (`onOpenAutoFocus`, `onEscapeKeyDown`), as
  * components/activity/ActivityDrawer does.
  */
 export function keepOpenOnCompanionToggle(event: { target: EventTarget | null; preventDefault(): void }) {

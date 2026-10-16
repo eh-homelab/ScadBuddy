@@ -68,7 +68,7 @@ import { Spinner } from './ui/Spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
-import { ModalCompanionContext, focusInto, topmostDialog } from '../lib/modal'
+import { ModalCompanionContext, escapeTaken, focusInto, topmostDialog } from '../lib/modal'
 import { useMediaQuery } from '../lib/useMediaQuery'
 import { usePageTitle } from '../lib/usePageTitle'
 
@@ -261,7 +261,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   }, [shown, toggle])
 
   const onPanelKey = (event: ReactKeyboardEvent) => {
-    if (event.key === 'Escape' && !event.defaultPrevented) {
+    // Not `defaultPrevented`: a dialog beside the panel prevents the Escape it leaves to it.
+    if (event.key === 'Escape' && !escapeTaken(event.nativeEvent)) {
       event.preventDefault()
       closePanel()
     }
