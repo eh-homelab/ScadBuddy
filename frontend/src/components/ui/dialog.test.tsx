@@ -152,19 +152,25 @@ describe('Dialog placement', () => {
 })
 
 // #2386 — a dialog with no actions of its own (Colours, the font picker, Media) still has a
-// labelled way out that is not Esc or the backdrop, and it does not take the first focus.
+// labelled way out that is not Esc or the backdrop. It comes after the content, so a field
+// in the dialog takes the first focus before it; with none, it is what has the focus.
 describe('Dialog close button', () => {
-  function Bare() {
+  function Bare({ children = <input aria-label="Search fonts" /> }: { children?: ReactNode }) {
     const [open, setOpen] = useState(true)
     return (
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogTitle>Choose a font</DialogTitle>
-          <input aria-label="Search fonts" />
+          {children}
         </DialogContent>
       </Dialog>
     )
   }
+
+  it('takes the focus when the dialog has nothing else to focus', () => {
+    render(<Bare>{null}</Bare>)
+    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus()
+  })
 
   it('has a labelled Close by default, which closes it, while the first field takes focus', async () => {
     const user = userEvent.setup()
