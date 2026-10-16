@@ -293,12 +293,12 @@ function AttachmentItem({
               <Trash2Icon aria-hidden="true" />
               Remove
             </Button>
-        </div>
-        {error && !confirming && (
-          <p role="alert" className="text-xs text-warn">
-            {error}
-          </p>
-        )}
+          </div>
+          {error && !confirming && (
+            <p role="alert" className="text-xs text-warn">
+              {error}
+            </p>
+          )}
         </div>
       </Card>
       <AlertDialog open={confirming} onOpenChange={(next) => !next && busy !== 'delete' && setConfirming(false)}>
