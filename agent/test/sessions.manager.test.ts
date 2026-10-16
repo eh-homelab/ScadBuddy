@@ -505,6 +505,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
     })
 
+    it("abandons a lost turn's process even when its spend cannot be written, and says so (#3849 review)", async () => {
+      const paths = await tempPaths()
+      const lines: string[] = []
+      // The database that cost the turn its claim refuses the charge too.
+      const sql = new Proxy(db.sql, {
+        apply(target, self, args: unknown[]) {
+          const strings = args[0] as readonly string[] | undefined
+          if (Array.isArray(strings) && strings.join('').includes('SET cost_usd = cost_usd +')) {
+            return Promise.reject(new Error('connection refused'))
+          }
+          return Reflect.apply(target, self, args)
+        },
+      })
+      const { runner } = scriptedRunner(() => ({ hang: true, resultOnAbortUsd: 0.02 }))
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      const running = await m.send(session.id, agentA, 'long job')
+      await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
+      expect(await m.reapExpired()).toEqual([session.id])
+
+      expect(await running.done).toEqual({ kind: 'lost_claim' })
+      await expect.poll(() => m.warm.size()).toBe(0)
+      expect(lines.join('')).toContain('its spend of 0.02 USD was not recorded: connection refused')
+      await m.warm.close()
+    })
+
     it('gives a lapsed turn its one turn row whether a send takes its session or the reaper does (#3320)', async () => {
       const paths = await tempPaths()
       const audit = new MemoryAudit()
@@ -691,16 +717,20 @@ describe.skipIf(!TEST_DATABASE_URL)(
         return realSetTimeout(() => {}, 2 ** 31 - 1)
       }) as typeof setTimeout)
 
-      const stopping = m.stopTurns({ graceMs: GRACE_MS, abortWaitMs: 5_000 })
-      // Draining: nothing new starts here.
-      await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
-      release()
-      // The one that could finish did, inside the grace period.
-      expect(await first.done).toMatchObject({ kind: 'result' })
-      expect(endGrace).toBeDefined()
-      endGrace!()
-      await stopping
-      timers.mockRestore()
+      try {
+        const stopping = m.stopTurns({ graceMs: GRACE_MS, abortWaitMs: 5_000 })
+        // Draining: nothing new starts here.
+        await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
+        release()
+        // The one that could finish did, inside the grace period.
+        expect(await first.done).toMatchObject({ kind: 'result' })
+        expect(endGrace).toBeDefined()
+        endGrace!()
+        await stopping
+      } finally {
+        // Not left on setTimeout for the tests after this one when an assertion fails (#3849 review).
+        timers.mockRestore()
+      }
       // The other was aborted and recorded it before stopTurns returned, so the pool can close now.
       expect(await second.done).toEqual({ kind: 'interrupted' })
       expect(await m.get(stuck.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })

@@ -2010,9 +2010,10 @@ export class SessionManager {
       const cutUsd = (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd
       if (local.lost) {
         outcome = { kind: 'lost_claim' }
-        await this.chargeLostTurn(session.id, result, turnUsd, cutUsd)
         // Another turn owns the session now, wherever it runs: this process is not kept for it.
+        // Before the charge, which needs the database a lost claim may have lost too (#3849 review).
         for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
+        await this.chargeLostTurn(session.id, turnId, result, turnUsd, cutUsd)
         return outcome
       }
       // A turn stopped after its refusal was reported is still the caller's.
@@ -2106,7 +2107,7 @@ export class SessionManager {
     // connection, so a lock taken here could wait on itself.
     const [held] = await this.deps.sql`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_id = ${turnId}`
     if (!held) {
-      await this.chargeLostTurn(id, result, turnUsd, cutUsd)
+      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd)
       return { kind: 'lost_claim' }
     }
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
@@ -2189,7 +2190,7 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
     if (!released) {
-      await this.chargeLostTurn(id, result, turnUsd, cutUsd)
+      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd)
       return { kind: 'lost_claim' }
     }
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
@@ -2694,13 +2695,29 @@ export class SessionManager {
    * review): the requests were billed whoever owns the session now. Counted as finish()
    * counts it, without the claim, and added to the row rather than set, since the turn
    * that took it over may be writing its own.
+   *
+   * Deliberately no `turnCostEntry` row and no `session.result` event (#3849 review): a
+   * lapsed turn has exactly one `turn` row, the reaper's or the claim's (#3320), so its
+   * spend shows in the session's total only; and the session's events are the newer
+   * turn's now, whose own `session.result` carries the total with this in it. A failed
+   * write is logged, not thrown: the claim is often lost because the database was.
    */
-  private async chargeLostTurn(id: string, result: SDKResultMessage | undefined, turnUsd: number, cutUsd: number): Promise<void> {
+  private async chargeLostTurn(
+    id: string,
+    turnId: string,
+    result: SDKResultMessage | undefined,
+    turnUsd: number,
+    cutUsd: number,
+  ): Promise<void> {
     const usd = (result ? turnUsd : 0) + cutUsd
     if (usd <= 0) return
-    await this.deps.sql`
-      UPDATE ai_sessions SET cost_usd = cost_usd + ${usd}, unpriced_cost_usd = unpriced_cost_usd + ${cutUsd}
-      WHERE id = ${id}`
+    try {
+      await this.deps.sql`
+        UPDATE ai_sessions SET cost_usd = cost_usd + ${usd}, unpriced_cost_usd = unpriced_cost_usd + ${cutUsd}
+        WHERE id = ${id}`
+    } catch (err) {
+      this.deps.stderr?.(`session ${id} turn ${turnId}: its spend of ${usd} USD was not recorded: ${describe(err)}\n`)
+    }
   }
 
   /**
@@ -2769,7 +2786,8 @@ export class SessionManager {
         event({ type: 'session.status', sessionId: id, status }),
       ])
       // Its `turn` row, as any other ending has (#2375); its own finish never ran. No
-      // cost: no result came back, and the reaper never saw the requests it made.
+      // cost on it: the reaper never saw the requests it made. A turn on this replica
+      // adds its own spend to the session when it stops (chargeLostTurn).
       await this.deps.audit?.record({
         kind: 'turn',
         action: 'lost_claim',
