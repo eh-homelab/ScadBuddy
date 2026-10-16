@@ -3,7 +3,7 @@ part), with no colour of its own (§3.3), recentred so the object's printed part
 z = 0 about their own x/y centre (a negative part does not set the bed); an object read
 with ``count`` copies becomes that many scene objects sharing its meshes; the objects
 start in a row along X, ``gap`` apart, centred on the origin. A painted part's codes are
-kept beside its mesh for paint transfer (§7)."""
+kept beside its mesh, and the render carries them (`paint.py`, spec §7)."""
 
 from __future__ import annotations
 
@@ -119,13 +119,6 @@ def scene_from_objects(
                     painted=painted,
                     negative=colour_part.negative,
                 )
-            )
-        if any(p.painted for p in parts):
-            # Nothing reads the .paint.json files until paint transfer (spec §7, phase 3):
-            # OpenSCAD's import drops paint, so renders and prints carry none.
-            notes.append(
-                f"{obj.name}: painted in Bambu Studio; the paint is not carried into renders "
-                "or prints until phase 3, so each part prints in its own colour"
             )
         notes += [f"{obj.name}: {note}" for note in obj.notes]
         for _ in range(obj.count):

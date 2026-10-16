@@ -248,6 +248,8 @@ export type OutputPlate = Schemas['OutputPlate']
 
 /** #313 — the Library page's listing, and one row of it. */
 export type LibraryListing = Schemas['LibraryListing']
+/** #2349 — one library file's name by id (`GET /print/library/names`). */
+export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
@@ -257,6 +259,10 @@ export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 export type LibraryMoveResult = Schemas['LibraryMoveResult']
 export type LibraryCopyResult = Schemas['LibraryCopyResult']
 export type LibraryRenameResult = Schemas['LibraryRenameResult']
+export type LibraryFolder = Schemas['LibraryFolder']
+export type LibraryFolderCreate = Schemas['LibraryFolderCreate']
+export type LibraryFolderDeleteResult = Schemas['LibraryFolderDeleteResult']
+export type LibraryFolderUpdate = Schemas['LibraryFolderUpdate']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']

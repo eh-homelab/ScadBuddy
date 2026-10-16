@@ -8,7 +8,6 @@ from collections.abc import Sequence
 import pytest
 
 from scadbuddy.meshmodel.compile import compile_scene
-from scadbuddy.meshmodel.edits import SceneEditError
 from scadbuddy.meshmodel.operations import MAX_SOURCE_BYTES, compiled
 from scadbuddy.meshmodel.scene import (
     Add,
@@ -24,6 +23,7 @@ from scadbuddy.meshmodel.scene import (
     Subtract,
     Transform,
 )
+from scadbuddy.meshmodel.shared import SceneEditError
 
 SOURCE = SceneSource(kind="upload", name="carrot.3mf", sha256="ab" * 32)
 

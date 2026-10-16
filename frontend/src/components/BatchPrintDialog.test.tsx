@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -37,12 +37,14 @@ async function loaded() {
 }
 
 /** Slot 1's checked spool, and one that is not. */
+/** Slot 1's spools, its list opened: shadcn radios are buttons, checked by `aria-checked`. */
 function slot1() {
-  const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
-  return {
-    checked: radios.find((radio) => radio.checked) as HTMLInputElement,
-    other: radios.find((radio) => !radio.checked) as HTMLInputElement,
+  if (screen.getByTestId('change-slot-1').getAttribute('aria-expanded') === 'false') {
+    fireEvent.click(screen.getByTestId('change-slot-1'))
   }
+  const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLButtonElement[]
+  const isChecked = (radio: HTMLElement) => radio.getAttribute('aria-checked') === 'true'
+  return { checked: radios.find(isChecked)!, other: radios.find((radio) => !isChecked(radio))! }
 }
 
 beforeEach(() => resetMockState())
@@ -59,7 +61,6 @@ describe('BatchPrintDialog (#2672)', () => {
     await step(1, 2)
     await loaded()
     expect(screen.getByTestId('batch-strip')).toHaveTextContent(name(89))
-    await user.click(screen.getByTestId('change-slot-1'))
     const spool = Number(slot1().other.value)
     await user.click(slot1().other)
     await user.click(screen.getByTestId('batch-next'))
@@ -117,7 +118,6 @@ describe('BatchPrintDialog (#2672)', () => {
     await step(1, 2)
     await loaded()
     const suggested = Number(slot1().checked.value)
-    await user.click(screen.getByTestId('change-slot-1'))
     await user.click(slot1().other)
     await user.click(screen.getByTestId('batch-next'))
 
@@ -432,7 +432,6 @@ describe('BatchPrintDialog (#2672)', () => {
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
     await step(1, 2)
     await loaded()
-    await user.click(screen.getByTestId('change-slot-1'))
     const spool = Number(slot1().other.value)
     await user.click(slot1().other)
 

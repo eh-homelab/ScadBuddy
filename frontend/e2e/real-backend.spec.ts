@@ -112,8 +112,8 @@ test.describe('real backend', () => {
 
     await page.getByRole('button', { name: 'Browse' }).click()
     const dialog = page.getByRole('dialog', { name: 'Choose a font' })
-    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Pacifico')
-    const row = dialog.getByRole('button', { name: /^Pacifico/ })
+    await dialog.getByRole('combobox', { name: 'Search fonts' }).fill('Pacifico')
+    const row = dialog.getByRole('option', { name: /^Pacifico/ })
     await expect(row).toBeVisible({ timeout: 60_000 })
     await row.click()
     await expect(dialog).toBeHidden({ timeout: 120_000 })
@@ -186,7 +186,7 @@ test.describe('real backend', () => {
         .last()
         .getByRole('button', { name: 'Restore this version' })
         .click()
-      await page.getByRole('dialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
+      await page.getByRole('alertdialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
       await expect(versions.locator('li')).toHaveCount(3)
       expect(await (await request.get(`/api/v1/models/${slug}/source`)).text()).toContain(
         'width = 10;',

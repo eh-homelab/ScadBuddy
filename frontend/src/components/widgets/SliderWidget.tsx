@@ -2,6 +2,7 @@ import type { Param } from '../../api/types'
 import { paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { NumberInput } from './NumberInput'
+import { Slider } from '@/components/ui/slider'
 
 /**
  * #367 — the characters the number box must show: the range's ends at the step's
@@ -33,22 +34,25 @@ export function SliderWidget({
       id={id}
       label={paramLabel(param)}
       name={param.name}
-      readout={<span className="text-ink">{value}</span>}
+      readout={<span className="text-foreground">{value}</span>}
       error={error}
     >
-      <div className="flex items-center gap-2.5">
-        <input
-          id={id}
-          type="range"
+      <div className="flex items-center gap-3">
+        <Slider
           min={min}
           max={max}
           step={step}
-          value={value}
-          aria-label={paramLabel(param)}
-          onChange={(event) => onChange(Number(event.target.value))}
-          className="h-1.5 w-full flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-[var(--sb-accent)]"
+          // Clamped for the thumb only: an off-range value from a preset stays in the box.
+          value={[Math.min(max, Math.max(min, value))]}
+          thumbLabel={paramLabel(param)}
+          onValueChange={([next]) => {
+            if (next !== undefined && next !== value) onChange(next)
+          }}
+          className="flex-1 cursor-pointer py-2"
         />
         <NumberInput
+          // The label's target: the box takes typing, the slider only arrows and drags.
+          id={id}
           min={min}
           max={max}
           step={step}
@@ -59,7 +63,7 @@ export function SliderWidget({
           onCommit={onChange}
           // Padding, border and the spin buttons take the 2.5 rem; never under 4.5 rem.
           style={{ '--sb-box-chars': boxChars(min, max, step, value) } as React.CSSProperties}
-          className="sb-field sb-num w-[max(4.5rem,calc(var(--sb-box-chars)*1ch+2.5rem))] shrink-0 text-right"
+          className="sb-num w-[max(4.5rem,calc(var(--sb-box-chars)*1ch+2.5rem))] shrink-0 text-right"
         />
       </div>
     </Field>

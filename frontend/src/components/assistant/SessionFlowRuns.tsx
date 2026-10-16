@@ -34,18 +34,18 @@ export function SessionFlowRuns({ sessionId }: { sessionId: string }) {
   const waiting = (queues.data ?? []).filter((q) => q.entries.length > 0)
   return (
     <div className="shrink-0 border-b border-line px-3 py-1.5 text-[12.5px]">
-      <Link to={`/workflows?session=${encodeURIComponent(sessionId)}`} className="text-accent hover:underline">
+      <Link to={`/workflows?session=${encodeURIComponent(sessionId)}`} className="text-primary hover:underline">
         Flow runs started here ({count})
       </Link>
       {waiting.length > 0 && (
         <ul aria-label="Waiting in runs started here" className="mt-1 flex flex-col gap-1">
           {waiting.map((q) => (
             <li key={q.run_id}>
-              <Link to={flowRunPath(q.run_id)} className="text-accent hover:underline">
+              <Link to={flowRunPath(q.run_id)} className="text-primary hover:underline">
                 {q.name}
               </Link>{' '}
               waits on {q.entries.length}
-              <ul className="ml-3 list-disc text-[12px] text-muted">
+              <ul className="ml-3 list-disc text-[12px] text-subtle">
                 {q.entries.map((e) => (
                   <li key={e.id}>{entryText(e)}</li>
                 ))}

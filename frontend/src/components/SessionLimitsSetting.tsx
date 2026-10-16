@@ -1,9 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /** agent `sessions/manager.ts` MAX_SESSION_BUDGET_USD and MAX_SESSION_MAX_TURNS. */
 const MAX_BUDGET_USD = 100
@@ -49,13 +47,12 @@ export function SessionLimitsSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Assistant chat limits</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <div className="flex flex-wrap gap-4">
-          <label className="flex flex-col gap-1 text-[13px]">
-            Session budget (USD)
-            <input
+    <SettingCard title="Assistant chat limits">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <div className="flex flex-wrap gap-4">
+            <LabeledInput
+              label="Session budget (USD)"
               type="number"
               inputMode="decimal"
               min={0.01}
@@ -64,13 +61,11 @@ export function SessionLimitsSetting() {
               required
               value={budgetText}
               onChange={(event) => setBudget(event.target.value)}
-              className="sb-field sb-num w-32"
+              className="w-36"
               aria-describedby="session-limits-help"
             />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            Max turns per reply
-            <input
+            <LabeledInput
+              label="Max turns per reply"
               type="number"
               inputMode="numeric"
               min={1}
@@ -79,33 +74,23 @@ export function SessionLimitsSetting() {
               required
               value={turnsText}
               onChange={(event) => setTurns(event.target.value)}
-              className="sb-field sb-num w-32"
+              className="w-36"
               aria-describedby="session-limits-help"
             />
-          </label>
-        </div>
-        <p id="session-limits-help" className="text-[12px] text-muted">
-          The budget covers a whole chat, up to ${MAX_BUDGET_USD}; when a chat uses it, you can continue in a new
-          chat or raise that chat&rsquo;s budget. Max turns caps the steps the assistant takes for one message.
-          Changes apply to chats started from now on.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. New chats use these limits.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+          </div>
+          <p id="session-limits-help" className="text-xs text-muted-foreground">
+            The budget covers a whole chat, up to ${MAX_BUDGET_USD}; when a chat uses it, you can continue in a new
+            chat or raise that chat&rsquo;s budget. Max turns caps the steps the assistant takes for one message.
+            Changes apply to chats started from now on.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={saved && !changed ? 'Saved. New chats use these limits.' : null}
+          error={error}
+        />
       </form>
-    </section>
+    </SettingCard>
   )
 }

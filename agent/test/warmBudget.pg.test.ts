@@ -31,8 +31,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the budget across alternating replicas${TES
     const settings = new SettingsStore(db.sql)
     await settings.set(SETTING_SESSION_BUDGET_USD, 0.1)
     // Each spawn serves one turn here. The real CLI reports total_cost_usd as the
-    // transcript's last cost-state plus its own spend (spec §2.2); the scripted
-    // process does not restore, so the totals are given as the CLI would report them:
+    // transcript's last cost-state plus its own spend (spec §2.2); the totals are
+    // given as the CLI would report them:
     //   A1: 0.03 (fresh)            B1: 0.03 (A1 still warm: no cost-state yet)
     //   A2: 0.03 carried + 0.03     B2: 0.03 carried (B1's, the last) + 0.03
     const totals = [0.03, 0.03, 0.06, 0.06]
@@ -80,8 +80,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the budget across alternating replicas${TES
       await expect(B.send(id, agentA, 'five')).rejects.toMatchObject({ code: 'budget_exhausted' })
 
       // The transcript's cost-states are each recycled process's own total, which is
-      // stale against the row; fine, since the baseline warm.ts reads (`costStateUsd`)
-      // is the same entry the CLI restores from, and a turn's cost is the difference.
+      // stale against the row; fine, since the baseline warm.ts reads (`restoredCostUsd`)
+      // is the entry the process restored from, and a turn's cost is the difference.
       const entries = await new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) }).load({ projectKey: '', sessionId: id })
       expect((entries ?? []).filter((e) => e.type === 'cost-state').map((e) => e.totalCostUSD)).toEqual([0.03, 0.03])
     } finally {

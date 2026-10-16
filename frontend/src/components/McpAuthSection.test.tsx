@@ -6,6 +6,7 @@ import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { McpAuthSection } from './McpAuthSection'
+import { choose } from '../test/select'
 
 // #251 — Settings → "MCP authentication" over the msw stand-in for the agent
 // service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
@@ -23,7 +24,7 @@ describe('McpAuthSection', () => {
     renderPage(<McpAuthSection />)
     expect(await loaded()).toBeChecked()
     expect(screen.getByRole('radio', { name: /Allow calls without a token/ })).not.toBeChecked()
-    expect(screen.getByLabelText('Access without a token')).toHaveValue('outward')
+    expect(screen.getByLabelText('Access without a token')).toHaveTextContent('Full access')
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull()
   })
@@ -33,16 +34,16 @@ describe('McpAuthSection', () => {
     const { user } = renderPage(<McpAuthSection />)
     await loaded()
     await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
-    await user.selectOptions(screen.getByLabelText('Access without a token'), 'read')
+    await choose(user, screen.getByLabelText('Access without a token'), 'Read only')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Allow MCP calls without a token?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Allow MCP calls without a token?' })
     expect(dialog).toHaveTextContent('as an anonymous caller with read only')
     expect(dialog).toHaveTextContent('still wait for a person to approve them')
     expect(set).not.toHaveBeenCalled()
 
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(set).not.toHaveBeenCalled()
     expect(await api.getMcpAuth()).toEqual({
       mode: 'bearer',
@@ -58,7 +59,7 @@ describe('McpAuthSection', () => {
     await loaded()
     await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Turn authentication off' }))
 
     expect(set).toHaveBeenCalledWith({
@@ -66,7 +67,7 @@ describe('McpAuthSection', () => {
       anonymous_cap: 'outward',
       expected: { mode: 'bearer', anonymous_cap: 'outward' },
     })
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(screen.getByRole('status')).toHaveTextContent('Saved. It applies from the next MCP call.')
     expect(screen.getByTestId('mcp-auth-disabled-warning')).toHaveTextContent(
       'without a token, with full access',
@@ -76,7 +77,7 @@ describe('McpAuthSection', () => {
     expect(await api.getMcpAuth()).toEqual(off)
 
     // Lowering the cap while off, and turning it back on, need no confirmation.
-    await user.selectOptions(screen.getByLabelText('Access without a token'), 'write')
+    await choose(user, screen.getByLabelText('Access without a token'), 'Read and write')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() =>
       expect(set).toHaveBeenLastCalledWith({
@@ -85,7 +86,7 @@ describe('McpAuthSection', () => {
         expected: { mode: 'disabled', anonymous_cap: 'outward' },
       }),
     )
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     await user.click(screen.getByRole('radio', { name: /Require an access token/ }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() =>
@@ -95,7 +96,7 @@ describe('McpAuthSection', () => {
         expected: { mode: 'disabled', anonymous_cap: 'write' },
       }),
     )
-    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() => expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull())
   })
 
@@ -104,10 +105,10 @@ describe('McpAuthSection', () => {
     const set = vi.spyOn(api, 'setMcpAuth')
     const { user } = renderPage(<McpAuthSection />)
     expect(await screen.findByTestId('mcp-auth-disabled-warning')).toHaveTextContent('with read only')
-    await user.selectOptions(screen.getByLabelText('Access without a token'), 'outward')
+    await choose(user, screen.getByLabelText('Access without a token'), 'Full access')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    const dialog = await screen.findByRole('dialog', {
+    const dialog = await screen.findByRole('alertdialog', {
       name: 'Give MCP calls without a token more access?',
     })
     expect(dialog).toHaveTextContent('as an anonymous caller with full access')
@@ -117,13 +118,13 @@ describe('McpAuthSection', () => {
     expect(await api.getMcpAuth()).toMatchObject({ mode: 'disabled', anonymous_cap: 'read' })
 
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Raise access' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Raise access' }))
     expect(set).toHaveBeenCalledWith({
       mode: 'disabled',
       anonymous_cap: 'outward',
       expected: { mode: 'disabled', anonymous_cap: 'read' },
     })
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(screen.getByTestId('mcp-auth-disabled-warning')).toHaveTextContent('with full access')
   })
 
@@ -165,13 +166,13 @@ describe('McpAuthSection', () => {
     await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Allow MCP calls without a token?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Allow MCP calls without a token?' })
     expect(within(dialog).getByTestId('mcp-auth-confirm-oidc')).toHaveTextContent(
       'OIDC sign-in is on and still applies after this save',
     )
     expect(set).not.toHaveBeenCalled()
     await user.click(within(dialog).getByRole('button', { name: 'Allow once OIDC is off' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(onSaved).toHaveBeenCalledWith({
       mode: 'oidc',
       configured_mode: 'disabled',
@@ -193,7 +194,7 @@ describe('McpAuthSection', () => {
     setMcpAuthMode('bearer', 'write')
 
     // Lowering the cap looks safe from the stale view, so no dialog; the service refuses it.
-    await user.selectOptions(screen.getByLabelText('Access without a token'), 'read')
+    await choose(user, screen.getByLabelText('Access without a token'), 'Read only')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('changed elsewhere')
     expect(set).toHaveBeenCalledTimes(1)
@@ -209,7 +210,7 @@ describe('McpAuthSection', () => {
     expect(screen.getByRole('radio', { name: /Require an access token/ })).toBeChecked()
     await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByRole('dialog', { name: 'Allow MCP calls without a token?' })).toBeInTheDocument()
+    expect(await screen.findByRole('alertdialog', { name: 'Allow MCP calls without a token?' })).toBeInTheDocument()
     expect(set).toHaveBeenCalledTimes(1)
   })
 
@@ -223,7 +224,7 @@ describe('McpAuthSection', () => {
     await loaded()
     await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Turn authentication off' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('must come through the HTTPS ingress')
     expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull()

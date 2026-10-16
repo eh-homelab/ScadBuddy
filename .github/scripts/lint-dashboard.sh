@@ -158,7 +158,9 @@ mapfile -t api_files < <(
 )
 worker_names=$(
   {
-    grep -E '^RenderStage = Literal\[' "$metrics_py" | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./' || true
+    # The whole Literal[...], which ruff format may wrap over several lines.
+    awk '/^RenderStage = Literal\[/ { on = 1 } on { print } on && /\]/ { exit }' "$metrics_py" \
+      | grep -oE '"[a-z_]+"' | tr -d '"' | sed 's/^/render./' || true
     span_literals "${worker_files[@]}"
   } | sort -u
 )

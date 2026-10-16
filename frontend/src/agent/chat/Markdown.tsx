@@ -131,7 +131,7 @@ function inline(text: string, base: ImageBase | undefined): ReactNode[] {
       const href = safeHttpUrl(m[6])
       out.push(
         href ? (
-          <a key={key} href={href} target="_blank" rel="noreferrer noopener" className="text-accent underline">
+          <a key={key} href={href} target="_blank" rel="noreferrer noopener" className="text-primary underline">
             {m[5]}
           </a>
         ) : (

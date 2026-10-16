@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  LibraryFileName,
   AttachResult,
   PrintCheck,
   PrintProgress,
@@ -10,6 +11,10 @@ import type {
   LibraryDeleteResult,
   LibraryEntry,
   LibraryFileObjects,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryFolderView,
   LibraryListing,
   LibraryMoveResult,
@@ -121,7 +126,7 @@ export const SLICED_PROFILES: Record<number, SlicedProfile> = {
   },
 }
 
-/** The two-plate file; every other 3MF is one plate and an STL none. */
+/** The three-plate file; every other 3MF is one plate and an STL none. */
 export const MULTI_PLATE_FILE = 67
 
 /** What the library routes answer for a file that is gone or not printable. */
@@ -154,7 +159,7 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
   const pathOf = (id: number | null | undefined): string[] => {
-    const folder = libraryFolders.find((row) => row.id === id)
+    const folder = listedFolders().find((row) => row.id === id)
     return folder ? [...pathOf(folder.parent_id), folder.name] : []
   }
   const matched = terms.length === 0
@@ -181,6 +186,17 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
 }
 
 export const handlers = [
+  // #2349 — names by id; a file the mock library does not have is `name: null`.
+  http.get(`${base}/print/library/names`, ({ request }) => {
+    const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
+    return HttpResponse.json(
+      ids.map((id) => {
+        const file = listedFiles().find((row) => row.id === id)
+        return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
+      }) satisfies LibraryFileName[],
+    )
+  }),
+
   http.get(`${base}/print/library/search`, ({ request }) => {
     const search = new URL(request.url).searchParams
     return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
@@ -202,7 +218,7 @@ export const handlers = [
     return HttpResponse.json({
       folder_id: folderId,
       all,
-      folders: libraryFolders,
+      folders: listedFolders(),
       files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
       hidden: here.length - files.length,
     } satisfies LibraryListing)
@@ -280,6 +296,44 @@ export const handlers = [
     return HttpResponse.json({ id: file_id, filename, previous: file.filename } satisfies LibraryRenameResult)
   }),
 
+  /** #3650 — a folder renamed or moved; `parent_id` 0 is the top level. */
+  http.patch(`${base}/print/library/folders/:id`, async ({ params, request }) => {
+    const id = Number(params['id'])
+    const update = (await request.json()) as LibraryFolderUpdate
+    const folder = listedFolders().find((row) => row.id === id)
+    if (!folder) return problem(404, 'Not Found', `library folder ${id} is no longer in Bambuddy's library`)
+    const parent = update.parent_id === 0 ? null : (update.parent_id ?? folder.parent_id ?? null)
+    if (parent !== null && (parent === id || descendants(id).has(parent))) {
+      return problem(400, 'Bad Request', 'Cannot move a folder into itself or one of its subfolders')
+    }
+    folderEdits.set(id, { name: update.name ?? folder.name, parent_id: parent })
+    return HttpResponse.json({ id, name: update.name ?? folder.name, parent_id: parent } satisfies LibraryFolder)
+  }),
+
+  http.post(`${base}/print/library/folders`, async ({ request }) => {
+    const body = (await request.json()) as LibraryFolderCreate
+    const folder: LibraryFolderView = { id: 500 + createdFolders.length, name: body.name, parent_id: body.parent_id ?? null, depth: 0, file_count: 0 }
+    createdFolders.push(folder)
+    return HttpResponse.json({ id: folder.id, name: folder.name, parent_id: folder.parent_id } satisfies LibraryFolder)
+  }),
+
+  /** #3650 — the folder's files to the trash, then the folder and its subfolders. */
+  http.post(`${base}/print/library/folders/:id/delete`, ({ params }) => {
+    const id = Number(params['id'])
+    if (!listedFolders().some((row) => row.id === id)) {
+      return problem(404, 'Not Found', `library folder ${id} is no longer in Bambuddy's library`)
+    }
+    const gone = new Set([id, ...descendants(id)])
+    const result: LibraryFolderDeleteResult = { deleted: [], folders: [...gone], skipped: [] }
+    for (const file of listedFiles().filter((row) => gone.has(row.folder_id ?? -1))) {
+      if (file.is_external) removed.add(file.id)
+      else trashed.add(file.id)
+      result.deleted.push({ id: file.id, filename: file.filename, trashed: !file.is_external })
+    }
+    for (const folder of gone) deletedFolders.add(folder)
+    return HttpResponse.json(result)
+  }),
+
   http.post(`${base}/print/library/restore`, async ({ request }) => {
     const { file_ids } = (await request.json()) as { file_ids: number[] }
     const result: LibraryRestoreResult = { restored: [], skipped: [] }
@@ -309,10 +363,17 @@ export const handlers = [
       return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read the plates of library file ${params['id']}`)
     }
     if (file.file_type === 'stl') return HttpResponse.json([] satisfies OutputPlate[])
-    const count = file.id === MULTI_PLATE_FILE ? 2 : 1
-    return HttpResponse.json(
-      Array.from({ length: count }, (_, n) => ({ index: n + 1, has_thumbnail: true })) satisfies OutputPlate[],
-    )
+    // #3652 — the multi-plate file's first two plates share a name, as ReWindr's do.
+    if (file.id === MULTI_PLATE_FILE) {
+      return HttpResponse.json(
+        (['Side', 'Side', 'Roller Bolt'] as const).map((name, n) => ({
+          index: n + 1,
+          has_thumbnail: true,
+          name,
+        })) satisfies OutputPlate[],
+      )
+    }
+    return HttpResponse.json([{ index: 1, has_thumbnail: true }] satisfies OutputPlate[])
   }),
 
   http.get(`${base}/print/library/:id/choices`, ({ params, request }) => {
@@ -571,6 +632,40 @@ const moved = new Map<number, number | null>()
 const renamed = new Map<number, string>()
 const copies: LibraryEntry[] = []
 
+/** #3650 — the mocked folder renames, moves, creates and deletes, laid over the fixed tree. */
+const folderEdits = new Map<number, { name: string; parent_id: number | null }>()
+const createdFolders: LibraryFolderView[] = []
+const deletedFolders = new Set<number>()
+
+/** The folder tree as the listing sends it: flattened depth first, each with its depth. */
+function listedFolders(): LibraryFolderView[] {
+  const all = [...libraryFolders, ...createdFolders]
+    .filter((folder) => !deletedFolders.has(folder.id))
+    .map((folder) => ({ ...folder, ...folderEdits.get(folder.id) }))
+  const out: LibraryFolderView[] = []
+  const walk = (parent: number | null, depth: number) => {
+    for (const folder of all.filter((row) => (row.parent_id ?? null) === parent)) {
+      out.push({ ...folder, depth })
+      walk(folder.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return out
+}
+
+function descendants(id: number): Set<number> {
+  const found = new Set<number>()
+  const folders = [...libraryFolders, ...createdFolders].map((folder) => ({ ...folder, ...folderEdits.get(folder.id) }))
+  const walk = (parent: number) => {
+    for (const folder of folders.filter((row) => row.parent_id === parent)) {
+      found.add(folder.id)
+      walk(folder.id)
+    }
+  }
+  walk(id)
+  return found
+}
+
 function listedFiles(): LibraryEntry[] {
   return [...libraryFiles, ...copies]
     .filter((file) => !trashed.has(file.id) && !removed.has(file.id))
@@ -589,4 +684,7 @@ export function reset(): void {
   moved.clear()
   renamed.clear()
   copies.length = 0
+  folderEdits.clear()
+  createdFolders.length = 0
+  deletedFolders.clear()
 }

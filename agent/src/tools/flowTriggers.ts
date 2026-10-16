@@ -83,7 +83,7 @@ export const flowTriggerTools: Tool[] = [
     description:
       'Make a trigger that starts runs of one flow version, always that version, with these inputs: on a ' +
       '`schedule` (cron or interval, time zone, catch-up window) or on an `event` (a render finished, a ' +
-      'template changed). Its runs act as this principal, with its tiers as they are at each fire, and ' +
+      'template changed; the script reads it with `trigger()`). Its runs act as this principal, with its tiers as they are at each fire, and ' +
       'without this session. Their outward calls wait for the user unless the user approves a standing ' +
       'grant (attach_flow_trigger_grant).',
     input: z.object({

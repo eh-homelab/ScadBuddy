@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { choose } from './select'
 
 /** #836 — the H2C's rack step, end to end in the browser against the msw worker. */
 test.describe('rack nozzle', () => {
@@ -63,7 +64,7 @@ test.describe('rack nozzle', () => {
     const saved = page.waitForRequest(
       (request) => request.method() === 'PUT' && request.url().endsWith('/rack-algorithm'),
     )
-    await dialog.getByLabel('Rack algorithm').selectOption('oldest_first')
+    await choose(page, dialog.getByLabel('Rack algorithm'), 'Oldest first')
     expect((await saved).postDataJSON()).toEqual({ algorithm: 'oldest_first', version: expect.any(Number) })
   })
 })

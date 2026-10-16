@@ -275,7 +275,7 @@ describe('SessionTouched', () => {
     renderPage(<SessionTouched sessionId="sess-undo" />)
 
     await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
-    const dialog = await screen.findByRole('dialog', { name: "Undo this chat's changes to name-keychain?" })
+    const dialog = await screen.findByRole('alertdialog', { name: "Undo this chat's changes to name-keychain?" })
     expect(dialog).toHaveTextContent('saved as a new version')
     await user.click(within(dialog).getByRole('button', { name: 'Undo changes' }))
 
@@ -293,7 +293,7 @@ describe('SessionTouched', () => {
     renderPage(<SessionTouched sessionId="sess-undo" />)
 
     await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: 'Undo changes' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Revision not found')
   })
@@ -362,7 +362,7 @@ describe('SessionTouched', () => {
     )
     renderPage(<SessionTouched sessionId="sess-moved" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    expect(await screen.findByRole('dialog')).toHaveTextContent('It was also changed outside this chat')
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('It was also changed outside this chat')
   })
 
   it('warns when the model was changed between two of the session’s own versions', async () => {
@@ -378,7 +378,7 @@ describe('SessionTouched', () => {
     )
     renderPage(<SessionTouched sessionId="sess-between" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    expect(await screen.findByRole('dialog')).toHaveTextContent('It was also changed outside this chat')
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('It was also changed outside this chat')
   })
 
   it('does not warn when a later version names its parent by a short id', async () => {
@@ -396,7 +396,7 @@ describe('SessionTouched', () => {
     )
     renderPage(<SessionTouched sessionId="sess-short" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    expect(await screen.findByRole('dialog')).not.toHaveTextContent('It was also changed outside this chat')
+    expect(await screen.findByRole('alertdialog')).not.toHaveTextContent('It was also changed outside this chat')
   })
 
   it('offers the undo when only a file with no text diff changed, such as a thumbnail', async () => {
@@ -421,7 +421,7 @@ describe('SessionTouched', () => {
     setSessionResources('sess-again', first)
     const view = renderPage(<SessionTouched sessionId="sess-again" refreshKey={1} />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to name-keychain' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Undo changes' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Undo changes' }))
     await screen.findByRole('status')
 
     setSessionResources('sess-again', [
@@ -450,9 +450,9 @@ describe('SessionTouched', () => {
     ])
     const view = renderPage(<SessionTouched sessionId="sess-open" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    await screen.findByRole('dialog')
+    await screen.findByRole('alertdialog')
     view.rerender(<SessionTouched sessionId="sess-open" working />)
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
     expect(screen.queryByText(/available when the assistant has finished/)).toBeNull()
   })
 
@@ -473,7 +473,7 @@ describe('SessionTouched', () => {
     server.use(http.get('/api/v1/models/:slug', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
     renderPage(<SessionTouched sessionId="sess-unread" />)
     await user.click(await screen.findByRole('button', { name: 'Undo changes to bin' }))
-    const dialog = await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Could not check whether it was changed outside this chat.')
     expect(dialog).not.toHaveTextContent('It was also changed outside this chat')
   })

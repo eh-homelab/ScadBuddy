@@ -217,7 +217,7 @@ describe('printRunBody', () => {
       plan: PLAN,
       printChoices: { nozzles: [...DEFAULT_NOZZLES], tier: 'standard' } as unknown as Parameters<typeof printRunBody>[0]['printChoices'],
       copies: null,
-      plate: 1,
+      plate: [1],
       projectId: undefined,
       options: {} as Parameters<typeof printRunBody>[0]['options'],
       printSequence: null,

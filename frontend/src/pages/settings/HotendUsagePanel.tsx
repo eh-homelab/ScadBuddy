@@ -1,7 +1,8 @@
 import { api, ApiError } from '../../api/client'
 import type { BambuddyTargets, PrinterRackUsage, RackHotendUsage, RackSpoolUse } from '../../api/types'
 import { flowLabel } from '../../components/print/rackLabels'
-import { Spinner } from '../../components/ui/Spinner'
+import { Badge } from '@/components/ui/badge'
+import { LoadingLines, Tip } from '../../components/settings/form'
 import { formatDuration, normalizeHex, timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 
@@ -22,17 +23,19 @@ async function readAll(targets: BambuddyTargets): Promise<Read[]> {
 
 function Swatch({ colour, label }: { colour: string | null | undefined; label: string }) {
   if (!colour) {
-    return <span aria-hidden="true" className="size-3.5 shrink-0 rounded-[3px] border border-dashed border-line" />
+    return <span aria-hidden="true" className="size-3.5 shrink-0 rounded-[3px] border border-dashed" />
   }
   const hex = normalizeHex(colour)
   return (
-    <span
-      role="img"
-      aria-label={label}
-      title={hex}
-      style={{ background: hex }}
-      className="size-3.5 shrink-0 rounded-[3px] ring-1 ring-black/25 ring-inset"
-    />
+    <Tip content={hex}>
+      <span
+        role="img"
+        aria-label={label}
+        tabIndex={0}
+        style={{ background: hex }}
+        className="size-3.5 shrink-0 rounded-[3px] ring-1 ring-black/25 outline-none ring-inset focus-visible:ring-2 focus-visible:ring-ring"
+      />
+    </Tip>
   )
 }
 
@@ -61,59 +64,58 @@ function HotendRow({ hotend }: { hotend: RackHotendUsage }) {
   const loaded = loadedLabel(hotend)
   const spools = hotend.spools ?? []
   return (
-    <li aria-label={`Position ${hotend.position}`} className="space-y-1.5 border-t border-line py-2">
+    <li aria-label={`Position ${hotend.position}`} className="space-y-1.5 border-t py-2.5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
         <span className="font-medium">
           Position <span className="sb-num">{hotend.position}</span> · {hotend.nozzle_diameter} mm{' '}
           {flowLabel(hotend.high_flow ? 'high_flow' : 'standard')}
         </span>
-        <span className="font-mono text-[12px] break-all text-muted">
+        <span className="font-mono text-[12px] break-all text-muted-foreground">
           {hotend.serial ? `Serial ${hotend.serial}` : 'No serial reported'}
         </span>
       </div>
       <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[12px]">
         <div className="flex items-center gap-1.5">
-          <dt className="text-muted">Loaded</dt>
+          <dt className="text-muted-foreground">Loaded</dt>
           <dd className="flex items-center gap-1.5">
             <Swatch colour={hotend.filament_colour} label={`${loaded} ${hotend.filament_colour ?? ''}`.trim()} />
             {loaded}
           </dd>
         </div>
         <div className="flex gap-1.5">
-          <dt className="text-muted">Wear</dt>
-          <dd className={wearKnown(hotend.wear) ? 'sb-num' : 'text-muted'}>{wearLabel(hotend.wear)}</dd>
+          <dt className="text-muted-foreground">Wear</dt>
+          <dd className={wearKnown(hotend.wear) ? 'sb-num' : 'text-muted-foreground'}>{wearLabel(hotend.wear)}</dd>
         </div>
         <div className="flex gap-1.5">
-          <dt className="text-muted">Prints</dt>
+          <dt className="text-muted-foreground">Prints</dt>
           <dd className="sb-num">
             {hotend.prints}
-            {hotend.pending > 0 && <span className="text-muted"> (+{hotend.pending} queued)</span>}
+            {hotend.pending > 0 && <span className="text-muted-foreground"> (+{hotend.pending} queued)</span>}
           </dd>
         </div>
         <div className="flex gap-1.5">
-          <dt className="text-muted">Print time</dt>
+          <dt className="text-muted-foreground">Print time</dt>
           <dd className="sb-num">{hotend.print_seconds > 0 ? formatDuration(hotend.print_seconds) : '—'}</dd>
         </div>
         <div className="flex gap-1.5">
-          <dt className="text-muted">Last used</dt>
+          <dt className="text-muted-foreground">Last used</dt>
           <dd>{hotend.last_used_at ? timeAgo(hotend.last_used_at) : 'Never'}</dd>
         </div>
       </dl>
       {spools.length > 0 && (
         <div className="flex items-baseline gap-1.5 text-[12px]">
-          <span className="text-muted">Ran</span>
+          <span className="text-muted-foreground">Ran</span>
           <ul aria-label={`Spools run through position ${hotend.position}`} className="flex min-w-0 flex-wrap gap-1.5">
             {spools.map((spool, index) => (
-              <li
-                key={spool.spool_id ?? `label-${spool.label ?? index}`}
-                className="flex items-center gap-1.5 rounded border border-line px-1.5 py-0.5"
-              >
-                <Swatch colour={spool.colour} label={`${spoolName(spool)} ${spool.colour ?? ''}`.trim()} />
-                <span>{spoolName(spool)}</span>
-                <span className="sb-num whitespace-nowrap text-muted">
-                  ×{spool.prints}
-                  {spool.grams > 0 && ` · ${Math.round(spool.grams)} g`}
-                </span>
+              <li key={spool.spool_id ?? `label-${spool.label ?? index}`}>
+                <Badge variant="outline" className="h-6 gap-1.5 font-normal">
+                  <Swatch colour={spool.colour} label={`${spoolName(spool)} ${spool.colour ?? ''}`.trim()} />
+                  <span>{spoolName(spool)}</span>
+                  <span className="sb-num whitespace-nowrap text-muted-foreground">
+                    ×{spool.prints}
+                    {spool.grams > 0 && ` · ${Math.round(spool.grams)} g`}
+                  </span>
+                </Badge>
               </li>
             ))}
           </ul>
@@ -135,11 +137,7 @@ export function HotendUsagePanel({ targets }: { targets: BambuddyTargets | null 
 
   if (!targets) return null
   if (state.loading) {
-    return (
-      <p className="flex items-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading hotend usage
-      </p>
-    )
+    return <LoadingLines label="Loading hotend usage" lines={['w-1/3', 'w-full', 'w-5/6']} />
   }
   const reads = state.data ?? []
   const racks = reads.filter((read) => (read.usage?.hotends.length ?? 0) > 0)
@@ -150,8 +148,8 @@ export function HotendUsagePanel({ targets }: { targets: BambuddyTargets | null 
     <div className="space-y-3">
       {racks.map((read) => (
         <section key={read.printerId} aria-label={`Hotend usage for ${read.name}`} className="min-w-0">
-          <h3 className="text-[13px] font-medium">Hotend usage · {read.name}</h3>
-          <ul className="text-[13px]">
+          <h3 className="text-sm font-medium">Hotend usage · {read.name}</h3>
+          <ul className="text-sm">
             {read.usage?.hotends.map((hotend) => (
               <HotendRow key={hotend.serial ?? `position-${hotend.position}`} hotend={hotend} />
             ))}
@@ -159,7 +157,7 @@ export function HotendUsagePanel({ targets }: { targets: BambuddyTargets | null 
         </section>
       ))}
       {failed.length > 0 && (
-        <p className="text-[12px] text-muted">
+        <p className="text-xs text-muted-foreground">
           Hotend usage could not be read for {failed.map((read) => `${read.name} (${read.error})`).join(', ')}.
         </p>
       )}
