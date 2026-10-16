@@ -13,7 +13,6 @@ from pydantic import TypeAdapter, ValidationError
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import (
     Edit,
-    SceneEditError,
     apply_edits,
     removed_parameters,
 )
@@ -33,6 +32,7 @@ from scadbuddy.meshmodel.scene import (
     value,
 )
 from scadbuddy.meshmodel.section import OpenSectionError
+from scadbuddy.meshmodel.shared import SceneEditError
 from tests.meshmodel.test_section import neck
 
 SOURCE = SceneSource(kind="upload", name="garden.3mf", sha256="ab" * 32)
