@@ -814,7 +814,9 @@ async def _sequence_clearance(
     if sequence != "by object":
         return None, []
     # The resolved printer's, as the plate warnings are (#3024 review). Only a printer
-    # Bambuddy reports no model for is judged as the configured model.
+    # Bambuddy reports no model for is judged as the configured model. Reached only from
+    # the check, which always has a fresh PreparedRun, so no run from an older history
+    # (with no printer model) gets here (#3783 review).
     clearance = clearance_for(prepared.printer_model or PRINTER_MODEL)
     try:
         # The source's own read, which the nozzle check made already (#2976).
