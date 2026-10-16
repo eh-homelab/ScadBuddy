@@ -681,6 +681,8 @@ def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
     [
         ([3, 2, 1], "This file holds no plate 2, so it is left out.", [1, 3]),
         ([1, 2, 4], "This file holds no plates 2 and 4, so they are left out.", [1]),
+        # One chosen plate is `plate_id` (#3768 review): the file's first, said the same.
+        ([2], "This file holds no plate 2, so plate 1 is queued instead.", [1]),
     ],
 )
 def test_a_sliced_file_leaves_out_chosen_plates_it_does_not_hold(

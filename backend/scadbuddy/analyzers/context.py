@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.analyzers.model import ScopeRef
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions, FilamentPlan
@@ -75,6 +75,14 @@ class AnalysisRequest(BaseModel):
     #: What reading a library file's 3MF for the mesh checks may spend (#2087), each
     #: omitted budget the setting's; none past its ceiling.
     read_budget: ReadBudgetOverride | None = None
+
+    @model_validator(mode="after")
+    def _one_plate_is_plate_id(self) -> AnalysisRequest:
+        # As `PrintRunRequest` folds it (#3768 review): one chosen plate is that plate's
+        # print, so the mesh checks read the plate that prints.
+        if not self.all_plates and self.plate_ids is not None and len(set(self.plate_ids)) == 1:
+            self.plate_id, self.plate_ids = self.plate_ids[0], None
+        return self
 
 
 class FilamentSlot(BaseModel):

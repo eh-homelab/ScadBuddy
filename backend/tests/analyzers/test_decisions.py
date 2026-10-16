@@ -266,6 +266,9 @@ def test_the_base_identity_moves_with_the_plate_set() -> None:
     plain = identity(AnalysisRequest())
     assert "plates" not in plain
     assert identity(AnalysisRequest(plate_ids=[1])) == plain
+    # One chosen plate is that plate's print, as `PrintRunRequest` reads it (#3768 review).
+    assert identity(AnalysisRequest(plate_ids=[2, 2])) == identity(AnalysisRequest(plate_id=2))
+    assert AnalysisRequest(plate_ids=[2]).plate_id == 2
     one_three = identity(AnalysisRequest(plate_ids=[3, 1]))
     assert one_three["plates"] == [1, 3]
     assert one_three != identity(AnalysisRequest(plate_ids=[1, 2]))

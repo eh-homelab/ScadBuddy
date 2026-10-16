@@ -3384,7 +3384,9 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await user.click(within(plates).getByTestId('plates-none'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('No plate chosen. Choose at least one to print.')
     expect(screen.getByTestId('run-print')).toBeDisabled()
-    // #3762 review: no plate is checked or judged for a print that names none.
+    // #3762 review: no plate is checked or judged for a print that names none. A wait
+    // past the debounce is the only way to see that nothing was sent; a slow machine can
+    // make it miss a stray request (pass), never fail on one that was not sent.
     await new Promise((settle) => setTimeout(settle, ANALYSIS_DEBOUNCE_MS * 2))
     expect(checks.urls).toHaveLength(checked)
     expect(analyses.urls).toHaveLength(analysed)
