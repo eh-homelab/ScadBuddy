@@ -88,24 +88,34 @@ test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
   expect(await violations(page)).toEqual([])
 })
 
-// #3777 — laid out, not only classed: in a short window the page slot's read-only view of
-// inputs that would not migrate keeps its textarea inside the 30vh alert, and at three
-// lines at least however long the error.
-test('keeps the unmigrated inputs inside their alert, three lines tall, in a short window', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 300 })
+// #3777 — laid out, not only classed. The page slot's read-only view of inputs that would
+// not migrate keeps three lines of them visible however long the error, counted inside
+// the textarea's padding (#3844 review: a border-box floor of 3lh shows about two), and
+// where 30vh holds that floor, the textarea stays inside its alert.
+async function openUnmigrated(page: Page, height: number) {
+  await page.setViewportSize({ width: 1280, height })
   await page.goto('/m/ui-unmigrated')
   await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old')
-
   const saved = page.getByRole('textbox', { name: 'Saved inputs' })
   await expect(saved).toBeVisible()
   const alert = page.getByRole('alert').filter({ has: saved })
   await expect(alert).toContainText('defines no migrate')
+  return { saved, alert }
+}
 
+test('keeps three lines of unmigrated inputs visible in a short window', async ({ page }) => {
+  const { saved } = await openUnmigrated(page, 300)
+  const lines = await saved.evaluate((el) => {
+    const style = el.ownerDocument.defaultView!.getComputedStyle(el)
+    const text = el.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+    return text / parseFloat(style.lineHeight)
+  })
+  expect(lines).toBeGreaterThanOrEqual(2.98)
+})
+
+test('keeps the unmigrated inputs inside their alert where 30vh holds them', async ({ page }) => {
+  const { saved, alert } = await openUnmigrated(page, 420)
   const box = (await alert.boundingBox())!
   const area = (await saved.boundingBox())!
   expect(area.y + area.height).toBeLessThanOrEqual(box.y + box.height + 0.5)
-  const line = await saved.evaluate((el) =>
-    parseFloat(el.ownerDocument.defaultView!.getComputedStyle(el).lineHeight),
-  )
-  expect(area.height).toBeGreaterThanOrEqual(3 * line - 0.5)
 })
