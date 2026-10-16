@@ -836,12 +836,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
   scope's hit rate drops, move it to `type=registry` on GHCR, which works only on
   pushes and same-repo PRs, not forks (#743).
-- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
-  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
-  arm64 under QEMU and runs `openscad-lsp --version`, caching under
-  `scope=openscad-lsp-arm64` with `mode=min`. It is not a required check. Making it one needs its
-  `pull_request.paths` filter dropped first: a required check that never runs on a PR
-  outside those paths leaves that PR waiting for it forever.
+- No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
+  publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
+  (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
+  Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
+  `docker/setup-qemu-action`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
   `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
@@ -853,7 +852,7 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   pushes it to a same-repo PR with the `RUNNER_APP` token.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
-  touching Go, a `v*` tag or a dispatch, for amd64 and arm64: `sha-<7>` always,
+  touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)
