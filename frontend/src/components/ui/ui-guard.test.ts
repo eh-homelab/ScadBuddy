@@ -40,7 +40,7 @@ describe('the colour names', () => {
     // surfaces now (index.css). The amber is `primary` and the secondary text `subtle`,
     // so a `text-muted` left over would be a surface colour used as text.
     expect(
-      matches(/(?<![\w-])(?:text|border|ring|outline|decoration|fill|stroke|divide|placeholder|caret|from|via|to|shadow)-(?:accent|muted)(?:\/\d+)?(?![\w-])/g),
+      matches(/(?<![\w-])(?:text|border|ring|outline|decoration|fill|stroke|divide|placeholder|caret|from|via|to|shadow|drop-shadow|inset-shadow|text-shadow|ring-offset|inset-ring)-(?:accent|muted)(?:\/\d+)?(?![\w-])/g),
     ).toEqual([])
   })
 })
