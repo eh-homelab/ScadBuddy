@@ -23,6 +23,22 @@ async function seeded() {
   )
 }
 
+/**
+ * Moves the fake clock 20 ms at a time until `check` passes, at most half of SETTLE_MS
+ * in all, so a timer due at SETTLE_MS cannot fire before the test means it to.
+ */
+async function stepUntil(check: () => void): Promise<void> {
+  for (let moved = 0; ; moved += 20) {
+    try {
+      check()
+      return
+    } catch (error) {
+      if (moved >= SETTLE_MS / 2) throw error
+    }
+    await act(() => vi.advanceTimersByTimeAsync(20))
+  }
+}
+
 /** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
 async function enter(user: UserEvent, field: HTMLElement, text: string) {
   await user.click(field)
@@ -145,12 +161,18 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
     const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
-    // Time itself, not one timer picked out by its closure's text (#3247 review).
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    // Time itself, not one timer picked out by its closure's text (#3247 review), and
+    // only the time the test moves (#3804 review): a clock that also followed the wall
+    // could pass SETTLE_MS on a loaded machine before the first check.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
-      await seeded()
-      await waitFor(() => expect(scrolls).toContain(4992))
+      // The page's loads wait on timers too (the mock API's delays), so move the clock
+      // in small steps, never near SETTLE_MS, until each step shows.
+      await stepUntil(() =>
+        expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
+      )
+      await stepUntil(() => expect(scrolls).toContain(4992))
       expect(observers[0]!.disconnected).toBe(false)
       act(() => vi.advanceTimersByTime(SETTLE_MS))
       expect(observers[0]!.disconnected).toBe(true)
