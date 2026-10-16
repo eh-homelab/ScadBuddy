@@ -609,7 +609,11 @@ function isAccepting(body: unknown): body is CommandAccepting {
  * request again with its key. Followed for up to `acceptingMs`, as the re-sends were.
  * `signal` aborting sends one last follow at once, which names a claim already made.
  */
-async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signal?: AbortSignal): Promise<T> {
+async function untilAccepted<T>(
+  send: () => Promise<T | CommandAccepting>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<T> {
   const began = performance.now()
   let answer = await send()
   let last = false
@@ -647,7 +651,10 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
       // `finish`, as the POST's own re-send has: a follow in flight when the signal aborts
       // may have made the supersede's release, so an unanswered one is sent once more to
       // learn what it claimed, never dropped (#3576).
-      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal, { finish: true })
+      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal, {
+        finish: true,
+        within,
+      })
     } catch (caught) {
       if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
       answer = await send()
@@ -780,11 +787,20 @@ async function followPrintRun(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<PrintRunResult> {
-  let run = await reattach(
-    () => request<PrintRun>(path, { method: 'POST', body: JSON.stringify(body), signal }),
-    signal,
-    { within },
-  )
+  // A run no worker has picked up yet is a 202 to follow, not a 503 to re-POST (#2793).
+  const send = () =>
+    reattach(
+      () =>
+        request<PrintRun | CommandAccepting>(path, {
+          method: 'POST',
+          headers: { Prefer: 'respond-async' },
+          body: JSON.stringify(body),
+          signal,
+        }),
+      signal,
+      { within },
+    )
+  let run = await untilAccepted<PrintRun>(send, signal, within)
   const began = performance.now()
   while (run.status === 'running') {
     if (performance.now() - began >= printRunPoll.followMs) {

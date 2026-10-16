@@ -327,6 +327,27 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(posts).toBe(2)
   })
 
+  // #3035: the one 503 the print route keeps under respond-async is a repeat of an
+  // ended run without a request_id (`ended`), or any start the server would not offer a
+  // 202 for. `reattach` still sends the same request again, still asking to follow.
+  it('re-posts a 503 still-accepting under respond-async, the same request each time (#3035)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: { prefer: string | null; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push({ prefer: request.headers.get('Prefer'), body: await request.json() })
+        return sent.length < 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent.map((s) => s.prefer)).toEqual(['respond-async', 'respond-async'])
+    expect(sent[1]!.body).toEqual(sent[0]!.body)
+  })
+
   // Review #1316 (13) 1a: the backend's `may_have_started` says whether the start may
   // have reached Temporal; true, only the same request_id may follow it.
   const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>
@@ -596,6 +617,71 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect((error as ApiError).problem).toMatchObject({ type: UNANSWERED, status: 0 })
     expect(mayHaveRun(error)).toBe(true)
     expect(posts).toBe(3)
+  })
+
+  // #2793 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-POST.
+  const runFollowUrl = '/api/v1/commands/print-x/updates/r1'
+  const runAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'print-x', update_id: 'r1', follow_url: runFollowUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    let prefer: string | null = null
+    let follows = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return runAccepting()
+      }),
+      http.post(runFollowUrl, () => {
+        follows += 1
+        return follows === 1 ? runAccepting() : HttpResponse.json(started)
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('posts the print again, the same request, when the follow says command-resend (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: string[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push(await request.text())
+        return sent.length === 1 ? runAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.post(runFollowUrl, () =>
+        HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+      ),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toBe(sent[0])
+  })
+
+  it('says a print it gave up following may have started (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.acceptingMs = 20
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => runAccepting()),
+      http.post(runFollowUrl, () => runAccepting()),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(mayHaveRun(error)).toBe(true)
   })
 })
 
