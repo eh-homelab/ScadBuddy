@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import numpy as np
@@ -256,9 +255,15 @@ async def test_a_run_s_clearance_is_judged_against_its_resolved_printer(tmp_path
     request = PrintRunRequest.model_construct(print_sequence="by object")
 
     async def judged(model: str | None) -> list[str]:
-        prepared = SimpleNamespace(plate_ids=[1], printer_model=model)
+        prepared = PreparedRun(
+            plate_ids=[1],
+            printer_id=1,
+            catalogue=None,
+            printer_status=None,
+            printer_model=model,
+        )
         _, warnings = await _sequence_clearance(
-            cast(Any, None), cast(PrintSource, Source()), request, cast(PreparedRun, prepared)
+            cast(Any, None), cast(PrintSource, Source()), request, prepared
         )
         return [warning.message for warning in warnings]
 

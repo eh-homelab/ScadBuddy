@@ -8,6 +8,7 @@ from scadbuddy.bambuddy.choices import (
 )
 from scadbuddy.bambuddy.hardware import plate_unlisted_warning
 from scadbuddy.bambuddy.models import Archive, PrinterStatus
+from scadbuddy.bambuddy.print_run import PreparedPlates
 from tests.bambuddy.conftest import recording
 
 
@@ -91,6 +92,14 @@ def test_a_plate_the_printers_model_does_not_take_warns() -> None:
         assert plate_unlisted_warning(chosen, "H2C", "x") is None, chosen
     # A model the profiles do not know is offered every plate, so nothing is claimed.
     assert plate_unlisted_warning("Cool Plate", "Elegoo Neptune", "x") is None
+
+
+def test_a_run_accepted_before_the_model_was_carried_says_nothing_of_its_plate() -> None:
+    """#3024 review: a PreparedPlates from an older workflow history has no
+    printer_model, and plan_run's plate check then claims nothing."""
+    old = PreparedPlates.model_validate({"plate_ids": [1], "printer_id": 1})
+    assert old.printer_model is None
+    assert plate_unlisted_warning("Cool Plate", old.printer_model, "x") is None
 
 
 def test_a_size_not_in_the_rack_warns() -> None:
