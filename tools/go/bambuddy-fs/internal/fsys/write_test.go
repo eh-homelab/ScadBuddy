@@ -1001,34 +1001,20 @@ func TestFileTypes(t *testing.T) {
 	}
 }
 
-// #3713 review: a write still open on the file follows it through a type-changing
-// rename, so closing it replaces the new file instead of leaving a conflict copy.
-func TestAWriteOpenOnAFileFollowsItThroughARetype(t *testing.T) {
+// A rename between two model types (x.stl to x.3mf) keeps the file: sending STL bytes
+// again as a .3mf would not make them a 3MF, and the file would lose its ID.
+func TestARenameBetweenModelTypesKeepsTheFile(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.folder(4, "Top", 0)
-	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.file(10, "x.stl", 4, []byte("solid"))
 	dir := mount(t, lib, Options{All: true})
 	top := filepath.Join(dir, "Top")
-	fh, err := os.OpenFile(filepath.Join(top, "x.3mf.tmp"), os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fh.WriteString("new"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
-		t.Fatal(err)
-	}
-	if err := fh.Close(); err != nil {
+	if err := os.Rename(filepath.Join(top, "x.stl"), filepath.Join(top, "x.3mf")); err != nil {
 		t.Fatal(err)
 	}
 	lib.locked(func() {
-		var sent []api.File
-		for _, f := range lib.files {
-			sent = append(sent, f)
-		}
-		if len(sent) != 1 || sent[0].Name != "x.3mf" || string(lib.data[sent[0].ID]) != "new" {
-			t.Fatalf("%+v", sent)
+		if lib.deleted[10] || lib.uploads != 0 || lib.files[10].Name != "x.3mf" {
+			t.Fatalf("deleted %v uploads %d files %+v", lib.deleted, lib.uploads, lib.files)
 		}
 	})
 }
