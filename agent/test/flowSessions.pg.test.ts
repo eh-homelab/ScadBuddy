@@ -108,6 +108,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect(await waiting).toEqual({ session_id: sid, turn_id: 't1', text: '{"done": true}', outward_calls: 1 })
   })
 
+  it('answers from the latest start of a turnId logged twice, as userTurnText reads it (#3750)', async () => {
+    const sid = await session()
+    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
+    await log.append(sid, [
+      event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'first', author: owner }),
+      ...say(sid, 'm1', 'the first answer'),
+      event({ type: 'session.result', sessionId: sid, turns: 1 }),
+      event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'again', author: owner }),
+      ...say(sid, 'm2', 'the second answer'),
+      event({ type: 'session.result', sessionId: sid, turns: 2 }),
+      event({ type: 'session.status', sessionId: sid, status: 'idle' }),
+    ])
+    expect(await log.userTurnText(sid, 't1')).toBe('again')
+    expect((await turn(sid, 't1')).text).toBe('the second answer')
+  })
+
   it('fails a turn that ended in an error, never to be retried', async () => {
     const sid = await session()
     const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
