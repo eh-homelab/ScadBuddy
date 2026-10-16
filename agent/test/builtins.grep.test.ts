@@ -68,7 +68,7 @@ describe('Grep matches line by line, as ripgrep does', () => {
       })
     }
     // \123 is octal S, not \12 then 3: the lookahead stops only at another octal digit.
-    expect((await grep(ctx, { pattern: 'a\\123', output_mode: 'content' })).text).toBe('No matches found')
+    expect((await grep(workspace({ 's.txt': 'xaSy\na123\n' }), { pattern: 'a\\123', output_mode: 'content' })).text).toBe('s.txt:1:xaSy')
     // \N is the letter N, not a newline.
     expect((await grep(ctx, { pattern: 'a\\Nb', output_mode: 'content' })).text).toBe('No matches found')
     // An escaped [ starts no class, so a\[^x]n is literal text, not a newline.
