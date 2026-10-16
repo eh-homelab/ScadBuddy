@@ -41,7 +41,7 @@ afterAll(async () => {
   await forwarder.close()
 })
 
-const none = async (): Promise<PackageServers> => ({ plugins: [], problems: [], secrets: [], release: () => {} })
+const none = async (): Promise<PackageServers> => ({ plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} })
 
 describe('plugin packages in a durable turn', () => {
   it('shares a package by its content hash, once, and replaces a copy that does not match', async () => {
@@ -240,7 +240,7 @@ describe('plugin packages in a durable turn', () => {
     const client = await listing.servers[0]!.connect()
     expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['CronCreate', 'ScheduleWakeup', 'TaskStop'])
     await client.close()
-    expect(listing.notes?.[0]).toContain('The session keeps the jobs and wakeups')
+    expect(listing.notes?.[0]).toContain('The session keeps the jobs, wakeups, watches and workflows')
     expect(listing.problems).toEqual([])
     await listing.release()
     // Without them (no Temporal), they are left out, and said.
@@ -283,7 +283,7 @@ describe('plugin packages in a durable turn', () => {
       handed.push(loaded.map((p) => p.name))
       const plugins = loaded.map((p) => ({ name: `plugin_${p.name}_api`, url: URL, toolTiers: {}, disabledTools: [] }))
       // As forwardPackageServers does: the header values and the forwarder URLs are its secrets.
-      return { plugins, problems: [], secrets: plugins.flatMap((p) => [p.url, 'notes-token-0123456789']), release: () => {} }
+      return { plugins, problems: [], secrets: plugins.flatMap((p) => [p.url, 'notes-token-0123456789']), terminate: async () => {}, release: () => {} }
     }
     const signal = new AbortController().signal
     const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))

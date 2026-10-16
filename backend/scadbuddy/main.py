@@ -5,7 +5,7 @@ import importlib
 import logging
 import pkgutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -53,7 +53,7 @@ from scadbuddy.api.limits import (
 )
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
@@ -95,6 +95,7 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
+from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -115,6 +116,7 @@ from scadbuddy.workflows.housekeeping import (
     FLOWS_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
@@ -336,6 +338,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
             )
         else:
+            failed = False
             try:
                 removed = await sweep_content(
                     state.store.content, state.refs, grace=state.config.job_ttl
@@ -345,12 +348,25 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
                     removed += await backend.sweep_unrecorded(cutoff=cutoff)
+            except BaseException:
+                # BaseException on purpose: a cancelled sweep must stay cancelled, not be
+                # replaced by the trim's own failure below.
+                failed = True
+                raise
             finally:
                 # Both steps above need Bambuddy (a stale blob's release is a round
                 # trip too): one that is down must not stop the local cache being
                 # trimmed, or it grows for as long as Bambuddy stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
-                    await asyncio.to_thread(state.store.blobs.evict)
+                    try:
+                        await asyncio.to_thread(state.store.blobs.evict)
+                    except Exception:
+                        # Under a Bambuddy failure, logged on its own and that failure
+                        # goes on (#2560): raised here it would replace it, left only
+                        # as __context__. Alone, it is the sweep's failure.
+                        if not failed:
+                            raise
+                        logger.exception("could not trim the worker cache")
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
@@ -504,6 +520,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_preview_slices() -> None:
         await _heartbeating(_sweep_preview_slices_logged(state))
 
+    @activity.defn(name=LOST_SLICES_SWEEP)
+    async def sweep_lost_slice_starts() -> None:
+        await _heartbeating(_sweep_lost_slices_logged(state))
+
     @activity.defn(name=GIT_SWEEP)
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
@@ -522,6 +542,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         reap_output_holds,
         sweep_flow_runs,
         sweep_preview_slices,
+        sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
     ]
@@ -603,25 +624,60 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
 
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
+    """#2169: the dialog's background slices no run queued. On `SWEEPS`' Schedule only,
+    so the sweeps' switch turns it off."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            removed = await sweep_preview_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the print dialog's background slices")
+            raise
+        if removed:
+            logger.info("removed unprinted background slices", extra={"count": removed})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _sweep_lost_slices_logged(state: AppState) -> None:
+    """#2715: what print runs' lost slice starts left. On the prune Schedule too: the
+    job that names the file is kept only 30 minutes."""
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            lost = await sweep_lost_slices(client, state.uploads)
+        except Exception:
+            logger.exception("could not sweep the files of lost slice starts")
+            raise
+        if lost:
+            logger.info("removed the files of lost slice starts", extra={"count": lost})
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _with_bambuddy(
+    state: AppState, sweep: Callable[[BambuddyClient], Awaitable[None]]
+) -> None:
+    """Run ``sweep`` with a Bambuddy client; nothing to do when Bambuddy is not set up.
+    What ``sweep`` raises it has logged, and is raised as it is."""
     settings = await asyncio.to_thread(state.settings_store.load)
+    # Held, not raised in place: a sweep's own ApiError must miss the handler below,
+    # which would log it again as Bambuddy unreachable, or drop it as NOT_CONFIGURED.
+    failed: Exception | None = None
     try:
         async with client_for(settings) as client:
-            removed = await sweep_preview_slices(client, state.uploads)
-            # #2715: and what print runs' lost slice starts left, on the same tick.
-            lost = await sweep_lost_slices(client, state.uploads)
+            try:
+                await sweep(client)
+            except Exception as err:
+                failed = err
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
-            logger.debug("no background-slice sweep: Bambuddy is not set up")
+            logger.debug("no slice sweep: Bambuddy is not set up")
             return
-        logger.exception("could not sweep the print dialog's background slices")
+        logger.exception("could not reach Bambuddy to sweep slices")
         raise
-    except Exception:
-        logger.exception("could not sweep the print dialog's background slices")
-        raise
-    if removed:
-        logger.info("removed unprinted background slices", extra={"count": removed})
-    if lost:
-        logger.info("removed the files of lost slice starts", extra={"count": lost})
+    if failed is not None:
+        raise failed
 
 
 async def _maintain_models_git_logged(state: AppState) -> None:
@@ -915,7 +971,8 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
     # timeout on a slow Temporal.
     handoff = asyncio.create_task(_hand_off_watches(state, client))
     try:
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop)
+        where = {name: kind.where for name, kind in ops.kinds.items()}
+        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
     finally:
         # A row whose follow did not start stays for the next boot.
         handoff.cancel()
@@ -1054,11 +1111,15 @@ async def _serve_until(
 
 
 async def _end_lost_runs_until(
-    client: Client, store: PrintRunStore, operations: OperationStore, stop: asyncio.Event
+    client: Client,
+    store: PrintRunStore,
+    operations: OperationStore,
+    stop: asyncio.Event,
+    where: Mapping[str, str] | None = None,
 ) -> None:
     """Every ``LOST_RUN_INTERVAL`` until ``stop``, end the print runs (review #1061) and
     the operations (review #1063) whose execution closed without ending them: one
-    terminated in the Temporal UI."""
+    terminated in the Temporal UI. ``where``: each operation kind's what-to-check."""
     while not stop.is_set():
         try:
             ended = await reconcile_lost_runs(client, store)
@@ -1067,7 +1128,7 @@ async def _end_lost_runs_until(
         except Exception:
             logger.exception("could not check print runs for lost executions")
         try:
-            ended = await reconcile_lost_operations(client, operations)
+            ended = await reconcile_lost_operations(client, operations, where=where)
             if ended:
                 logger.warning("ended operations whose execution was gone", extra={"count": ended})
         except Exception:
@@ -1127,6 +1188,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
+            # #2788: on the API's /data, so every replica shares it.
+            downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
@@ -1252,16 +1315,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
-        if worker is not None:
-            stop.set()
-            await _stop_worker(state, *worker)
-        await components.aclose()
-        await state.render.aclose()
-        await asyncio.to_thread(state.projection.close)
-        await asyncio.to_thread(state.presets.close)
-        await state.events.aclose()
-        await state.store.aclose()
-        await asyncio.to_thread(state.settings_store.close)
+        # Each close runs even when one before it raises, so a component (or a pool)
+        # failing on its way out cannot leak the pools and the bus's listener (#653).
+        # The stack unwinds last-pushed first: pushed here in reverse of the order run.
+        async with AsyncExitStack() as closing:
+            closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
+            closing.push_async_callback(state.store.aclose)
+            closing.push_async_callback(state.events.aclose)
+            closing.push_async_callback(asyncio.to_thread, state.presets.close)
+            closing.push_async_callback(asyncio.to_thread, state.projection.close)
+            closing.push_async_callback(state.render.aclose)
+            closing.push_async_callback(components.aclose)
+            if worker is not None:
+                # Pushed last, so it runs first: the worker stops before the queue and
+                # the pools it uses close, and its failing still lets them close (#3125).
+                stop.set()
+                closing.push_async_callback(_stop_worker, state, *worker)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

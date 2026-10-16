@@ -49,6 +49,8 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 
 export const TURN_SPAN = 'agent.turn'
 export const RESUME_SPAN = 'agent.turn.resume'
+/** The warm cache's acquire for a turn (spec 2026-10-13 §5.3): `warm.outcome` is hit, miss or recycle, `warm.reason` why a recycle. */
+export const WARM_SPAN = 'agent.turn.spawn'
 
 export function toolSpanName(tool: string): string {
   return `agent.tool/${tool}`
@@ -64,8 +66,9 @@ export type TurnTraceOptions = {
   /**
    * #2376 — the session's spend and model turns before this turn. An outcome carries the
    * session's running totals, so without these a late turn of a long chat reads as costly.
+   * Required (#3244): a caller that left it out would put the session's total on the turn.
    */
-  before?: { costUsd: number; turns: number }
+  before: { costUsd: number; turns: number }
 }
 
 type Segment = {
@@ -122,7 +125,7 @@ export class TurnTrace implements GateTrace {
     this.#sessionId = options.sessionId
     this.#turnId = options.turnId
     this.#tierOf = options.tierOf
-    this.#before = options.before ?? { costUsd: 0, turns: 0 }
+    this.#before = options.before
     this.#segment = this.#open(TURN_SPAN, 0, options.parent, [])
   }
 
@@ -145,6 +148,24 @@ export class TurnTrace implements GateTrace {
   /** The open segment's context: what the turn's own work runs under. */
   context(): Context {
     return trace.setSpan(ROOT_CONTEXT, this.#segment.span)
+  }
+
+  /**
+   * One `agent.turn.spawn` span under the open segment around the warm cache's
+   * acquire (sessions/warm.ts): its outcome and reason, or its failure's class.
+   */
+  async warm<T extends { outcome: string; reason?: string | undefined }>(acquire: () => Promise<T>): Promise<T> {
+    const span = tracer().startSpan(WARM_SPAN, { attributes: this.#ids() }, this.context())
+    try {
+      const acquired = await acquire()
+      span.setAttributes({ 'warm.outcome': acquired.outcome, ...(acquired.reason === undefined ? {} : { 'warm.reason': acquired.reason }) })
+      return acquired
+    } catch (err) {
+      recordFailure(span, err)
+      throw err
+    } finally {
+      span.end()
+    }
   }
 
   #startTool(toolUseId: string, name: string, parent: Context, attributes: Attributes = {}, links: Link[] = []): Span {
@@ -212,12 +233,20 @@ export class TurnTrace implements GateTrace {
 
   /** SDK callback hooks (harness/run.ts HarnessRun.traceHooks): every tool's start and end. */
   hooks(): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+    return TurnTrace.hooksFor(() => this)
+  }
+
+  /**
+   * The same hooks for whichever turn `current` names when each fires (a turn
+   * slot, sessions/turnSlot.ts); with none they do nothing.
+   */
+  static hooksFor(current: () => TurnTrace | undefined): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
     return {
       PreToolUse: [
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PreToolUse') this.toolStarted(input.tool_use_id, input.tool_name)
+              if (input.hook_event_name === 'PreToolUse') current()?.toolStarted(input.tool_use_id, input.tool_name)
               return Promise.resolve({})
             },
           ],
@@ -227,7 +256,7 @@ export class TurnTrace implements GateTrace {
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PostToolUse') this.toolEnded(input.tool_use_id, true)
+              if (input.hook_event_name === 'PostToolUse') current()?.toolEnded(input.tool_use_id, true)
               return Promise.resolve({})
             },
           ],
@@ -237,7 +266,7 @@ export class TurnTrace implements GateTrace {
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PostToolUseFailure') this.toolEnded(input.tool_use_id, false)
+              if (input.hook_event_name === 'PostToolUseFailure') current()?.toolEnded(input.tool_use_id, false)
               return Promise.resolve({})
             },
           ],

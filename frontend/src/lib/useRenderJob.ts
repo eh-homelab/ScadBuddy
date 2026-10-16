@@ -14,9 +14,9 @@ const POLL_MS = 400
 export const QUEUE_READ_MS = 3_000
 
 /** A render's steps, as `job.progress` names them (backend `core/metrics.py` `RenderStage`). */
-export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'thumbnail' | 'write'
+export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'paint' | 'thumbnail' | 'write'
 
-const STAGES: readonly string[] = ['source', 'render', 'split', 'solids', 'thumbnail', 'write']
+const STAGES: readonly string[] = ['source', 'render', 'split', 'solids', 'paint', 'thumbnail', 'write']
 
 /** A submit this hook made: what it rendered, and the job id it was answered with. */
 interface Submission {
@@ -146,15 +146,24 @@ export function canRetry(error: unknown): boolean {
  * #2464 — a render that could not be submitted (a 503 while the server restarts, no
  * answer at all) is tried again on its own, at once when the browser comes back online,
  * so a deploy mid-edit does not leave the page on the previous render for good. At most
- * RENDER_AUTO_RETRIES tries in a row; the count starts over once a render goes through,
+ * RENDER_AUTO_RETRIES timed tries in a row (one made on coming back online is not counted),
+ * and none while `enabled` is false; the count starts over once a render goes through,
  * and for new values (`values`), which the server may take where it refused the old.
  */
-export function useRenderAutoRetry(error: unknown, rendering: boolean, retry: () => void, values: unknown): void {
+export function useRenderAutoRetry(
+  error: unknown,
+  rendering: boolean,
+  retry: () => void,
+  values: unknown,
+  enabled = true,
+): void {
   const tries = useRef(0)
   useEffect(() => {
     tries.current = 0
   }, [values])
   useEffect(() => {
+    // Values that cannot be rendered (#3341): a retry would do nothing but use up a try.
+    if (!enabled) return
     if (!error || !canRetry(error)) {
       // Counted down only once a render has gone through; a retry in flight keeps it.
       if (!rendering) tries.current = 0
@@ -167,12 +176,15 @@ export function useRenderAutoRetry(error: unknown, rendering: boolean, retry: ()
       retry()
     }
     const timer = setTimeout(again, wait)
-    window.addEventListener('online', again)
+    // Back online: tried at once but not counted (#3341). The connection failed, not the
+    // server, and one that keeps dropping must not use up the tries the server needs.
+    const online = () => retry()
+    window.addEventListener('online', online)
     return () => {
       clearTimeout(timer)
-      window.removeEventListener('online', again)
+      window.removeEventListener('online', online)
     }
-  }, [error, rendering, retry])
+  }, [enabled, error, rendering, retry])
 }
 
 /** The problem `code` of a 503 whose template snapshot is still uploading (#1422). */

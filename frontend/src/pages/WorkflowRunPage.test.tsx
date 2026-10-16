@@ -1,7 +1,8 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import { fakeRealtime } from '../lib/realtime.fake'
 import {
   flowRequests,
@@ -16,6 +17,7 @@ import {
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { choose } from '../test/select'
 import { WorkflowRunPage } from './WorkflowRunPage'
 import { ATTENTION_POLL_MS } from '../agent/attention'
 import { STALE_ENTRY_MESSAGE } from '../lib/flows'
@@ -52,6 +54,18 @@ describe('WorkflowRunPage', () => {
       'false',
       '[1]',
     ])
+  })
+
+  it('says a run was started by a trigger, as whoever made it (#2484)', async () => {
+    const view = await api.getFlowRun('run-done')
+    const fired = new Date(Date.now() - 5 * 60_000).toISOString()
+    server.use(
+      http.get('/api/v1/workflow-runs/:id', () =>
+        HttpResponse.json({ ...view, trigger: { trigger_id: 't1', kind: 'schedule', fire_key: 'k', fired_at: fired } }),
+      ),
+    )
+    render('run-done')
+    expect(await screen.findByText(/through a schedule, fired/)).toBeInTheDocument()
   })
 
   it('shows no inputs for a run of a flow with none', async () => {
@@ -109,11 +123,36 @@ describe('WorkflowRunPage', () => {
 
   // #2482 — a call outside the run's grant: where it waits, why, and its way up.
   it('says a call waits at the starting session first, why it is outside the grant, and that you may decide now', async () => {
-    render('run-escalated')
-    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
-    expect(card).toHaveTextContent('With the session that started the run until')
-    expect(card).toHaveTextContent('Outside the grant: print limit reached')
-    expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    // The fixture's hop runs to 09:11 on 2026-10-10.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-10T09:05:00Z'))
+    try {
+      render('run-escalated')
+      const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+      expect(card).toHaveTextContent('With the session that started the run until')
+      expect(card).toHaveTextContent('Outside the grant: print limit reached')
+      expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // #3350: not left saying so until the next read moves the call on.
+  it("drops the starting session's notice once its hop's time is up", async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-10-10T09:10:50Z'))
+    try {
+      render('run-escalated')
+      const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+      expect(card).toHaveTextContent('With the session that started the run until')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(card).not.toHaveTextContent('With the session that started the run until')
+      expect(card).toHaveTextContent('Outside the grant: print limit reached')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("shows a parent's proposal beside the call it narrows, and approves exactly what was shown", async () => {
@@ -133,6 +172,28 @@ describe('WorkflowRunPage', () => {
     await user.click(approve)
     await waitFor(() => expect(flowRequests()).toHaveLength(1))
     expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
+  })
+
+  // #3350: a proposal that changes nothing says so, not an empty table.
+  it('says a proposal that changes nothing changes nothing', async () => {
+    const same = { request: { objects: [{ output_id: 'a', count: 3 }], goal: 'fewest_plates' } }
+    server.use(
+      http.get('/api/v1/workflow-runs/:id/proposals/:callId', () =>
+        HttpResponse.json({
+          call_id: 'call-narrowed',
+          fn: 'arrange',
+          tool: null,
+          original: same,
+          proposed: same,
+          proposal_hash: 'f'.repeat(64),
+          proposed_by: 'session:sess-escalated',
+        }),
+      ),
+    )
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    expect(await within(card).findByText('The proposal changes nothing.')).toBeInTheDocument()
+    expect(within(card).queryByRole('table', { name: 'Proposed change' })).toBeNull()
   })
 
   it('sends the reason typed with an approval as proposed, as Approve and Deny do', async () => {
@@ -228,9 +289,17 @@ describe('WorkflowRunPage', () => {
   })
 
   it("names the step of the run's own call", async () => {
+    // #3493: the step comes from the agent's queue, a read apart from the run's, so the
+    // card can render first. Answered late here, as a slow runner does.
+    server.use(
+      http.get('/api/v1/ai/flow-runs/:id/queue', async () => {
+        await delay(50)
+        return undefined
+      }),
+    )
     render('run-escalated')
     const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
-    expect(card).toHaveTextContent('Step 1 (queue_print)')
+    await waitFor(() => expect(card).toHaveTextContent('Step 1 (queue_print)'))
   })
 
   it('keeps the approval of every outward call for the person', async () => {
@@ -344,7 +413,7 @@ describe('WorkflowRunPage, #2350', () => {
   it('forgets a finished run once confirmed, saying what is lost', async () => {
     const { user } = renderWithExits('run-done')
     await user.click(await screen.findByRole('button', { name: 'Forget run' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Forget this run?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Forget this run?' })
     expect(dialog).toHaveTextContent('Its steps, your answers and approvals, and its result are deleted')
     expect(dialog).toHaveTextContent('This can’t be undone.'.replace('’', "'"))
     expect(dialog).not.toHaveTextContent('It is stopped first')
@@ -357,7 +426,7 @@ describe('WorkflowRunPage, #2350', () => {
   it('says a run still going is stopped first', async () => {
     const { user } = renderWithExits('run-ask')
     await user.click(await screen.findByRole('button', { name: 'Stop and forget' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Forget this run?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Forget this run?' })
     expect(dialog).toHaveTextContent('This run has not finished. It is stopped first')
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(flowRequests()).toEqual([])
@@ -367,21 +436,22 @@ describe('WorkflowRunPage, #2350', () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
     const point = await screen.findByRole('combobox', { name: 'Reset point' })
-    expect(within(point).getAllByRole('option').map((o) => o.textContent)).toEqual([
-      'Choose a point…',
+    expect(point).toHaveTextContent('Choose a point…')
+    await user.click(point)
+    expect((await screen.findAllByRole('option')).map((o) => o.textContent)).toEqual([
       'Event 11: before step 1 (render)',
       'Event 21: before step 2 (queue_print)',
       'Event 31: before step 3 (sleep)',
       'Event 37: after the last step',
     ])
-    await user.selectOptions(point, 'Event 11: before step 1 (render)')
+    await user.click(screen.getByRole('option', { name: 'Event 11: before step 1 (render)' }))
     const again = await screen.findByRole('list', { name: 'Calls that run again' })
     const items = within(again).getAllByRole('listitem')
     expect(items.map((i) => i.textContent)).toEqual(['#1 render', '#2 queue_printOutward: sent again', '#3 sleep'])
     expect(items[1]).toHaveAttribute('data-outward', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Reset to this point…' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Reset this run?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Reset this run?' })
     expect(within(dialog).getByRole('list', { name: 'Outward calls sent again' })).toHaveTextContent('#2 queue_print')
     expect(flowRequests()).toEqual([])
     await user.click(within(dialog).getByRole('button', { name: 'Reset run' }))
@@ -409,8 +479,8 @@ describe('WorkflowRunPage, #2350', () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
     const point = await screen.findByRole('combobox', { name: 'Reset point' })
-    await user.selectOptions(point, 'Event 11: before step 1 (render)')
-    await user.selectOptions(point, 'Event 31: before step 3 (sleep)')
+    await choose(user, point, 'Event 11: before step 1 (render)')
+    await choose(user, point, 'Event 31: before step 3 (sleep)')
     await screen.findByRole('list', { name: 'Calls that run again' })
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -435,10 +505,10 @@ describe('WorkflowRunPage, #2350', () => {
   it('a point past every step runs nothing again', async () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
-    await user.selectOptions(await screen.findByRole('combobox', { name: 'Reset point' }), 'Event 37: after the last step')
+    await choose(user, await screen.findByRole('combobox', { name: 'Reset point' }), 'Event 37: after the last step')
     expect(await screen.findByText('No recorded call runs again.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Reset to this point…' }))
-    expect(await screen.findByRole('dialog', { name: 'Reset this run?' })).toHaveTextContent(
+    expect(await screen.findByRole('alertdialog', { name: 'Reset this run?' })).toHaveTextContent(
       'No outward call (a print, an arrange) is sent again.',
     )
   })
@@ -446,17 +516,18 @@ describe('WorkflowRunPage, #2350', () => {
   it('shows the new preview when outward calls landed since the one seen', async () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
-    await user.selectOptions(
+    await choose(
+      user,
       await screen.findByRole('combobox', { name: 'Reset point' }),
       'Event 21: before step 2 (queue_print)',
     )
     await user.click(await screen.findByRole('button', { name: 'Reset to this point…' }))
     moveFlowRunPastPreview('run-done')
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reset run' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset run' }))
     expect(await screen.findByRole('status')).toHaveTextContent('The run made more outward calls since that preview')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Reset to this point…' }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reset run' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset run' }))
     await screen.findByText('Reset. The run continues from that point.')
     expect(flowRequests().map((r) => r.body['as_of_event_id'])).toEqual([100, 110])
   })

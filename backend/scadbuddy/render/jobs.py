@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.metrics import Metrics, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -34,6 +35,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.fonts import (
+    GLYPH_CHECK_TIMEOUT,
+    font_coverage,
+    font_families,
+    missing_glyphs,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
@@ -44,6 +51,8 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.meshmodel.paint import carry_paint, read_carried, turned, write_carried
+from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
@@ -102,6 +111,45 @@ def unreadable_colour_warnings(
             warnings.append(
                 f"colour parameter {parameter.name!r} is {value!r}, not a colour; "
                 "it gets no extruder"
+            )
+    return warnings
+
+
+def missing_glyph_warnings(
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    coverage: Callable[[str, float], tuple[str, list[tuple[int, int]]] | None],
+    budget: float = GLYPH_CHECK_TIMEOUT,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[str]:
+    """A warning for each font parameter whose family has no glyph for characters in
+    the model's text parameters (#2358): OpenSCAD's ``text()`` leaves those out without
+    a word, so an emoji renders as a gap. Every text parameter is checked against every
+    font parameter, as nothing says which text a font draws: a string that never
+    reaches ``text()`` (a label, a file name, a mode) can raise a warning too.
+    docs/user-guide.md says so. ``coverage`` is given what is left of ``budget``, one
+    wait shared by every font, so a wedged fontconfig costs the render ``budget`` once,
+    not per font; a font past it gets no check."""
+    texts = "".join(
+        str(params.get(p.name, p.initial) or "") for p in schema.parameters if p.type == "string"
+    )
+    if not texts:
+        return []
+    warnings: list[str] = []
+    deadline = clock() + budget
+    for parameter in schema.parameters:
+        if parameter.type != "font":
+            continue
+        font = str(params.get(parameter.name, parameter.initial) or "")
+        if not font_families(font):
+            continue
+        left = deadline - clock()
+        if left <= 0:
+            break
+        missing = missing_glyphs(font, texts, coverage(font, left))
+        if missing:
+            warnings.append(
+                f"font {font!r} has no glyph for {' '.join(missing)}; the text leaves them out"
             )
     return warnings
 
@@ -190,10 +238,12 @@ def object_defines(index: int) -> list[str]:
 @dataclass(frozen=True)
 class PartSource:
     """Where a layout part's mesh is on disk, relative to the render's directory:
-    a closed solid's own file, or the material of a split render."""
+    a closed solid's own file, or the material of a split render; and, for a mesh
+    model's painted part, the file of the painting carried onto it (#2146)."""
 
     file: str
     solid: bool = False
+    paint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +272,7 @@ class PlateLayout:
                         "file": source.file,
                         "solid": source.solid,
                         **({"negative": True} if part.negative else {}),
+                        **({"paint": source.paint} if source.paint is not None else {}),
                         # Left out for the first object, so a layout of one reads as before.
                         **({"object": number} if number != 1 else {}),
                     }
@@ -248,7 +299,7 @@ class PlateLayout:
         splits: dict[str, list[ColourPart]] = {}
 
         def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
-            source = PartSource(entry["file"], entry["solid"])
+            source = PartSource(entry["file"], entry["solid"], entry.get("paint"))
             if source.solid:
                 mesh, paint = solid_mesh(work / source.file), None
                 if mesh is None:
@@ -262,6 +313,8 @@ class PlateLayout:
                     if split.material_index == entry["material_index"]
                 )
                 mesh, paint = split.mesh, split.paint
+            if source.paint is not None:
+                mesh, paint = read_carried(work / source.paint, mesh)
             return (
                 ColourPart(
                     entry["material_index"],
@@ -534,6 +587,66 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
             )
         )
     return infos
+
+
+#: A painted part's carried painting beside the layout (spec 2026-10-11 §7): plate, part.
+PAINT_FILE = "paint-{plate}-{part}.json"
+PAINT_NOT_CARRIED = (
+    "the mesh model's painting could not be read, so it is not carried: "
+    "its parts print in their own colour"
+)
+
+
+def paint_layout(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
+    """A mesh model's painting carried onto its render (#2146, spec 2026-10-11 §7): each
+    painted part's codes written beside the layout and named by its `PartSource`, its
+    faces turned to start where their source triangles do, the colours its painting
+    prints with added to the filament list, and the transfer's warnings. Anything but a
+    one-plate render of a model's own model.scad comes back as it was; a model with no
+    scene, or no painted part, too (`carry_paint`)."""
+    if scad.name != SOURCE_NAME or len(layout.plates) != 1:
+        return layout
+    try:
+        return _painted(layout, scad, params, work)
+    except Exception as error:
+        # Whatever a scene.json or mesh file's damage raises (OSError, pydantic's
+        # ValidationError, a zip's BadZipFile, trimesh's KeyError) costs the painting,
+        # never the render.
+        logger.warning(
+            "could not carry the painting of %s: %s", scad.parent.name, type(error).__name__
+        )
+        return replace(layout, warnings=[*layout.warnings, PAINT_NOT_CARRIED])
+
+
+def _painted(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
+    plate, sources = layout.plates[0], layout.sources[0]
+    carried, warnings = carry_paint(scad.parent, params, plate.parts)
+    if not any(found is not None for found in carried) and not warnings:
+        return layout
+    parts, placed, colours = list(plate.parts), list(sources), list(layout.colours)
+    for index, found in enumerate(carried):
+        if found is None:
+            continue
+        name = PAINT_FILE.format(plate=1, part=index + 1)
+        write_carried(work / name, found)
+        parts[index] = replace(
+            parts[index], mesh=turned(parts[index].mesh, found.turns), paint=found.paint
+        )
+        placed[index] = replace(placed[index], paint=name)
+        for colour in found.paint.used():
+            if colour.upper() not in {c.upper() for c in colours}:
+                colours.append(colour.upper())
+    return replace(
+        layout,
+        plates=[replace(plate, parts=tuple(parts))],
+        colours=colours,
+        warnings=[*layout.warnings, *warnings],
+        sources=[tuple(placed)],
+    )
 
 
 def result_plates(layout: PlateLayout) -> list[PlateInfo]:
@@ -1033,6 +1146,10 @@ async def _render_solids(
             # A failed plate warns as a failed whole render does (#451).
             error.warnings = failed_render_warnings(error.missing_files, schema, params)
             raise
+    if (prepared.scad.parent / SCENE_NAME).is_file():
+        with stage("paint"):
+            # A mesh model's painting, onto the parts the layout names (spec 2026-10-11 §7).
+            layout = await asyncio.to_thread(paint_layout, layout, prepared.scad, params, work)
     layout.save(work / LAYOUT_NAME)
     return layout
 
@@ -1124,6 +1241,13 @@ async def finish_piece_stage(
         )
     warnings += thumbnail_warnings
     warnings += unreadable_colour_warnings(schema, params)
+    fonts_env = env_for(config.data_dir)
+    warnings += await asyncio.to_thread(
+        missing_glyph_warnings,
+        schema,
+        params,
+        lambda font, timeout: font_coverage(font, fonts_env, timeout),
+    )
 
     model_3mf = work / MODEL_NAME
     # A built-in's bare slug, as download_filename names the file: the id's

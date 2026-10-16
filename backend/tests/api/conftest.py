@@ -335,6 +335,21 @@ def job_file(client: TestClient, job_id: str, name: str) -> Path:
     )
 
 
+def follow_operation(
+    client: TestClient, op: dict[str, Any], timeout: float = 60, poll: float = 0.2
+) -> dict[str, Any]:
+    """Follow a 202's operation (``GET /operations/{id}``) until it is no longer running,
+    or ``timeout`` seconds pass; the last read. One loop for every test that follows
+    one (#2827), at the 0.2 s most of them polled at (review #3007)."""
+    deadline = time.monotonic() + timeout
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(poll)
+        response = client.get(f"/api/v1/operations/{op['id']}")
+        assert response.status_code == 200, response.text
+        op = response.json()
+    return op
+
+
 def set_plate_image(client: TestClient, job_id: str, cover: bytes | None) -> None:
     """Make ``cover`` the finished job's plate image, or leave it none. A real render
     draws its own, except when the cover step times out (and on a loaded machine it

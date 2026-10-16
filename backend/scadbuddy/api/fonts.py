@@ -64,6 +64,29 @@ def get_fonts(fonts: FontsDep) -> list[FontFamily]:
     return fonts.installed()
 
 
+class GlyphCoverage(BaseModel):
+    """#2358 — the characters of ``text`` the font has no glyph for, which a render's
+    ``text()`` leaves out. Empty for the default font, a family that is not installed
+    (reported on its own, #1286), or when fontconfig cannot answer."""
+
+    font: str
+    missing: list[str] = Field(default_factory=list)
+
+
+@router.get(
+    "/fonts/glyphs",
+    response_model=GlyphCoverage,
+    summary="Characters a font has no glyph for",
+)
+async def get_glyphs(
+    fonts: FontsDep,
+    font: Annotated[str, Query(max_length=200)],
+    text: Annotated[str, Query(max_length=2000)],
+) -> GlyphCoverage:
+    missing = await asyncio.to_thread(fonts.missing_glyphs, font, text)
+    return GlyphCoverage(font=font, missing=missing)
+
+
 @router.get(
     "/fonts/catalogue",
     response_model=FontCatalogueView,

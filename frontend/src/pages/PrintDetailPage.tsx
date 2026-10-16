@@ -1,4 +1,5 @@
 import { Fragment, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ChevronRightIcon, ExternalLinkIcon, PrinterIcon, SlidersHorizontalIcon, TriangleAlertIcon } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { Job, PrintDetail, PrinterMedia } from '../api/types'
@@ -7,15 +8,22 @@ import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
 import { PrintAttachments } from '../components/prints/PrintAttachments'
-import { PrintFiles } from '../components/prints/PrintFiles'
+import { ParamsTable, PrintFiles } from '../components/prints/PrintFiles'
 import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
+import { PrintStatus } from '../components/prints/PrintStatus'
 import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
-import { Button } from '../components/ui/Button'
-import { Spinner } from '../components/ui/Spinner'
+import { Hint } from '../components/Hint'
+import { Spinner } from '../components/ui/spinner'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
 import { isEmbedded, openExternal } from '../lib/embed'
-import { formatBytes, formatDuration, formatValue } from '../lib/format'
+import { formatBytes, formatDuration } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { fineLength, useDisplayUnit } from '../lib/units'
 
@@ -23,8 +31,6 @@ import { fineLength, useDisplayUnit } from '../lib/units'
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 
 type Run = PrintDetail['outcome']['runs'][number]
-
-
 
 function formatWhen(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -106,19 +112,25 @@ export function PrintDetailPage() {
 
   if (state.loading) {
     return (
-      <p className="flex items-center gap-2 px-4 py-16 text-[13px] text-muted">
-        <Spinner /> Loading the print
-      </p>
+      <div role="status" aria-label="Loading the print" className="mx-auto max-w-6xl px-4 py-6">
+        <span className="sr-only">Loading the print</span>
+        <Skeleton className="h-3 w-40" />
+        <Skeleton className="mt-3 mb-5 h-6 w-64" />
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Skeleton className="h-72 rounded-xl" />
+          <Skeleton className="h-72 rounded-xl" />
+        </div>
+      </div>
     )
   }
   if (state.error || !print) {
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">No such print</h1>
-        <p className="mt-2 text-[13px] text-muted">{state.error?.message}</p>
-        <Link to="/prints" className="mt-4 inline-block text-[13px] text-accent underline">
-          Back to the prints
-        </Link>
+        <h1 className="text-base font-medium">No such print</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{state.error?.message}</p>
+        <Button asChild variant="outline" className="mt-4">
+          <Link to="/prints">Back to the prints</Link>
+        </Button>
       </div>
     )
   }
@@ -133,43 +145,47 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <nav className="mb-2 flex items-baseline gap-2 text-[12px]">
-          <Link to="/prints" className="text-muted hover:text-ink">
+        <nav aria-label="Breadcrumb" className="mb-2 flex items-baseline gap-1.5 text-xs text-muted-foreground">
+          <Link to="/prints" className="hover:text-foreground">
             Prints
           </Link>
-          <span className="text-faint">/</span>
+          <ChevronRightIcon aria-hidden="true" className="size-3 self-center" />
           {print.slug !== null ? (
-            <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
+            <Link to={modelPath(print.slug)} className="hover:text-foreground">
               {print.slug}
             </Link>
           ) : print.library_file_id !== null ? (
             // #1755 — the file by its name, linking to every print of it.
-            <Link to={libraryPrintsPath(print.library_file_id)} className="text-muted hover:text-ink">
+            <Link to={libraryPrintsPath(print.library_file_id)} className="hover:text-foreground">
               {print.library_file_name ?? 'Bambuddy library file'}
             </Link>
           ) : (
-            <span className="text-muted">Bambuddy library file</span>
+            <span>Bambuddy library file</span>
           )}
         </nav>
         <header className="mb-5 flex flex-wrap items-center gap-3">
-          <h1 className="text-[17px] font-medium">{title}</h1>
-          <StatusBadge status={print.status} />
-          <span className="sb-num text-[12px] text-faint">Archive #{print.archive_id}</span>
+          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+          <PrintStatus status={print.status} />
+          <span className="sb-num text-xs text-muted-foreground">Archive #{print.archive_id}</span>
           <div className="ml-auto flex flex-wrap gap-2">
             {print.provenance && (
-              <Link
-                to={print.provenance.edit_url}
-                className="inline-flex items-center rounded-[6px] border border-line bg-surface-2 px-3 py-1.5 text-[13px] text-ink hover:border-line-strong"
-              >
-                Customize from this
-              </Link>
+              <Button asChild variant="outline">
+                <Link to={print.provenance.edit_url}>
+                  <SlidersHorizontalIcon aria-hidden="true" />
+                  Customize from this
+                </Link>
+              </Button>
             )}
             {/* #2736 — not while it is still going: its outcome is not known yet. */}
             {!deleted && !isUnfinished(print.status) && (
-              <Button onClick={() => setReprinting(true)}>Print again</Button>
+              <Button onClick={() => setReprinting(true)}>
+                <PrinterIcon aria-hidden="true" />
+                Print again
+              </Button>
             )}
             {print.links.bambuddy_url && (
-              <Button onClick={() => openExternal(print.links.bambuddy_url as string)}>
+              <Button variant="outline" onClick={() => openExternal(print.links.bambuddy_url as string)}>
+                <ExternalLinkIcon aria-hidden="true" />
                 Open in Bambuddy
               </Button>
             )}
@@ -177,13 +193,13 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
         </header>
 
         {deleted && (
-          <p
-            role="status"
-            className="mb-4 rounded-[6px] border border-warn/40 bg-warn/8 px-3 py-2 text-[13px] text-warn"
-          >
-            This print was deleted in Bambuddy. Its photos, timelapse and sliced file went with
-            it{print.provenance ? '; ScadBuddy still has the parameters and its own files.' : '.'}
-          </p>
+          <Alert role="status" className="mb-4 border-warn/40 bg-warn/10 text-warn">
+            <TriangleAlertIcon aria-hidden="true" />
+            <AlertDescription className="text-warn">
+              This print was deleted in Bambuddy. Its photos, timelapse and sliced file went with
+              it{print.provenance ? '; ScadBuddy still has the parameters and its own files.' : '.'}
+            </AlertDescription>
+          </Alert>
         )}
 
         <div className="grid gap-4 lg:grid-cols-2">
@@ -201,7 +217,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           ) : (
             <Section title="Provenance">
               {/* #1860 — say why there is none, rather than leave the section out. */}
-              <p className="text-[13px] text-muted">
+              <p className="text-[13px] text-muted-foreground">
                 {print.library_file_id !== null
                   ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
                   : 'The ScadBuddy output this print came from is not known.'}
@@ -220,28 +236,20 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const tone =
-    status === 'completed'
-      ? 'bg-ok/12 text-ok'
-      : status === 'failed' || status === DELETED_STATUS
-        ? 'bg-warn/12 text-warn'
-        : 'bg-surface-2 text-muted'
-  return <span className={`rounded-[6px] px-1.5 py-0.5 text-[11px] ${tone}`}>{statusLabel(status)}</span>
-}
-
+/** A section of the print, as a card: a region named by its heading. */
 function Section({ title, children, wide }: { title: string; children: ReactNode; wide?: boolean }) {
   const heading = `print-section-${title.toLowerCase().replace(/\W+/g, '-')}`
   return (
-    <section
-      aria-labelledby={heading}
-      className={`min-w-0 rounded-[6px] border border-line bg-surface p-3 ${wide ? 'lg:col-span-2' : ''}`}
-    >
-      <h2 id={heading} className="mb-2 text-[12px] font-medium text-muted">
-        {title}
-      </h2>
-      {children}
-    </section>
+    <Card role="region" aria-labelledby={heading} className={cn('min-w-0 gap-3', wide && 'lg:col-span-2')}>
+      <CardHeader>
+        <CardTitle>
+          <h2 id={heading} className="text-sm font-medium">
+            {title}
+          </h2>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="min-w-0">{children}</CardContent>
+    </Card>
   )
 }
 
@@ -254,7 +262,7 @@ function GallerySection({ print }: { print: PrintDetail }) {
         slides={slides}
         onOpen={setOpen}
         label={`Print ${print.archive_id}`}
-        fallback={<p className="text-[13px] text-faint">Bambuddy has no photos of this print.</p>}
+        fallback={<p className="text-[13px] text-muted-foreground">Bambuddy has no photos of this print.</p>}
       />
       <MediaLightbox slides={slides} index={open} onClose={() => setOpen(null)} />
     </Section>
@@ -290,21 +298,38 @@ function RenderSection({ print }: { print: PrintDetail }) {
   }, [glb, print.output_id, print.slug, print.library_file_id, output.data])
   // #2731 — a library file's plate mesh is the whole file's geometry for that plate (11 MB
   // for one print): its image first, and the mesh only when asked for.
-  const [meshAsked, setMeshAsked] = useState(false)
+  // Keyed by the mesh's URL (#2915): another print shown in this same section starts on
+  // its image again, rather than loading its mesh unasked.
+  const [meshAskedFor, setMeshAskedFor] = useState<string | null>(null)
+  // #2915 — the plate image that would not load: shown as a placeholder, not a broken image.
+  const [brokenImage, setBrokenImage] = useState<string | null>(null)
   if (!glb || !job) return null
+  const meshAsked = meshAskedFor === glb.url
   const library = print.library_file_id
   const plate = Number(new URL(glb.url, window.location.origin).searchParams.get('plate') ?? '1')
   return (
     <Section title={print.output_id !== null ? 'ScadBuddy render' : 'Library file'}>
-      <div className="relative aspect-[4/3] overflow-hidden rounded-[4px]">
+      <div className="relative aspect-[4/3] overflow-hidden rounded-lg">
         {library !== null && !meshAsked ? (
           <>
-            <img
-              src={api.libraryPlateThumbnailUrl(library, plate)}
-              alt={`Plate ${plate} of the library file`}
-              className="size-full bg-surface-2 object-contain"
-            />
-            <Button size="sm" className="absolute right-2 bottom-2" onClick={() => setMeshAsked(true)}>
+            {brokenImage === api.libraryPlateThumbnailUrl(library, plate) ? (
+              <p className="flex size-full items-center justify-center bg-muted text-xs text-muted-foreground">
+                No image of plate {plate}
+              </p>
+            ) : (
+              <img
+                src={api.libraryPlateThumbnailUrl(library, plate)}
+                alt={`Plate ${plate} of the library file`}
+                className="size-full bg-muted object-contain"
+                onError={() => setBrokenImage(api.libraryPlateThumbnailUrl(library, plate))}
+              />
+            )}
+            <Button
+              size="sm"
+              variant="secondary"
+              className="absolute right-2 bottom-2 shadow-sm"
+              onClick={() => setMeshAskedFor(glb.url)}
+            >
               Show in 3D
             </Button>
           </>
@@ -375,10 +400,10 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
           controlsList={isEmbedded() ? 'nofullscreen' : undefined}
           playsInline
           preload="metadata"
-          className="aspect-video w-full rounded-[4px] bg-black"
+          className="aspect-video w-full rounded-lg bg-black"
         />
         {info && (
-          <p className="sb-num mt-1.5 text-[12px] text-faint">
+          <p className="sb-num mt-1.5 text-xs text-muted-foreground">
             {clock(info.duration)} · {info.width}×{info.height} · {formatBytes(info.file_size)}
           </p>
         )}
@@ -386,16 +411,16 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
           <ul aria-label="Timelapse frames" className="mt-2 flex gap-1.5 overflow-x-auto">
             {frames.map((frame) => (
               <li key={frame.timestamp} className="shrink-0">
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
                   aria-label={`Go to ${clock(frame.timestamp)}`}
                   onClick={() => {
                     if (video.current) video.current.currentTime = frame.timestamp
                   }}
-                  className="block overflow-hidden rounded-[4px] focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+                  className="h-auto overflow-hidden rounded-md p-0"
                 >
                   <img src={frame.url} alt="" loading="lazy" className="h-12 w-auto" />
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
@@ -408,27 +433,28 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   const forbidden = (onPrinter?.warnings ?? []).includes('printer_files_forbidden')
   return (
     <Section title="Timelapse">
-      <p className="text-[13px] text-muted">Bambuddy has no timelapse of this print.</p>
+      <p className="text-[13px] text-muted-foreground">Bambuddy has no timelapse of this print.</p>
       {onPrinter === null ? (
-        <Button size="sm" className="mt-2" onClick={() => void look()} disabled={looking}>
+        <Button size="sm" variant="outline" className="mt-2" onClick={() => void look()} disabled={looking}>
           {looking && <Spinner />}
           Look on the printer
         </Button>
       ) : forbidden ? (
-        <p className="mt-2 text-[12px] text-warn">
+        <p className="mt-2 text-xs text-warn">
           The Bambuddy API key cannot list the printer&apos;s files: that needs the Control
           Printer permission.
         </p>
       ) : timelapses.length === 0 ? (
-        <p className="mt-2 text-[12px] text-faint">No timelapse on the printer for this print.</p>
+        <p className="mt-2 text-xs text-muted-foreground">No timelapse on the printer for this print.</p>
       ) : (
         <ul className="mt-2 space-y-2">
           {timelapses.map((file) => (
             <li key={file.path} className="flex flex-wrap items-center gap-2">
-              <span className="sb-num min-w-0 truncate text-[12px] text-ink">{file.name}</span>
-              <span className="sb-num text-[12px] text-faint">{formatBytes(file.size)}</span>
+              <span className="sb-num min-w-0 truncate text-xs">{file.name}</span>
+              <span className="sb-num text-xs text-muted-foreground">{formatBytes(file.size)}</span>
               <Button
                 size="sm"
+                variant="outline"
                 className="ml-auto"
                 onClick={() => void pull(file.name)}
                 disabled={pulling !== null}
@@ -442,7 +468,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
         </ul>
       )}
       {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
+        <p role="alert" className="mt-2 text-xs text-warn">
           {error}
         </p>
       )}
@@ -475,9 +501,13 @@ function LinkFact({ label, url }: { label: string; url: string | null | undefine
       label={label}
       value={
         web ? (
-          <button type="button" className="break-all text-left text-accent underline" onClick={() => openExternal(url)}>
+          <Button
+            variant="link"
+            className="h-auto p-0 text-left font-normal break-all whitespace-normal"
+            onClick={() => openExternal(url)}
+          >
             {url}
-          </button>
+          </Button>
         ) : (
           url
         )
@@ -490,8 +520,8 @@ function Fact({ label, value }: { label: string; value: ReactNode }) {
   if (value === null || value === undefined || value === '') return null
   return (
     <>
-      <dt className="text-[12px] text-faint">{label}</dt>
-      <dd className="sb-num text-[13px] text-ink">{value}</dd>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="sb-num text-[13px]">{value}</dd>
     </>
   )
 }
@@ -533,7 +563,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
       </dl>
       {outcome.runs.length > 0 && (
         <>
-          <h3 className="mt-3 text-[12px] font-medium text-muted">Runs</h3>
+          <h3 className="mt-3 text-xs font-medium text-muted-foreground">Runs</h3>
           <ul aria-label="Runs" className="mt-1 space-y-1">
             {outcome.runs.map((run) => (
               <RunRow key={run.id} run={run} />
@@ -555,11 +585,14 @@ const HEX_COLOUR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 function Swatch({ colour }: { colour: string }) {
   const paint = HEX_COLOUR.test(colour.trim()) ? colour.trim() : undefined
   return (
-    <span
-      title={colour}
-      className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-line"
-      style={paint ? { background: paint } : undefined}
-    />
+    <Hint content={colour}>
+      <span
+        role="img"
+        aria-label={colour}
+        className="inline-block size-3.5 shrink-0 rounded-full border"
+        style={paint ? { background: paint } : undefined}
+      />
+    </Hint>
   )
 }
 
@@ -588,13 +621,13 @@ function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing
       </dl>
       {slicing.filament_slots.length > 0 && (
         <>
-          <h3 className="mt-3 text-[12px] font-medium text-muted">Filament by slot</h3>
+          <h3 className="mt-3 text-xs font-medium text-muted-foreground">Filament by slot</h3>
           <ul aria-label="Filament by slot" className="mt-1 space-y-1">
             {slicing.filament_slots.map((slot) => (
-              <li key={slot.slot_id} className="sb-num flex items-center gap-2 text-[13px] text-ink">
+              <li key={slot.slot_id} className="sb-num flex items-center gap-2 text-[13px]">
                 {slot.color && <Swatch colour={slot.color} />}
                 <span>Slot {slot.slot_id}</span>
-                {slot.filament_type && <span className="text-muted">{slot.filament_type}</span>}
+                {slot.filament_type && <span className="text-muted-foreground">{slot.filament_type}</span>}
                 {slot.used_grams !== null && <span>{amount(slot.used_grams, 'g')}</span>}
               </li>
             ))}
@@ -637,40 +670,62 @@ function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> 
         <LinkFact label="Link" url={record.external_url} />
       </dl>
       {other.length > 0 && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-[12px] text-muted">All other fields ({other.length})</summary>
-          <dl aria-label="All other fields" className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-            {other.map(([name, value]) => (
-              <Fragment key={name}>
-                <dt className="sb-num text-[12px] text-faint">{name}</dt>
-                <dd className="sb-num text-[13px] break-all text-ink">{value === null ? '—' : String(value)}</dd>
-              </Fragment>
-            ))}
-          </dl>
-        </details>
+        <Collapsible className="mt-3">
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="group -ml-2 text-xs font-normal text-muted-foreground">
+              <ChevronRightIcon
+                aria-hidden="true"
+                className="transition-transform group-data-[state=open]:rotate-90"
+              />
+              All other fields ({other.length})
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <dl aria-label="All other fields" className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+              {other.map(([name, value]) => (
+                <Fragment key={name}>
+                  <dt className="sb-num text-xs text-muted-foreground">{name}</dt>
+                  <dd className="sb-num text-[13px] break-all">{value === null ? '—' : String(value)}</dd>
+                </Fragment>
+              ))}
+            </dl>
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </Section>
   )
 }
 
+/** Why a run's filament reading is not taken as this print's. */
+const SUSPECT_READING = "Far more than this print used, most likely a spool's weight; not used for the cost"
+
 function RunRow({ run }: { run: Run }) {
   return (
-    <li className="flex flex-wrap gap-x-3 text-[12px]">
-      <span className="text-ink">{statusLabel(run.status)}</span>
-      <span className="sb-num text-faint">{formatWhen(run.started_at)}</span>
+    <li className="flex flex-wrap gap-x-3 text-xs">
+      <span>{statusLabel(run.status)}</span>
+      <span className="sb-num text-muted-foreground">{formatWhen(run.started_at)}</span>
       {run.duration_seconds != null && (
-        <span className="sb-num text-faint">{duration(run.duration_seconds)}</span>
+        <span className="sb-num text-muted-foreground">{duration(run.duration_seconds)}</span>
       )}
       {run.filament_used_grams != null &&
         (run.filament_reading_suspect ? (
-          <span
-            className="sb-num text-warn"
-            title="Far more than this print used, most likely a spool's weight; not used for the cost"
-          >
-            {`${run.filament_used_grams} g, not this print's`}
-          </span>
+          <>
+            {/* Focusable, so the tooltip opens from the keyboard too. */}
+            <Hint content={SUSPECT_READING}>
+              <span
+                tabIndex={0}
+                className="sb-num rounded-sm text-warn outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                aria-describedby={`run-${run.id}-suspect`}
+              >
+                {`${run.filament_used_grams} g, not this print's`}
+              </span>
+            </Hint>
+            <span id={`run-${run.id}-suspect`} className="sr-only">
+              {SUSPECT_READING}
+            </span>
+          </>
         ) : (
-          <span className="sb-num text-faint">{run.filament_used_grams} g</span>
+          <span className="sb-num text-muted-foreground">{run.filament_used_grams} g</span>
         ))}
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
@@ -678,7 +733,6 @@ function RunRow({ run }: { run: Run }) {
 }
 
 function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail['provenance']> }) {
-  const params = Object.entries(provenance.params)
   const version = provenance.model_version
   return (
     <Section title="Provenance">
@@ -686,7 +740,7 @@ function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail
         <Fact
           label="Template"
           value={
-            <Link to={modelPath(provenance.slug)} className="text-accent underline">
+            <Link to={modelPath(provenance.slug)} className="font-medium text-primary underline underline-offset-4">
               {provenance.slug}
             </Link>
           }
@@ -695,7 +749,10 @@ function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail
           label="Revision"
           value={
             version ? (
-              <Link to={modelPath(provenance.slug, 'versions')} className="text-accent underline">
+              <Link
+                to={modelPath(provenance.slug, 'versions')}
+                className="font-medium text-primary underline underline-offset-4"
+              >
                 {version.slice(0, 7)}
               </Link>
             ) : (
@@ -704,18 +761,9 @@ function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail
           }
         />
       </dl>
-      <table aria-label="Parameters" className="mt-3 w-full text-[12px]">
-        <tbody>
-          {params.map(([name, value]) => (
-            <tr key={name} className="border-t border-line">
-              <th scope="row" className="py-1 pr-3 text-left font-normal text-faint">
-                {name}
-              </th>
-              <td className="sb-num py-1 text-ink">{formatValue(value)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <Card size="sm" className="mt-3 gap-0 py-0">
+        <ParamsTable label="Parameters" params={provenance.params} />
+      </Card>
     </Section>
   )
 }

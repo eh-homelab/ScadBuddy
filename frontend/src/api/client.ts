@@ -1,9 +1,13 @@
 import type {
   InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  MeshModelCreate,
   BackgroundTask,
   DecisionCreate,
   FixApply,
@@ -23,7 +27,9 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  GlyphCoverage,
   HttpRequestSetting,
+  BrowserOriginsSetting,
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
@@ -36,6 +42,7 @@ import type {
   AiSessionView,
   RenderLimits,
   SessionLimits,
+  SessionRuntime,
   BlankTemplate,
   SessionModeSetting,
   DurableSubagentsSetting,
@@ -48,7 +55,13 @@ import type {
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
+  LibraryFileName,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryListing,
+  LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
   LibraryRestoreResult,
@@ -115,7 +128,11 @@ import type {
   FlowRunStarted,
   FlowRunView,
   FlowState,
+  FlowStandingGrant,
   FlowSummary,
+  FlowTrigger,
+  FlowTriggerCreate,
+  FlowTriggerUpdate,
   FlowVersion,
   Operation,
   OperationAccepted,
@@ -811,8 +828,15 @@ export const api = {
       signal,
     }),
 
-  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
-  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
 
   getFlowVersionSource: (name: string, commit: string) =>
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
@@ -847,6 +871,36 @@ export const api = {
   revokeFlowGrant: (id: string) =>
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
 
+  // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
+  // as whoever made it. A standing grant is approved as sent from here; only a person
+  // approves or declines an agent's.
+  /** The newest 200, the route's most. */
+  listFlowTriggers: (name?: string) =>
+    request<FlowTrigger[]>(`/flow-triggers?limit=200${name ? `&name=${encodeURIComponent(name)}` : ''}`),
+  getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
+  createFlowTrigger: (body: FlowTriggerCreate) =>
+    request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
+  updateFlowTrigger: (id: string, body: FlowTriggerUpdate) =>
+    request<FlowTrigger>(`/flow-triggers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  pauseFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/pause`, { method: 'POST' }),
+  resumeFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/resume`, { method: 'POST' }),
+  deleteFlowTrigger: (id: string) => request<void>(`/flow-triggers/${seg(id)}`, { method: 'DELETE' }),
+  /** `seen` is the trigger's as it was shown: the server refuses (409) when it changed since. */
+  attachFlowTriggerGrant: (id: string, spec: FlowGrantSpec, seen: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, seen }),
+    }),
+  approveFlowTriggerGrant: (id: string, seen: string, spec?: FlowGrantSpec) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec, seen } : { seen }),
+    }),
+  declineFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
 
@@ -869,6 +923,10 @@ export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
+
+  /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
+  createMeshModel: (body: MeshModelCreate) =>
+    command<ModelSummary>('/models/from-mesh', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
    * `extras` are the other files of a bundled model's directory (#179). `filename`
@@ -1258,13 +1316,29 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
-  arrangeOutputs: (body: ArrangeRequest) =>
-    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
+   * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
+   */
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
+    )
+  },
 
-  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
-  backfillOutput: (outputId: string) =>
-    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+  /**
+   * #902 — re-render an output saved before Arrange; poll the job, then the output's
+   * `backfill`. #2280 — its render is started like any other, so it is sent again with
+   * the same key while the server is still accepting it, until `signal` aborts.
+   */
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
+  },
 
   /**
    * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
@@ -1303,6 +1377,10 @@ export const api = {
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
+
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
@@ -1438,11 +1516,12 @@ export const api = {
    *
    * `plateId` is what the print dialog reads another plate of a multi-plate 3MF by;
    * plate 1 already arrives inside `getChoices`. `allPlates` reads every plate at once —
-   * one row per slot any plate uses — for an all-plates print.
+   * one row per slot any plate uses — for an all-plates print, and `plateIds` those
+   * plates' alone (#3652).
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1450,6 +1529,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
@@ -1470,6 +1550,16 @@ export const api = {
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
+
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
 
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
@@ -1685,6 +1775,14 @@ export const api = {
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /** #3630 — library files whose name or folder holds every word, from every folder. */
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+    const search = new URLSearchParams({ q: query.q })
+    if (query.all) search.set('all', 'true')
+    if (query.fresh) search.set('fresh', 'true')
+    return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
+  },
+
   /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
   deleteLibraryFiles: (fileIds: number[]) =>
     command<LibraryDeleteResult>('/print/library/delete', {
@@ -1720,6 +1818,21 @@ export const api = {
       body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
+  /** #3650 — a folder renamed, or moved under another (`parent_id` 0 is the top level). */
+  updateLibraryFolder: (folderId: number, update: LibraryFolderUpdate) =>
+    command<LibraryFolder>(`/print/library/folders/${folderId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  /** #3650 — a new folder, at the top level without `parent_id`. */
+  createLibraryFolder: (body: LibraryFolderCreate) =>
+    command<LibraryFolder>('/print/library/folders', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #3650 — a folder and everything in it: its files to Bambuddy's trash, then its folders. */
+  deleteLibraryFolder: (folderId: number) =>
+    command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
+
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
@@ -1729,6 +1842,9 @@ export const api = {
   libraryPreviewGlbUrl: (fileId: number, plate: number) =>
     `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
+  /** #2349 — library files' names by id; `name: null` for one Bambuddy no longer has. */
+  libraryFileNames: (ids: readonly number[]) =>
+    request<LibraryFileName[]>(`/print/library/names?${ids.map((id) => `ids=${id}`).join('&')}`),
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
@@ -1743,7 +1859,7 @@ export const api = {
 
   getLibraryFilaments: (
     fileId: number,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1751,6 +1867,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },
@@ -1791,6 +1908,10 @@ export const api = {
     }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
+
+  /** #2358 — the characters of `text` the font has no glyph for, which a render leaves out. */
+  getGlyphs: (font: string, text: string) =>
+    request<GlyphCoverage>(`/fonts/glyphs?${new URLSearchParams({ font, text })}`),
 
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
   listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
@@ -1957,6 +2078,29 @@ export const api = {
     }),
 
   /**
+   * #982 — the headless browser's allow and deny lists, and the origins approved in each
+   * chat, served by the agent service. Fails (404 or 503) without the agent or its database.
+   */
+  getBrowserOrigins: () => request<BrowserOriginsSetting>('/ai/settings/browser-origins'),
+
+  putBrowserOrigins: (lists: { allow: string[]; deny: string[] }) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins', { method: 'PUT', body: JSON.stringify(lists) }),
+
+  /** #982 — "Always allow" on a browser approval card: one origin added to the allow list. */
+  allowBrowserOrigin: (rule: string) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins/allow', { method: 'POST', body: JSON.stringify({ rule }) }),
+
+  /** #982 — "Allow for this chat": the origin opens without asking for the rest of the session. */
+  approveBrowserOrigin: (sessionId: string, origin: string) =>
+    request<{ origin: string; scope: 'session' }>(`/ai/sessions/${seg(sessionId)}/browser-origins`, {
+      method: 'POST',
+      body: JSON.stringify({ origin }),
+    }),
+
+  revokeBrowserOrigin: (sessionId: string, origin: string) =>
+    request<void>(`/ai/sessions/${seg(sessionId)}/browser-origins?origin=${encodeURIComponent(origin)}`, { method: 'DELETE' }),
+
+  /**
    * #1941 — uploads an image the user attached in the assistant panel; its message then
    * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
    * typed, never base64 in JSON.
@@ -2081,6 +2225,15 @@ export const api = {
     request<SessionLimits>('/ai/settings/session-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
+    }),
+
+  /** The park hold, warm process cache and turn limit, served by the agent service. */
+  getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
+
+  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+    request<SessionRuntime>('/ai/settings/session-runtime', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
     }),
 
   /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */

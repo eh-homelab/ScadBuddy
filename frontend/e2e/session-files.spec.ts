@@ -36,7 +36,7 @@ test.describe('assistant Files (#2329)', () => {
     expect(saved.suggestedFilename()).toBe('my_part.scad')
 
     await files.getByRole('button', { name: 'Delete uploads/my_part.scad' }).click()
-    await files.getByRole('group', { name: 'Delete uploads/my_part.scad?' }).getByRole('button', { name: 'Delete file' }).click()
+    await page.getByRole('alertdialog', { name: 'Delete uploads/my_part.scad?' }).getByRole('button', { name: 'Delete file' }).click()
     await expect(files.getByText(/No files yet/)).toBeVisible()
   })
 })

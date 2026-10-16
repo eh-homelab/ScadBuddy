@@ -4,8 +4,11 @@ import type { SpoolOption, UnknownTray } from '../../api/types'
 import { bambuddyBase, useLoadBambuddyLinks } from '../../lib/bambuddyLinks'
 import { openExternal } from '../../lib/embed'
 import { howFull } from '../../lib/trays'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Spinner } from '../ui/spinner'
 import { Swatch } from './Swatch'
 
 function candidateName(spool: SpoolOption): string {
@@ -53,13 +56,25 @@ export function TrayQuestion({ printerId, tray, spools, onAssigned, onDecline }:
     }
   }
 
+  const spoolRow = (spool: (typeof candidates)[number]) => (
+    <>
+      <Swatch colour={spool.colour} size="sm" />
+      <span>{candidateName(spool)}</span>
+      {howFull(spool) && <span className="text-muted-foreground">{howFull(spool)}</span>}
+      {spool.storage_location && <span className="text-muted-foreground">· kept in {spool.storage_location}</span>}
+      <span className="text-muted-foreground">· spool #{spool.spool_id}</span>
+    </>
+  )
+
   return (
-    <section
-      className="rounded-[6px] border border-line bg-surface-2 px-3 py-2.5"
+    <Card
+      size="sm"
+      role="region"
+      className="gap-2 px-3"
       data-testid={`tray-question-${tray.ams_id}-${tray.tray_id}`}
       aria-label={`Which spool is in ${tray.label}?`}
     >
-      <p className="text-[13px] text-ink">
+      <p className="text-sm">
         <span className="mr-1.5 inline-flex align-[-3px]">
           <Swatch colour={tray.colour} size="sm" />
         </span>
@@ -67,60 +82,51 @@ export function TrayQuestion({ printerId, tray, spools, onAssigned, onDecline }:
       </p>
       {candidates.length > 0 && (
         <>
-          <p className="mt-1.5 text-[13px] text-ink">
+          <p className="text-sm">
             {one
               ? `Is the ${candidateName(one)} spool${howFull(one) ? ` (${howFull(one)})` : ''} in ${tray.label}?`
               : `Which spool is in ${tray.label}?`}
           </p>
-          <ul className="mt-1.5 space-y-1">
-            {candidates.map((spool) => (
-              <li key={spool.spool_id}>
-                <label className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-ink">
-                  {!one && (
-                    <input
-                      type="radio"
-                      name={`tray-${tray.ams_id}-${tray.tray_id}`}
-                      checked={picked === spool.spool_id}
-                      onChange={() => setPicked(spool.spool_id)}
-                      className="accent-[var(--sb-accent)]"
-                    />
-                  )}
-                  <Swatch colour={spool.colour} size="sm" />
-                  <span>{candidateName(spool)}</span>
-                  {howFull(spool) && <span className="text-muted">{howFull(spool)}</span>}
-                  {spool.storage_location && <span className="text-muted">· kept in {spool.storage_location}</span>}
-                  <span className="text-faint">· spool #{spool.spool_id}</span>
-                </label>
-              </li>
-            ))}
-          </ul>
+          {one ? (
+            <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">{spoolRow(one)}</p>
+          ) : (
+            <RadioGroup
+              aria-label={`Spool in ${tray.label}`}
+              value={picked === null ? '' : String(picked)}
+              onValueChange={(next) => setPicked(Number(next))}
+              className="gap-1.5"
+            >
+              {candidates.map((spool) => (
+                <Label key={spool.spool_id} className="cursor-pointer flex-wrap gap-x-2 gap-y-0.5 text-xs font-normal">
+                  <RadioGroupItem value={String(spool.spool_id)} />
+                  {spoolRow(spool)}
+                </Label>
+              ))}
+            </RadioGroup>
+          )}
         </>
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {candidates.length > 0 && (
-          <Button size="sm" variant="primary" disabled={saving || picked === null} onClick={() => void confirm()}>
+          <Button type="button" size="sm" disabled={saving || picked === null} onClick={() => void confirm()}>
             {saving && <Spinner />}
             {one ? 'Yes, that one' : 'Yes, this one'}
           </Button>
         )}
-        <Button size="sm" disabled={saving} onClick={onDecline} data-testid="tray-decline">
+        <Button type="button" size="sm" variant="outline" disabled={saving} onClick={onDecline} data-testid="tray-decline">
           {candidates.length > 0 ? 'No / not sure' : 'Print from the tray as it is'}
         </Button>
         {base && (
-          <button
-            type="button"
-            onClick={() => openExternal(`${base}/inventory`)}
-            className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
-          >
+          <Button type="button" size="sm" variant="link" onClick={() => openExternal(`${base}/inventory`)}>
             Add it in Bambuddy&apos;s inventory
-          </button>
+          </Button>
         )}
       </div>
       {error && (
-        <p role="alert" className="mt-1.5 text-[12px] text-warn">
+        <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}
-    </section>
+    </Card>
   )
 }

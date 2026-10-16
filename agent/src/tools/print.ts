@@ -8,6 +8,7 @@ import { outputId, slug } from './common.js'
 import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { errorName } from '../telemetry/scrub.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -84,6 +85,28 @@ export function sourceOf(args: { output_id?: string | undefined; library_file_id
 /** How a source is named in an approval line, a title or an error. */
 export function sourceName(args: { output_id?: string | undefined; library_file_id?: number | undefined }): string {
   return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
+}
+
+/** #1899 — a print's supports, as its approval line names them. */
+function supportsPhrase(
+  supports: { enabled: boolean; type?: string; threshold_angle?: number; on_build_plate_only?: boolean } | undefined,
+): string {
+  if (supports === undefined) return ''
+  if (!supports.enabled) return ', without supports'
+  return (
+    (supports.type === undefined ? ', with supports' : `, with ${supports.type} supports`) +
+    `${supports.threshold_angle === undefined ? '' : ` at ${supports.threshold_angle}°`}` +
+    `${supports.on_build_plate_only === true ? ' on the build plate only' : supports.on_build_plate_only === false ? ', from the model too' : ''}`
+  )
+}
+
+function towerPhrase(tower: { enabled: boolean; no_sparse_layers?: boolean } | undefined): string {
+  if (tower === undefined) return ''
+  if (!tower.enabled) return ', without a prime tower'
+  return (
+    ', with a prime tower' +
+    (tower.no_sparse_layers === true ? ' (no sparse layers)' : tower.no_sparse_layers === false ? ' (sparse layers too)' : '')
+  )
 }
 
 /** The folder a library move or copy names, in its approval line (#2670). */
@@ -284,7 +307,8 @@ export const printTools: Tool[] = [
         getChoices(ctx, source, args.printer_id),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
-          console.warn(`get_print_choices: ${err instanceof Error ? err.message : String(err)}`)
+          // #1814: the error's name and status, never its message, which can quote a connection string (telemetry/scrub.ts).
+          console.warn(`get_print_choices: the plates could not be read (${errorName(err)})`)
           return []
         }),
       ])
@@ -314,6 +338,21 @@ export const printTools: Tool[] = [
     routes: ['GET /api/v1/print/outputs/{output_id}/filaments', 'GET /api/v1/print/library/{file_id}/filaments'],
     handler: async ({ printer_id, plate_id, all_plates, ...source }, ctx) =>
       json(await getFilaments(ctx, sourceOf(source), { printer_id, plate_id, all_plates })),
+  }),
+
+  defineTool({
+    name: 'get_filament_profiles',
+    description:
+      'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
+      'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
+      'subtype or slicer preset), the settings it changes, each with its cited sources, and advice it cannot ' +
+      'apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the user wants it.',
+    input: z.object({}),
+    risk: 'read',
+    source: 'ScadBuddy\'s built-in profiles, quoting the pages they cite',
+    routes: ['GET /api/v1/print/filament-profiles'],
+    handler: async (_, { backend }) =>
+      json(await ok(backend.GET('/api/v1/print/filament-profiles'), 'list the filament profiles')),
   }),
 
   defineTool({
@@ -413,6 +452,30 @@ export const printTools: Tool[] = [
       const { items, ...rest } = page(files ?? [], args, (file) => String(file.id), 'list_library')
       return json({ ...listing, files: items, ...rest })
     },
+  }),
+
+  // #3630 — a file found by name, without walking the folders one at a time.
+  defineTool({
+    name: 'search_library',
+    description:
+      "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear (as " +
+      'a substring) in ' +
+      "the file's name or its folder path, whatever the case or separator. Each file names its `folder_path`. " +
+      'Without `all` only unsliced 3MFs (`hidden` counts the other matches); with it every file. At most 100 ' +
+      'files; `total` says how many matched. The library is read whole and kept for 30 s: after changing it ' +
+      '(delete_library_files, a move, copy or rename) pass `fresh: true` so the search sees the change.',
+    input: z.object({ query: z.string().min(1).max(200), all: z.boolean().optional(), fresh: z.boolean().optional() }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library/search'],
+    handler: async ({ query, all, fresh }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/library/search', { params: { query: { q: query, all, fresh } } }),
+          'search the library',
+        ),
+      ),
   }),
 
   // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
@@ -810,6 +873,50 @@ export const printTools: Tool[] = [
         .enum(['by layer', 'by object'])
         .optional()
         .describe("'by object' finishes each object before the next starts; omit for the template's own"),
+      filament_profiles: z
+        .array(z.string().max(64))
+        .max(8)
+        .optional()
+        .describe(
+          'Filament profiles to apply, by id (get_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
+            "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
+            "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
+        ),
+      supports: z
+        .object({
+          enabled: z
+            .boolean()
+            .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
+          type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
+          threshold_angle: z
+            .number()
+            .int()
+            .min(0)
+            .max(90)
+            .optional()
+            .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
+          on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
+        })
+        .optional()
+        .describe(
+          'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
+            "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
+        ),
+      prime_tower: z
+        .object({
+          enabled: z.boolean().describe('false prints with no prime (purge) tower; true prints one when the plate changes filament'),
+          no_sparse_layers: z
+            .boolean()
+            .optional()
+            .describe(
+              "With the tower on, print it only on layers that change filament (Bambu Studio's wipe_tower_no_sparse_layers); omit for the template's, else off",
+            ),
+        })
+        .optional()
+        .describe(
+          "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
+            'else the process (on whenever a plate uses more than one filament).',
+        ),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -833,6 +940,9 @@ export const printTools: Tool[] = [
         `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
         `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
         `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+        `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
+        `${supportsPhrase(args.supports)}` +
+        `${towerPhrase(args.prime_tower)}` +
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
@@ -910,6 +1020,27 @@ export const printTools: Tool[] = [
         options: args.options,
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
+        ...(args.filament_profiles?.length ? { filament_profiles: args.filament_profiles } : {}),
+        ...(args.supports === undefined
+          ? {}
+          : {
+              // Only what was asked for: a field left out keeps the template's (#2835 review).
+              // With supports off, only that: the backend applies nothing else (#3179).
+              supports: !args.supports.enabled
+                ? { enabled: false }
+                : {
+                    enabled: true,
+                    ...(args.supports.type === undefined ? {} : { type: args.supports.type }),
+                    ...(args.supports.threshold_angle === undefined
+                      ? {}
+                      : { threshold_angle: args.supports.threshold_angle }),
+                    ...(args.supports.on_build_plate_only === undefined
+                      ? {}
+                      : { on_build_plate_only: args.supports.on_build_plate_only }),
+                  },
+            }),
+        // As given: the backend drops No sparse layers with the tower off (#3648 review).
+        ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
       const started = await reattach(

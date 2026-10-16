@@ -1,13 +1,46 @@
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
 import type { BambuddyTargets, FlowGrantRule, FlowGrantSpec, ModelSummary } from '../../api/types'
-import { BOUNDS, type Bound, grantProblems, type HostFn, HOUR, isUnbounded, MAX_GRANT_MS, unboundedText } from '../../lib/grants'
+import {
+  BOUNDS,
+  type Bound,
+  grantProblems,
+  type HostFn,
+  HOUR,
+  isUnbounded,
+  MAX_GRANT_MS,
+  MAX_STANDING_GRANT_MS,
+  unboundedText,
+} from '../../lib/grants'
 import { useAsync, type AsyncState } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Spinner } from '../ui/spinner'
 
-const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1 text-[13px]'
+/** A checkbox and its label, side by side. */
+function Check({
+  checked,
+  onChange,
+  children,
+}: {
+  checked: boolean
+  onChange: (checked: boolean) => void
+  children: ReactNode
+}) {
+  const id = useId()
+  return (
+    <div className="flex items-center gap-2">
+      <Checkbox id={id} checked={checked} onCheckedChange={(next) => onChange(next === true)} />
+      <Label htmlFor={id} className="font-normal">
+        {children}
+      </Label>
+    </div>
+  )
+}
 
 // -- the draft ------------------------------------------------------------------------
 
@@ -132,6 +165,8 @@ interface Props {
   busy?: boolean
   onSubmit: (spec: FlowGrantSpec) => void
   onCancel?: () => void
+  /** #2484 — a trigger's standing grant: up to 30 days, 7 by default, and no starting session to ask. */
+  standing?: boolean
 }
 
 /**
@@ -145,22 +180,40 @@ export function GrantEditor(props: Props) {
   const host = useAsync(() => api.getFlowHostFunctions(), [])
   if (host.error) {
     return (
-      <p role="alert" className="text-[13px] text-warn">
+      <p role="alert" className="text-[13px] text-destructive">
         The tools a grant may name could not be read: {host.error.message}
       </p>
     )
   }
-  if (!host.data) return <p className="text-[13px] text-muted">Loading…</p>
+  if (!host.data) {
+    return (
+      <div role="status" aria-label="Loading" className="flex flex-col gap-2">
+        <Skeleton className="h-16 w-full rounded-xl" />
+        <Skeleton className="h-16 w-full rounded-xl" />
+      </div>
+    )
+  }
   return <Form {...props} outwardTools={host.data.tools.filter((t) => t.tier === 'outward').map((t) => t.name)} />
 }
 
-function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: Props & { outwardTools: string[] }) {
+function Form({
+  initial,
+  submitLabel,
+  busy,
+  onSubmit,
+  onCancel,
+  standing = false,
+  outwardTools,
+}: Props & { outwardTools: string[] }) {
+  const maxMs = standing ? MAX_STANDING_GRANT_MS : MAX_GRANT_MS
   const printers = useAsync(() => api.getBambuddyTargets(), [])
   const models = useAsync(() => api.listModels(), [])
   const [rows, setRows] = useState(() => initialRows(initial, outwardTools))
-  const [expires, setExpires] = useState(() => localInput(initial?.expires_at ?? Date.now() + 24 * HOUR))
+  const [expires, setExpires] = useState(() =>
+    localInput(initial?.expires_at ?? Date.now() + (standing ? 7 * 24 : 24) * HOUR),
+  )
   const [sessions, setSessions] = useState(initial?.sessions ?? false)
-  const [askStarter, setAskStarter] = useState(initial?.ask_starter_session ?? true)
+  const [askStarter, setAskStarter] = useState(standing ? false : (initial?.ask_starter_session ?? true))
   // The picker's range, from when the form opened; the check below is against now.
   const [openedAt] = useState(() => Date.now())
 
@@ -173,8 +226,9 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
   }
   const outward = useMemo(() => new Set(outwardTools), [outwardTools])
   const typing = typingProblems(rows)
-  const problems = [...typing, ...(typing.length > 0 ? [] : grantProblems(spec, new Date(), outward))]
+  const problems = [...typing, ...(typing.length > 0 ? [] : grantProblems(spec, new Date(), outward, maxMs))]
 
+  const expiresId = useId()
   const update = (key: string, change: Partial<RowDraft>) =>
     setRows((current) => current.map((r) => (r.key === key ? { ...r, ...change } : r)))
 
@@ -189,7 +243,7 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
         if (problems.length === 0) onSubmit(spec)
       }}
     >
-      <p className="text-[12.5px] text-muted">
+      <p className="text-[12.5px] text-muted-foreground">
         Calls inside an allowed rule run without asking you; any other outward call still waits for a decision.
       </p>
       {rows.map((row) => (
@@ -202,36 +256,38 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
           models={models}
         />
       ))}
-      <label className="flex flex-col gap-1">
-        <span>Expires</span>
-        <input
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor={expiresId}>Expires</Label>
+        <Input
+          id={expiresId}
           type="datetime-local"
           aria-label="Expires"
           value={expires}
           min={localInput(openedAt)}
-          max={localInput(openedAt + MAX_GRANT_MS)}
+          max={localInput(openedAt + maxMs)}
           onChange={(e) => setExpires(e.target.value)}
-          className={FIELD}
+          className="w-fit"
         />
-      </label>
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={sessions} onChange={(e) => setSessions(e.target.checked)} />
+      </div>
+      <Check checked={sessions} onChange={setSessions}>
         Extends to the sessions it starts
-      </label>
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={askStarter} onChange={(e) => setAskStarter(e.target.checked)} />
-        Ask the starting session first
-      </label>
+      </Check>
+      {!standing && (
+        <Check checked={askStarter} onChange={setAskStarter}>
+          Ask the starting session first
+        </Check>
+      )}
       {problems.length > 0 && (
-        <ul role="alert" className="list-disc pl-5 text-warn">
+        <ul role="alert" className="list-disc pl-5 text-destructive">
           {problems.map((p) => (
             <li key={p}>{p}</li>
           ))}
         </ul>
       )}
       <div className="flex gap-2">
-        <Button type="submit" variant="primary" disabled={busy || problems.length > 0}>
-          {busy ? <Spinner /> : submitLabel}
+        <Button type="submit" disabled={busy || problems.length > 0} aria-busy={busy}>
+          {busy && <Spinner />}
+          {submitLabel}
         </Button>
         {onCancel && (
           <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>
@@ -257,12 +313,11 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
   const printerChoices = (printers.data?.printers ?? []).map((p) => ({ value: p.id, label: p.name }))
   const modelChoices = (models.data ?? []).map((m) => ({ value: m.slug, label: m.name }))
   return (
-    <fieldset aria-label={`Rule ${name}`} className="rounded-[8px] border border-line p-2">
+    <fieldset aria-label={`Rule ${name}`} className="rounded-xl p-3 ring-1 ring-foreground/10">
       <legend className="px-1 font-mono text-[12.5px]">{row.fn === 'tool' ? `tool: ${name}` : name}</legend>
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={row.on} onChange={(e) => update({ on: e.target.checked })} />
+      <Check checked={row.on} onChange={(on) => update({ on })}>
         Allow without asking
-      </label>
+      </Check>
       {row.on && (
         <div className="mt-2 flex flex-col gap-2">
           {applies('printers') && (
@@ -288,22 +343,16 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
             />
           )}
           {applies('library_files') && (
-            <div className="flex flex-col gap-1">
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={row.libraryFiles === null}
-                  onChange={(e) => update({ libraryFiles: e.target.checked ? null : '' })}
-                />
+            <div className="flex flex-col gap-1.5">
+              <Check checked={row.libraryFiles === null} onChange={(any) => update({ libraryFiles: any ? null : '' })}>
                 Any library file
-              </label>
+              </Check>
               {row.libraryFiles !== null && (
-                <input
+                <Input
                   aria-label="Library file ids"
                   placeholder="Bambuddy library file ids, comma-separated; empty for none"
                   value={row.libraryFiles}
                   onChange={(e) => update({ libraryFiles: e.target.value })}
-                  className={FIELD}
                 />
               )}
             </div>
@@ -321,19 +370,19 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
             <div className="flex flex-col gap-1">
               {row.args.map((arg, i) => (
                 <div key={i} className="flex flex-wrap items-center gap-2">
-                  <input
+                  <Input
                     aria-label="Argument path"
                     placeholder="/printer_id"
                     value={arg.path}
                     onChange={(e) => update({ args: row.args.map((a, j) => (j === i ? { ...a, path: e.target.value } : a)) })}
-                    className={`${FIELD} w-40 font-mono`}
+                    className="w-40 font-mono"
                   />
-                  <input
+                  <Input
                     aria-label="Allowed values"
                     placeholder="3, 4"
                     value={arg.values}
                     onChange={(e) => update({ args: row.args.map((a, j) => (j === i ? { ...a, values: e.target.value } : a)) })}
-                    className={`${FIELD} min-w-0 flex-1`}
+                    className="w-auto min-w-0 flex-1"
                   />
                   <Button type="button" size="sm" variant="ghost" onClick={() => update({ args: row.args.filter((_, j) => j !== i) })}>
                     Remove
@@ -341,13 +390,18 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
                 </div>
               ))}
               <div>
-                <Button type="button" size="sm" onClick={() => update({ args: [...row.args, { path: '', values: '' }] })}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => update({ args: [...row.args, { path: '', values: '' }] })}
+                >
                   Add argument bound
                 </Button>
               </div>
             </div>
           )}
-          {isUnbounded(rule) && <p className="text-[12.5px] text-warn">{unboundedText(rule)}</p>}
+          {isUnbounded(rule) && <p className="text-[12.5px] text-destructive">{unboundedText(rule)}</p>}
         </div>
       )}
     </fieldset>
@@ -356,15 +410,15 @@ function RuleRow({ row, name, update, printers, models }: RowProps) {
 
 function NumberField({ label, value, onChange }: { label: string; value: string; onChange: (next: string) => void }) {
   return (
-    <label className="flex flex-col gap-0.5 text-[12.5px]">
-      <span className="text-muted">{label}</span>
-      <input
+    <label className="flex flex-col gap-1 text-[12.5px]">
+      <span className="text-muted-foreground">{label}</span>
+      <Input
         aria-label={label}
         inputMode="decimal"
         placeholder="no limit"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className={`${FIELD} w-28`}
+        className="w-28"
       />
     </label>
   )
@@ -385,27 +439,25 @@ function Picker<T extends string | number>({ label, anyLabel, value, choices, un
   // A value the request named that the read no longer lists stays pickable.
   const all = [...choices, ...(value ?? []).filter((v) => !choices.some((c) => c.value === v)).map((v) => ({ value: v, label: describe(v) }))]
   return (
-    <div role="group" aria-label={label} className="flex flex-col gap-1">
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={value === null} onChange={(e) => onChange(e.target.checked ? null : [])} />
+    <div role="group" aria-label={label} className="flex flex-col gap-1.5">
+      <Check checked={value === null} onChange={(any) => onChange(any ? null : [])}>
         {anyLabel}
-      </label>
+      </Check>
       {value !== null && (
-        <div className="ml-5 flex max-h-32 flex-col gap-0.5 overflow-y-auto">
-          {unavailable && <p className="text-[12.5px] text-muted">{unavailable}</p>}
+        <div className="ml-6 flex max-h-32 flex-col gap-1.5 overflow-y-auto py-0.5">
+          {unavailable && <p className="text-[12.5px] text-muted-foreground">{unavailable}</p>}
           {all.map((choice) => (
-            <label key={String(choice.value)} className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={value.includes(choice.value)}
-                onChange={(e) =>
-                  onChange(e.target.checked ? [...value, choice.value] : value.filter((v) => v !== choice.value))
-                }
-              />
+            <Check
+              key={String(choice.value)}
+              checked={value.includes(choice.value)}
+              onChange={(on) => onChange(on ? [...value, choice.value] : value.filter((v) => v !== choice.value))}
+            >
               {choice.label}
-            </label>
+            </Check>
           ))}
-          {value.length === 0 && <p className="text-[12.5px] text-muted">None picked: this rule admits none.</p>}
+          {value.length === 0 && (
+            <p className="text-[12.5px] text-muted-foreground">None picked: this rule admits none.</p>
+          )}
         </div>
       )}
     </div>

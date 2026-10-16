@@ -51,7 +51,6 @@ describe('ParameterPanel', () => {
         </>,
       )
       const tabs = screen.getAllByRole('tab')
-      expect(tabs.map((tab) => tab.getAttribute('tabindex'))).toEqual(['0', '-1', '-1'])
 
       await user.click(screen.getByRole('button', { name: 'Before' }))
       await user.tab()
@@ -96,8 +95,9 @@ describe('ParameterPanel', () => {
       const panel = screen.getByRole('tabpanel', { name: 'Plate' })
       expect(panel).toHaveAttribute('aria-labelledby', plate.id)
       expect(plate).toHaveAttribute('aria-controls', panel.id)
-      for (const tab of screen.getAllByRole('tab')) {
-        expect(tab).toHaveAttribute('aria-controls', panel.id)
+      // Each other tab names its own panel, hidden until it is selected.
+      for (const tab of screen.getAllByRole('tab').filter((tab) => tab !== plate)) {
+        expect(document.getElementById(tab.getAttribute('aria-controls') ?? '')).toHaveAttribute('hidden')
       }
     })
 

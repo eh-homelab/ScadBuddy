@@ -43,4 +43,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`EventLog.userTurnText${TEST_DATABASE_URL ? 
     expect(await log.userTurnText(a, 't3')).toBeUndefined()
     expect(await log.userTurnText(a, 'missing')).toBeUndefined()
   })
+
+  it('returns the last one logged when a turnId is logged twice (#3361)', async () => {
+    const a = await session()
+    await log.append(a, [event({ type: 'user.turn', sessionId: a, turnId: 't1', text: 'first', author: BROWSER })])
+    await log.append(a, [event({ type: 'user.turn', sessionId: a, turnId: 't1', text: 'second', author: BROWSER })])
+    expect(await log.userTurnText(a, 't1')).toBe('second')
+  })
 })

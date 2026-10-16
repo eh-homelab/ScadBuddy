@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FontFamily, InstalledFamily } from '../../api/types'
+import { forgetGlyphAnswers } from '../../lib/useMissingGlyphs'
 import { setCatalogueOffline } from '../../mocks/handlers'
 import { FontPicker } from './FontPicker'
 
@@ -30,21 +31,24 @@ function setup(props: Partial<Parameters<typeof FontPicker>[0]> = {}) {
 }
 
 function rows() {
-  return within(screen.getByTestId('font-rows')).queryAllByRole('button')
+  return within(screen.getByTestId('font-rows')).queryAllByRole('option')
 }
 
 async function loaded() {
   await waitFor(() => expect(rows().length).toBeGreaterThan(0))
 }
 
-beforeEach(() => window.localStorage.clear())
+beforeEach(() => {
+  window.localStorage.clear()
+  forgetGlyphAnswers()
+})
 
 describe('FontPicker', () => {
   it('lists the catalogue with each row drawn in its own family', async () => {
     setup()
     await loaded()
 
-    const pacifico = screen.getByRole('button', { name: /Pacifico/ })
+    const pacifico = screen.getByRole('option', { name: /Pacifico/ })
     const preview = within(pacifico).getByText('Reagan', { selector: 'span' })
     expect(preview).toHaveStyle({ fontFamily: '"Pacifico", sans-serif' })
   })
@@ -57,12 +61,12 @@ describe('FontPicker', () => {
     // name every row announces as "Reagan <family>" — forty rows that differ only
     // in their last word. It shipped that way once; this pins it. The e2e suite
     // catches it too, but only once per CI run and minutes in.
-    expect(screen.getByRole('button', { name: /^Pacifico/ })).toHaveAccessibleName('Pacifico')
+    expect(screen.getByRole('option', { name: /^Pacifico/ })).toHaveAccessibleName('Pacifico')
     // An installed row keeps its badge, so the assertion is that the name STARTS with the
     // family and never carries the specimen — not the exact string. jsdom joins adjacent
     // inline spans with no separator ("Noto Sansinstalled") where a browser inserts one,
     // and pinning either spelling would be pinning the engine rather than the behaviour.
-    const installed = screen.getByRole('button', { name: /^Noto Sans/ })
+    const installed = screen.getByRole('option', { name: /^Noto Sans/ })
     expect(installed).toHaveAccessibleName(/^Noto Sans/)
     expect(installed).not.toHaveAccessibleName(/Reagan/)
   })
@@ -84,15 +88,15 @@ describe('FontPicker', () => {
   it('marks what fontconfig already resolves', async () => {
     setup()
     await loaded()
-    expect(screen.getByRole('button', { name: /Noto Sans/ })).toHaveTextContent('installed')
-    expect(screen.getByRole('button', { name: /Pacifico/ })).not.toHaveTextContent('installed')
+    expect(screen.getByRole('option', { name: /Noto Sans/ })).toHaveTextContent('installed')
+    expect(screen.getByRole('option', { name: /Pacifico/ })).not.toHaveTextContent('installed')
   })
 
   it('searches with a type-ahead', async () => {
     const { user } = setup()
     await loaded()
 
-    await user.type(screen.getByRole('searchbox', { name: 'Search fonts' }), 'paci')
+    await user.type(screen.getByRole('combobox', { name: 'Search fonts' }), 'paci')
 
     await waitFor(() => expect(rows()).toHaveLength(1), { timeout: 3000 })
     expect(rows()[0]).toHaveTextContent('Pacifico')
@@ -102,7 +106,7 @@ describe('FontPicker', () => {
     const { user } = setup()
     await loaded()
 
-    await user.click(screen.getByRole('button', { name: 'Script', pressed: false }))
+    await user.click(screen.getByRole('radio', { name: 'Script', checked: false }))
 
     await waitFor(() => expect(rows()).toHaveLength(1))
     expect(rows()[0]).toHaveTextContent('Pacifico')
@@ -112,7 +116,7 @@ describe('FontPicker', () => {
     const { user, onPick, onClose } = setup()
     await loaded()
 
-    await user.click(screen.getByRole('button', { name: /Pacifico/ }))
+    await user.click(screen.getByRole('option', { name: /Pacifico/ }))
 
     await waitFor(() => expect(onPick).toHaveBeenCalledTimes(1))
     const installedFamily = onPick.mock.calls[0]![0] as InstalledFamily
@@ -125,7 +129,7 @@ describe('FontPicker', () => {
     const { user, onPick } = setup()
     await loaded()
 
-    await user.click(screen.getByRole('button', { name: /Playfair Display/ }))
+    await user.click(screen.getByRole('option', { name: /Playfair Display/ }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be downloaded')
     expect(onPick).not.toHaveBeenCalled()
@@ -142,7 +146,7 @@ describe('FontPicker', () => {
     setCatalogueOffline(true)
     setup()
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Google Fonts is unreachable')
+    expect(await screen.findByText(/Google Fonts is unreachable/)).toHaveAttribute('role', 'status')
     await waitFor(() => expect(rows()).toHaveLength(2))
     expect(rows().map((row) => row.textContent)).toEqual([
       expect.stringContaining('Noto Sans'),
@@ -155,7 +159,7 @@ describe('FontPicker', () => {
     const { user, onPick } = setup()
     await waitFor(() => expect(rows()).toHaveLength(2))
 
-    await user.click(screen.getByRole('button', { name: /Noto Sans/ }))
+    await user.click(screen.getByRole('option', { name: /Noto Sans/ }))
 
     await waitFor(() => expect(onPick).toHaveBeenCalled())
   })
@@ -199,10 +203,21 @@ describe('the widget it feeds', () => {
     render(<Harness />)
     await waitFor(() => expect(rows().length).toBeGreaterThan(0))
 
-    await user.click(screen.getByRole('button', { name: /Pacifico/ }))
+    await user.click(screen.getByRole('option', { name: /Pacifico/ }))
 
     await waitFor(() =>
       expect(screen.getByTestId('value')).toHaveTextContent('Pacifico:style=Regular'),
     )
+  })
+
+  // #2358 — the specimen draws a glyph the font lacks in the browser's fallback font, so
+  // an installed row that cannot print the sample says so.
+  it('marks an installed row whose font lacks a character of the sample', async () => {
+    setup({ sampleText: 'Zoë 😀' })
+    await loaded()
+    const noto = screen.getByRole('option', { name: /^Noto Sans/ })
+    await waitFor(() => expect(noto).toHaveTextContent('no 😀'))
+    // A row not installed cannot be asked: the server has no file for it.
+    expect(screen.getByRole('option', { name: /Pacifico/ })).not.toHaveTextContent('no 😀')
   })
 })

@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -111,11 +111,15 @@ describe('the library routes', () => {
       http.get(`${LIB}/choices`, () => HttpResponse.json({ printer_id: 1 })),
       http.get(`${LIB}/plates`, () => HttpResponse.json({ detail: 'Bambuddy could not read the plates' }, { status: 502 })),
     )
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warned.mockRestore())
     expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE }, ctx()))).toEqual({
       printer_id: 1,
       plates: [],
       plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
     })
+    // #1814: the log names the error and the backend's status; its message (the model sees it above) is not logged.
+    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError 502)']])
   })
 
   it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {
@@ -223,7 +227,15 @@ describe('the library routes', () => {
       uri: `/api/v1/print/library/${FILE}/preview.glb?plate=2`,
       name: `library-${FILE}-plate-2.glb`,
     })
-    // No plate is plate 1, under plate 1's one name.
+    // No plate is plate 1, under plate 1's one name, inline and as a link.
+    plate = null
+    const inline = await tool('get_output_preview').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 16 }))
+    expect(plate).toBe('1')
+    expect(inline.content).toContainEqual({
+      type: 'resource',
+      resource: { uri: `scadbuddy://print/library/${FILE}/preview.glb?plate=1`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+    })
+    plate = null
     const first = await tool('get_output_preview').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 1 }))
     expect(plate).toBe('1')
     expect(first.content[0]).toMatchObject({
@@ -288,6 +300,29 @@ describe('the library routes', () => {
     expect(result.total).toBe(2)
     expect(result.next_cursor).toBeTruthy()
   })
+
+  it('finds files by name in every folder (#3630)', async () => {
+    let query = ''
+    const found = {
+      query: 'dino',
+      all: false,
+      files: [{ id: 7, filename: 'dino.3mf', file_type: '3mf', printable: true, folder_path: ['Toys'] }],
+      total: 1,
+      hidden: 0,
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/library/search`, ({ request }) => {
+        query = new URL(request.url).search
+        return HttpResponse.json(found)
+      }),
+    )
+    expect(tool('search_library').risk).toBe('read')
+    const result = firstText(await tool('search_library').execute({ query: 'dino' }, ctx()))
+    expect(query).toBe('?q=dino')
+    expect(result).toEqual(found)
+    await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
+    expect(query).toBe('?q=dino&fresh=true')
+  })
 })
 
 describe('print_output on a library file', () => {
@@ -322,6 +357,46 @@ describe('print_output on a library file', () => {
       filament_plan: { slots: [{ slot_id: 1, spool_id: 10 }] },
       choices: { tier: 'fine', bed_type: 'Cool Plate' },
     })
+  })
+
+  it('sends the filament profiles it is told to, and names them in its approval line (#717)', async () => {
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const t = tool('print_output')
+    await t.execute({ library_file_id: FILE, filament_profiles: ['silk-pla'] }, ctx())
+    expect(body).toMatchObject({ filament_profiles: ['silk-pla'] })
+    expect(t.summarize({ library_file_id: FILE, filament_profiles: ['silk-pla'] })).toContain(
+      'with the silk-pla profile',
+    )
+
+    // Never sent unless named.
+    await t.execute({ library_file_id: FILE }, ctx())
+    expect(body).not.toHaveProperty('filament_profiles')
+  })
+
+  it('lists the filament profiles (#717)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/filament-profiles`, () =>
+        HttpResponse.json([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }]),
+      ),
+    )
+    const t = tool('get_filament_profiles')
+    expect(t.risk).toBe('read')
+    const result = await t.execute({}, ctx())
+    expect(firstText(result)).toEqual([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }])
   })
 
   it('names the library file in its approval line and title', () => {

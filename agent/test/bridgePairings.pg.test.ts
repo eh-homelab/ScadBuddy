@@ -111,11 +111,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
              AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())`).length)
         .toBe(1)
       const stop = new AbortController()
-      const lookup = store.pairedTab(agent, stop.signal)
+      // #1814: the query itself, so its own outcome shows it was never cancelled (a
+      // cancelled one rejects with 57014); "no lock waiter left" alone cannot tell.
+      const sent: PromiseLike<unknown>[] = []
+      // Only the tagged-template call is recorded. A Proxy is `db.sql` itself for everything
+      // else, so its helpers (`sql.begin`, `sql.unsafe`, ...) work however they are defined.
+      const watched = new Proxy(db.sql, {
+        apply(target, self, args: Parameters<typeof db.sql>) {
+          const query: PromiseLike<unknown> = Reflect.apply(target, self, args)
+          sent.push(query)
+          return query
+        },
+      })
+      const lookup = new PostgresPairingStore(watched).pairedTab(agent, stop.signal)
+      // This database's backends other than the admin's own: another test's lock wait cannot count.
       const waiting = async () =>
         (await admin`
           SELECT 1 FROM pg_stat_activity
-           WHERE datname = current_database() AND wait_event_type = 'Lock'
+           WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
              AND query LIKE '%FROM ai_browser_pairings%' AND query LIKE '%tab_id%'`).length
       await expect.poll(waiting).toBe(1)
       stop.abort(new Error('the wait ended'))
@@ -125,9 +138,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       unlock()
       await locked
       // Never cancelled on the server: the read finishes once the lock goes, and the pool serves the next one.
+      expect(sent).toHaveLength(1)
+      // No rows: this test's agent has no paired tab, so the read that finished finds none.
+      await expect(sent[0]).resolves.toEqual([])
       await expect.poll(async () => (await admin`
         SELECT 1 FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
+         WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+           AND query LIKE '%FROM ai_browser_pairings%'`).length).toBe(0)
       expect(await store.pairedTab(agent)).toBeUndefined()
     } finally {
       unlock()

@@ -908,7 +908,17 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
     # An older client that sends none keeps the key it had before the field existed.
     before = json.dumps(
         plain.model_dump(
-            mode="json", exclude={"request_id", "print_sequence", "rack_position", "rack_algorithm"}
+            mode="json",
+            exclude={
+                "request_id",
+                "print_sequence",
+                "rack_position",
+                "rack_algorithm",
+                "filament_profiles",
+                "supports",
+                "prime_tower",
+                "plate_ids",
+            },
         ),
         sort_keys=True,
         separators=(",", ":"),
@@ -924,6 +934,56 @@ def test_the_print_sequence_is_part_of_the_key_only_when_chosen() -> None:
     by_layer = PrintRunRequest.model_validate({**body(), "print_sequence": "by layer"})
     assert len({run_key("a" * 32, r) for r in (plain, by_object, by_layer)}) == 3
     assert "print_sequence" not in json.dumps(plain.model_dump(mode="json", exclude_none=True))
+
+
+def test_filament_profiles_are_part_of_the_key_only_when_chosen() -> None:
+    """#717: no profiles keeps the key from before the field existed; a profile makes a
+    print of its own, however often it is named."""
+    plain = PrintRunRequest.model_validate(body())
+    silk = PrintRunRequest.model_validate({**body(), "filament_profiles": ["silk-pla"]})
+    twice = PrintRunRequest.model_validate({**body(), "filament_profiles": ["silk-pla"] * 2})
+    empty = PrintRunRequest.model_validate({**body(), "filament_profiles": []})
+    assert run_key("a" * 32, plain) == run_key("a" * 32, empty)
+    assert run_key("a" * 32, plain) != run_key("a" * 32, silk)
+    assert run_key("a" * 32, silk) == run_key("a" * 32, twice)
+
+
+def test_supports_are_part_of_the_key_only_when_chosen() -> None:
+    """#1899: no choice keeps the key from before the field existed, and each choice
+    is a print of its own."""
+    plain = PrintRunRequest.model_validate(body())
+    tree = PrintRunRequest.model_validate({**body(), "supports": {"enabled": True}})
+    none = PrintRunRequest.model_validate({**body(), "supports": {"enabled": False}})
+    assert len({run_key("a" * 32, r) for r in (plain, tree, none)}) == 3
+
+
+def test_the_prime_tower_is_part_of_the_key_only_when_chosen() -> None:
+    """#3628: no choice keeps the key from before the field existed, and each choice
+    is a print of its own."""
+    plain = PrintRunRequest.model_validate(body())
+    on = PrintRunRequest.model_validate({**body(), "prime_tower": {"enabled": True}})
+    sparse = PrintRunRequest.model_validate(
+        {**body(), "prime_tower": {"enabled": True, "no_sparse_layers": True}}
+    )
+    off = PrintRunRequest.model_validate({**body(), "prime_tower": {"enabled": False}})
+    assert len({run_key("a" * 32, r) for r in (plain, on, sparse, off)}) == 4
+    # Off is off, whatever "No sparse layers" came with it (#3648 review).
+    off_sparse = PrintRunRequest.model_validate(
+        {**body(), "prime_tower": {"enabled": False, "no_sparse_layers": True}}
+    )
+    assert run_key("a" * 32, off_sparse) == run_key("a" * 32, off)
+
+
+def test_chosen_plates_are_part_of_the_key_only_when_sent() -> None:
+    """#3652: no plate list keeps the key from before the field existed; the same plates
+    in another order or named twice are the same print."""
+    plain = PrintRunRequest.model_validate(body())
+    some = PrintRunRequest.model_validate({**body(), "plate_ids": [1, 3]})
+    again = PrintRunRequest.model_validate({**body(), "plate_ids": [3, 1, 3]})
+    other = PrintRunRequest.model_validate({**body(), "plate_ids": [1, 2]})
+    assert "plate_ids" not in json.dumps(plain.model_dump(mode="json", exclude_none=True))
+    assert run_key("a" * 32, some) == run_key("a" * 32, again)
+    assert len({run_key("a" * 32, r) for r in (plain, some, other)}) == 3
 
 
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:

@@ -11,7 +11,11 @@ import pytest
 from scadbuddy import main
 from scadbuddy.activity.index import ACTIVITY_PRUNE_MARGIN, ActivityIndex
 from scadbuddy.activity.models import ActivityRow
-from scadbuddy.library.settings_store import SettingsPatch, StoredSettings
+from scadbuddy.library.settings_store import (
+    RETENTION_MAX_SECONDS,
+    SettingsPatch,
+    StoredSettings,
+)
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.housekeeping import ACTIVITY_PATCH, ACTIVITY_SWEEP, SWEEPS
@@ -81,6 +85,26 @@ def test_settings_fields() -> None:
     with pytest.raises(ValueError):
         SettingsPatch(activity_repair_window_seconds=8 * DAY)
     assert SettingsPatch(activity_follow=["browser"]).activity_follow == ["browser"]
+
+
+def test_a_retention_stored_past_the_maximum_is_read_as_it() -> None:
+    """A row saved before the bound (656868686867 s) cannot put the prune out of range."""
+    stored = StoredSettings.model_validate(
+        {
+            "activity_ttl_seconds": 656868686867.0,
+            "print_run_retention_seconds": 656868686867.0,
+            "operation_retention_seconds": 7 * DAY,
+        }
+    )
+    assert stored.activity_ttl_seconds == RETENTION_MAX_SECONDS
+    assert stored.print_run_retention_seconds == RETENTION_MAX_SECONDS
+    assert stored.operation_retention_seconds == 7 * DAY
+    with pytest.raises(ValueError):
+        SettingsPatch(activity_ttl_seconds=RETENTION_MAX_SECONDS + 1)
+
+
+async def test_prune_with_the_maximum_ttl_is_in_range(index: ActivityIndex) -> None:
+    assert await index.prune(RETENTION_MAX_SECONDS, DAY) == 0
 
 
 async def test_prune_deletes_old_finished_only(pg_pool: PgPool, index: ActivityIndex) -> None:
@@ -346,3 +370,43 @@ async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> No
     with pytest.raises(RuntimeError, match="database down"):
         await main._sweep_activity_logged(state)
     assert index.calls == []
+
+
+def test_a_repair_commits_each_row_it_restores(pg_pool: PgPool, index: ActivityIndex) -> None:
+    """A restore takes the event log's lock, held to commit: one transaction over the
+    whole pass would hold every publisher up until its end. Each row commits as it goes,
+    so the next row's build already sees the last one from another connection."""
+    with pg_pool.connection() as conn:
+        for run in ("p1", "p2"):
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status, workflow_id,"
+                " workflow_run_id, slug) VALUES (%s, 'abc', %s, 'running', %s, 'r', 'demo')",
+                (run, f"k-{run}", f"print-{run}"),
+            )
+    seen: list[int] = []
+
+    def build(found: Any) -> ActivityRow:
+        with pg_pool.connection() as probe:
+            count = probe.execute(
+                "SELECT count(*) AS n FROM activity WHERE id LIKE 'print_run:%'"
+            ).fetchone()
+        seen.append(0 if count is None else count["n"])
+        return ActivityRow(
+            id=f"print_run:{found['id']}",
+            kind="print_run",
+            status="running",
+            title="t",
+            source="print_runs",
+            source_id=found["id"],
+            created_at=found["created_at"],
+            finished_at=found["finished_at"],
+        )
+
+    with pg_pool.connection() as conn:
+        # What this relies on: the repair's own pool commits each row's transaction.
+        assert conn.autocommit, "the repair's pool is no longer autocommit"
+    restored = index._repair_source(
+        DAY, "print_run:", "print_runs", "r.id, r.created_at, r.finished_at", build
+    )
+    assert restored == 2
+    assert seen == [0, 1]

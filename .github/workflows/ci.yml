@@ -43,8 +43,8 @@ name: CI
 # two independent networks on 2026-09-02, and an 880 ms failure is too fast to
 # be congestion -- but the cause is UNIDENTIFIED; do not merge the two.
 #
-# `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
-# build-image.yml, so no job here needs a bigger or different runner.
+# `ubuntu-latest` provides docker + buildx, so no job here needs a bigger or
+# different runner.
 on:
   pull_request:
   # The merge queue (#508): a queued PR is re-checked on the queue's own commit --
@@ -357,6 +357,8 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
+    # About 10 minutes now that Playwright is `frontend-e2e`: on the slowest
+    # recent main run the other steps add up to 613 s. 20 is twice that.
     timeout-minutes: 20
     defaults:
       run:
@@ -405,46 +407,147 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # The MSW-BACKED half of the e2e suite lives here and NOT in the image
-      # job, which is where it started. frontend/playwright.config.ts is
-      # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
-      # (`pnpm build && pnpm preview --port 4173`) against the production
-      # bundle with the msw worker mocking the API — by its own comment, "so it
-      # exercises the same build the backend will host". Those specs never talk
-      # to a backend, so pointing them at the running container was simply
-      # wrong, and gating them on the container's entrypoint was wrong for the
-      # same reason. Here they also reuse the node_modules this job already
-      # installed instead of a second `pnpm install`.
-      #
-      # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
-      # design — it needs a real openscad. The image job runs it against the
-      # container it builds; see the e2e steps there.
+  # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
+  #
+  # The MSW-BACKED half of the e2e suite lives here and NOT in the image
+  # job, which is where it started. frontend/playwright.config.ts is
+  # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
+  # (`pnpm build && pnpm preview --port 4173`) against the production
+  # bundle with the msw worker mocking the API — by its own comment, "so it
+  # exercises the same build the backend will host". Those specs never talk
+  # to a backend, so pointing them at the running container was simply
+  # wrong, and gating them on the container's entrypoint was wrong for the
+  # same reason.
+  #
+  # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
+  # design — it needs a real openscad. The image job runs it against the
+  # container it builds; see the e2e steps there.
+  #
+  # A job of its own, in three shards, rather than steps after the unit tests.
+  # In one job the two took about 8 and 9 minutes on main (Unit tests 377-496 s,
+  # Playwright smoke 444-533 s), so the job sat at 15.5-19.5 of its 20 minutes,
+  # and #3762's timed out in Playwright. Each shard keeps the config's one CI
+  # worker (`playwright.config.ts`), so a test sees the machine it always did.
+  # `frontend-e2e-split` checks that the three shards ran the whole suite.
+  frontend-e2e:
+    name: Frontend Playwright (${{ matrix.shard }}/3)
+    needs: layout
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' }}
+    runs-on: ubuntu-latest
+    # A shard is a third of the 533 s suite plus the webServer's build (typecheck
+    # and vite, about a minute) and the browser install: about five minutes. 15 is
+    # three times that, room for a slow runner and the retries.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # The webServer's `pnpm build` runs typecheck, which runs `pnpm gen:api`.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Install Playwright browsers
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
         run: pnpm exec playwright install --with-deps chromium
 
+      # `--list` needs no server. Its last line is "Total: N tests in M files".
+      - name: Count this shard's tests
+        run: |
+          set -euo pipefail
+          total=$(pnpm exec playwright test --list | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
+          selected=$(pnpm exec playwright test --list --shard=${{ matrix.shard }}/3 | sed -n 's/^Total: \([0-9]*\) tests\{0,1\} in .*/\1/p')
+          echo "shard ${{ matrix.shard }} selects ${selected} of ${total}"
+          mkdir -p counts
+          echo "${{ matrix.shard }} ${selected} ${total}" > counts/selected.txt
+
       - name: Playwright smoke
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
         # DEBUG=pw:webserver is load-bearing for diagnosis, not noise.
         # Playwright pipes the webServer's STDERR but IGNORES its stdout, so a
         # server that fails to come up produces only
         # "Timed out waiting 180000ms from config.webServer" with no cause —
         # vite's own startup banner and any build output are discarded. This
         # channel prints the lifecycle instead.
+        #
+        # `--reporter` replaces the config's CI reporters, so they are named again
+        # beside the junit file the count reads.
         env:
           DEBUG: pw:webserver
-        run: pnpm exec playwright test
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: results/junit.xml
+        run: pnpm exec playwright test --shard=${{ matrix.shard }}/3 --reporter=github,list,junit
 
-      - name: Upload the Playwright report
-        if: ${{ failure() && needs.layout.outputs.e2e == 'true' }}
+      - name: Count what this shard ran
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ran=0
+          if [ -f results/junit.xml ]; then ran=$(grep -o '<testcase ' results/junit.xml | wc -l); fi
+          echo "$(cat counts/selected.txt) ${ran}" > counts/shard-${{ matrix.shard }}.txt
+          cat counts/shard-${{ matrix.shard }}.txt
+
+      - name: Upload the count
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report
+          name: frontend-e2e-count-${{ matrix.shard }}
+          path: frontend/counts/shard-${{ matrix.shard }}.txt
+
+      - name: Upload the Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-${{ matrix.shard }}
           path: |
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  frontend-e2e-split:
+    name: Frontend Playwright shards cover the suite
+    needs: frontend-e2e
+    if: ${{ !cancelled() && needs.frontend-e2e.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: frontend-e2e-count-*
+          merge-multiple: true
+          path: counts
+
+      - name: Check the counts
+        run: |
+          set -euo pipefail
+          cat counts/shard-*.txt
+          files=(counts/shard-*.txt)
+          [ "${#files[@]}" -eq 3 ] || { echo "::error::expected 3 shard counts, got ${#files[@]}"; exit 1; }
+          totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
+          [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards listed different suites: $totals"; exit 1; }
+          sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
+          [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
+          short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
+          [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
+          echo "The three shards select and ran all ${totals} tests."
 
   # ── Agent service (#261): the AI sidecar in agent/ ──────────────────────────
   #
@@ -1018,8 +1121,10 @@ jobs:
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
   # The LFS fixtures, pulled once per change of them into the Actions cache the four
-  # shards restore from: a miss (a new fixture, or an eviction from the full cache)
-  # costs one ~290 MB pull of the LFS bandwidth quota, not four. A failure here
+  # shards restore from: a new fixture costs one ~290 MB pull of the LFS bandwidth
+  # quota, not four. An entry evicted from the full cache since, or a save that never
+  # landed, is the exception: each shard then pulls them itself, four pulls in all
+  # (#2488). A failure here
   # skips the required backend-pytest, which CI Summary reports as a failure.
   lfs-fixtures:
     name: LFS fixtures
@@ -1848,7 +1953,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
+    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1874,6 +1979,8 @@ jobs:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
+          FRONTEND_E2E_SPLIT_RESULT: ${{ needs.frontend-e2e-split.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
           AGENT_DURABLE_RESULT: ${{ needs.agent-durable.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
@@ -1912,6 +2019,8 @@ jobs:
           if [ -f backend/pyproject.toml ]; then has_backend=true; fi
           has_frontend=false
           if [ -f frontend/package.json ]; then has_frontend=true; fi
+          has_e2e=false
+          if [ "$has_frontend" = true ] && [ -d frontend/e2e ]; then has_e2e=true; fi
           has_agent=false
           if [ -f agent/package.json ]; then has_agent=true; fi
           has_agent_durable=false
@@ -1934,6 +2043,8 @@ jobs:
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
+          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$has_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
@@ -1975,7 +2086,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, frontend, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

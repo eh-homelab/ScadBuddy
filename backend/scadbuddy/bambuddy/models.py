@@ -38,6 +38,11 @@ class PresetRef(BambuddyModel):
     id: str
 
 
+#: One process setting's value as a process preset stores it: a string, or a list of
+#: strings for a per-extruder-variant option (#717).
+ProcessValue = str | list[str]
+
+
 class Preset(PresetRef):
     name: str | None = None
     filament_type: str | None = None
@@ -500,7 +505,9 @@ class PrinterStatus(BambuddyModel):
     layer_num: int | None = None
     total_layers: int | None = None
     current_archive_id: int | None = None
-    awaiting_plate_clear: bool = False
+    #: ``None`` when Bambuddy sent something other than a bool (#3632): unknown, which
+    #: /prints shows as "check the plate", never as a quiet "no".
+    awaiting_plate_clear: bool | None = False
     cover_url: str | None = None
     hms_errors: list[HmsError] = Field(default_factory=list)
 
@@ -527,7 +534,7 @@ class PrinterStatus(BambuddyModel):
     @field_validator("awaiting_plate_clear", mode="before")
     @classmethod
     def _flag(cls, value: Any) -> Any:
-        return value if isinstance(value, bool) else False
+        return value if isinstance(value, bool) else None
 
     @field_validator("hms_errors", mode="before")
     @classmethod
@@ -721,8 +728,9 @@ class SliceRequest(BambuddyModel):
     plate: int = 1
     use_embedded_settings: bool = False
     #: Process settings written over the process preset for this slice, as Bambuddy's
-    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is.
-    process_overrides: dict[str, str] | None = None
+    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is. A per-extruder
+    #: option (``outer_wall_speed`` on an H2C) is a list, one value per variant (#717).
+    process_overrides: dict[str, ProcessValue] | None = None
 
     @property
     def preset_key(self) -> str:
@@ -741,8 +749,25 @@ class SliceRequest(BambuddyModel):
             f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
         )
         if self.process_overrides:
-            key += "/" + ",".join(f"{k}={v}" for k, v in sorted(self.process_overrides.items()))
+            key += "/" + ",".join(
+                # Each value as JSON, so a list and a string, or a value holding a
+                # separator, can never key the same slice (#2804, #3585 review).
+                f"{k}={json.dumps(v)}"
+                for k, v in sorted(self.process_overrides.items())
+            )
         return key
+
+
+class PresetValues(BambuddyModel):
+    """``GET /slicer/preset-values``: a process preset's effective values, its
+    ``inherits:`` chain flattened by Bambuddy's slicer sidecar. ``resolved`` is false,
+    with ``values`` empty and a ``reason`` (``sidecar_unavailable``,
+    ``preset_unresolved``, ``not_configured`` …), whenever they cannot be read; it is
+    never an error (``slicer_presets.py``)."""
+
+    resolved: bool = False
+    values: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
 
 
 class SliceJobAccepted(BambuddyModel):

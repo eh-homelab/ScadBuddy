@@ -29,7 +29,7 @@ export type PrintSource =
     }
   | { kind: 'library'; file: Pick<LibraryEntry, 'id' | 'filename'> }
 
-export type FilamentQuery = { printerId?: number | null; plateId?: number; allPlates?: boolean }
+export type FilamentQuery = { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] }
 
 /** The dialog's reads and writes for one source. */
 export interface SourceApi {

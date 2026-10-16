@@ -1,7 +1,6 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
-import os from 'node:os'
 import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
@@ -11,9 +10,11 @@ import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
+import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
+import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
@@ -28,6 +29,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
@@ -35,6 +37,7 @@ import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
@@ -48,6 +51,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
+import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
@@ -73,7 +77,7 @@ import { AgentWorker } from './temporal/worker.js'
 import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
-import { DurableTurns } from './sessions/durable.js'
+import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
@@ -202,7 +206,13 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
-const pluginForwarder = await PluginForwarder.start()
+const pluginForwarder = await PluginForwarder.start({
+  ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
+  log: (message) => console.error(message),
+})
+// The database's clock the moment it is ready, before a turn can record a session: the pass at
+// start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
+const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
 const backend = createBackendClient(config.backendUrl)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
@@ -291,7 +301,10 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
-// A session's background tasks (CronCreate, ScheduleWakeup, TaskStop), in either mode:
+// This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
+// Monitor commands, which run where its turns' Bash runs.
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
 // payloads are task ids only, so its client has no codec.
 const backgroundTasks =
@@ -309,6 +322,24 @@ const backgroundTasks =
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+const runtime = await readStartSettings({ database, settings }, console.log)
+// The data keys that seal a session's transcript (D7) and, below, its durable payloads: one
+// instance, so forgetting a subject drops its key from the one cache.
+const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
+if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
+// Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
+if (database && dataKeys) {
+  void database
+    .ready()
+    .then(async (ready) => {
+      if (!ready) return
+      const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
+      if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
+    })
+    .catch((err: unknown) => console.error('session transcripts: sealing the existing rows failed; retried at the next start:', (err as Error).message))
+} else if (database) {
+  console.warn('session transcripts: no secret key, so the existing rows are not sealed')
+}
 // Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
 // and durable ones (memoryActivities), so a knob set here applies to both (#2420).
 // Undefined: the defaults.
@@ -320,6 +351,7 @@ const sessions =
         memory,
         sql: database.sql,
         paths,
+        ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
@@ -342,22 +374,38 @@ const sessions =
         ...(plugins
           ? {
               remotePlugins: async () =>
-                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
+                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder, { record: true }),
             }
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
         // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
-        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
+        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: HOST_QUEUE } } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
+        // One warm Claude Code per classic session (unified runtime spec 2026-10-13
+        // §5.3, sessions/warm.ts), sized by the runtime settings (sessions/runtimeSettings.ts).
+        warm: { maxEntries: runtime.warm_max_per_replica, idleMs: runtime.warm_idle_seconds * 1000, log: (message) => console.log(message) },
+      })
+    : undefined
+// A credential, plugin or package change on any replica, and a session handed
+// off, marked done, archived or forgotten, evict warm processes everywhere
+// (sessions/warmEvict.ts): on the event bus's connection, like the relays above.
+const stopWarmSync =
+  sessions && settings && events
+    ? wireRuntimeSync({
+        settings,
+        warm: sessions.warm,
+        revalidate: () => sessions.revalidateWarm(),
+        events,
+        log: console.log,
       })
     : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
@@ -426,10 +474,7 @@ if (database && commandKinds.length > 0) {
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
-const payloadKeys =
-  temporal && kek.ok
-    ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
-    : undefined
+const payloadKeys = temporal ? dataKeys : undefined
 // A session's large payloads are files on the data share, by reference (#2243).
 const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
 const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined
@@ -465,7 +510,6 @@ if (database) {
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
-const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -487,6 +531,8 @@ const turnToolDeps = temporal
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         ...(settings ? { settings } : {}),
+        // The headless browser's lists (#982), as a classic turn's.
+        browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
@@ -507,11 +553,13 @@ const turnToolDeps = temporal
               builtins: {
                 files: workspace,
                 audit,
-                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
+                // A durable session's Monitor commands run in agent-durable, where its Bash does.
+                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: DURABLE_TASK_QUEUE } } : {}),
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
-                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    credentials: new CredentialPool({ repo: credentials, kek, audit }),
+                    ...(context.flow ? {} : { sessionId: context.session }),
                     // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
                     ...(context.flow
                       ? {}
@@ -546,6 +594,19 @@ const turnToolDeps = temporal
     }
   : undefined
 
+// One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
+const background =
+  backgroundTasks && sessions
+    ? backgroundActivities({
+        store: backgroundTasks.store,
+        send: managerSender(sessions),
+        tz: agentTimezone(),
+        paths,
+        secrets: toolServices.secrets,
+        agents: managerAgents(sessions),
+        workspace,
+      })
+    : undefined
 const temporalWorker =
   temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
@@ -586,9 +647,7 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
-          ...(backgroundTasks && sessions
-            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone() })
-            : {}),
+          ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -605,7 +664,12 @@ const hostWorker =
         address: temporal.address,
         namespace: config.temporalNamespace,
         taskQueue: HOST_QUEUE,
-        activities: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        activities: {
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
+          // A classic session's Monitor commands, in its directory on this replica.
+          ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
+        },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
@@ -648,6 +712,31 @@ const stopOrphanSweep =
         },
       )
     : undefined
+// At start and every 5 min: the upstream MCP sessions of replicas that no longer poll
+// agent-tools (plugins/pluginSessions.ts); skipped, and logged, when Temporal cannot say who polls.
+const PLUGIN_SESSION_SWEEP_MS = 5 * 60_000
+const stopPluginSessionSweep =
+  database && plugins
+    ? (() => {
+        const deps = { plugins, kek: kek.ok ? kek.kek : undefined, log: (message: string) => console.error(message) }
+        let ownEnded = false
+        const sweep = async () => {
+          if (!(await database.ready())) return
+          // Once, first: what this hostname's previous incarnation left; nothing of this one's is live yet.
+          if (!ownEnded) {
+            const mark = await pluginSessionMark
+            if (mark) await endOwnSessions(database.sql, replicaIdentity(), deps, mark)
+            ownEnded = mark !== undefined
+          }
+          await runPluginSessionSweep({ sql: database.sql, client: temporalClient, ...deps })
+        }
+        const run = () => void sweep().catch((err: unknown) => console.error('plugin session sweep failed:', (err as Error).message))
+        run()
+        const timer = setInterval(run, PLUGIN_SESSION_SWEEP_MS)
+        timer.unref()
+        return () => clearInterval(timer)
+      })()
+    : undefined
 const commands =
   temporalClient && operationStore
     ? new AgentCommands({
@@ -678,6 +767,8 @@ const app = createApp({
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
+  // The headless browser's lists and approvals (#982, routes/browserOrigins.ts).
+  ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
   // The panel's background tasks (routes/backgroundTasks.ts).
@@ -753,11 +844,13 @@ async function stop(): Promise<void> {
   stopQuestionSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()
+  stopPluginSessionSweep?.()
   stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
   stopWorkspaceSweep?.()
+  stopWarmSync?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted

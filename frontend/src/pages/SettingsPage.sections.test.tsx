@@ -11,6 +11,8 @@ import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handl
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+import { SETTLE_MS } from './settings/sectionNav'
+import { choose, optionDisabled } from '../test/select'
 
 // #322 — every runtime setting in the UI, with where its value came from; a save per
 // section; the remembered choices; About.
@@ -71,16 +73,21 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     return { scrolls, intoView, restore }
   }
 
-  /** A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected. */
+  /**
+   * A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected.
+   * Only those on the pane's content are listed: Radix measures its own controls too.
+   */
   function stubResizeObserver() {
     const observers: { fire: () => void; disconnected: boolean }[] = []
     class Fake {
       entry: { fire: () => void; disconnected: boolean }
       constructor(callback: () => void) {
         this.entry = { fire: callback, disconnected: false }
-        observers.push(this.entry)
       }
-      observe() {}
+      observe(target: Element) {
+        if (target.parentElement?.classList.contains('sb-settings')) observers.push(this.entry)
+      }
+      unobserve() {}
       disconnect() {
         this.entry.disconnected = true
       }
@@ -110,24 +117,111 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     }
   })
 
-  it('keeps a deep-linked section in view while the sections above it load, until the reader scrolls', async () => {
-    const tops = { libraries: 5000 }
-    const { scrolls, restore } = stubLayout(tops)
+  it.each(['wheel', 'touchstart', 'keydown', 'pointerdown'])(
+    'keeps a deep-linked section in view while the sections above it load, until a %s',
+    async (stop) => {
+      const tops = { libraries: 5000 }
+      const { scrolls, restore } = stubLayout(tops)
+      const observers = stubResizeObserver()
+      try {
+        renderPage(<SettingsPage />, { route: '/settings#libraries' })
+        await seeded()
+        await waitFor(() => expect(scrolls).toContain(4992))
+        // The first is the deep link's follow; the section-in-view one comes after it.
+        const observer = observers[0]!
+        // Remembered choices finish loading above it and push it down.
+        tops.libraries = 6900
+        act(() => observer.fire())
+        expect(scrolls.at(-1)).toBe(6892)
+        document.querySelector('.sb-settings')!.dispatchEvent(new Event(stop))
+        expect(observer.disconnected).toBe(true)
+      } finally {
+        restore()
+        vi.unstubAllGlobals()
+      }
+    },
+  )
+
+  it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
+    const timeouts = vi.spyOn(window, 'setTimeout')
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
       await seeded()
       await waitFor(() => expect(scrolls).toContain(4992))
-      const observer = observers.at(-1)!
-      // Remembered choices finish loading above it and push it down.
-      tops.libraries = 6900
-      act(() => observer.fire())
-      expect(scrolls.at(-1)).toBe(6892)
-      document.querySelector('.sb-settings')!.dispatchEvent(new Event('wheel'))
-      expect(observer.disconnected).toBe(true)
+      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
+      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
+      expect(settle).toBeDefined()
+      act(() => (settle![0] as () => void)())
+      expect(observers[0]!.disconnected).toBe(true)
+    } finally {
+      timeouts.mockRestore()
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('marks the section that a load above moves into view current, without a scroll (#2947 review)', async () => {
+    const tops: Record<string, number> = {}
+    const { restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings' })
+      await seeded()
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      const ids = within(nav)
+        .getAllByRole('link')
+        .map((link) => link.getAttribute('href')!.slice(1))
+      const at = ids.indexOf('libraries')
+      // Each section 1000 px below the last, the first at the top.
+      ids.forEach((id, index) => (tops[id] = index * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      const libraries = within(nav).getByRole('link', { name: 'Libraries' })
+      expect(libraries).not.toHaveAttribute('aria-current')
+      // Everything above Libraries shrinks as it loads: Libraries is now at the top.
+      ids.forEach((id, index) => (tops[id] = (index - at) * 1000))
+      act(() => {
+        for (const observer of observers) observer.fire()
+      })
+      expect(libraries).toHaveAttribute('aria-current', 'location')
     } finally {
       restore()
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('a section link on a page with unsaved changes scrolls there without a hash, so one Back is still held (#2947 review)', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    window.history.replaceState(null, '', '/')
+    window.history.pushState(null, '', '/settings')
+    try {
+      const user = userEvent.setup()
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/" element={<p>The catalogue</p>} />
+          </Routes>
+        </BrowserRouter>,
+      )
+      await seeded()
+      await user.clear(screen.getByLabelText('Render timeout'))
+      await user.type(screen.getByLabelText('Render timeout'), '45')
+
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      await user.click(within(nav).getByRole('link', { name: 'Libraries' }))
+      expect(scrolls).toContain(4992)
+      await waitFor(() => expect(document.activeElement).toBe(document.getElementById('libraries-heading')))
+      expect(window.location.hash).toBe('')
+
+      act(() => window.history.back())
+      expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+      expect(window.location.pathname).toBe('/settings')
+    } finally {
+      restore()
     }
   })
 
@@ -213,7 +307,7 @@ describe('SettingsPage field checks and descriptions (#2347, #2348, #2456)', () 
     await seeded()
     const assistant = document.getElementById('assistant')!
     expect(assistant).toHaveAccessibleName('Assistant')
-    const status = document.getElementById('ai-status-heading')!.closest('section')!
+    const status = document.getElementById('ai-status-heading')!.closest('[role="region"]')!
     expect(status).toHaveAccessibleName('Assistant status')
   })
 })
@@ -295,7 +389,7 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
     expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
@@ -307,7 +401,7 @@ describe('SettingsPage sections (#322)', () => {
     await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
     expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here')
     // The other section kept its edit.
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     put.mockRestore()
   })
@@ -361,7 +455,7 @@ describe('SettingsPage sections (#322)', () => {
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
     await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
 
@@ -415,10 +509,10 @@ describe('SettingsPage sections (#322)', () => {
     await seeded()
     const limit = screen.getByLabelText('Largest media upload')
     expect(limit).toHaveValue(1)
-    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GiB')
+    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveTextContent('GiB')
 
     // Picking a unit converts the number; typing one reinterprets it in that unit.
-    await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
+    await choose(user, screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
     expect(limit).toHaveValue(1073.742)
     await user.clear(limit)
     await user.type(limit, '500')
@@ -452,7 +546,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(timeout, '45')
 
     await user.click(screen.getByRole('link', { name: 'Catalogue' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(dialog).toHaveTextContent('Rendering')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.queryByText('The catalogue')).toBeNull()
@@ -494,7 +588,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     await user.click(screen.getByRole('button', { name: 'Go home' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(screen.queryByText('The catalogue')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByText('The catalogue')).toBeInTheDocument()
@@ -517,7 +611,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(window.location.pathname).toBe('/settings')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
@@ -548,7 +642,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     act(() => window.history.back())
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(window.location.pathname).toBe('/settings')
@@ -625,7 +719,7 @@ describe('SettingsPage remembered choices (#322)', () => {
     const { user } = renderPage(<SettingsPage />)
     await screen.findByRole('table', { name: 'Remembered choices' })
     await user.click(screen.getByRole('button', { name: 'Forget all' }))
-    await user.click(screen.getByRole('button', { name: 'Yes, forget all' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Yes, forget all' }))
     expect(await screen.findByText('Nothing is remembered yet.')).toBeInTheDocument()
   })
 })
@@ -739,9 +833,9 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    expect(store).toHaveValue('local')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeEnabled()
-    await user.selectOptions(store, 'bambuddy')
+    expect(store).toHaveTextContent('This server’s volume')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(false)
+    await choose(user, store, /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -752,14 +846,14 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     const own = screen.getByLabelText(/ScadBuddy.s own URL/)
     await user.clear(own)
     await enter(user, own, 'https://scadbuddy.test')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('store_backend')
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
   })
 
   it('falls back to the local store when the Bambuddy store loses its inbox', async () => {
@@ -767,10 +861,10 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    await waitFor(() => expect(store).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
-    expect(store).toHaveValue('local')
+    await waitFor(() => expect(store).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(true)
+    expect(store).toHaveTextContent('This server’s volume')
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: null, store_backend: 'local' })
@@ -780,21 +874,21 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
     // The choice follows the saved URL, so it moves once Connection is saved.
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('local'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('This server’s volume'))
   })
 
   it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
@@ -813,8 +907,8 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
     const own = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(own)
     await enter(user, own, 'https://mine.test')
@@ -827,9 +921,9 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '3')
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Keychains')
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: 3 })
@@ -854,22 +948,23 @@ describe('SettingsPage blob store (#426)', () => {
     const url = await screen.findByLabelText('Bambuddy URL')
     await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
     await enter(user, url, 'https://bambuddy.new.test')
-    const option = screen.getByRole('option', { name: /Bambuddy library/ })
-    expect(option).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
     expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(option).toBeEnabled())
+    await waitFor(async () =>
+      expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(false),
+    )
     expect(screen.queryByTestId('store-backend-hint')).toBeNull()
-    await user.selectOptions(screen.getByLabelText('Blob store'), 'bambuddy')
+    await choose(user, screen.getByLabelText('Blob store'), /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
     serve({ ...stored, library_folder_id: null })
-    renderPage(<SettingsPage />)
+    const { user } = renderPage(<SettingsPage />)
     await seeded()
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
   })
 
   it('shows what the blob store holds, where, against its caps', async () => {

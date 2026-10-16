@@ -91,6 +91,15 @@ WarningKind = Literal[
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
     "sequence-clearance",
+    # #717: a filament profile left on that could not apply; the print goes ahead.
+    "profile-not-applied",
+    # #1899: a support setting left out because the preset's shape for it is unknown:
+    # its values could not be read, or it has no value (or an empty one) for that key.
+    "supports-not-applied",
+    # #3628: a prime tower setting the process preset has no value for, sent anyway.
+    "prime-tower-unconfirmed",
+    # #3628: a prime tower chosen for an already-sliced file, which queues as it is.
+    "prime-tower-not-applied",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",
     "sliced-nozzle-missing",
@@ -549,7 +558,12 @@ def _anchor_family(
 ) -> set[str]:
     """The family an all-undeclared plate is suggested in (#2850): the one whose
     spools match the most slots with a loaded spool, then the most slots at all, then
-    the best single match."""
+    the best single match.
+
+    It counts slots, not spools: one loaded spool whose colour fits three slots beats
+    two loaded spools that fit two, since an undeclared slot can share a loaded spool.
+    A spool with no material is the family ``""``; if that wins, only material-less
+    spools are suggested for the undeclared slots."""
     loaded: dict[str, set[int]] = {}
     matched: dict[str, set[int]] = {}
     best: dict[str, tuple[float, int]] = {}
@@ -825,6 +839,29 @@ async def read_inventory(client: BambuddyClient) -> Inventory:
         client.spools(), client.spool_assignments(), return_exceptions=True
     )
     return settled(spools), settled(assignments)
+
+
+#: The most plates one request may name (#3652); a 3MF lays out far fewer.
+MAX_PLATES = 256
+
+
+def asked_plates(
+    plate_id: int, all_plates: bool, plate_ids: Sequence[int] | None
+) -> list[int] | None:
+    """The plates a request asks for, each once and in plate order; ``None`` for every
+    plate (#3652). ``all_plates`` wins over ``plate_ids``, which wins over ``plate_id``."""
+    if all_plates:
+        return None
+    if plate_ids:
+        return sorted(set(plate_ids))
+    return [plate_id]
+
+
+def plates_named(plates: Sequence[int]) -> str:
+    """``plate 4``, or ``plates 4 and 5``, or ``plates 4, 5 and 6``."""
+    if len(plates) == 1:
+        return f"plate {plates[0]}"
+    return f"plates {', '.join(map(str, plates[:-1]))} and {plates[-1]}"
 
 
 async def gather_plate_options(

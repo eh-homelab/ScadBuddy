@@ -6,14 +6,17 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { browserGuard } from '../src/browser/guard.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
-import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.js'
+import { CALL_ID_META } from '../src/builtins/callId.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -36,11 +39,23 @@ const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
 const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
 
+/**
+ * An `sql` for a test that saves no http body: a call (a read) throws, and so does any
+ * property, `begin` included, which a save opens with.
+ */
+function noDatabase(): unknown {
+  const refuse = () => {
+    throw new Error('this test saves no http body: no database is set up for one')
+  }
+  return new Proxy(refuse, { apply: refuse, get: refuse })
+}
+
 function notes(calls: string[]): () => McpServer {
   return () => {
     const server = new McpServer({ name: 'notes', version: '1' })
-    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }) => {
-      calls.push(`read ${id}`)
+    server.registerTool('read.note', { description: 'reads a note', inputSchema: { id: z.string() } }, async ({ id }, extra) => {
+      const callId = extra._meta?.[CALL_ID_META]
+      calls.push(`read ${id}${callId === undefined ? '' : ` as ${String(callId)}`}`)
       return { content: [{ type: 'text', text: `note ${id}` }] }
     })
     server.registerTool('post', { description: 'posts', inputSchema: { method: z.string(), body: z.string() } }, async ({ body }) => {
@@ -75,6 +90,9 @@ const tierOf = (name: string, input: unknown): RiskTier => {
 }
 const mayPark = (name: string) => !name.endsWith('__read_note')
 
+/** The fake audit's input hash, which the checks are bound to. */
+const fakeHash = (tool: string, input: unknown) => `hash:${tool}:${JSON.stringify(input)}`
+
 function harness(
   options: {
     owner?: Owner & { turnTiers?: string[] }
@@ -88,6 +106,8 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
+    lapsed?: (requestId: string, inputHash: string | undefined) => boolean
+    callIds?: boolean
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -95,6 +115,8 @@ function harness(
   const audits: AuditEntry[] = []
   const reported: string[] = []
   const stored: string[] = []
+  /** The input hash each session approval check was bound to (#2649). */
+  const bindings: (string | undefined)[] = []
   const owner = options.owner ?? BROWSER
   let connects = 0
   const server: TurnServer = {
@@ -105,6 +127,7 @@ function harness(
     ...(options.mayPark === false ? {} : { mayPark }),
     ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
+    ...(options.callIds ? { callIds: true } : {}),
   }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
@@ -116,18 +139,26 @@ function harness(
       release: () => {},
     }),
     hostQueue: 'agent-tools.host-1',
-    approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    approvals: {
+      approved: async (requestId, binding) => {
+        bindings.push(binding?.inputHash)
+        return requestId.endsWith(':toolu_approved')
+      },
+      ...(options.lapsed
+        ? { lapsed: async (requestId: string, binding?: { inputHash?: string }) => options.lapsed!(requestId, binding?.inputHash) }
+        : {}),
+    },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
       // Only the backend's workflow_run_decisions approves a flow's call, and only for the
       // input it was decided on (PgFlowRuns refuses a call with no hash, #2728).
       approved: async (requestId, inputHash) =>
-        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === `hash:notes__post:${JSON.stringify({ method: 'POST', body: 'x' })}`,
+        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === fakeHash('notes__post', { method: 'POST', body: 'x' }),
     },
     currentTiers: async () => options.starterTiers,
     audit: {
       record: async (entry) => void audits.push(entry),
-      hash: (tool, input) => `hash:${tool}:${JSON.stringify(input)}`,
+      hash: fakeHash,
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
@@ -140,6 +171,7 @@ function harness(
     audits,
     reported,
     stored,
+    bindings,
     connects: () => connects,
     activities: turnToolActivities(deps),
     call: turnToolActivity(deps),
@@ -256,6 +288,7 @@ describe('turn tools in a durable session', () => {
       ],
       problems: [],
       secrets: [],
+      terminate: async () => {},
       release: () => {},
     }
     const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
@@ -275,8 +308,13 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      // Its saved bodies are in Postgres; this test saves none.
-      servers: turnServers({ httpRequest: { saveRoot, sql: {} as never } }),
+      // Its saved bodies are in Postgres; this test saves none, and says so if it ever does.
+      servers: turnServers({
+        httpRequest: {
+          saveRoot,
+          sql: noDatabase() as never,
+        },
+      }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
@@ -302,6 +340,36 @@ describe('turn tools in a durable session', () => {
     expect(await env('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
     expect(h.calls).toEqual(['read a'])
     expect(h.audits).toEqual([expect.objectContaining({ action: 'notes__read_note', tier: 'read', outcome: 'ok', sessionId: SESSION })])
+  })
+
+  it("tells a server of its own each call's tool_use id, so a retried activity is one call; never another server (#3201)", async () => {
+    const own = harness({ callIds: true })
+    await env('turn:notes__read_note', 'tool-toolu_01').run(own.call, { id: 'a' })
+    expect(own.calls).toEqual(['read a as toolu_01'])
+    const other = harness()
+    await env('turn:notes__read_note', 'tool-toolu_01').run(other.call, { id: 'a' })
+    expect(other.calls).toEqual(['read a'])
+  })
+
+  it("gives a call the activity's own time, not the MCP client's 60 s default (#3199)", async () => {
+    const slow = () => () => {
+      const server = new McpServer({ name: 'notes', version: '1' })
+      server.registerTool('read.note', { description: 'reads slowly', inputSchema: { id: z.string() } }, async ({ id }) => {
+        await new Promise((r) => setTimeout(r, 1_000))
+        return { content: [{ type: 'text', text: `note ${id}` }] }
+      })
+      return server
+    }
+    const run = (startToCloseTimeoutMs: number) =>
+      new MockActivityEnvironment({
+        activityId: 'tool-toolu_01',
+        activityType: 'turn:notes__read_note',
+        workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+        taskQueue: 'agent-tools',
+        startToCloseTimeoutMs,
+      }).run(harness({ server: slow }).call, { id: 'a' })
+    expect((await failure(run(300))).message).toMatch(/timed out/i)
+    expect(await run(10 * 60_000)).toBe('note a')
   })
 
   it("records the durable turn on a call's audit row and in its servers' context, as a classic turn's (#2497)", async () => {
@@ -331,8 +399,13 @@ describe('turn tools in a durable session', () => {
     expect(refused.type).toBe('NotApproved')
     expect(h.calls).toEqual([])
     expect(await env('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+    // #2649: each check is bound to the call's own input hash, as a ScadBuddy tool's is,
+    // so an approval (a person's, or a run grant's use) covers only the input it was for.
+    const hash = fakeHash('notes__post', { method: 'POST', body: 'x' })
+    expect(h.bindings).toEqual([hash, hash])
     // A GET needs none.
     expect(await env('turn:notes__post').run(h.call, { method: 'GET', body: 'y' })).toBe('posted y')
+    expect(h.bindings).toHaveLength(2)
   })
 
   it("holds a call to the turn's tiers", async () => {
@@ -383,6 +456,23 @@ describe('turn tools in a durable session', () => {
     const reported = harness({ problems: [`plugin x failed with header ${SECRET}`] })
     await env(TURN_TOOLS_ACTIVITY).run(reported.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)
     expect(reported.reported).toEqual(['plugin x failed with header [redacted]'])
+  })
+
+  it("refuses a session's call whose approval lapsed as GrantRevoked, before it runs (#2871)", async () => {
+    const asked: (string | undefined)[] = []
+    const h = harness({
+      lapsed: (requestId, inputHash) => {
+        asked.push(inputHash)
+        return requestId.endsWith(':toolu_lapsed')
+      },
+    })
+    const lapsed = await failure(env('turn:notes__post', 'tool-toolu_lapsed').run(h.call, { method: 'POST', body: 'x' }))
+    expect(lapsed.type).toBe(GRANT_REVOKED)
+    // Bound to the call's input, as the approved check is (#3471 review).
+    expect(asked[0]).toBe(fakeHash('notes__post', { method: 'POST', body: 'x' }))
+    const never = await failure(env('turn:notes__post', 'tool-toolu_other').run(h.call, { method: 'POST', body: 'x' }))
+    expect(never.type).toBe('NotApproved')
+    expect(h.calls).toEqual([])
   })
 
   describe("from a flow's tool(name, args) (#2320 phase 8)", () => {
@@ -489,6 +579,111 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe("the headless browser's lists in a durable turn (#982)", () => {
+  const LISTS = { allow: ['makerworld.com'], deny: ['evil.example'] }
+  const page = (url: string) => `### Page\n- Page URL: ${url}\n\nThe text of ${url}`
+
+  function browserHarness() {
+    const calls: string[] = []
+    const approvals = new Map<string, 'once' | 'session'>()
+    const redirects: Record<string, string> = { 'https://makerworld.com/go': 'https://elsewhere.example/' }
+    const guard = browserGuard({
+      store: {
+        lists: async () => LISTS,
+        approved: async () => new Map(approvals),
+        approve: async (_id, origin, scope) => {
+          if (approvals.get(origin) !== 'session') approvals.set(origin, scope)
+          return true
+        },
+      },
+      sessionId: SESSION,
+      plugins: ['playwright'],
+    })
+    const server: TurnServer = {
+      name: 'playwright',
+      connect: () =>
+        connectInProcess(() => {
+          const mcp = new McpServer({ name: 'playwright', version: '1' })
+          mcp.registerTool('browser_navigate', { description: 'navigate', inputSchema: { url: z.string() } }, async ({ url }) => {
+            calls.push(url)
+            return { content: [{ type: 'text', text: page(redirects[url] ?? url) }] }
+          })
+          return mcp
+        }),
+      tierOf: () => 'outward',
+      guard: (name, input) => guard.check(name, input),
+      screen: (name, input, text) => guard.screen(name, input, text),
+    }
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: async () => ({ servers: [server], problems: [], secrets: [], release: () => {} }),
+      approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    }
+    const activities = turnToolActivities(deps)
+    return {
+      calls,
+      approvals,
+      tier: (url: string) => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'playwright__browser_navigate', input: { url } }),
+      call: (url: string, id = 'tool-toolu_01') => env('turn:playwright__browser_navigate', id).run(turnToolActivity(deps), { url }),
+    }
+  }
+
+  it('tiers a navigation by its page: allowed runs unasked, unlisted parks, denied is not parked', async () => {
+    const h = browserHarness()
+    expect(await h.tier('https://makerworld.com/en/models/1')).toEqual({ tier: 'write' })
+    expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward' })
+    expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward' })
+    // No approval could run it, so the user is not asked: its call refuses it.
+    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write', refused: expect.stringContaining('deny rule "evil.example"') as unknown })
+  })
+
+  it('runs an allowed navigation, refuses a denied one even approved, and an unlisted one until approved', async () => {
+    const h = browserHarness()
+    expect(await h.call('https://makerworld.com/en/models/1')).toContain('The text of https://makerworld.com/en/models/1')
+    const denied = await failure(h.call('https://evil.example/', 'tool-toolu_approved'))
+    expect(denied.message).toContain('deny rule "evil.example"')
+    expect((await failure(h.call('https://example.org/a'))).type).toBe('NotApproved')
+    expect(h.calls).toEqual(['https://makerworld.com/en/models/1'])
+    expect(await h.call('https://example.org/a', 'tool-toolu_approved')).toContain('The text of https://example.org/a')
+    expect(h.approvals.get('https://example.org')).toBe('once')
+  })
+
+  it('withholds a page an allowed navigation was redirected to', async () => {
+    const h = browserHarness()
+    const text = await h.call('https://makerworld.com/go')
+    expect(text).toMatch(/withheld this result: the browser is now on https:\/\/elsewhere\.example/)
+    expect(text).not.toContain('The text of')
+  })
+
+  it("lists a remote plugin's browser tools as may_park, and browser_navigate's tier as the page's", async () => {
+    const forwarded: PluginsForRun = {
+      plugins: [{ name: 'playwright', url: 'http://127.0.0.1:9/forward/pw', toolTiers: { browser_snapshot: 'read' }, disabledTools: [] }],
+      problems: [],
+      secrets: [],
+      release: () => {},
+      terminate: async () => {},
+    }
+    const { servers } = await turnServers({
+      remotePlugins: async () => forwarded,
+      browserOrigins: { lists: async () => LISTS, approved: async () => new Map(), approve: async () => true },
+    })({ session: SESSION, owner: BROWSER, signal: new AbortController().signal, listing: true })
+    const pw = servers.find((s) => s.name === 'playwright')!
+    expect(pw.mayPark?.('mcp__playwright__browser_snapshot')).toBe(true)
+    expect(pw.fixedTier?.('mcp__playwright__browser_snapshot')).toBe('read')
+    expect(pw.fixedTier?.('mcp__playwright__browser_navigate')).toBeUndefined()
+    expect(await pw.guard?.('mcp__playwright__browser_navigate', { url: 'https://makerworld.com/' })).toMatchObject({ allow: expect.any(String) })
+  })
+})
+
+describe('the no-database sql stub (#2963 review)', () => {
+  it('says why on a save, which opens with sql.begin, as well as on a read', async () => {
+    const bodies = new PgHttpBodies(noDatabase() as never, SESSION)
+    const meta = { url: 'http://example.test/', content_type: null, size_bytes: 1, complete: true }
+    await expect(bodies.save('b1', Buffer.from('x'), meta)).rejects.toThrow('this test saves no http body')
+    await expect(bodies.meta('b1')).rejects.toThrow('this test saves no http body')
   })
 })
 

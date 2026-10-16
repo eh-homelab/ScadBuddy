@@ -27,6 +27,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
+    SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
     QueueCounts,
@@ -144,12 +145,16 @@ RECENT_RENDERS = 20
 #: The shortest render `recent_render_seconds` counts: piece-cache hits finish in well
 #: under a second and say nothing about how long a full queue takes to drain.
 MIN_COUNTED_RENDER_SECONDS = 1.0
-#: The event a settled job announces; `core.events.JobKind` has no ``job.cancelled``.
-_FINISHED_KINDS: dict[str, JobKind] = {
-    "done": "job.done",
-    "failed": "job.failed",
-    "cancelled": "job.superseded",
-}
+#: The event a settled job announces. A cancelled one is `_cancelled_kind`'s.
+_FINISHED_KINDS: dict[str, JobKind] = {"done": "job.done", "failed": "job.failed"}
+
+
+def _settled_kind(state: str, error: str | None) -> JobKind:
+    """``job.superseded`` only for a job a newer render replaced: a subscriber reads it
+    as "a replacement exists". A release with none is ``job.cancelled`` (#607)."""
+    if state != "cancelled":
+        return _FINISHED_KINDS[state]
+    return "job.superseded" if error == SUPERSEDED_ERROR else "job.cancelled"
 
 
 def workflow_id_for(job_id: str) -> str:
@@ -220,12 +225,14 @@ class JobProjection:
         return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
-        if self.events is not None:
-            self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
+        # The activity row, then the event: `upsert_in` takes the event log's lock
+        # before the row (pg_events.py, "Lock order"), and the publish reuses it.
         if self.activity is not None:
             from scadbuddy.render.activity import row_of  # activity imports this module
 
             self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
+        if self.events is not None:
+            self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
 
     def _read_in(self, conn: Connection[Any], job_id: str) -> Job:
         columns = ", ".join(PROJECTION_COLUMNS)
@@ -398,7 +405,7 @@ class JobProjection:
             (now(), error, row["id"]),
         ).fetchone()
         assert dropped is not None
-        self._announce(conn, row["id"], row["slug"], "job.superseded")
+        self._announce(conn, row["id"], row["slug"], _settled_kind("cancelled", error))
         return _job(dropped)
 
     def release_claim(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
@@ -491,7 +498,7 @@ class JobProjection:
                 ),
             )
             if cursor.rowcount == 1:
-                self._announce(conn, job.id, job.slug, _FINISHED_KINDS[job.state])
+                self._announce(conn, job.id, job.slug, _settled_kind(job.state, job.error))
                 return True
             if job.state != "cancelled":
                 return False

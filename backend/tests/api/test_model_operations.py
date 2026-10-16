@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import json
 import subprocess
-import time
 import uuid
 from datetime import timedelta
 from functools import partial
@@ -28,6 +27,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.library.presets import MAX_PRESETS
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
+from tests.api.conftest import follow_operation
 from tests.support.operations import press
 
 SOURCE = "cube(10);\n"
@@ -151,11 +151,7 @@ def test_a_slow_create_answers_202_and_its_operation_ends_with_the_model(
         "/api/v1/models", json={"name": "Slow", "source": SOURCE}, headers=press()
     )
     assert started.status_code == 202, started.text
-    op = started.json()
-    deadline = time.monotonic() + 60
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(client, started.json())
     assert op["status"] == "succeeded", op
     assert op["result"]["slug"] == "slow"
 
@@ -336,14 +332,19 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
 ) -> None:
     """Review 3c 1.2: a final answer drops the request's claims, except the bytes an
     operation still running holds by the same name."""
-    monkeypatch.setattr(
-        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
-    )
+
+    def short_for_slow(*args: Any, **kwargs: Any) -> Any:
+        # Only the slow create must outlast its deadline: the quick one has to answer
+        # 201, and a 1 s deadline was too short for it on a loaded shard (#3499).
+        seconds = 1 if args[2].subject == "slow" else 60
+        return start_command(*args, deadline=timedelta(seconds=seconds), **kwargs)
+
+    monkeypatch.setattr(operations_api, "start_command", short_for_slow)
     create = models_api._create
 
     async def slow_for_slow(*args: Any, **kwargs: Any) -> Any:
-        if kwargs["slug"] == "slow":
-            await asyncio.sleep(3)
+        # The quick create takes as long as it did on the shard that flaked: past 1 s.
+        await asyncio.sleep(3 if kwargs["slug"] == "slow" else 1.5)
         return await create(*args, **kwargs)
 
     monkeypatch.setattr(models_api, "_create", slow_for_slow)
@@ -359,11 +360,7 @@ def test_a_finished_create_drops_its_claims_but_not_one_a_running_operation_name
     )
     assert quick.status_code == 201, quick.text
     assert _claims(app) == {hashlib.sha256(SOURCE.encode()).hexdigest()}
-    op = slow.json()
-    deadline = time.monotonic() + 60
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(client, slow.json())
     assert op["status"] == "succeeded", op
 
 

@@ -103,10 +103,10 @@ describe('the Settings toggle', () => {
 
   it('is off by default, stores the choice per browser, and an agent cannot flip it', async () => {
     const { user } = renderPage(<Shell />)
-    const toggle = await screen.findByRole('checkbox', { name: label })
+    const toggle = await screen.findByRole('switch', { name: label })
     expect(toggle).not.toBeChecked()
 
-    const agent = await appBridge.call('click', { role: 'checkbox', name: label })
+    const agent = await appBridge.call('click', { role: 'switch', name: label })
     expect(!agent.ok && agent.error.code).toBe('refused')
     expect(toggle).not.toBeChecked()
 

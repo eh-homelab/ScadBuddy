@@ -14,7 +14,7 @@ from scadbuddy.api import flow_script
 from scadbuddy.api.components import getter_for
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FLOWS
-from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
+from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS
 from tests.flows.flows_support import AgentTiers
 
 
@@ -78,7 +78,7 @@ def test_the_host_functions_are_the_ones_a_script_is_checked_against(
     body = response.json()
     functions = {f["name"]: f for f in body["functions"]}
     # Every host function the check offers, and nothing it does not (the gated bodies).
-    assert list(functions) == [t.__name__ for t in SCRIPT_TOOLS]
+    assert list(functions) == [t.__name__ for t in HOST_FUNCTIONS]
     assert "approved_print" not in functions
     render = functions["render"]
     assert (
@@ -118,4 +118,36 @@ def test_an_agent_that_does_not_answer_lists_no_tools(
     body = response.json()
     assert body["tools"] == []
     assert body["tools_unavailable"] == flow_script.TOOLS_UNAVAILABLE
-    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in SCRIPT_TOOLS]
+    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in HOST_FUNCTIONS]
+
+
+INPUTS = {
+    "type": "object",
+    "properties": {"slug": {"type": "string"}, "copies": {"type": "integer", "default": 2}},
+    "required": ["slug"],
+}
+
+
+def test_a_flow_with_inputs_completes_inputs_and_its_type(client: TestClient) -> None:
+    """#2651: given the flow's inputs schema, the editor lists `inputs()` and the
+    `FlowInputs` the type check types it with."""
+    response = client.post("/api/v1/workflow-script/host-functions", json={"inputs_schema": INPUTS})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    functions = {f["name"]: f for f in body["functions"]}
+    assert list(functions) == [*(t.__name__ for t in HOST_FUNCTIONS), "inputs"]
+    assert functions["inputs"]["signature"] == "async def inputs() -> FlowInputs"
+    flow_inputs = next(t for t in body["types"] if t["name"] == "FlowInputs")
+    assert "slug: str" in flow_inputs["source"]
+    assert "copies: int" in flow_inputs["source"]
+    assert [t["name"] for t in body["tools"]] == ["list_models", "send_to_bambuddy"]
+
+
+@pytest.mark.parametrize("schema", [None, {"type": "array"}])
+def test_no_schema_or_a_bad_one_completes_no_inputs(client: TestClient, schema: object) -> None:
+    """A bad schema is the check's to report; the editor offers no `inputs()` for it."""
+    response = client.post("/api/v1/workflow-script/host-functions", json={"inputs_schema": schema})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in HOST_FUNCTIONS]
+    assert "FlowInputs" not in [t["name"] for t in body["types"]]

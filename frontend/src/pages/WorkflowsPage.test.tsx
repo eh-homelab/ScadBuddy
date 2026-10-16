@@ -57,12 +57,18 @@ describe('WorkflowsPage', () => {
     expect(within(plates).getByRole('link', { name: 'plates' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
     expect(plates).toHaveTextContent('latest v2')
     // `GET /workflows` is each name's newest version: one row per flow.
-    expect(within(flows).getAllByRole('listitem')).toHaveLength(3)
+    expect(flows.querySelectorAll('[data-flow]')).toHaveLength(3)
     expect(plates).toHaveTextContent('Registered by you, in the browser')
     const swap = flows.querySelector<HTMLElement>('[data-flow="swap"]')!
     expect(swap).toHaveTextContent('latest v1')
     expect(swap).toHaveTextContent('Registered by an assistant (session sess-1)')
     expect(screen.getByRole('link', { name: 'Flows' })).toHaveAttribute('aria-current', 'page')
+    // #2484: its triggers under it, each with its last run and pause or resume.
+    const triggers = await within(swap).findByRole('list', { name: 'Triggers' })
+    const hourly = within(triggers).getByRole('listitem', { name: /Every hour/ })
+    expect(within(hourly).getByRole('link', { name: 'run, succeeded' })).toHaveAttribute('href', '/workflows/runs/run-done')
+    expect(within(hourly).getByRole('button', { name: 'Pause' })).toBeInTheDocument()
+    expect(plates.querySelector('[aria-label="Triggers"]')).toBeNull()
   })
 
   it('archives a flow from the Flows tab, after saying what happens to its runs, and shows it again (#2485)', async () => {
@@ -70,13 +76,15 @@ describe('WorkflowsPage', () => {
     const flows = await screen.findByRole('list', { name: 'Flows' })
     const swap = () => flowRow('swap')
     await user.click(within(swap()!).getByRole('button', { name: 'Archive' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Archive swap?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Archive swap?' })
     expect(dialog).toHaveTextContent('Runs in progress keep running')
+    // The agent may confirm an archive, as before #3653; a delete stays the user's own.
+    expect(within(dialog).getByRole('button', { name: 'Archive' })).not.toHaveAttribute('data-agent-user-only')
     await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(swap()).toBeNull())
     expect(within(flows).getAllByRole('listitem')).toHaveLength(2)
 
-    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await user.click(screen.getByRole('switch', { name: 'Show archived' }))
     await waitFor(() => expect(swap()).not.toBeNull())
     expect(swap()).toHaveTextContent('Archived by you, in the browser')
     await user.click(within(swap()!).getByRole('button', { name: 'Unarchive' }))
@@ -93,13 +101,13 @@ describe('WorkflowsPage', () => {
     const plates = () => flowRow('plates')
     expect(flows).toBeInTheDocument()
     await user.click(within(plates()!).getByRole('button', { name: 'Delete' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete plates?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete plates?' })
     expect(dialog).toHaveTextContent('Runs in progress keep running on the version they started with')
     expect(dialog).toHaveTextContent('Finished runs still show the script they ran')
     await user.click(within(dialog).getByRole('button', { name: 'Delete flow' }))
     await waitFor(() => expect(plates()).toBeNull())
 
-    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await user.click(screen.getByRole('switch', { name: 'Show archived' }))
     await waitFor(() => expect(plates()).toHaveTextContent('Deleted by you, in the browser'))
     expect(within(plates()!).queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     await user.click(within(plates()!).getByRole('button', { name: 'Restore v2' }))
@@ -112,7 +120,7 @@ describe('WorkflowsPage', () => {
     const { user } = renderPage(<WorkflowsPage tab="flows" />)
     const flows = await screen.findByRole('list', { name: 'Flows' })
     expect(flows.querySelector('[data-flow="swap"]')).toBeNull()
-    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await user.click(screen.getByRole('switch', { name: 'Show archived' }))
     await waitFor(() => expect(flowRow('swap')).toHaveTextContent('Archived by an assistant (session s9)'))
   })
 
@@ -148,7 +156,7 @@ describe('WorkflowsPage', () => {
       { route: '/workflows/flows' },
     )
     await screen.findByRole('list', { name: 'Flows' })
-    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await user.click(screen.getByRole('switch', { name: 'Show archived' }))
     await waitFor(() => expect(flowRow('plates')).not.toBeNull())
     expect(within(flowRow('plates')!).queryByRole('button', { name: 'Start run' })).toBeNull()
     await user.click(within(flowRow('swap')!).getByRole('button', { name: 'Start run' }))

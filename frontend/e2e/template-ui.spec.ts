@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { choose } from './select'
 
 // The ui-demo and ui-broken templates are msw fixtures (src/mocks/templateUi.ts); the real
 // stack has neither.
@@ -80,7 +81,8 @@ test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
   const ui = page.getByTestId('template-ui')
   await expect(ui.locator('sb-param[name="wall_color"]')).toBeVisible()
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeHidden()
-  await ui.locator('sb-param[name="mode"]').getByRole('combobox').selectOption('ball_lid')
+  // #3672 — a Radix select in the template's shadow root; its list portals to the page.
+  await choose(page, ui.locator('sb-param[name="mode"]').getByRole('combobox'), 'Ball with snap-on lid')
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeVisible()
   await expect(page.getByTestId('ui-origin')).toHaveText('Custom interface · built-in')
   expect(await violations(page)).toEqual([])

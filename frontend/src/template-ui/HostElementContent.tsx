@@ -21,7 +21,11 @@ export interface ElementContext {
 }
 
 function Problem({ children }: { children: ReactNode }) {
-  return <p role="alert" className="px-3 py-2 text-[12px] text-warn">{children}</p>
+  return (
+    <p role="alert" className="m-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      {children}
+    </p>
+  )
 }
 
 function BoundParam({ element, context, extruders }: { element: HostElement; context: ElementContext; extruders: ReadonlyMap<string, number> }) {

@@ -7,9 +7,12 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  PrimeTowerChoice,
+  SupportsChoice,
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
+import { plateFields, plateKey } from './plateChoice'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -36,6 +39,12 @@ interface RunInput {
   options: PrintOptions
   /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
   printSequence: PrintSequence | null
+  /** #1899 — this print's supports; `null` (or absent) leaves them to the template and the process. */
+  supports?: SupportsChoice | null
+  /** #3628 — this print's prime tower; `null` (or absent) leaves it to the template and the process. */
+  primeTower?: PrimeTowerChoice | null
+  /** #717 — the filament profiles left on, by id. */
+  filamentProfiles?: string[]
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
@@ -58,6 +67,8 @@ function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes
   }
 }
 
+const NONE: string[] = []
+
 /**
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
  * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
@@ -76,11 +87,19 @@ export function useRunPrint({
   projectId,
   options,
   printSequence,
+  supports = null,
+  primeTower = null,
+  filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
   onRan,
 }: RunInput) {
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
+  const platesKey = plateKey(plate)
+  // By value: the caller builds a new array each render.
+  const profilesKey = filamentProfiles.join(',')
+  const supportsKey = JSON.stringify(supports)
+  const towerKey = JSON.stringify(primeTower)
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -113,8 +132,11 @@ export function useRunPrint({
     plan,
     overrides,
     printerId,
-    plate,
+    platesKey,
     printSequence,
+    supportsKey,
+    towerKey,
+    profilesKey,
     rackPosition,
     rackAlgorithm,
   ])
@@ -166,11 +188,10 @@ export function useRunPrint({
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         ...(copies === null ? {} : { copies }),
-        plate_id: plate === 'all' ? 1 : plate,
-        all_plates: plate === 'all',
+        ...plateFields(plate),
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
-        ...sliceOverrides(printSequence),
+        ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while

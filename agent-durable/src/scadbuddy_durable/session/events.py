@@ -83,8 +83,11 @@ def translate(
         if not isinstance(text, str) or not text:
             return []
         message = f"durable-{event['offset']}"
+        # A refused credential's notice (runner.py HeldText.mark_notice, #3703):
+        # shown, never retained.
+        notice = {"notice": True} if event.get("notice") is True else {}
         return [
-            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text},
+            {**base, "type": "assistant.text.delta", "messageId": message, "delta": text, **notice},
             {**base, "type": "assistant.text.done", "messageId": message},
         ]
     if kind == "tool_call":
@@ -201,13 +204,15 @@ class SessionEvents:
 
     @activity.defn(name="follow_session")
     async def follow_session(self, args: FollowArgs) -> FollowResult:
-        # A listed tier is the agent's free string: one that is not a tier is labelled
-        # outward, as an unlisted tool is, rather than reaching the transcript as is (#2839).
-        listed = {name: tier for name, tier in args.tiers.items() if tier in RISK_TIERS}
-        for name in args.tiers.keys() - listed.keys():
+        # A listed tier is the agent's free string, and a manifest's tier is the agent's
+        # SCADBUDDY_DURABLE_TOOLS_JSON: one that is not a tier, from either, is labelled
+        # outward, as an unlisted tool is, rather than reaching the transcript as is
+        # (#2839, #3245).
+        given = {e.name: e.tier for e in tools.manifest()} | args.tiers
+        tiers = {name: tier for name, tier in given.items() if tier in RISK_TIERS}
+        for name in sorted(given.keys() - tiers.keys()):
             # The tool, never the value: the value is the agent's free string (#3144).
-            activity.logger.warning("tool %s was listed with no known tier: labelled outward", name)
-        tiers = {e.name: e.tier for e in tools.manifest()} | listed
+            activity.logger.warning("tool %s has no known tier: labelled outward", name)
         at = [0]
         failed: str | None = None
         try:

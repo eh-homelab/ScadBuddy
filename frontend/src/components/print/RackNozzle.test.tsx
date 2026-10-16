@@ -1,5 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { choose } from '../../test/select'
 import type { RackPickView } from '../../api/types'
 import { RackNozzleLine, RackNozzleStep } from './RackNozzle'
 
@@ -44,14 +46,15 @@ describe('RackNozzleLine (#836)', () => {
 })
 
 describe('RackNozzleStep (#836, #2166)', () => {
-  it('is one list, Automatic or a position by hand, with how Automatic ranks them', () => {
+  it('is one list, Automatic or a position by hand, with how Automatic ranks them', async () => {
+    const user = userEvent.setup()
     const onAlgorithm = vi.fn()
     const onPosition = vi.fn()
     render(
       <RackNozzleStep rack={rack} algorithm="least_used" position={null} onAlgorithm={onAlgorithm} onPosition={onPosition} />,
     )
     expect(screen.getByRole('radio', { name: 'Automatic' })).toBeChecked()
-    fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
+    await choose(user, screen.getByRole('combobox', { name: 'Rack algorithm' }), 'Oldest first')
     expect(onAlgorithm).toHaveBeenCalledWith('oldest_first')
     fireEvent.click(screen.getByRole('radio', { name: /Position 2/ }))
     expect(onPosition).toHaveBeenLastCalledWith(2)

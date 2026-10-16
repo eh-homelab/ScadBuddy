@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getRealtime } from './realtime'
+import { getRealtime, type RealtimeSignal } from './realtime'
 
 export interface AsyncState<T> {
   data: T | undefined
@@ -54,7 +54,13 @@ export function useAsync<T>(
   load: () => Promise<T>,
   deps: readonly unknown[],
   topics: readonly string[] = [],
+  /** Which signals on `topics` are news for this read; every one when left out. */
+  news?: (signal: RealtimeSignal) => boolean,
 ): AsyncState<T> {
+  const isNews = useRef(news)
+  useEffect(() => {
+    isNews.current = news
+  })
   const [nonce, setNonce] = useState(0)
   const key = `${JSON.stringify(deps)}#${nonce}`
   const [snapshot, setSnapshot] = useState<Snapshot<T>>({ key: '' })
@@ -159,7 +165,11 @@ export function useAsync<T>(
   useEffect(() => {
     if (!topicList) return
     const realtime = getRealtime()
-    const stops = topicList.split('\n').map((topic) => realtime.subscribe(topic, () => refresh()))
+    const stops = topicList.split('\n').map((topic) =>
+      realtime.subscribe(topic, (signal) => {
+        if (!isNews.current || isNews.current(signal)) refresh()
+      }),
+    )
     followed.current = topicList
     return () => {
       followed.current = ''

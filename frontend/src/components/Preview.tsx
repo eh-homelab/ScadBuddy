@@ -2,7 +2,6 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -29,8 +28,11 @@ import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { ErrorBoundary } from './ErrorBoundary'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { RenderStage } from '../lib/useRenderJob'
 
 /** Seconds since ``since``, ticking; the server's clock may run ahead, so never below 0. */
@@ -48,9 +50,13 @@ const STAGE_LABELS: Record<RenderStage, string> = {
   render: 'running OpenSCAD',
   split: 'colouring the preview',
   solids: 'building each colour',
+  paint: 'carrying the painting over',
   thumbnail: 'drawing the covers',
   write: 'writing the 3MF',
 }
+
+/** A readout over the scene: a translucent card, so the model shows through its edges. */
+const CHIP = 'rounded-lg border bg-background/85 text-muted-foreground shadow-xs backdrop-blur-sm'
 
 /**
  * #1743 — below this the readouts shrink to one-line chips and the notes and warnings
@@ -150,7 +156,8 @@ interface Props {
    */
   rejected?: boolean
   /**
-   * #2444 — why nothing renders now: a value on the form is out of range (or no colour).
+   * #2444 — why nothing renders now: a value on the form `rangeProblem` refuses (a number
+   * out of range, say).
    * The last render stays, marked as not of these values; with none, this is said instead
    * of "Change a parameter to render.", which reads as if nothing were wrong.
    */
@@ -197,10 +204,16 @@ export function Preview({
   const onMeasured = useCallback((url: string, box: BoundingBox) => setMeasuredBox({ url, bbox: box }), [])
 
   // #2731 — the one plate of a multi-plate render the viewer chose to see alone, for
-  // that render only; null shows them all.
+  // that render only; null shows them all. Keyed by the job: a re-render coalesced onto
+  // the same job is the same render, so it keeps the plate shown (#2914).
   const [chosen, setChosen] = useState<{ jobId: string; plate: number }>()
-  const platesOfJob = job?.status === 'done' ? (job.plates?.length ?? 0) : 0
-  const alone = chosen && job && chosen.jobId === job.id && chosen.plate <= platesOfJob ? chosen.plate : null
+  // #2914 — the plates by their own index, which the 3MF names them by.
+  const plateIndices = job?.status === 'done' ? (job.plates ?? []).map((p) => p.index) : []
+  const platesOfJob = plateIndices.length
+  const alone =
+    chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
+  // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
+  const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url && alone !== null) {
@@ -289,6 +302,12 @@ export function Preview({
         onError={() => {
           if (!shown) return
           useLoader.clear(GLTFLoader, shown.url)
+          if (alone !== null && job) {
+            // One plate's mesh: every plate together still loads, so go back to it.
+            setPlateFailed({ jobId: job.id, plate: alone })
+            setChosen(undefined)
+            return
+          }
           setBrokenUrl(shown.url)
         }}
         fallback={(_, retry) => <PreviewFailed captureRef={captureRef} onRetry={retry} />}
@@ -386,10 +405,11 @@ export function Preview({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {(rendering || loading) && (
-              <span
+              <Badge
+                variant="outline"
                 data-testid="preview-rendering"
                 data-overlay="chip"
-                className={`flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-[12px]'}`}
+                className={`${CHIP} h-auto gap-2 font-normal ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'}`}
               >
                 <Spinner /> {live?.status === 'pending' ? 'Waiting' : 'Rendering'}
                 {live?.status === 'pending' && live.queue_position && !compact && (
@@ -399,7 +419,7 @@ export function Preview({
                   <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
                 )}
                 {live && <RenderElapsed since={live.created_at} />}
-              </span>
+              </Badge>
             )}
             {controls}
           </div>
@@ -421,14 +441,24 @@ export function Preview({
                   <RenderMessages {...messages} sourceLink={sourceLink} overlay />
                 </div>
               ))}
-            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
+            {/* The measured box too (#2866): a library plate framed by it has a size to show.
+                `shown` is checked as well only for its plates: there is no box without it. */}
+            {shown && bbox && <Dimensions bbox={bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
-                plates={platesOfJob}
+                plates={plateIndices}
                 chosen={alone}
                 compact={compact}
-                onChoose={(plate) => setChosen(plate === null ? undefined : { jobId: job.id, plate })}
+                onChoose={(plate) => {
+                  setPlateFailed(undefined)
+                  setChosen(plate === null ? undefined : { jobId: job.id, plate })
+                }}
               />
+            )}
+            {job && plateFailed?.jobId === job.id && (
+              <p role="status" className={`${CHIP} px-2 py-0.5 text-xs text-destructive`}>
+                Plate {plateFailed.plate} could not be shown alone; showing all plates.
+              </p>
             )}
           </div>
         )}
@@ -449,8 +479,8 @@ export function Preview({
           data-testid="preview-blocked"
           className={
             shown
-              ? 'pointer-events-none absolute inset-x-0 bottom-14 mx-auto w-fit max-w-[90%] rounded-[6px] border border-warn/40 bg-surface/90 px-3 py-1.5 text-center text-[12px] text-warn backdrop-blur-sm'
-              : 'absolute inset-0 flex items-center justify-center px-6 text-center text-[13px] text-warn'
+              ? 'pointer-events-none absolute inset-x-0 bottom-14 mx-auto w-fit max-w-[90%] rounded-lg border border-destructive/40 bg-background/90 px-3 py-1.5 text-center text-xs text-destructive shadow-xs backdrop-blur-sm'
+              : 'absolute inset-0 flex items-center justify-center px-6 text-center text-sm text-destructive'
           }
           style={clear}
         >
@@ -459,7 +489,7 @@ export function Preview({
       )}
       {!shown && !failed && !rendering && !rejected && !blocked && (
         <p
-          className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
+          className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground"
           style={clear}
         >
           Change a parameter to render.
@@ -481,32 +511,36 @@ function PlatePicker({
   compact,
   onChoose,
 }: {
-  plates: number
+  /** Each plate's own index. */
+  plates: number[]
   chosen: number | null
   compact: boolean
   onChoose: (plate: number | null) => void
 }) {
-  const options: (number | null)[] = [null, ...Array.from({ length: plates }, (_, i) => i + 1)]
+  const options: (number | null)[] = [null, ...plates]
   return (
-    <div
-      role="group"
+    <ToggleGroup
+      type="single"
+      size="sm"
+      spacing={0}
       aria-label="Plates shown"
       data-overlay="chip"
-      className={`pointer-events-auto flex max-w-full flex-wrap gap-0.5 rounded-[6px] border border-line bg-surface/90 p-0.5 backdrop-blur-sm ${compact ? 'text-[11px]' : 'text-[12px]'}`}
+      value={chosen === null ? 'all' : String(chosen)}
+      // A press on the plate already shown keeps it: there is always one view.
+      onValueChange={(next) => next && onChoose(next === 'all' ? null : Number(next))}
+      className={`${CHIP} pointer-events-auto max-w-full flex-wrap p-0.5 ${compact ? 'text-[11px]' : 'text-xs'}`}
     >
       {options.map((plate) => (
-        <button
+        <ToggleGroupItem
           key={plate ?? 'all'}
-          type="button"
-          aria-pressed={chosen === plate}
+          value={plate === null ? 'all' : String(plate)}
           aria-label={plate === null ? 'All plates' : `Plate ${plate} alone`}
-          onClick={() => onChoose(plate)}
-          className={`sb-num rounded-[4px] px-2 py-0.5 ${chosen === plate ? 'bg-accent text-accent-ink' : 'text-muted hover:text-ink'}`}
+          className="sb-num h-6 min-w-6 rounded-md! px-2 text-[inherit] data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
         >
           {plate === null ? 'All' : plate}
-        </button>
+        </ToggleGroupItem>
       ))}
-    </div>
+    </ToggleGroup>
   )
 }
 
@@ -527,10 +561,10 @@ function PreviewFailed({
     <div
       role="alert"
       data-testid="preview-failed"
-      className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-[13px] text-muted"
+      className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-sm text-muted-foreground"
     >
       Could not load the preview.
-      <Button size="sm" onClick={onRetry}>
+      <Button type="button" variant="outline" size="sm" onClick={onRetry}>
         Try again
       </Button>
     </div>
@@ -543,7 +577,7 @@ function PlateBadge({ plate, compact }: { plate: Plate; compact: boolean }) {
     <span
       data-testid="plate-badge"
       data-overlay="chip"
-      className={`sb-num rounded-[6px] border border-line bg-surface/90 px-2 text-[11px] text-faint backdrop-blur-sm ${compact ? 'py-0.5' : 'py-1'}`}
+      className={`${CHIP} sb-num px-2 text-[11px] ${compact ? 'py-0.5' : 'py-1'}`}
     >
       {/* #1743 — short of room, the size alone: it is what the scene draws. */}
       {compact ? (
@@ -567,11 +601,11 @@ function Dimensions({ bbox, plates, compact }: { bbox: BoundingBox; plates: numb
         aria-label="Bounding box"
         data-testid="bbox-readout"
         data-overlay="chip"
-        className="sb-num rounded-[6px] border border-line bg-surface/90 px-2 py-0.5 text-[11px] text-ink backdrop-blur-sm"
+        className={`${CHIP} sb-num px-2 py-0.5 text-[11px] text-foreground`}
       >
         {formatBbox(bbox, unit)}
         {plates > 1 && (
-          <span data-testid="plate-count" className="text-faint">
+          <span data-testid="plate-count" className="text-muted-foreground">
             {` · ${plates} plates`}
           </span>
         )}
@@ -582,15 +616,15 @@ function Dimensions({ bbox, plates, compact }: { bbox: BoundingBox; plates: numb
     <dl
       data-testid="bbox-readout"
       data-overlay="chip"
-      className="w-fit self-start rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+      className={`${CHIP} w-fit self-start px-2.5 py-1.5`}
     >
-      <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
-      <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox, unit)}</dd>
+      <dt className="text-[10px] tracking-wide">Bounding box</dt>
+      <dd className="sb-num mt-0.5 text-sm text-foreground">{formatBbox(bbox, unit)}</dd>
       {/* #289 — the preview draws every plate at once; the 3MF splits them. */}
       {plates > 1 && (
         <>
-          <dt className="mt-1 text-[10px] tracking-wide text-faint">Plates</dt>
-          <dd data-testid="plate-count" className="sb-num mt-0.5 text-[13px] text-ink">
+          <dt className="mt-1 text-[10px] tracking-wide">Plates</dt>
+          <dd data-testid="plate-count" className="sb-num mt-0.5 text-sm text-foreground">
             {plates}, shown together
           </dd>
         </>
@@ -599,18 +633,12 @@ function Dimensions({ bbox, plates, compact }: { bbox: BoundingBox; plates: numb
   )
 }
 
-/**
- * The top layer, where a popover escapes the preview's clipping. Without it (jsdom has
- * none) the panel is fixed-position in place, which the clipping does not reach either.
- */
-const POPOVER = typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype
-
 const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 
 /**
  * #1744 — the notes and warnings folded into one chip, for a preview without room to
- * show them open. It opens them in a popover in the top layer, clear of the preview's
- * clipping; Escape or a press elsewhere closes it.
+ * show them open. It opens them in a popover (#3672: Radix's, portalled clear of the
+ * preview's clipping); Escape or a press elsewhere closes it.
  */
 function MessagesChip({
   warnings,
@@ -623,80 +651,27 @@ function MessagesChip({
   compact: boolean
   children: ReactNode
 }) {
-  const [open, setOpen] = useState(false)
-  const chip = useRef<HTMLButtonElement>(null)
-  const popover = useRef<HTMLDivElement>(null)
-  const id = useId()
-
-  useLayoutEffect(() => {
-    const panel = popover.current
-    const anchor = chip.current
-    if (!open || !panel || !anchor) return
-    if (POPOVER) panel.showPopover()
-    const place = () => {
-      const box = anchor.getBoundingClientRect()
-      const below = box.top < window.innerHeight / 2
-      panel.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - panel.offsetWidth - 8))}px`
-      panel.style.top = below ? `${box.bottom + 4}px` : 'auto'
-      panel.style.bottom = below ? 'auto' : `${window.innerHeight - box.top + 4}px`
-      panel.style.maxHeight = `${(below ? window.innerHeight - box.bottom : box.top) - 12}px`
-    }
-    place()
-    panel.focus()
-    window.addEventListener('resize', place)
-    return () => window.removeEventListener('resize', place)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setOpen(false)
-      chip.current?.focus()
-    }
-    const onPointer = (event: PointerEvent) => {
-      const target = event.target as Node
-      if (popover.current?.contains(target) || chip.current?.contains(target)) return
-      setOpen(false)
-    }
-    document.addEventListener('keydown', onKey)
-    document.addEventListener('pointerdown', onPointer)
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      document.removeEventListener('pointerdown', onPointer)
-    }
-  }, [open])
-
   return (
-    <>
-      <button
-        ref={chip}
-        type="button"
-        data-overlay="chip"
-        aria-expanded={open}
-        aria-controls={open ? id : undefined}
-        onClick={() => setOpen((was) => !was)}
-        className={`pointer-events-auto rounded-[6px] border bg-surface/90 px-2 text-[11px] backdrop-blur-sm hover:bg-surface ${compact ? 'py-0.5' : 'py-1'} ${warnings > 0 ? 'border-warn/45 text-warn' : 'border-line text-muted'}`}
-      >
-        {[warnings > 0 && count(warnings, 'warning'), notes > 0 && count(notes, 'note')]
-          .filter(Boolean)
-          .join(' · ')}
-      </button>
-      {open && (
-        <div
-          ref={popover}
-          id={id}
-          popover={POPOVER ? 'manual' : undefined}
-          tabIndex={-1}
-          role="group"
-          aria-label="About this render"
-          className="m-0 flex w-max max-w-[min(32rem,calc(100vw-1rem))] flex-col gap-2 overflow-auto border-0 bg-transparent p-0 outline-none"
-          style={{ position: 'fixed', inset: 'auto' }}
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-overlay="chip"
+          className={`${CHIP} pointer-events-auto px-2 text-[11px] hover:bg-background ${compact ? 'py-0.5' : 'py-1'} ${warnings > 0 ? 'border-destructive/45 text-destructive' : ''}`}
         >
-          {children}
-        </div>
-      )}
-    </>
+          {[warnings > 0 && count(warnings, 'warning'), notes > 0 && count(notes, 'note')]
+            .filter(Boolean)
+            .join(' · ')}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        aria-label="About this render"
+        collisionPadding={8}
+        className="max-h-(--radix-popover-content-available-height) w-max max-w-[min(32rem,calc(100vw-1rem))] gap-2 overflow-auto bg-transparent p-0 shadow-none ring-0"
+      >
+        {children}
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -731,7 +706,7 @@ function RenderMessages({
  * In the popover it is an ordinary panel.
  */
 const panelClass = (overlay: boolean, border: string) =>
-  `w-fit max-w-[min(32rem,100%)] rounded-[6px] border ${border} px-2.5 py-1.5 ${overlay ? 'pointer-events-none bg-surface/90 backdrop-blur-sm' : 'bg-surface'}`
+  `w-fit max-w-[min(32rem,100%)] rounded-lg border ${border} px-2.5 py-1.5 shadow-xs ${overlay ? 'pointer-events-none bg-background/85 backdrop-blur-sm' : 'bg-popover'}`
 
 /**
  * #285 — what the template echoed as `NOTE:`/`WARNING:` on a successful render: a
@@ -744,10 +719,10 @@ function RenderNotes({ notes, overlay }: { notes: string[]; overlay: boolean }) 
       data-testid="render-notes"
       data-overlay="panel"
       aria-label="Notes from the template"
-      className={panelClass(overlay, 'border-line')}
+      className={panelClass(overlay, 'border-border')}
     >
-      <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
-      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
+      <h3 className="text-[10px] font-medium tracking-wide text-muted-foreground">From the template</h3>
+      <ul className="mt-0.5 space-y-0.5 text-xs leading-snug text-foreground">
         {/* An index key: a display-only list, and its text need not be unique. */}
         {notes.map((note, index) => (
           <li key={index}>{note}</li>
@@ -775,18 +750,18 @@ function OpenScadWarnings({
     <section
       aria-label="OpenSCAD warnings"
       data-overlay="panel"
-      className={panelClass(overlay, 'border-warn/45')}
+      className={panelClass(overlay, 'border-destructive/45')}
     >
-      <h3 className="flex items-center gap-2 text-[10px] tracking-wide text-warn">
+      <h3 className="flex items-center gap-2 text-[10px] font-medium tracking-wide text-destructive">
         From OpenSCAD
         {sourceLink && (
           <span className="pointer-events-auto text-[11px] tracking-normal underline">{sourceLink}</span>
         )}
       </h3>
-      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-warn">
+      <ul className="mt-0.5 space-y-0.5 text-xs leading-snug text-destructive">
         {diagnostics.map((diagnostic, index) => (
           <li key={index} className="flex gap-2">
-            <span className="sb-num shrink-0 text-faint">
+            <span className="sb-num shrink-0 text-muted-foreground">
               {diagnostic.line == null
                 ? ''
                 : diagnostic.file && diagnostic.file !== 'model.scad'
@@ -821,11 +796,11 @@ function RenderWarnings({
       aria-label="Render warnings"
       data-overlay={inline ? undefined : 'panel'}
       className={
-        inline ? 'max-h-28 overflow-auto border-b border-warn/25 px-3 py-2' : panelClass(overlay, 'border-warn/45')
+        inline ? 'max-h-28 overflow-auto border-b border-destructive/25 px-3 py-2' : panelClass(overlay, 'border-destructive/45')
       }
     >
-      <h3 className="text-[10px] tracking-wide text-warn">From ScadBuddy</h3>
-      <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-[12px] leading-snug text-warn">
+      <h3 className="text-[10px] font-medium tracking-wide text-destructive">From ScadBuddy</h3>
+      <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-xs leading-snug text-destructive">
         {warnings.map((warning, index) => (
           <li key={index}>{warning}</li>
         ))}
@@ -853,10 +828,10 @@ function RenderError({
   return (
     <div
       // #1743 — no taller than the preview, which clips it: on a short one it scrolls.
-      className="absolute inset-x-3 bottom-3 max-h-[calc(100%-1.5rem)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
+      className="absolute inset-x-3 bottom-3 max-h-[calc(100%-1.5rem)] overflow-auto rounded-xl border border-destructive/45 bg-popover/95 shadow-md backdrop-blur-sm"
       style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
     >
-      <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
+      <p className="border-b border-destructive/25 px-3 py-2 text-sm font-medium text-destructive">
         {cancelled
           ? 'This render was cancelled. A newer request replaced it before it finished — your parameters were not the problem.'
           : ownFailure
@@ -866,7 +841,7 @@ function RenderError({
       {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre
         data-testid="render-log"
-        className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted"
+        className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted-foreground"
       >
         {(ownFailure ? error : log) || 'No log output was captured.'}
       </pre>
@@ -971,10 +946,12 @@ function PlateOutline({
         <edgesGeometry args={[outline]} attach="geometry" />
         <lineBasicMaterial color={theme.edge} attach="material" />
       </lineSegments>
+      {/* A DOM overlay, so `captureSnapshot` with `plate: true` draws the outlines without
+          these numbers (#2866). Nothing that snapshots a multi-plate row needs them yet. */}
       <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
         <span
           data-testid="plate-label"
-          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-muted select-none"
+          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-subtle select-none"
         >
           Plate {number}
         </span>
@@ -1006,7 +983,12 @@ function Model({
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
-  // put it on the bed) is measured, so it is centred and framed like any other.
+  // put it on the bed) is measured, so it is centred and framed like any other. It is
+  // measured on the loader's own scene, never on the drawn clone (#3026 review): the
+  // clone is mounted under the offset group, whose world matrix can still hold the last
+  // render's offset until the next demand frame, and `setFromObject` reads it. The
+  // loader's scene is never mounted, so its box is model space; `clone(true)` copies the
+  // local transforms and shares the geometry, so it is the clone's box too.
   useEffect(() => {
     if (bbox) return
     const box = new THREE.Box3().setFromObject(gltf.scene)

@@ -24,6 +24,19 @@ describe('DurableSubagentsSetting', () => {
     expect(await api.getDurableSubagents()).toEqual({ url: IN_CLUSTER, peers: ['10.42.0.0/16', '10.43.1.2'] })
   })
 
+  it('shows the URL as the agent stored it, parsed, once saved (#3054)', async () => {
+    const { user, unmount } = renderPage(<DurableSubagentsSetting />)
+    const url = await screen.findByRole('textbox', { name: URL_LABEL })
+    await user.type(url, 'HTTP://ScadBuddy.svc')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    expect(url).toHaveValue('http://scadbuddy.svc/')
+    // And a fresh load reads it back as stored, not only the save's answer (#3766).
+    unmount()
+    renderPage(<DurableSubagentsSetting />)
+    expect(await screen.findByRole('textbox', { name: URL_LABEL })).toHaveValue('http://scadbuddy.svc/')
+  })
+
   it('saves empty fields as back to loopback', async () => {
     await api.putDurableSubagents({ url: IN_CLUSTER, peers: ['10.42.0.0/16'] })
     const { user } = renderPage(<DurableSubagentsSetting />)

@@ -3,12 +3,13 @@ import { useNavigate } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { FlowGrantSpec } from '../../api/types'
-import { initialValues, inputFields, toInputs, type InputField, type InputValues } from '../../lib/flowInputs'
+import { inputFields, type InputField } from '../../lib/flowInputs'
 import { flowRunPath } from '../../lib/flows'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Spinner } from '../ui/spinner'
 import { GrantEditor } from './GrantEditor'
+import { useInputs } from './inputsForm'
 
 type Schema = Record<string, unknown> | null
 type Mode = 'inputs' | 'grant'
@@ -31,16 +32,16 @@ export function StartRun({
   name,
   schema,
   disabled = false,
-  size = 'md',
-  variant = 'primary',
+  size = 'default',
+  variant = 'default',
   withGrant = false,
 }: {
   flowId: string
   name?: string
   schema?: Schema
   disabled?: boolean
-  size?: 'sm' | 'md'
-  variant?: 'primary' | 'default'
+  size?: 'sm' | 'default'
+  variant?: 'default' | 'outline'
   withGrant?: boolean
 }) {
   const navigate = useNavigate()
@@ -88,16 +89,23 @@ export function StartRun({
 
   return (
     <>
-      <Button variant={variant} size={size} onClick={() => void press('inputs')} disabled={disabled || busy}>
-        {busy && !form ? <Spinner /> : 'Start run'}
+      <Button
+        variant={variant}
+        size={size}
+        onClick={() => void press('inputs')}
+        disabled={disabled || busy}
+        aria-busy={busy && !form}
+      >
+        {busy && !form && <Spinner />}
+        Start run
       </Button>
       {withGrant && (
-        <Button size={size} onClick={() => void press('grant')} disabled={disabled || busy} {...USER_ONLY}>
+        <Button variant="outline" size={size} onClick={() => void press('grant')} disabled={disabled || busy} {...USER_ONLY}>
           Start with a grant…
         </Button>
       )}
       {error && !form && (
-        <p role="alert" className="text-[12.5px] text-warn">
+        <p role="alert" className="text-[12.5px] text-destructive">
           {error}
         </p>
       )}
@@ -131,30 +139,9 @@ function refusal(caught: unknown): string {
   return Array.isArray(problems) && problems.length > 0 ? problems.map(String).join('\n') : caught.detail
 }
 
-/** The form's values and errors, and the inputs once they parse. */
-function useInputs(fields: InputField[]) {
-  const [values, setValues] = useState<InputValues>(() => initialValues(fields))
-  const [errors, setErrors] = useState<Record<string, string>>({})
-  const parse = (): Record<string, unknown> | null => {
-    const parsed = toInputs(fields, values)
-    setErrors(parsed.errors)
-    return Object.keys(parsed.errors).length === 0 ? parsed.inputs : null
-  }
-  const rendered = fields.map((field) => (
-    <Field
-      key={field.name}
-      field={field}
-      value={values[field.name] ?? ''}
-      error={errors[field.name]}
-      onChange={(next) => setValues((now) => ({ ...now, [field.name]: next }))}
-    />
-  ))
-  return { parse, rendered }
-}
-
 function Refusal({ error }: { error?: string }) {
   return error ? (
-    <p role="alert" className="whitespace-pre-wrap text-[13px] text-warn">
+    <p role="alert" className="text-[13px] whitespace-pre-wrap text-destructive">
       {error}
     </p>
   ) : null
@@ -185,26 +172,29 @@ function InputsDialog({
   }
 
   return (
-    <Dialog
-      open
-      title={`Start ${name}`}
-      description="This flow takes inputs. Each starts at its default."
-      onClose={onClose}
-      footer={
-        <>
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{`Start ${name}`}</DialogTitle>
+          <DialogDescription>
+            This flow takes inputs. Each starts at its default; text you clear is sent empty, and a number or a choice
+            left blank takes its default.
+          </DialogDescription>
+        </DialogHeader>
+        <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-4">
+          {rendered}
+          <Refusal error={error} />
+        </form>
+        <DialogFooter>
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form={formId} disabled={busy}>
-            {busy ? <Spinner /> : 'Start run'}
+          <Button type="submit" form={formId} disabled={busy} aria-busy={busy}>
+            {busy && <Spinner />}
+            Start run
           </Button>
-        </>
-      }
-    >
-      <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-3">
-        {rendered}
-        <Refusal error={error} />
-      </form>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   )
 }
@@ -225,150 +215,30 @@ function GrantDialog({
 }) {
   const { parse, rendered } = useInputs(fields)
   return (
-    <Dialog
-      open
-      title="Start with a grant"
-      description="What the run's outward calls may do without asking you."
-      onClose={onClose}
-    >
-      {fields.length > 0 && (
-        <section aria-label="Inputs" className="mb-4 flex flex-col gap-3">
-          <h3 className="text-[13px] font-medium">Inputs</h3>
-          {rendered}
-        </section>
-      )}
-      <GrantEditor
-        submitLabel="Start run"
-        busy={busy}
-        onSubmit={(grant) => {
-          if (fields.length === 0) return onStart({ grant })
-          const inputs = parse()
-          if (inputs) onStart({ inputs, grant })
-        }}
-        onCancel={onClose}
-      />
-      <div className="mt-2">
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Start with a grant</DialogTitle>
+          <DialogDescription>What the run&apos;s outward calls may do without asking you.</DialogDescription>
+        </DialogHeader>
+        {fields.length > 0 && (
+          <section aria-label="Inputs" className="flex flex-col gap-4">
+            <h3 className="text-[13px] font-medium">Inputs</h3>
+            {rendered}
+          </section>
+        )}
+        <GrantEditor
+          submitLabel="Start run"
+          busy={busy}
+          onSubmit={(grant) => {
+            if (fields.length === 0) return onStart({ grant })
+            const inputs = parse()
+            if (inputs) onStart({ inputs, grant })
+          }}
+          onCancel={onClose}
+        />
         <Refusal error={error} />
-      </div>
+      </DialogContent>
     </Dialog>
-  )
-}
-
-
-const CONTROL =
-  'w-full rounded-[6px] border border-line bg-surface px-2 py-1.5 text-[13px] text-ink aria-[invalid=true]:border-warn'
-
-function Field({
-  field,
-  value,
-  error,
-  onChange,
-}: {
-  field: InputField
-  value: string | boolean
-  error?: string
-  onChange: (next: string | boolean) => void
-}) {
-  const id = useId()
-  const help = `${id}-help`
-  const described = [field.description || field.type === 'array' ? help : '', error ? `${id}-error` : '']
-    .filter(Boolean)
-    .join(' ')
-  const common = {
-    id,
-    'aria-invalid': error ? true : undefined,
-    'aria-describedby': described || undefined,
-    'aria-required': field.required && field.default === undefined ? true : undefined,
-  }
-  const label = (
-    <>
-      {field.label}
-      {field.required && field.default === undefined && <span className="text-warn"> *</span>}
-      {field.label !== field.name && <code className="ml-1.5 font-mono text-[11px] text-faint">{field.name}</code>}
-    </>
-  )
-  const hint = (field.description || field.type === 'array') && (
-    <p id={help} className="text-[12px] text-muted">
-      {field.description}
-      {field.type === 'array' && `${field.description ? ' ' : ''}One per line.`}
-    </p>
-  )
-  const problem = error && (
-    <p id={`${id}-error`} className="text-[12px] text-warn">
-      {error}
-    </p>
-  )
-
-  if (field.type === 'boolean') {
-    return (
-      <div className="flex flex-col gap-0.5">
-        <label htmlFor={id} className="flex w-fit items-center gap-2 text-[13px]">
-          <input {...common} type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} />
-          {label}
-        </label>
-        {hint}
-        {problem}
-      </div>
-    )
-  }
-
-  let control
-  if (field.enum) {
-    control = (
-      <select {...common} className={CONTROL} value={String(value)} onChange={(event) => onChange(event.target.value)}>
-        {/* With no default, nothing is chosen until the person chooses: never the first option shown chosen. */}
-        {field.default === undefined &&
-          (field.required ? (
-            <option value="" disabled>
-              Choose…
-            </option>
-          ) : (
-            <option value="">(none)</option>
-          ))}
-        {field.enum.map((option) => (
-          <option key={String(option)} value={String(option)}>
-            {String(option)}
-          </option>
-        ))}
-      </select>
-    )
-  } else if (field.type === 'array') {
-    control = (
-      <textarea
-        {...common}
-        rows={3}
-        className={`${CONTROL} font-mono`}
-        value={String(value)}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    )
-  } else if (field.type === 'integer' || field.type === 'number') {
-    control = (
-      <input
-        {...common}
-        type="number"
-        inputMode={field.type === 'integer' ? 'numeric' : 'decimal'}
-        step={field.type === 'integer' ? 1 : 'any'}
-        min={field.minimum}
-        max={field.maximum}
-        className={CONTROL}
-        value={String(value)}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    )
-  } else {
-    control = (
-      <input {...common} type="text" className={CONTROL} value={String(value)} onChange={(event) => onChange(event.target.value)} />
-    )
-  }
-  return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-[13px] font-medium">
-        {label}
-      </label>
-      {control}
-      {hint}
-      {problem}
-    </div>
   )
 }

@@ -14,23 +14,23 @@ test.describe('catalogue list mode (#278)', () => {
     await page.goto('/')
     await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByTestId('result-count')).toHaveText(`${all} of ${all}`)
-    const view = page.getByRole('group', { name: 'View' })
-    await view.getByRole('button', { name: 'List' }).click()
+    const view = page.getByRole('radiogroup', { name: 'View' })
+    await view.getByRole('radio', { name: 'List' }).click()
 
     await expect(page).toHaveURL(/\/\?view=list$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(all)
 
     await page.reload()
     await expect(page.locator('[data-model-row]')).toHaveCount(all)
-    await expect(view.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(view.getByRole('radio', { name: 'List' })).toHaveAttribute('aria-checked', 'true')
 
     // A URL with no `view` shows Cards, whatever was chosen before.
     await page.goto('/')
     await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(0)
-    await expect(view.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(view.getByRole('radio', { name: 'Cards' })).toHaveAttribute('aria-checked', 'true')
 
-    await view.getByRole('button', { name: 'List' }).click()
+    await view.getByRole('radio', { name: 'List' }).click()
     await expect(page).toHaveURL(/\/\?view=list$/)
 
     // Back undoes the toggle, Forward redoes it.

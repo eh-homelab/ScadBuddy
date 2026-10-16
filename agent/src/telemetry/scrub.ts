@@ -72,6 +72,27 @@ function withoutHeadMessage(stacktrace: string, message: string): string {
   return stacktrace
 }
 
+/** A short code that names a failure and quotes nothing: a SQLSTATE, an errno name. */
+const ERROR_CODE = /^[A-Z0-9_]{1,32}$/
+
+/**
+ * What a log line may say of an error (#1814): its name, never its message, which can
+ * quote a connection string or a query. The name is joined by the error's `code` when
+ * that is a short code (a postgres.js `57P01`, a socket's `ECONNREFUSED`) and its
+ * `status` when that is an HTTP status (a ToolError's backend answer): neither can
+ * carry a secret, and without them every database failure reads the same. Every
+ * `console.warn` of a caught error goes through this, so the rule lives in one place.
+ */
+export function errorName(err: unknown): string {
+  if (!(err instanceof Error)) return typeof err
+  const { code, status } = err as { code?: unknown; status?: unknown }
+  return [
+    err.name,
+    ...(typeof code === 'string' && ERROR_CODE.test(code) ? [code] : []),
+    ...(Number.isInteger(status) && (status as number) >= 100 && (status as number) <= 599 ? [String(status)] : []),
+  ].join(' ')
+}
+
 /** The V8 frame lines of a Node stack, with the head's `message` cut out first; nothing else. */
 export function framesOnly(stacktrace: string, message?: string): string {
   const text = message ? withoutHeadMessage(stacktrace, message) : stacktrace

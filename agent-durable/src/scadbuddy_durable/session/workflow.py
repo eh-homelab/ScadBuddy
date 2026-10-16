@@ -150,6 +150,8 @@ SESSION_FLOW_GRANT = "session-flow-grant"
 # A flow turn's call outside the grant (#2482): `on_outside="deny"` refuses it, and the
 # entry is the run's, with its hop and one timer for both hops.
 SESSION_FLOW_ESCALATION = "session-flow-escalation"
+#: A parent hop capped so the person's hop keeps the run's timeout (#2862).
+PERSON_KEEPS_TIMEOUT = "escalation-person-keeps-timeout"
 # An entry's timer at most (ai_pending_input's CHECK).
 ENTRY_MAX_S = 86_400
 # A session id, as ai_pending_input.parent_session holds it.
@@ -238,6 +240,17 @@ def _joined(append: str | None, note: str | None) -> str | None:
     """The turn's system append, with what this turn's listing said to tell the model."""
     parts = [p for p in (append, note) if p]
     return "\n\n".join(parts) if parts else None
+
+
+# What the plugin raises when a segment answered BUDGET_EXHAUSTED (``_fail`` with
+# ``f"Claude run failed: {seg.error}"``): that message exactly, with no cause. A failure
+# that only quotes the constant, amid other text or in a cause, is the session's content
+# and ends the turn failed (#3353).
+_BUDGET_FAILURE = f"Claude run failed: {BUDGET_EXHAUSTED}"
+
+
+def _budget_exhausted(err: FailureError) -> bool:
+    return err.cause is None and err.message == _BUDGET_FAILURE
 
 
 @workflow.defn(name=WORKFLOW)
@@ -409,7 +422,9 @@ class DurableSession:
             text = f"{err}: {err.cause}" if err.cause else str(err)
             if self._interrupted is not None:
                 outcome = "interrupted"
-            elif BUDGET_EXHAUSTED in text:
+            elif _budget_exhausted(err):
+                # Decides only _finish's arguments, never which commands run, so an old
+                # history replays the same without a workflow.patched() (#3353).
                 outcome = "budget_exhausted"
             else:
                 outcome, message = "failed", text[:MESSAGE_MAX]
@@ -674,7 +689,13 @@ class DurableSession:
                 ):
                     # The starter session first, for its hop; then the person. One
                     # timer covers both (spec §4.6): the agent's sweep moves it up.
-                    hop_s = min(hop_s, ENTRY_MAX_S - 1)
+                    # Each hop has the run's timeout (spec §4.6): a long parent hop is
+                    # cut so the person keeps theirs, rather than the whole being cut to
+                    # ENTRY_MAX_S and the person left a second or so (#2862).
+                    if workflow.patched(PERSON_KEEPS_TIMEOUT):
+                        hop_s = max(1, min(hop_s, ENTRY_MAX_S - timeout))
+                    else:
+                        hop_s = min(hop_s, ENTRY_MAX_S - 1)
                     hop.update(
                         hop="parent",
                         hop_until=_iso(workflow.now() + timedelta(seconds=hop_s)),

@@ -28,7 +28,6 @@ from scadbuddy.bambuddy.models import (
     PresetCatalogue,
     PresetRef,
 )
-from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +137,19 @@ CATALOGUE_VERSION = 1
 
 _ADAPTER = TypeAdapter(_Catalogue)
 
-#: Each file's catalogue as this process last parsed it, by the file's mtime.
+
+#: The public name for the catalogue a public caller holds (#3585 review).
+Catalogue = _Catalogue
+
+
+async def read_catalogue(client: BambuddyClient) -> Catalogue:
+    """The preset catalogue, read fresh from Bambuddy, as the check and the run read it;
+    :func:`cached_catalogue` is the print dialog's kept copy."""
+    return await _catalogue(client)
+
+
+#: The catalogue this process last parsed, by its file and that file's mtime: one
+#: entry, so a changed Bambuddy URL or key does not keep the old one alive (#3447).
 _parsed: dict[Path, tuple[int, _Catalogue]] = {}
 #: The background reads running in this process, one per file.
 _refreshing: dict[Path, asyncio.Task[None]] = {}
@@ -186,6 +197,7 @@ def _load(path: Path) -> tuple[float, _Catalogue] | None:
         held = _parsed.get(path)
         if held is None or held[0] != stat.st_mtime_ns:
             held = (stat.st_mtime_ns, _ADAPTER.validate_json(path.read_bytes()))
+            _parsed.clear()
             _parsed[path] = held
     except (OSError, ValidationError):
         return None
@@ -196,8 +208,13 @@ def _keep(path: Path, catalogue: _Catalogue) -> None:
     """Write ``path`` aside and rename it in, so another replica never reads half."""
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    partial.write_bytes(_ADAPTER.dump_json(catalogue))
-    partial.replace(path)
+    try:
+        partial.write_bytes(_ADAPTER.dump_json(catalogue))
+        partial.replace(path)
+    except OSError:
+        # Nothing sweeps this directory, so a write that failed part-way goes (#3447).
+        partial.unlink(missing_ok=True)
+        raise
 
 
 async def _refresh(config: BambuddyConfig, path: Path) -> None:
@@ -207,10 +224,20 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
         async with BambuddyClient(config) as client:
             catalogue = await _catalogue(client)
         await asyncio.to_thread(_keep, path, catalogue)
-    except (ApiError, OSError) as error:
+    except Exception as error:
+        # Nothing awaits this task, so whatever fails ends here, and only by its type:
+        # a pydantic error quotes Bambuddy's body (#3446).
         logger.warning(
             "could not refresh the kept preset catalogue", extra={"error": type(error).__name__}
         )
+
+
+async def stop_refreshes() -> None:
+    """Cancel this process's background reads and wait for them, at shutdown (#3446)."""
+    tasks = list(_refreshing.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def forget_catalogues() -> None:

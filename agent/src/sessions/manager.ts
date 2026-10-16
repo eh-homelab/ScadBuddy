@@ -1,9 +1,8 @@
-import { nestedQueries } from '../builtins/nested.js'
-import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import {
+  type EffortLevel,
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
@@ -16,50 +15,27 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { type CredentialSource, type PooledCredential, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
-import type { RiskTier, TierResolver } from '../harness/permissions.js'
+import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
-import {
-  DEFAULT_MAX_BUDGET_USD,
-  DEFAULT_MAX_TURNS,
-  harnessTierOf,
-  type HarnessRun,
-  runHarness,
-} from '../harness/run.js'
-import {
-  HTTP_SERVER,
-  type HttpLimits,
-  httpRequestEnabled,
-  httpRequestServer,
-  httpTierOf,
-  type SavedMeta,
-  savedBody,
-  SETTING_HTTP_REQUEST,
-} from '../harness/httpRequest.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
+import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import type { CheckedPlugin } from '../plugins/registry.js'
-import {
-  createMemoryHooks,
-  HindsightClient,
-  type MemoryActivity,
-  type MemoryHooks,
-  type MemoryOptions,
-  hindsightTarget,
-  turnRecallMaxQueryChars,
-} from '../memory/hindsight.js'
+import type { MemoryActivity, MemoryOptions } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
-import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import type { PackageServers } from '../plugins/packages/mcp.js'
+import { isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
-import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
-import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
+import { type AuditContext, type AuditDeps, type AuditSink, safeDetail } from '../audit/log.js'
 import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
@@ -92,8 +68,11 @@ import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
+import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.js'
+import { type WarmEntry, type WarmQuery, WarmSessions, type WarmTurn } from './warm.js'
+import { notifyWarmEvict } from './warmEvict.js'
+import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
 import { FlowQueue } from '../flows/queue.js'
-import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -142,10 +121,21 @@ import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 // renews the lease every `renewMs`; if its replica dies, the lease runs out
 // after `leaseMs` and the session can be sent to again, and the reaper
 // (`reapExpired`, every 30 s from main.ts) ends that turn: an interrupted event
-// and the session back to idle, since its own finish() never ran. The same
+// naming what this replica can tell of the cause, a `turn` audit row, and the
+// session back to idle, since its own finish() never ran (#2375). The same
 // renewal reads `interrupt_requested`, which is how an interrupt reaches a turn
 // running on another replica. On SIGTERM, `stopTurns` drains: no new turn,
-// running ones may finish, the rest are aborted and waited for.
+// running ones may finish, the rest are aborted and waited for, and the warm
+// processes are closed.
+//
+// Processes (unified runtime spec 2026-10-13 §5.3). A classic session's turns
+// run on one warm Claude Code per replica (`warm`, warm.ts), a streaming-input
+// query that each turn pushes its prompt into (warmTurn.ts): a turn after the
+// first spawns nothing while the process still matches it (its fingerprint,
+// the transcript tail, the budget), and respawns from the transcript when not.
+// A turn's cost is the difference of its process's cumulative total (§6.6).
+// An interrupt is `query.interrupt()`; the process answers with its result and
+// stays. A fallback to another credential respawns (§6.7).
 //
 // Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
 // call parks the turn in `waiting_approval` until a human decides
@@ -369,9 +359,59 @@ function abortMessage(signal: AbortSignal): string {
 }
 
 export const DEFAULT_LEASE_MS = 60_000
+/** A lapsed turn's `turn` row when a new turn took its session before the reaper ran (#3320). */
+export const TAKEN_OVER =
+  'the turn was stopped: its claim on the session lapsed and a new turn took the session (the replica running it stopped, or could not reach the database)'
 /** How long a handoff offer waits for its target (`handoff`). */
 export const HANDOFF_OFFER_TTL_MS = 60 * 60_000
 export const DEFAULT_RENEW_MS = 1_000
+/** A lease renewal this slow is logged (#2375): a minute without one and the reaper ends the turn. */
+export const SLOW_RENEW_MS = 5_000
+
+/**
+ * Renews a turn's lease every `everyMs`, one renewal at a time (#2375): one still
+ * waiting on a stalled pool is not joined by another every second, which would only
+ * queue more on the pool it waits for. A renewal that fails, or takes SLOW_RENEW_MS or
+ * more, is logged when it ends, and one still waiting at SLOW_RENEW_MS is logged then,
+ * once, so a renewal that never ends shows before the reaper says so (#2981 review).
+ * The lease covers several, but a minute of them is what ends the turn, and until now
+ * nothing said so. `stop` waits for the one in flight.
+ */
+export function renewLoop(renew: () => Promise<void>, everyMs: number, log: (line: string) => void): { stop(): Promise<void> } {
+  let inFlight: Promise<void> | undefined
+  let started = 0
+  let warned = false
+  const timer = setInterval(() => {
+    if (inFlight) {
+      const waited = Date.now() - started
+      if (!warned && waited >= SLOW_RENEW_MS) {
+        warned = true
+        log(`lease renewal still waiting after ${waited} ms`)
+      }
+      return
+    }
+    started = Date.now()
+    warned = false
+    inFlight = renew()
+      .then(
+        () => {
+          const took = Date.now() - started
+          if (took >= SLOW_RENEW_MS) log(`lease renewal took ${took} ms`)
+        },
+        // One line a renewal: a failure says how long it took (#3321).
+        (err: unknown) => log(`lease renewal failed after ${Date.now() - started} ms: ${describe(err)}`),
+      )
+      .finally(() => {
+        inFlight = undefined
+      })
+  }, everyMs)
+  return {
+    async stop() {
+      clearInterval(timer)
+      await inFlight
+    },
+  }
+}
 
 export type SessionErrorCode =
   | 'not_found'
@@ -537,8 +577,12 @@ export type SessionRecord = {
  * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
  * query's `total_cost_usd` does not hold that part.
  */
-type ClaimedSession = SessionRecord & {
+export type ClaimedSession = SessionRecord & {
   unpricedCostUsd: number
+  /** A Workflow agent's chat (startChild): its own model, effort and subagent definition. */
+  agentModel: string | null
+  agentEffort: EffortLevel | null
+  agentType: string | null
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -549,9 +593,14 @@ type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+
+const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  agentModel: row.agent_model,
+  agentEffort: row.agent_effort,
+  agentType: row.agent_type,
   claimedAt: row.claimed_at,
 })
 
@@ -638,8 +687,46 @@ export type ListFilter = {
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
 
-/** Runs one query; `runHarness` in production, a scripted stand-in in unit tests. */
+/**
+ * Starts one Claude Code process's query (the warm cache's spawn, warm.ts);
+ * `runHarness` in production, a scripted stand-in in unit tests. The stream
+ * serves every turn of the process: its `prompt` is the process's inbox.
+ */
 export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
+
+/** A warm process per replica past which the least recently used idle one goes (spec 2026-10-13 §5.3, D3) (main.ts passes the stored `warm_max_per_replica`). */
+export const DEFAULT_WARM_MAX_ENTRIES = 8
+/** How long a warm process may sit idle (spec §5.3: the same 10 min as temporal/sessionClients.ts) (main.ts passes the stored `warm_idle_seconds`). */
+export const DEFAULT_WARM_IDLE_MS = 600_000
+
+const isWarmQuery = (stream: AsyncIterable<SDKMessage>): stream is WarmQuery =>
+  typeof (stream as Partial<WarmQuery>).interrupt === 'function' && typeof (stream as Partial<WarmQuery>).close === 'function'
+
+/**
+ * The cache's `start` over a QueryRunner: a stream with its own `interrupt`
+ * and `close` (the SDK's Query, as runHarness returns it) is used as it is; a
+ * plain one (a scripted stand-in) is given an abort signal, which `interrupt`
+ * and `close` abort, as the SDK's abort ends a query.
+ */
+function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
+  return (spawn) => {
+    const controller = new AbortController()
+    const started = run({ ...spawn, signal: controller.signal })
+    if (isWarmQuery(started)) return started
+    const iterator = started[Symbol.asyncIterator]()
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      interrupt: () => {
+        controller.abort(new Error('the turn was interrupted'))
+        return Promise.resolve(undefined)
+      },
+      close: () => {
+        controller.abort(new Error('the process was closed'))
+        void iterator.return?.().catch(() => {})
+      },
+    }
+  }
+}
 
 export type SessionManagerDeps = {
   sql: Sql
@@ -721,8 +808,14 @@ export type SessionManagerDeps = {
    * name CronCreate and the rest gets the session's in place of Claude Code's own, which
    * end with the turn. Without it those are Claude Code's.
    */
-  background?: { tasks: BackgroundTasks; tz: string }
+  background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner
+  /**
+   * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
+   * DEFAULT_WARM_MAX_ENTRIES and DEFAULT_WARM_IDLE_MS when omitted, and where
+   * it says why each process went.
+   */
+  warm?: { maxEntries?: number; idleMs?: number; log?: (message: string) => void }
   /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
   nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
@@ -734,13 +827,15 @@ export type SessionManagerDeps = {
    * these (`resumeApproved`).
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
+  payloadKeys?: PayloadKeys
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
   /**
    * The audit log (#258, audit/log.ts): every tool call a turn makes
    * (audit/turn.ts), and every approval decision.
    */
-  audit?: AuditLog
+  audit?: AuditDeps
   /**
    * How often a parked turn polls its approval, or its question (#940), for a
    * decision or answer given on another replica: one interval for both.
@@ -935,6 +1030,14 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
 /** A turn running in this process. */
 type LocalTurn = {
   controller: AbortController
+  /** The turn this is, so the reaper attributes only its own dead turn to it. */
+  turnId: string
+  /**
+   * Set once the turn's claim is gone (a renewal found none, or the reaper took it):
+   * the turn then ends without finish(), whose session-wide approval cancel would
+   * reach a newer turn's (#2981 review).
+   */
+  lost: boolean
   /**
    * Set once the SDK has produced the turn's result (or the stream ended):
    * the turn is finishing on its own, and aborting now would only cut off the
@@ -973,8 +1076,14 @@ export class SessionManager {
    * are both configured; main.ts sets it. Without it a durable session is refused.
    */
   durableTurns: DurableTurns | undefined
+  /**
+   * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
+   * one per classic session, serving its turns until it no longer matches
+   * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
+   * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
+   */
+  readonly warm: WarmSessions
   private readonly deps: SessionManagerDeps
-  private readonly run: QueryRunner
   private readonly leaseMs: number
   private readonly renewMs: number
   /** Turns running in THIS process, by session id. */
@@ -986,10 +1095,12 @@ export class SessionManager {
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
   private readonly files: SessionFiles
+  /** Assembles each turn's query options (turnRunner.ts). */
+  private readonly runner: TurnRunner
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql)
+    this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
@@ -1016,10 +1127,19 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.warm = new WarmSessions({
+      sql: deps.sql,
+      store: this.store,
+      maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
+      idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
+      ...(deps.run ? { start: startedQuery(deps.run) } : {}),
+      ...(deps.warm?.log ? { log: deps.warm.log } : {}),
+    })
     this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
+      ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
       send: async (id, owner, text, tiers) => {
         await this.send(id, owner, text, { tiers })
@@ -1031,9 +1151,10 @@ export class SessionManager {
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
-    this.run = deps.run ?? runHarness
+    this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
   }
@@ -1046,6 +1167,31 @@ export class SessionManager {
     if (!isUuid(id)) return undefined
     const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_sessions WHERE id = $1`, [id])
     return row ? record(row) : undefined
+  }
+
+  /**
+   * Drops each idle warm process that a fresh assembly of its session would
+   * not reuse (warm.ts `revalidate`): the periodic backstop for a NOTIFY that
+   * never arrived (sessions/runtimeSync.ts). The session's owner and the
+   * process's own tiers and retry bound stand in for the turn's, as they are
+   * all fingerprint inputs a turn does not change.
+   */
+  revalidateWarm(): Promise<void> {
+    return this.warm.revalidate(async (entry) => {
+      // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
+      const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        [entry.sessionId],
+      )
+      if (!row) return undefined
+      const parts = entry.turn.fingerprintParts
+      const fresh = await this.runner.assemble(claimed(row), parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
+        // A rate-limited credential is still the one a healthy process runs on.
+        includeCooling: true,
+      })
+      fresh.fingerprintParts.transientRetries = parts.transientRetries
+      return fresh
+    })
   }
 
   /** The session if the principal may see it; otherwise not_found (existence is not revealed). */
@@ -1269,6 +1415,38 @@ export class SessionManager {
   }
 
   /**
+   * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
+   * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
+   * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
+   * It starts empty: the agent's task is its first turn.
+   */
+  async startChild(
+    parentId: string,
+    principal: Owner,
+    options: { title: string; tags?: string[]; agent?: { model?: string | undefined; effort?: string | undefined; type?: string | undefined } },
+  ): Promise<SessionRecord> {
+    const parent = await this.get(parentId, principal)
+    const id = randomUUID()
+    const session = await this.insert(
+      id,
+      principal,
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
+      { budgetOf: parent },
+    )
+    const agent = options.agent
+    if (agent && (agent.model || agent.effort || agent.type)) {
+      await this.deps.sql`
+        UPDATE ai_sessions SET agent_model = ${agent.model ?? null}, agent_effort = ${agent.effort ?? null}, agent_type = ${agent.type ?? null}
+         WHERE id = ${id}`
+    }
+    await this.events.append(id, [
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
+      event({ type: 'session.status', sessionId: id, status: 'idle' }),
+    ])
+    return session
+  }
+
+  /**
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
@@ -1294,13 +1472,15 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const claim = await this.claimSession(
+      id,
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
+       FROM prev
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, prev.prev_turn_id`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1325,6 +1505,46 @@ export class SessionManager {
   }
 
   /**
+   * Claims session `id` with `query`, an UPDATE that takes it when it is free or its
+   * lease has run out (`$1` its id; it joins `FROM prev` and returns `prev.prev_turn_id`),
+   * and reads in the same statement the turn it took over, if any (#3320). An expired lease is either reaped,
+   * and reapExpired writes that turn's `turn` row, or taken here, and this writes it:
+   * each lapsed turn gets exactly one, whichever replica ran it. The CTE locks the row
+   * before the UPDATE runs (joined, so it is read first: one read only in RETURNING
+   * would run after the UPDATE and find nothing to lock), so a reaper's UPDATE and this
+   * one are ordered and only one sees the turn. One statement, not a transaction, so a
+   * claim costs the pool one round trip (#2981 review).
+   */
+  private async claimSession(
+    id: string,
+    query: string,
+    params: (string | number)[],
+  ): Promise<ClaimRow | undefined> {
+    const [row] = await this.deps.sql.unsafe<(ClaimRow & { prev_turn_id: string | null })[]>(
+      `WITH prev AS (SELECT turn_id::text AS prev_turn_id FROM ai_sessions WHERE id = $1 FOR UPDATE)
+       ${query}`,
+      params,
+    )
+    const claim: ClaimRow | undefined = row
+    const taken = row?.prev_turn_id ?? undefined
+    if (claim && taken) {
+      // Not awaited: the send it is on would wait for it. record() settles on its own,
+      // and reports a write that never lands (audit/log.ts).
+      void this.deps.audit?.record({
+        kind: 'turn',
+        action: 'lost_claim',
+        surface: 'harness',
+        actor: { kind: claim.owner_kind, id: claim.owner_id, label: claim.owner_label },
+        sessionId: id,
+        turnId: taken,
+        outcome: 'error',
+        detail: TAKEN_OVER,
+      })
+    }
+    return claim
+  }
+
+  /**
    * Runs the turn that re-makes an approved call after its turn was lost
    * (#258: the approval was decided after a restart). Claims the session
    * like send() does, but for the decider rather than the owner: approving is
@@ -1338,13 +1558,15 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const claim = await this.claimSession(
+      approval.sessionId,
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
+       FROM prev
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, prev.prev_turn_id`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1465,7 +1687,7 @@ export class SessionManager {
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
     const controller = new AbortController()
-    const local: LocalTurn = { controller, settling: false }
+    const local: LocalTurn = { controller, turnId, settling: false, lost: false }
     this.active.set(id, local)
     const text = options.context ? `${prompt}\n\n${options.context}` : prompt
     const query = options.images?.length ? userPrompt(text, options.images) : text
@@ -1518,19 +1740,14 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    const registryTierOf = this.deps.tierOf ?? (() => undefined)
-    // The http tools' tier depends on the method in their input (#827).
-    const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
-    // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies.
-    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
-    let builtIn: BuiltInPolicy | undefined
-    const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
-    let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
-    // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
-    const asksUser = session.owner.kind === 'browser'
-    const shownTierOf: TierResolver = (name, input) =>
-      asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
+    /**
+     * The assembly whose process serves the turn (TurnRunner): the turn's own
+     * until the cache answers with a process spawned from another (warmTurn.ts),
+     * whose tiers, redactions and hooks are the turn's from then on.
+     */
+    let turn: AssembledTurn | undefined
+    const eventTierOf: TierResolver = (name, input) => turn?.eventTierOf(name, input)
+    const shownTierOf: TierResolver = (name, input) => turn?.shownTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf, this.deps.titleOf)
     const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
@@ -1549,12 +1766,11 @@ export class SessionManager {
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
     let result: SDKResultMessage | undefined
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
+    /** The warm entries the turn ran on (one per attempt): each one's slot is cleared once the turn has finished. */
+    const served: WarmEntry[] = []
     try {
-      let lost = false
-      /** Redacted from everything this turn writes to the durable event log. */
-      let secrets: string[] = []
-      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer).
-      let nestedUsd = 0
+      /** Redacted from everything this turn writes to the durable event log: every assembly's secrets the turn ran with. */
+      let secrets: readonly string[] = []
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
         ? new TurnAuditor(this.deps.audit, {
@@ -1566,25 +1782,24 @@ export class SessionManager {
           })
         : undefined
 
-      // Lease renewal, and the interrupt flag from other replicas.
-      let renewing: Promise<unknown> = Promise.resolve()
-      const renew = setInterval(() => {
-        renewing = sql<{ interrupt_requested: boolean }[]>`
-          UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
-          WHERE id = ${id} AND turn_id = ${turnId}
-          RETURNING interrupt_requested`
-          .then((rows) => {
-            if (rows.length === 0) {
-              lost = true
-              controller.abort(new Error('lost the turn claim'))
-            } else if (rows[0]?.interrupt_requested) {
-              controller.abort(new Error('the turn was interrupted'))
-            }
-          })
-          .catch(() => {
-            // A database blip: keep running; the lease covers several misses.
-          })
-      }, this.renewMs)
+      // Lease renewal, and the interrupt flag from other replicas. A database blip
+      // keeps the turn running: the lease covers several misses (renewLoop logs them).
+      const renewal = renewLoop(
+        async () => {
+          const rows = await sql<{ interrupt_requested: boolean }[]>`
+            UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
+            WHERE id = ${id} AND turn_id = ${turnId}
+            RETURNING interrupt_requested`
+          if (rows.length === 0) {
+            local.lost = true
+            controller.abort(new Error('lost the turn claim'))
+          } else if (rows[0]?.interrupt_requested) {
+            controller.abort(new Error('the turn was interrupted'))
+          }
+        },
+        this.renewMs,
+        (line) => this.deps.stderr?.(`session ${id} turn ${turnId}: ${line}\n`),
+      )
 
       let failure: string | undefined
       /** The model request the turn is cut off in, if it is: Claude Code never prices it (#991). */
@@ -1603,7 +1818,7 @@ export class SessionManager {
         if (auditor) for (const e of events) await auditor.observe(e)
       }
       const show = async (message: SDKMessage) => {
-        await pluginCheck?.(message)
+        await turn?.observe(message)
         let events = mapper.map(message)
         // A result's images are stored before the event that names them is
         // logged (#782), so no watcher sees a name it cannot load. If they cannot
@@ -1624,160 +1839,24 @@ export class SessionManager {
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
       }
-      let forwarded: PluginsForRun | undefined
-      let packages: PackagesForRun | undefined
-      let packageServers: PackageServers | undefined
-      let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
-      /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
-      let inProcessServers: string[] = []
+      /** The turn's attempts on the session's warm process (warmTurn.ts). */
+      let attempts: WarmTurnRun | undefined
+      /** Whether the attempt about to start continues an earlier one with CONTINUE_PROMPT (fallback.ts): no recall again (#1896). */
+      let continuing = false
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      // It reaches the session row when the turn finishes, so it is not checked against
+      // the turn's budget while the turn runs. That is bounded, not open-ended: each call
+      // is outward, so it needs its own approval, and each is capped at ASK_BUDGET_USD
+      // (builtins/nested.ts, 0.5 USD) (#2973).
+      const nested = { usd: 0 }
+      // The credential the turn is on, moved by each fallback (#2973), for WebFetch's model call.
+      const onCredential: { current: PooledCredential | undefined } = { current: undefined }
       try {
-        // The credentials first, and into `secrets` at once: whatever fails
-        // after this point is redacted before it reaches the event log. Every
-        // candidate's, since the turn may fall back to any of them.
-        const candidates = await this.deps.credentials.candidates()
-        secrets = candidates.map((c) => c.credential.secret)
-        builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
-        forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-        const remotePlugins = [...(forwarded?.plugins ?? [])]
-        // Plugin header values (and their bare tokens) are redacted from the
-        // event log like the credential. Claude Code never holds them (the
-        // forwarder adds them), but a plugin could echo one in a tool result.
-        secrets.push(...(forwarded?.secrets ?? []))
-        const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-        // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
-        const ownPlugin =
-          this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
-            ? this.deps.ownPlugin
-            : undefined
-        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
-        const packageNames = new Map<string, string>()
-        if (packages) {
-          // Loaded without their own http MCP servers, which come through the forwarder
-          // below: a query with strictMcpConfig off would start them itself (run.ts).
-          const loaded = packages
-          const problems = [...loaded.problems]
-          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
-          const stripped = async (dir: string): Promise<string | undefined> => {
-            const pkg = loaded.loaded.find((p) => p.dir === dir)
-            if (!pkg) return dir
-            try {
-              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
-              packageNames.set(loadedDir, pkg.name)
-              return loadedDir
-            } catch (err) {
-              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
-              return undefined
-            }
-          }
-          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
-          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
-        }
-        // Every package's http MCP servers, through the forwarder like a remote
-        // plugin's (#2320); Claude Code loads the packages without them (above).
-        packageServers =
-          packages && this.deps.packageServers
-            ? await this.deps.packageServers(packages.loaded)
-            : undefined
-        remotePlugins.push(...(packageServers?.plugins ?? []))
-        secrets.push(...(packageServers?.secrets ?? []))
-        const pluginTiers = harnessTierOf({
-          remotePlugins,
-          tierOf,
-          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-          pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
-          allowedPluginPaths: packages?.allowedPaths ?? [],
-        })
-        eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
-        // A plugin left out of this turn is said so in the session, not only in the log.
-        const unavailable = (message: string) =>
-          this.events.append(id, [
-            scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
-          ])
-        for (const problem of forwarded?.problems ?? []) {
-          this.deps.stderr?.(`${problem}\n`)
-          await unavailable(problem)
-        }
-        for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
-          this.deps.stderr?.(`${problem}\n`)
-          await unavailable(problem)
-        }
-        const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
-        const allowedPluginPaths = packages?.allowedPaths ?? []
-        pluginCheck = async (message: SDKMessage) => {
-          if (message.type !== 'system' || message.subtype !== 'init') return
-          // The SDK skips a plugin it cannot load; the init message lists what it did load
-          // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
-          const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
-          const loaded = new Set(listed.map((p) => path.resolve(p.path)))
-          if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
-            await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
-          }
-          for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
-            if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
-            }
-          }
-          // #1255: Claude Code drops an in-process server it cannot connect, and every
-          // tool on it, logging that at debug level only. Say so in the session.
-          for (const name of inProcessServers) {
-            const status = message.mcp_servers.find((s) => s.name === name)?.status
-            if (status !== 'connected') {
-              await this.events.append(id, [
-                scrubForLog(
-                  event({
-                    type: 'error',
-                    sessionId: id,
-                    code: 'tools_unavailable',
-                    message: `the ${name} tools are not available in this turn: Claude Code reports their in-process MCP server as ${status ?? 'missing'}`,
-                  }),
-                  secrets,
-                ),
-              ])
-            }
-          }
-          for (const plugin of remotePlugins) {
-            const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
-            if (status !== 'connected') {
-              await unavailable(
-                `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
-              )
-            }
-          }
-        }
-        const [cwd, resume, model, httpSetting] = await Promise.all([
-          ensureSessionDir(this.deps.paths, id),
-          this.store.exists(id),
-          this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-        ])
-        // The http_request tool (#827): on unless the setting is `false`. Its
-        // saved bodies live in the session's own directory, and it never sees
-        // the turn's secrets except to refuse a request that carries one.
-        const http =
-          this.deps.httpRequest && httpRequestEnabled(httpSetting)
-            ? httpRequestServer({
-                // In Postgres, so any replica serves it, after a deploy too (#2374).
-                saved: new PgHttpBodies(this.deps.sql, id),
-                // save_to_workspace (#2329): the body becomes one of the session's files.
-                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
-                secrets: () => secrets,
-                audit: this.deps.audit,
-                actor: session.owner,
-                sessionId: id,
-                turnId,
-                signal: controller.signal,
-                ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-                ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
-              })
-            : undefined
-        // The built-ins the packages name that the session serves instead of Claude Code: the
-        // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
-        const served = allowedPluginPaths.length
-          ? (packages?.builtinTools ?? []).filter(
-              (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
-            )
-          : []
+        turn = await this.runner.assemble(session, principal, { parent: traced.context() })
+        secrets = turn.secrets
+        // The first attempt is on the first candidate; none in an empty pool, which
+        // runWithFallback refuses before any WebFetch can ask (#3508 review).
+        onCredential.current = turn.candidates[0]
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1792,10 +1871,9 @@ export class SessionManager {
               return call ? log([call]) : Promise.resolve()
             }),
         })
-        // AskUserQuestion (#940): only the user in the panel answers, so only a
-        // session the browser user owns is given the tool. Any other owner's turn
-        // would wait on someone who is not asked.
-        const questionGate = asksUser
+        // AskUserQuestion (#940): the run has a question gate only in a session
+        // the browser user owns (TurnRunner), and this turn's answers it.
+        const questionGate = turn.run.questionGate
           ? this.questions.gate({
               sessionId: id,
               turnId,
@@ -1807,105 +1885,72 @@ export class SessionManager {
               turnStartedAt: session.claimedAt,
             })
           : undefined
-        const run: Omit<HarnessRun, 'credential'> = {
-          paths: this.deps.paths,
-          prompt,
-          cwd,
-          sessionStore: this.store,
-          includePartialMessages: true,
-          maxTurns: session.maxTurns,
-          maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-          signal: controller.signal,
-          tierOf,
-          ...(builtIn ? { builtInPolicy: builtIn } : {}),
-          approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-          ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
-          // First turn: the SDK session gets OUR id; later turns resume it.
-          ...(resume ? { resume: id } : { sessionId: id }),
-          ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || http || served.length
-            ? {
-                mcpServers: {
-                  ...(this.deps.mcpServers
-                    ? this.deps.mcpServers(
-                        session,
-                        principal,
-                        {
-                          ...(questionGate
-                            ? { waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })) }
-                            : {}),
-                          turnContext: () => traced.context(),
-                          ...(builtIn ? { builtIn } : {}),
-                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
-                          secrets: () => secrets,
-                        },
-                      )
-                    : {}),
-                  ...(http ? { [HTTP_SERVER]: http } : {}),
-                  ...(served.length
-                    ? {
-                        [BUILTIN_SERVER]: classicBuiltinServer(served, {
-                          ...(this.deps.background
-                            ? {
-                                background: {
-                                  tasks: this.deps.background.tasks,
-                                  sessionId: id,
-                                  owner: session.owner,
-                                  tz: this.deps.background.tz,
-                                  now: () => new Date(),
-                                },
-                              }
-                            : {}),
-                          web: {
-                            // The answer's model call, on the turn's first credential; its cost is the turn's.
-                            nested: (this.deps.nestedQueries ?? nestedQueries)({
-                              paths: this.deps.paths,
-                              credential: async () => candidates[0]!.credential,
-                              spent: async (cost) => {
-                                nestedUsd += cost
-                              },
-                            }),
-                            secrets: () => secrets,
-                            audit: this.deps.audit,
-                            actor: session.owner,
-                            sessionId: id,
-                            turnId,
-                            signal: controller.signal,
-                            ...(this.deps.httpRequest?.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-                          },
-                        }),
-                      }
-                    : {}),
-                },
-              }
-            : {}),
-          ...(pluginPaths.length ? { pluginPaths } : {}),
-          ...(allowedPluginPaths.length
-            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
-            : {}),
-          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-          ...(remotePlugins.length ? { remotePlugins } : {}),
-          ...(memory ? { memoryHooks: memory.hooks } : {}),
-          traceHooks: traced.hooks(),
-          ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
+        const approvalGate = auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate
+        // What the process's callbacks read as the turn (turnSlot.ts): set on
+        // the slot of the assembly its process was spawned from, at each
+        // acquire, before the prompt goes in. On a hit that is not this turn's
+        // own assembly: its secrets, tiers and hooks are the turn's from then on.
+        const onAcquired = ({ entry }: WarmTurn) => {
+          turn = entry.turn
+          secrets = [...new Set([...secrets, ...entry.turn.secrets])]
+          served.push(entry)
+          const memory = entry.turn.memory?.(userText, turnId)
+          entry.turn.slot.set({
+            turnId,
+            principal,
+            approvalGate,
+            ...(questionGate
+              ? {
+                  questionGate,
+                  waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
+                }
+              : {}),
+            ...(auditor ? { auditor } : {}),
+            trace: traced,
+            http: { turnId, signal: controller.signal },
+            nested,
+            credential: onCredential,
+            ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
+            signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
+          })
         }
-        inProcessServers = Object.keys(run.mcpServers ?? {})
-        const turn = runWithFallback(run, {
-          candidates,
-          report: this.deps.credentials.reporter({ sessionId: id, turnId }),
-          // Each attempt's query starts inside the turn's span (runHarness starts it at once).
-          run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
-          ...(this.deps.probe ? { probe: this.deps.probe } : {}),
-          // A resumed query's total includes what the session spent before
-          // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
-          ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
-          onRefused: (evidence, judged) => {
-            refused = { evidence, ...judged }
-          },
-          onAttempt: () => unpriced.newAttempt(),
+        const warm = warmAttempts({
+          warm: this.warm,
+          sessionId: id,
+          first: turn,
+          assemble: () => this.runner.assemble(session, principal, { parent: traced.context() }),
+          stop: controller.signal,
+          acquired: onAcquired,
+          trace: traced,
         })
-        for await (const message of turn) {
+        attempts = warm
+        const resume = turn.run.resume !== undefined
+        const stream = runWithFallback(
+          { ...turn.run, prompt, signal: controller.signal },
+          {
+            candidates: turn.candidates,
+            report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+            // Each attempt runs on the session's warm process, acquired inside the turn's span.
+            run: (attempt) => otelContext.with(traced.context(), () => warm.run(attempt)),
+            ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+            // A resumed query's total includes what the session spent before
+            // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
+            ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
+            // The warm process is the session's own: a turn it serves after
+            // its first sees no init message, and a failed attempt still
+            // continues there (fallback.ts `session`).
+            session: id,
+            onRefused: (evidence, judged) => {
+              refused = { evidence, ...judged }
+            },
+            onAttempt: (credential) => {
+              onCredential.current = credential
+              continuing = true
+              unpriced.newAttempt()
+            },
+          },
+        )
+        for await (const message of stream) {
           unpriced.observe(message)
           if (message.type === 'assistant' && message.error) {
             heldErrors.push(message)
@@ -1922,31 +1967,35 @@ export class SessionManager {
         }
         await flushErrors()
       } catch (err) {
+        // An assembly that failed released what it held, and says which secrets it had read.
+        if (err instanceof TurnAssemblyError) secrets = err.secrets
+        const cause = err instanceof TurnAssemblyError ? err.cause : err
         if (!refused) await flushErrors().catch(() => {})
         // For an error result the SDK yields the result and then throws
         // ("Claude Code returned an error result", test/run.test.ts); the
         // result is what counts then.
         if (!result && !controller.signal.aborted) {
-          failure = redact(describe(err), secrets)
-          traced.fail(err)
+          failure = redact(describe(cause), secrets)
+          traced.fail(cause)
         }
       } finally {
-        forwarded?.release()
-        packageServers?.release()
-        packages?.release()
+        // An assembly the cache never took (the turn ended before an acquire) is still ours to release.
+        attempts?.unused()?.release()
         local.settling = true
-        clearInterval(renew)
-        await renewing
+        await renewal.stop()
         await auditor?.finish(
           controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
       }
-      // The loop has ended only after the SDK's last transcript append (measured:
+      // The entry was settled on the result, after the SDK's last transcript
+      // append of the turn (warm.ts `settle` waits for the mirror; measured:
       // `last-prompt` and `cost-state` entries arrive after the `result`
       // message), so releasing the claim here means the next turn, on any
       // replica, resumes from a complete transcript.
-      if (lost) {
+      if (local.lost) {
         outcome = { kind: 'lost_claim' }
+        // Another turn owns the session now, wherever it runs: this process is not kept for it.
+        for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
         return outcome
       }
       const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
@@ -1960,72 +2009,27 @@ export class SessionManager {
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
+        attempts?.spentUsd() ?? 0,
         // Only a turn that did not end on its own can be cut off mid-request;
         // one that did has every request priced in its result. WebFetch's own
         // model calls are in no result, so they are added the same way.
-        (stopped !== undefined || !result ? unpriced.usd() : 0) + nestedUsd,
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd,
       )
+      // A claim that went after the lost check above: its process is not kept either (#2981 review).
+      if (outcome.kind === 'lost_claim') for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
       return outcome
     } catch (err) {
       traced.fail(err)
       throw err
     } finally {
       traced.finish(outcome, result)
+      // The turn has finished, its events written: a hook its process fires
+      // from now on finds no turn (turnSlot.ts). Only this turn's: the next
+      // one may already have claimed the session and set the slot for itself.
+      for (const entry of served) {
+        if (entry.turn.slot.current?.turnId === turnId) entry.turn.slot.clear()
+      }
     }
-  }
-
-  /**
-   * The turn's memory hooks, for the `hindsight` plugin this turn loaded (so
-   * only an enabled plugin whose endpoint passed its egress check this turn).
-   * Recall is against the user's words (`recallQuery`), not the page context
-   * appended after them, unless a fixed query is configured. Undefined when
-   * memory is off or the plugin's URL is not a bank endpoint (logged).
-   *
-   * Each recall and retain becomes an audit row and a `memory` panel event
-   * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
-   * retain reports after the turn ended; both writes work then too, since
-   * they need only the session row. A failure is logged by the hooks.
-   *
-   * The recall query's cap (`recallMaxQueryChars`) is read from Settings at
-   * each turn, so a change applies to the next one.
-   */
-  private async memoryHooks(
-    plugin: CheckedPlugin,
-    secrets: readonly string[],
-    userText: string,
-    turn: { session: SessionRecord; turnId: string },
-  ): Promise<MemoryHooks | undefined> {
-    const config = this.deps.memory
-    if (config === false) return undefined
-    const log = (line: string) => this.deps.stderr?.(line)
-    let client: HindsightClient
-    try {
-      client = new HindsightClient(hindsightTarget(plugin))
-    } catch (err) {
-      log(`hindsight: automatic memory is off for this turn: ${describe(err)}\n`)
-      return undefined
-    }
-    const fixed = config?.hookConfig?.recallQuery
-    const recallMaxQueryChars = await turnRecallMaxQueryChars(this.deps.settings, config?.hookConfig)
-    return createMemoryHooks({
-      ...config,
-      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText, recallMaxQueryChars },
-      client,
-      secrets,
-      log,
-      sessionStore: this.store,
-      onActivity: (activity) => this.recordMemory(turn.session, turn.turnId, activity, secrets),
-    })
-  }
-
-  /** One recall or retain: its audit row (never fails, audit/log.ts) and its panel event. */
-  private async recordMemory(
-    session: SessionRecord,
-    turnId: string,
-    a: MemoryActivity,
-    secrets: readonly string[],
-  ): Promise<void> {
-    await recordMemoryActivity({ audit: this.deps.audit, events: this.events }, session, turnId, a, secrets)
   }
 
   /**
@@ -2044,6 +2048,14 @@ export class SessionManager {
     failure: string | undefined,
     secrets: readonly string[],
     /**
+     * What the turn's attempts spent as their results priced it (warmTurn.ts
+     * `spentUsd`): each the difference of its process's cumulative
+     * `total_cost_usd` before and after (spec §6.6; warm.ts `turnCostUsd`), so
+     * a resumed process's carried history and the session's unpriced spend
+     * (#991), which no total holds, are neither counted again nor lost.
+     */
+    turnUsd: number,
+    /**
      * What the turn spent that no result prices: the request it was cut off in (#991,
      * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
      */
@@ -2053,20 +2065,7 @@ export class SessionManager {
     let status: SessionStatus
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
-    // `total_cost_usd` of a RESUMED query already includes the earlier
-    // turns: measured on SDK 0.3.283 and 0.3.287 (0.000105 after turn 1, 0.00021 after
-    // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
-    // SDK restores it from the transcript's `cost-state` entry, which holds
-    // only what Claude Code priced: not the session's unpriced spend (#991),
-    // which is added back. If the restore ever fails the total comes back
-    // smaller than what it should have carried, and it is added instead.
-    // `priced` is taken back out of a float sum, so it can come out an ulp or
-    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1):
-    // compared with fallback.ts's tolerance (`carries`), as fallback.ts does.
-    // The session's own row, not the lineage's pool (#823): only its own turns are in its transcript.
-    const priced = session.ownCostUsd - session.unpricedCostUsd
-    const fromTotal = (total: number) =>
-      carries(total, priced) ? total + session.unpricedCostUsd : session.ownCostUsd + total
+    // The session's own row, not the lineage's pool (#823): only its own turns ran on its process.
     let costUsd = session.ownCostUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when
@@ -2085,6 +2084,15 @@ export class SessionManager {
     // a posted `done` summary does, and cancelPending leaves it pending.
     // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
     await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
+    // The approvals are the session's, not this turn's: settled only while this turn still
+    // holds the claim. One the reaper or a send took after runTurn's lost check (#2981
+    // review) leaves them to the turn that has it; the release below would fail anyway.
+    // A claim taken between this read and the cancel below can still cost that newer
+    // turn its approvals: a window of one query, accepted. Holding the row's lock across
+    // the cancel would serialise it with every claim, and the cancel runs on its own
+    // connection, so a lock taken here could wait on itself.
+    const [held] = await this.deps.sql`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_id = ${turnId}`
+    if (!held) return { kind: 'lost_claim' }
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
@@ -2096,7 +2104,7 @@ export class SessionManager {
       // `error_during_execution` (harness/run.ts stopFirst), or a result that
       // raced the stop. The turn reads interrupted either way (#1168); what it
       // spent before it stopped is still counted, the cut-off request too.
-      costUsd = fromTotal(result.total_cost_usd) + cutUsd
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
@@ -2104,7 +2112,7 @@ export class SessionManager {
       outcome = { kind: 'interrupted' }
     } else if (result) {
       // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
-      costUsd = fromTotal(result.total_cost_usd) + cutUsd
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -2362,6 +2370,11 @@ export class SessionManager {
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
+    // Its warm process was spawned for the previous owner (the owner is in the
+    // fingerprint, and its question gate is the browser user's): gone here and
+    // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
+    void this.warm.evict(id, 'handed off')
+    await notifyWarmEvict(this.deps.sql, id)
     return this.get(id, to)
   }
 
@@ -2646,25 +2659,33 @@ export class SessionManager {
     const within = (ms: number, work: Promise<unknown>) =>
       Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
     await within(graceMs, ended())
-    if (this.active.size === 0) return
-    this.abortAll()
-    await within(abortWaitMs, ended())
+    if (this.active.size > 0) {
+      this.abortAll()
+      await within(abortWaitMs, ended())
+    }
+    // The warm processes go with the pod (spec 2026-10-13 §5.3 "shutdown"): the
+    // idle ones, and a stopped turn's that is still winding down past its wait.
+    await this.warm.close()
   }
 
   /**
-   * Ends the turns whose lease ran out: their process died before finish()
-   * (a SIGKILL, an OOM, a pool closed under them), so nothing else would say
-   * the turn stopped. A send could already take such a session over (its
-   * claim accepts an expired lease), but until then its row said `running`
-   * and its log had no end. A live turn renews its lease every `renewMs`, so
-   * an expired one is dead. One UPDATE, so two replicas' reapers never both
+   * Ends the turns whose lease ran out. Usually their process died before
+   * finish() (a SIGKILL, an OOM, a pool closed under them), so nothing else
+   * would say the turn stopped. A send could already take such a session over
+   * (its claim accepts an expired lease), but until then its row said `running`
+   * and its log had no end. A live turn renews its lease every `renewMs`, so an
+   * expired one has lost its claim, whether or not it is still running: one
+   * still running on this replica (its renewals stalled, #2375) is stopped
+   * here too, as lost, so it never runs finish() over a newer turn. One UPDATE, so two replicas' reapers never both
    * take the same row. The session goes to `waiting_approval` when an
    * approval is still pending (a shutdown keeps those for after the restart,
    * #258), otherwise `idle`; approved-but-unused approvals of the dead turn
    * are revoked, as finish() does on a shutdown. Returns the sessions reaped.
    */
   async reapExpired(): Promise<string[]> {
-    const rows = await this.deps.sql<{ id: string; status: SessionStatus; dead_turn: string }[]>`
+    const rows = await this.deps.sql<
+      { id: string; status: SessionStatus; dead_turn: string; owner_kind: string; owner_id: string; owner_label: string }[]
+    >`
       WITH dead AS (
         SELECT id, turn_id FROM ai_sessions
         WHERE turn_id IS NOT NULL AND lease_until <= now()
@@ -2680,8 +2701,26 @@ export class SessionManager {
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
       FROM dead
       WHERE s.id = dead.id
-      RETURNING s.id, s.status, dead.turn_id AS dead_turn`
-    for (const { id, status, dead_turn } of rows) {
+      RETURNING s.id, s.status, dead.turn_id AS dead_turn, s.owner_kind, s.owner_id, s.owner_label`
+    for (const { id, status, dead_turn, owner_kind, owner_id, owner_label } of rows) {
+      // Its cause, as far as this replica can tell (#2375). Only a turn on this one is
+      // known to be alive: its renewals stopped landing. Any other's replica stopped,
+      // or stopped reaching the database; which, this one cannot see.
+      const local = this.active.get(id)
+      const here = local?.turnId === dead_turn ? local : undefined
+      const message = here
+        ? 'the turn was stopped: it could not renew its claim on the session for a minute, though its replica is running'
+        : 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)'
+      if (here) {
+        // Lost before aborted: its runTurn then skips finish(), which would cancel the
+        // approvals of a turn sent since. The two audits split the rows: the local
+        // turn's auditor.finish closes only its open `tool_call` rows, with this
+        // message; the reaper writes the one `turn` row, below. So the lost exit in
+        // runTurn writes no `turn` row of its own: a turn whose session a new turn took
+        // before any reap gets its row from that claim (claimSession, #3320).
+        here.lost = true
+        here.controller.abort(new Error(message))
+      }
       await this.approvals.revokeUnused(id, 'the turn ended')
       // The dead turn's questions only (questions/service.ts).
       await this.questions.cancelPending(id, 'the turn ended', { refresh: false, turnId: dead_turn })
@@ -2690,10 +2729,22 @@ export class SessionManager {
           type: 'error',
           sessionId: id,
           code: 'interrupted',
-          message: 'the turn was interrupted (the agent service restarted)',
+          message,
         }),
         event({ type: 'session.status', sessionId: id, status }),
       ])
+      // Its `turn` row, as any other ending has (#2375); its own finish never ran. No
+      // cost: no result came back, and the reaper never saw the requests it made.
+      await this.deps.audit?.record({
+        kind: 'turn',
+        action: 'lost_claim',
+        surface: 'harness',
+        actor: { kind: owner_kind, id: owner_id, label: owner_label },
+        sessionId: id,
+        turnId: dead_turn,
+        outcome: 'error',
+        detail: message,
+      })
     }
     return rows.map((r) => r.id)
   }

@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { Param } from '../../api/types'
-import { textLength } from '../../lib/params'
+import { paramLabel, textLength } from '../../lib/params'
 import { Field } from './Field'
+import { Input } from '@/components/ui/input'
 
 /**
  * An edit cut to `max` characters, counted in code points (#920, #1449). The edit is
@@ -65,14 +66,14 @@ export function TextWidget({
 
   const readout =
     maxLength !== undefined ? (
-      <span id={`${id}-count`} className={length >= maxLength ? 'text-accent' : undefined}>
+      <span id={`${id}-count`} className={length >= maxLength ? 'text-primary' : undefined}>
         {length}/{maxLength}
       </span>
     ) : undefined
 
   return (
-    <Field id={id} label={param.caption ?? param.name} name={param.name} readout={readout}>
-      <input
+    <Field id={id} label={paramLabel(param)} name={param.name} readout={readout}>
+      <Input
         ref={input}
         id={id}
         type="text"
@@ -96,10 +97,9 @@ export function TextWidget({
           composedFrom.current = null
           apply(before, event.currentTarget.value)
         }}
-        className="sb-field"
       />
       {maxLength !== undefined && (
-        <p role="status" className="mt-1 text-[12px] text-warn empty:mt-0">
+        <p role="status" className="text-xs text-destructive empty:-mt-2">
           {refusals > 0 ? `At most ${maxLength} characters.` : ''}
         </p>
       )}

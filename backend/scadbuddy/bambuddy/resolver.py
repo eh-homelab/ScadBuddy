@@ -221,6 +221,12 @@ def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceRes
     )
 
 
+def process_preset_for(choices: PrintChoices, catalogue: _Catalogue) -> PresetRef | None:
+    """The process preset the choices resolve to, or ``None`` (which :func:`resolve`
+    reports as an error)."""
+    return _resolve_choices(choices, catalogue).process_preset
+
+
 def choice_errors(choices: PrintChoices, catalogue: _Catalogue) -> list[FilamentWarning]:
     """The errors :func:`resolve` would report from the choices alone, before any plate
     is read — so a caller can refuse before uploading anything. Slot errors (no spool,
