@@ -48,7 +48,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
-import { rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
+import { chatToRestore, rememberSession, rememberedSession } from './panelMemory'
 import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { RunsWaiting } from './RunsWaiting'
@@ -255,7 +255,7 @@ export function AssistantChat({
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   const filterId = useId()
-  /** #1885 — a refused Unarchive, shown for that chat only. */
+  /** #1885 — a refused Archive (#3738) or Unarchive, shown for that chat only. */
   const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
@@ -432,7 +432,8 @@ export function AssistantChat({
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
   // under way, rather than a blank new chat beside a turn that is still spending. Only a
-  // reloaded tab (#3164): a new one opens on a new chat.
+  // reloaded tab (#3164): a new one opens on a new chat, and a panel remounted in it keeps
+  // the chat it showed (`chatToRestore`).
   const restored = useRef(false)
   useEffect(() => {
     if (restored.current || !state.listed) return
@@ -441,7 +442,7 @@ export function AssistantChat({
       rememberSession(state.activeId)
       return
     }
-    const id = reloaded ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
+    const id = chatToRestore(reloaded, rememberedSession(), state.order, state.sessions)
     if (id) select(id)
     // A remembered chat that is no longer listed, with nothing under way to show instead.
     else rememberSession(null)
@@ -740,6 +741,25 @@ export function AssistantChat({
               Fork
             </Button>
           </Tip>
+          {/* #3738 — the open chat's Archive, beside Fork: behind the switcher's "…" alone it
+              went unfound. Offered as there, to the owner, while no turn runs or waits. */}
+          {owned && !busy && !archived && (
+            <Tip content="Put this chat away: it leaves the chat list for Archived, read-only, until you unarchive it">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => {
+                  setArchiveError(null)
+                  updateSession(active.id, { archived: true }).catch((caught: unknown) =>
+                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) }),
+                  )
+                }}
+              >
+                Archive
+              </Button>
+            </Tip>
+          )}
           {/* Disclosures of the panels below the header (#931, #2329). */}
           <Tip content="What this session's tool calls created, changed or deleted">
             <Button
@@ -786,6 +806,11 @@ export function AssistantChat({
                 <span className="truncate">Forked from {parent?.title ?? 'an earlier chat'}</span>
               </Button>
             </div>
+          )}
+          {!archived && archiveError?.id === active.id && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not archived: {archiveError.message}
+            </p>
           )}
           {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">

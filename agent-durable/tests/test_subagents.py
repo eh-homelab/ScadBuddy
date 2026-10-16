@@ -407,6 +407,8 @@ def test_url_problem_names_why_a_refused_url_was_refused(value: str, problem: st
 @pytest.mark.parametrize(
     "value", ["http://agent.svc/mcp", "https://agent.svc:8443/internal/durable/mcp"]
 )
-def test_url_problem_is_never_needed_for_an_accepted_url(value: str) -> None:
-    """Accepted, so the worker never asks why: on one, it would wrongly read "no host"."""
+def test_url_problem_misreads_an_accepted_url(value: str) -> None:
+    """Accepted, so the worker never asks why: on one, it reads "no host", which is wrong.
+    That misreading is why _url_problem is only for a URL _http_url refused."""
     assert _http_url(value)
+    assert _url_problem(value) == "no host"

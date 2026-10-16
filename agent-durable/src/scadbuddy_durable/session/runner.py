@@ -113,7 +113,7 @@ NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", 
 def _url_problem(value: str) -> str:
     """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme.
     Only for a value it refused: an accepted URL would read as "no host". Not asserted:
-    a misuse should not fail a worker's segment (#3765); tests/test_url_problem.py pins it."""
+    a misuse should not fail a worker's segment (#3765); tests/test_subagents.py pins it."""
     try:
         parts = urllib.parse.urlsplit(value)
     except ValueError:

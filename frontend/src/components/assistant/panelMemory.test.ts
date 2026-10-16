@@ -1,4 +1,12 @@
-import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
+import {
+  chatToRestore,
+  panelWasOpen,
+  reloaded,
+  rememberPanelOpen,
+  rememberSession,
+  rememberedSession,
+  sessionToRestore,
+} from './panelMemory'
 
 // #2372 — what a reloaded tab brings back.
 describe('the assistant panel’s memory (#2372)', () => {
@@ -24,6 +32,16 @@ describe('the assistant panel’s memory (#2372)', () => {
     const theirs = { ...sessions, desktop: { status: 'running', origin: 'chat', owner: { kind: 'bearer' } } } as const
     expect(sessionToRestore(null, ['desktop', ...order], theirs)).toBe('waiting')
     expect(sessionToRestore(null, ['desktop'], theirs)).toBeNull()
+  })
+
+  it('keeps the chat a tab showed when its panel remounts, but falls back only on a reload (#3249 review)', () => {
+    // A panel remounted on the same page (the assistant off and on again): not a reload,
+    // and the chat it showed stays.
+    expect(chatToRestore(false, 'newest', order, sessions)).toBe('newest')
+    // Not a reload, so no jumping to a chat under way (#3164).
+    expect(chatToRestore(false, 'gone', order, sessions)).toBeNull()
+    expect(chatToRestore(false, null, order, sessions)).toBeNull()
+    expect(chatToRestore(true, 'gone', order, sessions)).toBe('waiting')
   })
 
   it('takes a tab as reloaded only when it remembers a chat or an open panel (#3164)', () => {

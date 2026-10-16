@@ -88,6 +88,10 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'sliced-other-model': 'text-warn',
   'sliced-nozzle-missing': 'text-warn',
   'sliced-plate-missing': 'text-warn',
+  // #3436 — a sliced file whose settings could not be read: nothing was checked, so it is held.
+  'sliced-unchecked': 'text-warn',
+  // #2956 — sliced for another model of the same G-code family, which prints it.
+  'sliced-same-family': 'text-subtle',
   // #2955 — ScadBuddy's own earlier slice queued: said, so a missing slice job reads as intended.
   'slice-reused': 'text-subtle',
   // #2722 — the chosen spools mix material families: a warning, never a refusal.

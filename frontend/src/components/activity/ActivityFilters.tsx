@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { SearchIcon, XIcon } from 'lucide-react'
-import { principalLabel, SINCE_OPTIONS } from './labels'
+import { CHIPS_SHOWN, principalLabel, SINCE_OPTIONS } from './labels'
 
 interface Props {
   query: ActivityQuery
@@ -18,13 +18,45 @@ interface Props {
   onChange: (next: ActivityQuery, options?: { typing?: boolean }) => void
 }
 
-function Group({ label, children }: { label: string; children: React.ReactNode }) {
+/** The first `CHIPS_SHOWN` of `items` (the facets list them most frequent first), and
+ * every selected one past them, so a choice in force is never hidden. */
+function shownChips<T>(items: T[], key: (item: T) => string, selected: string[], all: boolean): T[] {
+  if (all || items.length <= CHIPS_SHOWN) return items
+  return items.filter((item, i) => i < CHIPS_SHOWN || selected.includes(key(item)))
+}
+
+function Group({
+  label,
+  children,
+  hidden = 0,
+  all = false,
+  onAll,
+}: {
+  label: string
+  children: React.ReactNode
+  /** How many chips `shownChips` left out; a toggle shows them. */
+  hidden?: number
+  all?: boolean
+  onAll?: (all: boolean) => void
+}) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span aria-hidden="true" className="text-xs text-muted-foreground">
         {label}
       </span>
       {children}
+      {onAll && (all || hidden > 0) && (
+        <Button
+          variant="link"
+          size="sm"
+          className="h-auto px-1 text-xs"
+          aria-expanded={all}
+          aria-label={all ? `${label}: show fewer` : `${label}: show ${hidden} more`}
+          onClick={() => onAll(!all)}
+        >
+          {all ? 'Show fewer' : `Show ${hidden} more`}
+        </Button>
+      )}
     </div>
   )
 }
@@ -83,6 +115,8 @@ function valueChips(
 
 /** The filters above the table; every choice comes from the facets endpoint. */
 export function ActivityFilters({ query, facets, onChange }: Props) {
+  const [all, setAll] = useState<Record<string, boolean>>({})
+  const showAll = (group: string) => (next: boolean) => setAll((was) => ({ ...was, [group]: next }))
   const latest = useRef(query)
   useEffect(() => {
     latest.current = query
@@ -121,6 +155,10 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
   const tools = valueChips(facets?.tools ?? [], query.tool)
   const subjects = valueChips(facets?.subjects ?? [], query.subject)
   const sinceKnown = SINCE_OPTIONS.some((o) => o.value === query.since)
+  const shownKinds = shownChips(kinds, (k) => k.key, selectedKinds, all.kind === true)
+  const shownPrincipals = shownChips(principals, (p) => p.value, [query.principal], all.principal === true)
+  const shownTools = shownChips(tools, (t) => t.value, [query.tool], all.tool === true)
+  const shownSubjects = shownChips(subjects, (s) => s.value, [query.subject], all.subject === true)
 
   return (
     <div className="flex flex-col gap-2.5" aria-label="Activity filters" role="search">
@@ -159,7 +197,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
         )}
       </div>
       {kinds.length > 0 && (
-        <Group label="Kind">
+        <Group label="Kind" hidden={kinds.length - shownKinds.length} all={all.kind} onAll={showAll('kind')}>
           <ToggleGroup
             type="multiple"
             variant="outline"
@@ -170,7 +208,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             value={selectedKinds}
             onValueChange={(next) => setKind(joinList(next))}
           >
-            {kinds.map((k) => (
+            {shownKinds.map((k) => (
               <ToggleGroupItem key={k.key} value={k.key} className={CHIP}>
                 {k.label}
               </ToggleGroupItem>
@@ -199,7 +237,12 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
         </Group>
       )}
       {principals.length > 0 && (
-        <Group label="Started by">
+        <Group
+          label="Started by"
+          hidden={principals.length - shownPrincipals.length}
+          all={all.principal}
+          onAll={showAll('principal')}
+        >
           <ToggleGroup
             type="single"
             variant="outline"
@@ -210,7 +253,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             value={query.principal}
             onValueChange={(principal) => onChange({ ...query, principal })}
           >
-            {principals.map((p) => (
+            {shownPrincipals.map((p) => (
               <ToggleGroupItem key={p.value} value={p.value} className={CHIP}>
                 {principalLabel(p.value, facets)}
                 <Count count={p.count} />
@@ -220,7 +263,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
         </Group>
       )}
       {tools.length > 0 && (
-        <Group label="Tool">
+        <Group label="Tool" hidden={tools.length - shownTools.length} all={all.tool} onAll={showAll('tool')}>
           <ToggleGroup
             type="single"
             variant="outline"
@@ -231,7 +274,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             value={query.tool}
             onValueChange={(tool) => onChange({ ...query, tool })}
           >
-            {tools.map((t) => (
+            {shownTools.map((t) => (
               <ToggleGroupItem key={t.value} value={t.value} className={CHIP}>
                 {t.value}
                 <Count count={t.count} />
@@ -241,7 +284,12 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
         </Group>
       )}
       {subjects.length > 0 && (
-        <Group label="Subject">
+        <Group
+          label="Subject"
+          hidden={subjects.length - shownSubjects.length}
+          all={all.subject}
+          onAll={showAll('subject')}
+        >
           <ToggleGroup
             type="single"
             variant="outline"
@@ -252,7 +300,7 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             value={query.subject}
             onValueChange={(subject) => onChange({ ...query, subject })}
           >
-            {subjects.map((s) => (
+            {shownSubjects.map((s) => (
               <ToggleGroupItem key={s.value} value={s.value} className={CHIP}>
                 {s.value}
                 <Count count={s.count} />

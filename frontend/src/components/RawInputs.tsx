@@ -10,7 +10,8 @@ type Props = {
    * Held to 30vh (the page slot's row, #3074): the error and the textarea share it,
    * each scrolling inside itself, so no scrollbar sits inside another, no error is
    * clipped, and on a short frame the textarea shrinks rather than spill over the
-   * template below.
+   * template below. Down to three lines (#3624 review): flex shrink is weighted by
+   * basis, so a long error would otherwise squeeze the saved inputs to a sliver.
    */
   capped?: boolean
 }
@@ -30,7 +31,7 @@ export function RawInputs({ inputs, error, rows = 12, capped = false }: Props) {
         rows={rows}
         value={JSON.stringify(inputs, null, 2)}
         aria-label="Saved inputs"
-        className={`sb-num field-sizing-fixed text-xs text-foreground ${capped ? 'min-h-0' : ''}`}
+        className={`sb-num field-sizing-fixed text-xs text-foreground ${capped ? 'min-h-[3lh]' : ''}`}
       />
     </div>
   )

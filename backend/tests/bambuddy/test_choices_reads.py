@@ -7,7 +7,10 @@ on the one before it deadlocks and the test times out, rather than passing slowl
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +27,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -213,6 +217,84 @@ async def test_a_failed_refresh_keeps_the_old_catalogue(
     assert presets.call_count == 2
     catalogue.forget_catalogues()
     assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_refresh_whose_local_presets_read_fails_keeps_the_old_catalogue(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3422: either read failing fails the refresh. A refresh that kept the presets
+    without the local ones would share a smaller catalogue as a fresh one."""
+    _, local = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    _expire(tmp_path)
+    local.mock(return_value=httpx.Response(500))
+
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+    await asyncio.gather(*catalogue._refreshing.values())
+
+    assert local.call_count == 2
+    assert kept.stat().st_mtime == 0  # not rewritten
+    catalogue.forget_catalogues()
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_kept_catalogue_is_named_by_an_hmac_under_the_kek(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3313: a listing of the shared volume names no hash a guessed API key can be
+    checked against without the KEK."""
+    _preset_routes()
+    kek = Kek(id="k1", key=b"\x01" * 32)
+    key = catalogue.catalogue_name_key(kek)
+    assert key is not None and catalogue.catalogue_name_key(None) is None
+    assert catalogue.catalogue_name_key(Kek(id="k1", key=b"\x01" * 32)) == key
+
+    await cached_catalogue(bambuddy, tmp_path, name_key=key)
+
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    message = f"{bambuddy.config.base_url}\0{bambuddy.config.api_key or ''}".encode()
+    assert kept.name == f"v1-{hmac.new(key, message, hashlib.sha256).hexdigest()[:32]}.json"
+    assert kept.name != catalogue._path(tmp_path, bambuddy.config).name
+
+
+@respx.mock
+async def test_a_keep_removes_the_files_left_unwritten_past_the_orphan_age(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3423: a file for another URL, key or version, or a crashed write, goes once it
+    has sat unwritten for CATALOGUE_ORPHAN_AGE; a recent one stays."""
+    _preset_routes()
+    directory = tmp_path / catalogue.CATALOGUE_DIRNAME
+    directory.mkdir()
+    old = time.time() - catalogue.CATALOGUE_ORPHAN_AGE - 60
+    orphans = [directory / "v1-0123456789abcdef0123456789abcdef.json", directory / ".v0-x.json.1f"]
+    for orphan in orphans:
+        orphan.write_text("{}", encoding="utf-8")
+        os.utime(orphan, (old, old))
+    recent = directory / "v1-fedcba9876543210fedcba9876543210.json"
+    recent.write_text("{}", encoding="utf-8")
+
+    await cached_catalogue(bambuddy, tmp_path)
+
+    kept = catalogue._path(tmp_path, bambuddy.config)
+    assert sorted(directory.iterdir()) == sorted([kept, recent])
+
+
+def test_forget_catalogues_drops_a_refresh_whose_event_loop_has_closed() -> None:
+    """#3311: cancelling a task that has started on a loop since closed raises."""
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(asyncio.sleep(3600))
+    loop.run_until_complete(asyncio.sleep(0))
+    loop.close()
+    catalogue._refreshing[Path("left-by-an-earlier-test")] = task
+    try:
+        catalogue.forget_catalogues()
+    finally:
+        catalogue._refreshing.clear()
+    assert catalogue._refreshing == {}
 
 
 @respx.mock

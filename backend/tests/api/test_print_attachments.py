@@ -17,10 +17,12 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy import main
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.bambuddy.attachments import MAX_ATTACHMENTS, Attachment
+from scadbuddy.core.problems import ApiError
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_media import WEBM
@@ -448,3 +450,69 @@ def test_the_attachment_cap_holds_at_insert_and_the_late_upload_is_taken_off(
     assert refused.status_code == 409, refused.text
     assert f"at most {MAX_ATTACHMENTS}" in refused.json()["detail"]
     assert bambuddy.photo_delete.called and bambuddy.library_delete.called
+
+
+# --- #3047: the attachments of archives deleted in Bambuddy ---------------------------
+
+
+def _attach(state: AppState, archive_id: int) -> None:
+    store = state.components.get(PRINT_ATTACHMENTS)
+    asyncio.run(
+        store.add(
+            Attachment(
+                id=0,
+                archive_id=archive_id,
+                kind="video",
+                library_file_id=archive_id * 10,
+                filename=f"{archive_id}.webm",
+                size_bytes=1,
+            )
+        )
+    )
+
+
+@respx.mock
+def test_the_sweep_forgets_the_attachments_of_an_archive_bambuddy_deleted(
+    client: TestClient,
+) -> None:
+    configure(client)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    _attach(state, 35)
+    _attach(state, 36)
+    mock_archive(35)
+    respx.get(f"{API}/archives/36").mock(
+        return_value=httpx.Response(404, json={"detail": "Archive not found"})
+    )
+
+    asyncio.run(main._sweep_print_attachments_logged(state))
+
+    store = state.components.get(PRINT_ATTACHMENTS)
+    assert [a.archive_id for a in asyncio.run(store.for_archive(35))] == [35]
+    assert asyncio.run(store.for_archive(36)) == []
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        # A 404 that is not Bambuddy's "Archive not found": a proxy, or no Bambuddy
+        # at that URL, would answer every archive so.
+        httpx.Response(404, text="Not Found"),
+        httpx.Response(404, json={"detail": "Not Found"}),
+        # Bambuddy, failing: no answer about the archive is not "gone".
+        httpx.Response(503),
+    ],
+)
+@respx.mock
+def test_the_sweep_forgets_nothing_without_bambuddys_own_404(
+    client: TestClient, archive: httpx.Response
+) -> None:
+    configure(client)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    _attach(state, 36)
+    respx.get(f"{API}/archives/36").mock(return_value=archive)
+
+    with pytest.raises(ApiError):
+        asyncio.run(main._sweep_print_attachments_logged(state))
+
+    store = state.components.get(PRINT_ATTACHMENTS)
+    assert len(asyncio.run(store.for_archive(36))) == 1
