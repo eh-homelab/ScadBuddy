@@ -316,6 +316,21 @@ describe('archive (#1885)', () => {
     expect(within(header()).queryByRole('button', { name: 'Archive' })).toBeNull()
   })
 
+  it('says why a header Archive was refused, and leaves the chat open to write in (#3864 review)', async () => {
+    server.use(
+      http.patch('/api/v1/ai/sessions/:id', () => HttpResponse.json({ detail: 'a turn is running' }, { status: 409 })),
+    )
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    const header = screen.getByTestId('active-session-header')
+
+    await user.click(within(header).getByRole('button', { name: 'Archive' }))
+    expect(await within(header).findByRole('alert')).toHaveTextContent('The chat was not archived: a turn is running')
+    expect(composerBox()).toBeEnabled()
+    expect(within(header).getByRole('button', { name: 'Archive' })).toBeInTheDocument()
+  })
+
   it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
     const { user } = await ownChat()
     await rowAction(user, OWN, `Archive ${OWN}`)
