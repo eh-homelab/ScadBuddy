@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
-import { type BrowserTabs, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import { type BrowserTabs, MAX_SESSION_TABS, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import type { TabRelay } from '../src/bridge/relay.js'
@@ -653,6 +653,38 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect(rows.get('s-aba')).toBe(OTHER_TAB) // its write was queued after the compare-and-set
     rows.delete('s-aba')
     expect((await here.sessionTab('s-aba')).tabId).toBe(OTHER_TAB)
+  })
+
+  it('pairs a session evicted while its compare-and-set was out once the write lands (#3825 review)', async () => {
+    const { rows } = sharedRows()
+    let release!: () => void
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (sessionId === 's-evicted') await new Promise<void>((resolve) => (release = resolve))
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(here, OTHER_TAB)
+    here.pairSession('s-evicted', OTHER_TAB)
+    await tick()
+    const paired = here.pairSessionIfStill('s-evicted', TAB, OTHER_TAB)
+    await tick()
+    // Enough other sessions paired here to evict it from the map while the write is out.
+    for (let i = 0; i < MAX_SESSION_TABS; i++) here.pairSession(`s-other-${i}`, OTHER_TAB)
+    release()
+    expect(await paired).toBe(true)
+    await tick()
+    expect(rows.get('s-evicted')).toBe(TAB)
+    rows.delete('s-evicted')
+    expect((await here.sessionTab('s-evicted')).tabId).toBe(TAB)
   })
 
   it('pairs only here when the compare-and-set fails, and queues no write that could land later (#3478 review)', async () => {

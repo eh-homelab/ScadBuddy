@@ -357,8 +357,12 @@ export class TabHub implements BrowserTabs {
         this.#pairHere(sessionId, tabId)
         return true
       }
-      // No entry: none was made, or it was evicted with no newer one here, and the
-      // stored row is this write's, so the map takes it.
+      // No entry: none was made, or it was evicted while the write was out, and the map
+      // takes this write's tab. Evicted can also mean a newer pairing here was made and
+      // then evicted, whose queued write owns the row: the map then names the older tab
+      // until that session pairs again. Reads prefer the stored row, so only a replica
+      // with no store to ask would act on it, and only after MAX_SESSION_TABS pairings
+      // in one write's flight (#3825 review).
       const now = this.#sessionTabSeqs.get(sessionId)
       if (now === undefined || now === before) this.#pairHere(sessionId, tabId)
       return true
