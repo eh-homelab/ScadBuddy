@@ -8,7 +8,10 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Query, Request, status
 from fastapi.responses import JSONResponse
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
 from scadbuddy.api.accepting import CommandAccepting, accepting, resend
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import RenderDep
 from scadbuddy.api.jobs import RenderAccepted, submit_problems
 from scadbuddy.core.problems import ApiError
@@ -49,10 +52,12 @@ async def follow_command(
     update_id: UpdateIdPath,
     request: Request,
     render: RenderDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     supersedes: Annotated[str | None, Query(max_length=64)] = None,
 ) -> RenderAccepted | JSONResponse:
     """Waits up to `FOLLOW_WAIT` on the Update, then answers it as the render route would
-    have: its job, or its refusal."""
+    have: its job, or its refusal. The job is attributed in Activity as that route
+    attributes it, since the route answered 202 first and attributed nothing."""
     if not workflow_id.startswith(RENDER_PREFIX):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no command {workflow_id!r} to follow")
     with submit_problems():
@@ -62,6 +67,7 @@ async def follow_command(
             return accepting(request, workflow_id, update_id, supersedes=supersedes)
         except CommandResendError:
             raise resend() from None
+    await attribute_request(activity.index, f"render:{job.id}")
     return RenderAccepted(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,

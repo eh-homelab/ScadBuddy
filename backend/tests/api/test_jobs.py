@@ -15,6 +15,7 @@ from httpx import Response
 from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.api import commands as commands_api
 from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -793,7 +794,15 @@ def _job(job_id: str = "j" * 32) -> Job:
     return Job(id=job_id, slug="demo", created_at=datetime.now(UTC), inputs={"v": 0})
 
 
-def test_following_a_render_answers_its_job(client: TestClient) -> None:
+def test_following_a_render_answers_its_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attributed: list[str] = []
+
+    async def attribute(index: object, activity_id: str) -> None:
+        attributed.append(activity_id)
+
+    monkeypatch.setattr(commands_api, "attribute_request", attribute)
     follow = mock.AsyncMock(return_value=_job())
     with mock.patch.object(RenderService, "follow", follow):
         response = client.post(
@@ -807,6 +816,9 @@ def test_following_a_render_answers_its_job(client: TestClient) -> None:
         "inputs": {"v": 0},
     }
     follow.assert_awaited_once_with("render-abc", "k1", supersedes="old")
+    # Attributed in Activity as the render route attributes it: that route answered 202
+    # and attributed nothing, so without this the render's principal stays NULL.
+    assert attributed == [f"render:{'j' * 32}"]
 
 
 def test_following_a_render_still_accepting_is_202_again(client: TestClient) -> None:
