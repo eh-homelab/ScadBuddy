@@ -162,8 +162,8 @@ class TriggerFires:
             return "skipped", admitted
         # Under the lock, before anything that can hang: an attempt that begins once its
         # workflow has ended no longer counts toward the rate cap, so it starts nothing.
-        if not await self.store.begin_start(trigger_id, fire_key):
-            return "skipped", "expired"
+        if (refused := await self.store.begin_start(trigger_id, fire_key)) is not None:
+            return "skipped", refused
         started_by = runs_as(trigger.created_by)
         # No execution: a grant held for this run is an earlier attempt's.
         await flows.store.delete_grant(run_id)
