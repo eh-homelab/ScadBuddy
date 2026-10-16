@@ -8,7 +8,6 @@ import { trayPlace } from '../../lib/filaments'
 import { Card } from '@/components/ui/card'
 import { LoadingLines, SwitchField } from '../../components/settings/form'
 
-
 /** Loaded spools first, then by material, brand and colour. */
 function order(a: InventorySpool, b: InventorySpool): number {
   if (!!a.loaded !== !!b.loaded) return a.loaded ? -1 : 1

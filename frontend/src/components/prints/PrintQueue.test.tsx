@@ -118,10 +118,13 @@ describe('PrintQueue (#2351)', () => {
 
   it('still lists the queue when the totals cannot be read (#2922)', async () => {
     server.use(http.get('/api/v1/farm/stats', () => HttpResponse.json({ detail: 'boom' }, { status: 502 })))
+    const stats = vi.spyOn(api, 'getFarmStats')
     renderPage(<PrintQueue />)
     expect(await screen.findByRole('list', { name: 'Waiting to print' })).toBeInTheDocument()
+    // The failed totals read, handled: not a guess at how long that takes.
+    await waitFor(() => expect(stats).toHaveBeenCalled())
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await stats.mock.results[0]!.value.catch(() => {})
     })
     expect(screen.queryByTestId('farm-totals')).toBeNull()
     expect(screen.queryByTestId('print-queue-error')).toBeNull()
