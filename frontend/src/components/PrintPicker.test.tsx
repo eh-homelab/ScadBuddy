@@ -192,7 +192,9 @@ afterEach(async () => {
     // The wait is `asyncUtilTimeout` (3 s, vitest.setup.ts), as for any find in a test.
     await waitFor(() => {
       // Names the requests still in flight (the last to start, as most end in order).
-      for (const seen of watching) expect(seen.urls.slice(seen.ended)).toEqual([])
+      for (const seen of watching) {
+        expect(seen.urls.slice(seen.ended), 'a watched request never ended: held, or aborted?').toEqual([])
+      }
     })
   } finally {
     // Even when a request never ends: only the test that left it fails, not every later one.
