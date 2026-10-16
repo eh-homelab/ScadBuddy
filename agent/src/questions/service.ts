@@ -393,13 +393,11 @@ export class QuestionService {
         UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
         WHERE id = ${id} AND kind = 'question' AND outcome IS NULL AND (${timer} OR expires_at <= now())
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: expired,
-        events: await this.withStatus(tx, sessionId, expired.length > 0, expired.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ])),
-      }
+      const events = expired.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+      ])
+      return { value: expired, events: await this.withStatus(tx, sessionId, expired.length > 0, events) }
     })
     if (rows.length === 0) return false
     this.wake(id)
@@ -551,13 +549,11 @@ export class QuestionService {
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
           AND (${questionId}::uuid IS NOT NULL OR ${isNotDoneSummary(tx)})
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: cancelled,
-        events: await this.withStatus(tx, sessionId, cancelled.length > 0 && options.refresh !== false, cancelled.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
-        ])),
-      }
+      const events = cancelled.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+      ])
+      return { value: cancelled, events: await this.withStatus(tx, sessionId, cancelled.length > 0 && options.refresh !== false, events) }
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)
@@ -602,13 +598,11 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'tab_disconnected'
           AND outcome IS NULL AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
         RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return {
-        value: resolved,
-        events: await this.withStatus(tx, sessionId, resolved.length > 0, resolved.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
-        ])),
-      }
+      const events = resolved.flatMap((r) => [
+        event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
+        inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
+      ])
+      return { value: resolved, events: await this.withStatus(tx, sessionId, resolved.length > 0, events) }
     })
     if (rows.length === 0) return 0
     for (const r of rows) this.wake(r.id)

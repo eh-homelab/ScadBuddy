@@ -148,6 +148,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`questions in Postgres${TEST_DATABASE_URL ? 
       .toBe(2)
     await expect.poll(async () => (await m.get(session.id, browser)).status, { timeout: 10_000 }).toBe('waiting_input')
 
+    // A spy, not a trigger: the two answers must meet between their own commits, and only
+    // a hook inside the transaction can hold the first there for the second.
     const service = m.questions as unknown as { statusRefresh: (tx: unknown, sessionId: string) => Promise<ServerEvent[]> }
     const refresh = service.statusRefresh.bind(service)
     let arrived = 0
