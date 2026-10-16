@@ -79,7 +79,8 @@ function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<
       const [start] = await sql<{ here: boolean; seq: string | null }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq
           FROM (SELECT 1) AS one
-          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}`
+          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}
+          ORDER BY e.seq DESC NULLS LAST LIMIT 1`
       if (!start?.here) throw gone()
       if (start.seq === null) return undefined
       after = start.seq
