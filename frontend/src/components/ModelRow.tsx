@@ -63,7 +63,7 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
               <span
                 data-testid="video-tile"
                 aria-hidden="true"
-                className="relative flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-ui-muted"
+                className="relative flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-muted"
               >
                 <Badge className="size-7 rounded-full bg-black/60 p-0 text-white">
                   <PlayIcon className="ml-0.5 fill-current" />
@@ -122,7 +122,7 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
                     type="button"
                     aria-label={`Filter by ${tag}`}
                     onClick={() => onTag(tag)}
-                    className="cursor-pointer hover:bg-ui-accent hover:text-accent-foreground"
+                    className="cursor-pointer hover:bg-accent hover:text-accent-foreground"
                   >
                     {tag}
                   </button>

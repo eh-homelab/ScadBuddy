@@ -22,7 +22,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard, Tip } from './settings/form'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 // #251 — Settings → "MCP access tokens": mint, list and revoke the bearer tokens an
 // outside MCP client presents at /mcp (AI design spec §8.1, §8.3). The agent service

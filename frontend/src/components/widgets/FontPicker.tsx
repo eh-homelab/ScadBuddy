@@ -13,7 +13,7 @@ import {
 import { useAsync } from '../../lib/useAsync'
 import { useDebounced } from '../../lib/useDebounced'
 import { useMissingGlyphs } from '../../lib/useMissingGlyphs'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
@@ -183,7 +183,7 @@ export function FontPicker({
           </div>
 
           {offline && (
-            <p role="status" className="rounded-lg bg-ui-muted px-2.5 py-1.5 text-xs text-muted-foreground">
+            <p role="status" className="rounded-lg bg-muted px-2.5 py-1.5 text-xs text-muted-foreground">
               Google Fonts is unreachable — showing the fonts already installed.
             </p>
           )}

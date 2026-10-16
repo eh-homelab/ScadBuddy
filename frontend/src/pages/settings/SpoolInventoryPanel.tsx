@@ -154,7 +154,7 @@ export function SpoolInventoryPanel() {
                   <tr
                     key={spool.id}
                     data-testid={`spool-${spool.id}`}
-                    className={`transition-colors hover:bg-ui-muted/50 ${spool.archived ? 'text-faint' : ''}`}
+                    className={`transition-colors hover:bg-muted/50 ${spool.archived ? 'text-faint' : ''}`}
                   >
                     <td className="px-3 py-2">
                       <span className="flex min-w-0 items-center gap-2">

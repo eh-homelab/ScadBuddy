@@ -100,7 +100,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**

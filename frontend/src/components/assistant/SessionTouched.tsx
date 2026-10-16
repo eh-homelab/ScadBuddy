@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Tip } from './Tip'
 
 type Kind = SessionResource['type']

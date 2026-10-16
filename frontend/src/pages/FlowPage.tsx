@@ -6,7 +6,7 @@ import { FlowActions } from '../components/flows/FlowActions'
 import { FlowScript } from '../components/flows/FlowScript'
 import { StartRun } from '../components/flows/StartRun'
 import { FlowTriggers } from '../components/flows/Triggers'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -163,7 +163,7 @@ export function FlowPage() {
                         <Link
                           to={flowPath(v.id)}
                           aria-current={v.id === id ? 'page' : undefined}
-                          className="flex items-baseline gap-2 rounded-md px-2 py-1 text-[12px] leading-snug hover:bg-ui-muted aria-[current=page]:bg-ui-muted"
+                          className="flex items-baseline gap-2 rounded-md px-2 py-1 text-[12px] leading-snug hover:bg-muted aria-[current=page]:bg-muted"
                         >
                           <span className="text-[13px] font-medium">v{v.version}</span>{' '}
                           <span className="min-w-0 truncate text-muted-foreground">{actorText(v.created_by)}</span>{' '}

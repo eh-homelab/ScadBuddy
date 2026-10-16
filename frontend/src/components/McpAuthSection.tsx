@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './settings/form'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 // #251 — Settings → "MCP authentication": whether an outside MCP client needs a token
 // at /mcp, and how far an anonymous caller may go when it does not (AI design spec
@@ -177,7 +177,7 @@ export function McpAuthSection({ onSaved }: Props) {
               )}
               {oidcActive && (
                 <p
-                  className="rounded-lg bg-ui-muted/50 px-3 py-2 text-xs text-muted-foreground ring-1 ring-foreground/10"
+                  className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground ring-1 ring-foreground/10"
                   data-testid="mcp-auth-oidc-note"
                 >
                   OIDC sign-in is on, so it overrides the choice below: every call needs an OIDC

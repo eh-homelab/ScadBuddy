@@ -592,7 +592,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
         {/* #1885 — the chats, or the archived ones. */}
         <CollapsibleContent asChild>
-          <nav aria-label="Sessions" className="border-b border-border bg-ui-muted/40">
+          <nav aria-label="Sessions" className="border-b border-border bg-muted/40">
             <Tabs
               value={pickerView}
               onValueChange={(view) => setPickerView(view === 'archived' ? 'archived' : 'chats')}
@@ -805,7 +805,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         <section
           id={touchedId}
           aria-label="What this session touched"
-          className="shrink-0 border-b border-border bg-ui-muted/40"
+          className="shrink-0 border-b border-border bg-muted/40"
         >
           {/* Read again when the status moves or a tool call finishes, so a running turn's
               changes show as they land. Keyed per session, so a switch reads once. */}
@@ -819,7 +819,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       )}
 
       {active && filesOpen && (
-        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-border bg-ui-muted/40">
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-border bg-muted/40">
           {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
           <SessionFiles
             key={active.id}

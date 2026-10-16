@@ -13,7 +13,7 @@ import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /** A style that is "" (none named): Radix refuses an empty item value. */
 const STYLE_DEFAULT = '\u0000default'

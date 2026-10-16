@@ -8,7 +8,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /** The backend's cap on a decision's reason (`DecisionCreate.reason`, max_length=500). */
 const MAX_REASON = 500

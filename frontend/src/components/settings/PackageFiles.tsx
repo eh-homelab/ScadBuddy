@@ -62,7 +62,7 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
             size="xs"
             onClick={() => select(path)}
             aria-current={path === selected ? 'true' : undefined}
-            className="sb-num h-auto min-h-6 justify-start text-left font-normal break-all whitespace-normal aria-[current=true]:bg-ui-muted aria-[current=true]:text-primary"
+            className="sb-num h-auto min-h-6 justify-start text-left font-normal break-all whitespace-normal aria-[current=true]:bg-muted aria-[current=true]:text-primary"
           >
             {path}
           </Button>
@@ -223,7 +223,7 @@ function RenderedMarkdown({ text }: { text: string }) {
   return (
     <div className="max-h-96 space-y-2 overflow-auto text-[13px]">
       {front && (
-        <pre className="rounded-md bg-ui-muted px-2 py-1 font-mono text-[12px] whitespace-pre-wrap text-muted-foreground">
+        <pre className="rounded-md bg-muted px-2 py-1 font-mono text-[12px] whitespace-pre-wrap text-muted-foreground">
           {front}
         </pre>
       )}

@@ -162,7 +162,7 @@ export function FileWidget({
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         className={`flex items-center gap-2.5 rounded-xl border border-dashed p-2 transition-colors ${
-          dragging ? 'border-primary bg-primary/10' : 'border-border bg-ui-muted/40'
+          dragging ? 'border-primary bg-primary/10' : 'border-border bg-muted/40'
         }`}
       >
         <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">

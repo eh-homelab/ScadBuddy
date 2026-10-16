@@ -6,7 +6,7 @@ import { Card } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /** agent `sessions/manager.ts` MAX_SESSION_BUDGET_USD: no chat's budget goes past it. */
 const MAX_BUDGET_USD = 100
@@ -35,7 +35,7 @@ export function BudgetMeter({ session }: { session: SessionState }) {
         aria-valuemax={100}
         aria-valuenow={percent}
         aria-valuetext={`${usd(session.budget.costUsd)} of ${usd(session.budget.budgetUsd)}`}
-        className="h-1.5 w-16 overflow-hidden rounded-full bg-ui-muted"
+        className="h-1.5 w-16 overflow-hidden rounded-full bg-muted"
       >
         <div className={`h-full rounded-full ${used >= BUDGET_WARNING ? 'bg-warn' : 'bg-primary'}`} style={{ width: `${percent}%` }} />
       </div>

@@ -13,7 +13,7 @@ import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
 import { PrintStatus } from '../components/prints/PrintStatus'
 import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
 import { Hint } from '../components/Hint'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -313,14 +313,14 @@ function RenderSection({ print }: { print: PrintDetail }) {
         {library !== null && !meshAsked ? (
           <>
             {brokenImage === api.libraryPlateThumbnailUrl(library, plate) ? (
-              <p className="flex size-full items-center justify-center bg-ui-muted text-xs text-muted-foreground">
+              <p className="flex size-full items-center justify-center bg-muted text-xs text-muted-foreground">
                 No image of plate {plate}
               </p>
             ) : (
               <img
                 src={api.libraryPlateThumbnailUrl(library, plate)}
                 alt={`Plate ${plate} of the library file`}
-                className="size-full bg-ui-muted object-contain"
+                className="size-full bg-muted object-contain"
                 onError={() => setBrokenImage(api.libraryPlateThumbnailUrl(library, plate))}
               />
             )}

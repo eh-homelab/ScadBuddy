@@ -18,7 +18,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /** Problem types `post_apply` refuses with (`backend/scadbuddy/api/analyzers.py`). */
 const STALE_PROBLEM = 'https://scadbuddy.dev/problems/analyzer-fix-stale'
@@ -46,7 +46,7 @@ function scopeValue(scope: ScopeRef): string {
 
 function ChangeRow({ change }: { change: SettingChange }) {
   return (
-    <li data-testid={`change-${change.setting}`} className="rounded-md bg-ui-muted px-2 py-1">
+    <li data-testid={`change-${change.setting}`} className="rounded-md bg-muted px-2 py-1">
       <div className="flex flex-wrap items-baseline gap-x-2">
         <code className="sb-num text-foreground">
           {change.setting}

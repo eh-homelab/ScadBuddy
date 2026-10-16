@@ -345,7 +345,7 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await expect(dialog).toBeVisible()
   })
 
-  // #3675 — the activity drawer is a Radix Sheet, not ui/Dialog: the same #798/#1897
+  // #3675 — the activity drawer is a Radix Sheet, not ui/dialog: the same #798/#1897
   // behaviour on another mechanism (pointer events off outside a Radix modal, and its
   // content remounting when it turns non-modal beside the panel).
   test('opens from its button while the activity drawer is open', async ({ page }) => {

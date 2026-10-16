@@ -75,7 +75,7 @@ export function SubSection({ id, title, children }: { id: string; title: string;
         <h3 id={headingId} className="text-sm font-medium">
           <CollapsibleTrigger
             aria-controls={`${id}-body`}
-            className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left hover:bg-ui-muted/50"
+            className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left hover:bg-muted/50"
           >
             <ChevronRightIcon
               aria-hidden="true"

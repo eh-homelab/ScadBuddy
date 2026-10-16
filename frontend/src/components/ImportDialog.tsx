@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ModelSummary } from '../api/types'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

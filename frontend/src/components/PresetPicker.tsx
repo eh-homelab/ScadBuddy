@@ -24,7 +24,7 @@ import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useFillable } from '../agent/useFillable'
 import { Hint } from './Hint'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import {
   AlertDialog,
   AlertDialogCancel,

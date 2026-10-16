@@ -53,7 +53,7 @@ export function CopyColours({
           aria-expanded={open}
           aria-controls={editorId}
           onClick={onToggle}
-          className="text-[12px] text-accent hover:underline"
+          className="text-[12px] text-primary hover:underline"
         >
           {open ? 'Done' : 'Change colours'}
         </button>
@@ -66,7 +66,7 @@ export function CopyColours({
               <li key={colour} className="text-[12px]">
                 <div className="flex items-center gap-2">
                   <Swatch colour={colour} size="sm" />
-                  <span className="sb-num text-muted">{colour}</span>
+                  <span className="sb-num text-subtle">{colour}</span>
                   <span aria-hidden="true" className="text-faint">
                     →
                   </span>
@@ -79,7 +79,7 @@ export function CopyColours({
                   />
                   <span className="sb-num">{now}</span>
                   {now !== colour && (
-                    <button type="button" onClick={() => swap(colour, colour)} className="text-accent hover:underline">
+                    <button type="button" onClick={() => swap(colour, colour)} className="text-primary hover:underline">
                       Keep {colour}
                     </button>
                   )}

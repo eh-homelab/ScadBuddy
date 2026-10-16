@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
 interface Props {
@@ -95,11 +95,11 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
                   the link is on the file when Bambuddy refused it. Silence when no public
                   URL is set: there was no link to attach, which is not a failure. */}
               {result.edit_url ? (
-                <p className="mt-1.5 text-[12px] text-muted">
+                <p className="mt-1.5 text-[12px] text-subtle">
                   Bambuddy has the link back to these parameters.
                 </p>
               ) : publicUrl ? (
-                <p className="mt-1.5 text-[12px] text-muted">
+                <p className="mt-1.5 text-[12px] text-subtle">
                   Bambuddy would not take the link back to these parameters.
                 </p>
               ) : null}
@@ -111,11 +111,11 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
               </p>
               {named && (
                 <p className="mt-1.5 text-[13px]" data-testid="send-plates">
-                  <span className="text-muted">{plates.length === 1 ? 'Plate:' : 'Plates:'}</span>{' '}
+                  <span className="text-subtle">{plates.length === 1 ? 'Plate:' : 'Plates:'}</span>{' '}
                   {plates.map((plate) => plateLabel(plates, plate.index)).join(' · ')}
                 </p>
               )}
-              <p className="mt-1.5 text-[12px] text-muted">
+              <p className="mt-1.5 text-[12px] text-subtle">
                 To slice and queue it, use Print instead.
               </p>
               {error && (

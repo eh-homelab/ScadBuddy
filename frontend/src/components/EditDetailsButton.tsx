@@ -7,7 +7,7 @@ import { isMarkdown, readmeProblem } from '../lib/modelFolder'
 import { addMedia, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { MediaPicker } from './media/MediaPicker'
 import { MEDIA_KEY, mediaIdOf, mediaPickerItems } from './media/pickerItems'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { FileTextIcon, PencilIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {

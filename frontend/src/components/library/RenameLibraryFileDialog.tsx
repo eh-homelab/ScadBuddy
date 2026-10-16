@@ -3,7 +3,7 @@ import { USER_ONLY } from '../../agent/dom'
 import { ApiError } from '../../api/client'
 import type { LibraryEntry } from '../../api/types'
 import { splitExtension } from '../../lib/libraryTransfer'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

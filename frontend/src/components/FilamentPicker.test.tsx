@@ -6,7 +6,7 @@ import * as fixtures from '../mocks/fixtures'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
-import { Dialog } from './ui/Dialog'
+import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
 function Harness({
@@ -212,8 +212,11 @@ describe('FilamentPicker', () => {
   it('closes only the open list on Escape, not the print dialog around it (#3636)', async () => {
     const onClose = vi.fn()
     const { user } = renderPage(
-      <Dialog open title="Print" onClose={onClose}>
-        <Harness options={fixtures.filamentOptions} />
+      <Dialog open onOpenChange={(open) => !open && onClose()}>
+        <DialogContent>
+          <DialogTitle>Print</DialogTitle>
+          <Harness options={fixtures.filamentOptions} />
+        </DialogContent>
       </Dialog>,
     )
     await expand(user, 1)
@@ -364,7 +367,7 @@ describe('FilamentPicker', () => {
 
     // "Load this spool into AMS-A slot 2" is an instruction, not a fault; colouring it
     // like one trains the user to ignore the colour.
-    expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-muted')
+    expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-subtle')
     expect(screen.getByTestId('filament-warnings-2').firstChild).toHaveClass('text-warn')
   })
 

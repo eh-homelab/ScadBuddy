@@ -100,14 +100,14 @@ function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
         </p>
         {item.input !== undefined && (
           <Fold summary={item.action === 'recall' ? 'Query' : 'Saved'} testId="agent-memory-input">
-            <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-ui-muted/50 p-2 font-mono text-[11px] whitespace-pre-wrap">
+            <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-[11px] whitespace-pre-wrap">
               {item.input}
             </pre>
           </Fold>
         )}
         {memories.length > 0 && (
           <Fold summary="Memories" testId="agent-memory-output">
-            <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-ui-muted/50 p-2 font-mono text-[11px] whitespace-pre-wrap">
+            <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-[11px] whitespace-pre-wrap">
               {memories.join('\n')}
             </pre>
           </Fold>
@@ -591,7 +591,7 @@ export function FeedItemView({
   switch (item.kind) {
     case 'user':
       return (
-        <div data-feed-item="user" className="group relative ml-8 rounded-lg bg-ui-muted px-2.5 py-1.5 text-[13px]">
+        <div data-feed-item="user" className="group relative ml-8 rounded-lg bg-muted px-2.5 py-1.5 text-[13px]">
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-muted-foreground">{item.author.label}</p>
           )}

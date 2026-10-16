@@ -64,7 +64,7 @@ import {
 } from '@/components/ui/sidebar'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
@@ -336,7 +336,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                     aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                     aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
                     title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                    // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                    // #1897 — above a dialog's overlay (ui/dialog, z-50), so the assistant
                     // opens beside a dialog that is already open, as the shortcut does. Only
                     // where the panel can sit beside one (#2013): on a phone the dialog covers
                     // the panel anyway, and a raised button would paint over the dialog.

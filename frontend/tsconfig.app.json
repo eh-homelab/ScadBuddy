@@ -23,8 +23,6 @@
     "noEmit": true,
 
     "paths": {
-      "@/components/ui/button": ["./src/components/ui/shadcn-button.tsx"],
-      "@/components/ui/dialog": ["./src/components/ui/shadcn-dialog.tsx"],
       "@/*": ["./src/*"]
     }
   },

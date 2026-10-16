@@ -120,7 +120,7 @@ function Cover({
       )}
     </span>
   )
-  const frame = 'relative block aspect-[4/3] w-full overflow-hidden rounded-lg bg-ui-muted'
+  const frame = 'relative block aspect-[4/3] w-full overflow-hidden rounded-lg bg-muted'
   if (!print.cover) {
     return (
       <div
@@ -137,7 +137,7 @@ function Cover({
       variant="ghost"
       aria-label={`Open media of ${label}`}
       onClick={onOpen}
-      className={cn(className, frame, 'h-auto cursor-zoom-in p-0 hover:bg-ui-muted active:not-aria-[haspopup]:translate-y-0')}
+      className={cn(className, frame, 'h-auto cursor-zoom-in p-0 hover:bg-muted active:not-aria-[haspopup]:translate-y-0')}
     >
       <img
         src={print.cover.url}
@@ -215,7 +215,7 @@ function ParamsDiff({ diff }: { diff: PrintSummary['params_diff'] }) {
     <div className="mt-2 flex flex-wrap items-start gap-1 text-[11px]">
       <dl className="flex min-w-0 flex-wrap gap-1" aria-label="Changed parameters">
         {entries.slice(0, PARAMS_SHOWN).map(([name, value]) => (
-          <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-md bg-ui-muted px-1.5 py-0.5">
+          <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-md bg-muted px-1.5 py-0.5">
             <dt className="text-muted-foreground">{name}</dt>
             <dd className="sb-num truncate">{formatValue(value)}</dd>
           </div>

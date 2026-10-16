@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { Swatch } from './Swatch'
 
 function candidateName(spool: SpoolOption): string {

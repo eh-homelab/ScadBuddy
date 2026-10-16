@@ -48,7 +48,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { ChevronRightIcon } from 'lucide-react'
 import { ChoiceSelect, SwitchField, TipProvider } from '../components/settings/form'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { NEW_TAB } from '../lib/embed'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -1507,7 +1507,7 @@ function SettingsSections() {
                 <table className="w-full text-left text-xs" aria-label="Deployment values">
                   <tbody className="divide-y">
                     {(settings.bootstrap ?? []).map((entry) => (
-                      <tr key={entry.name} className="align-top transition-colors hover:bg-ui-muted/50">
+                      <tr key={entry.name} className="align-top transition-colors hover:bg-muted/50">
                         <th scope="row" className="sb-num w-2/5 px-3 py-2 font-medium [overflow-wrap:anywhere]">
                           {entry.env_var}
                         </th>
@@ -1563,7 +1563,7 @@ function Advanced({ label, invalid, children }: { label: string; invalid: boolea
   }
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg ring-1 ring-foreground/10">
-      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground">
         <ChevronRightIcon aria-hidden="true" className={cn('size-4 shrink-0 transition-transform', open && 'rotate-90')} />
         {label}
       </CollapsibleTrigger>
@@ -1579,7 +1579,7 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
   const [open, setOpen] = useState(false)
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg text-xs ring-1 ring-foreground/10">
-      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-muted-foreground hover:bg-muted/50 hover:text-foreground">
         <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
         What Bambuddy answered
       </CollapsibleTrigger>

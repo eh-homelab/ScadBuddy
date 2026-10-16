@@ -24,7 +24,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { LoadingLines } from '../../components/settings/form'
-import { Spinner } from '../../components/ui/Spinner'
+import { Spinner } from '../../components/ui/spinner'
 import { libraryFileOfScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 
@@ -257,7 +257,7 @@ export function RememberedChoicesPanel({
             </thead>
             <tbody className="divide-y">
               {rows.map((row) => (
-                <tr key={row.key} className="align-top transition-colors hover:bg-ui-muted/50">
+                <tr key={row.key} className="align-top transition-colors hover:bg-muted/50">
                   <td className="px-3 py-2 text-muted-foreground">{row.kind}</td>
                   <td className="sb-num px-3 py-2">
                     {row.href ? (

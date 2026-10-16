@@ -26,15 +26,14 @@
  * the system unless `data-theme='dark'` asks for dark. shadcn's `.dark` class is not
  * used: the `dark` variant below follows the same rule, so its `dark:` utilities agree.
  *
- * Two of shadcn's colour names were ScadBuddy's already, with another meaning, and the
- * pages not yet converted still use them: `accent` (the amber, = `--primary` now) and
- * `muted` (secondary text, = `--muted-foreground`). Until the conversion is done, those
- * utilities keep the old meaning, and shadcn's `--accent` and `--muted` surfaces are
- * `ui-accent` and `ui-muted` (`bg-ui-accent`, `bg-ui-muted`). The generated components
- * were rewritten to match; `src/components/ui/ui-guard.test.ts` keeps it so.
+ * `accent` and `muted` are shadcn's surfaces. They were ScadBuddy's amber and its
+ * secondary text until the conversion was done; those are `primary` and `subtle` now
+ * (`src/components/ui/ui-guard.test.ts` keeps the old meanings out).
  *
- * The `--sb-*` tokens are the old palette's names, retuned to the neutral one so a page
- * not yet converted sits in the new look; hex, so theme.contrast.test.ts can check them.
+ * The `--sb-*` tokens are the old palette's names, retuned to the neutral one. They stay:
+ * a template's own UI reads them (a model's `ui/` module, Host API v1), as do the 3D viewer and a
+ * few utilities below (`text-subtle`, `text-faint`, `text-warn`, `text-ok` …). Hex, so
+ * theme.contrast.test.ts can check them.
  */
 
 @custom-variant dark {
@@ -194,9 +193,8 @@
   --color-border: var(--border);
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
-  /* shadcn's `accent` and `muted`, renamed while the old names are in use (above). */
-  --color-ui-accent: var(--accent);
-  --color-ui-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
@@ -217,7 +215,7 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* The old palette's utilities (`bg-surface`, `text-ink`, `text-muted`, `bg-accent` …). */
+/* The old palette's utilities (`bg-surface`, `text-ink`, `text-subtle`, `text-warn` …). */
 @theme {
   --color-bg: var(--sb-bg);
   --color-surface: var(--sb-surface);
@@ -226,10 +224,8 @@
   --color-line: var(--sb-line);
   --color-line-strong: var(--sb-line-strong);
   --color-ink: var(--sb-text);
-  --color-muted: var(--sb-muted);
+  --color-subtle: var(--sb-muted);
   --color-faint: var(--sb-faint);
-  --color-accent: var(--sb-accent);
-  --color-accent-ink: var(--sb-accent-ink);
   --color-ok: var(--sb-ok);
   --color-warn: var(--sb-warn);
 
@@ -304,21 +300,6 @@
 }
 
 @layer components {
-  .sb-field {
-    background: var(--sb-surface-2);
-    border: 1px solid var(--sb-line);
-    border-radius: var(--radius-sb);
-    padding: 6px 9px;
-    width: 100%;
-    transition: border-color 120ms ease;
-  }
-  .sb-field:hover:not(:disabled) {
-    border-color: var(--sb-line-strong);
-  }
-  .sb-field:disabled {
-    opacity: 0.55;
-  }
-
   .sb-num {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
@@ -350,20 +331,4 @@
       animation: none;
     }
   }
-}
-
-/*
- * #1035 — Settings is full of checkboxes, radios and disclosures, and at the browser's
- * default 13 px they are too small to tap. 24 px each way is WCAG 2.2's target size.
- * Unlayered, so no utility on an individual control can shrink it back.
- */
-.sb-settings input:is([type='checkbox'], [type='radio']) {
-  width: 1.5rem;
-  height: 1.5rem;
-  /* A flex item beside a long label would otherwise shrink back under 24 px wide. */
-  flex-shrink: 0;
-}
-
-.sb-settings summary {
-  min-height: 1.5rem;
 }

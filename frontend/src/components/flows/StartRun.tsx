@@ -7,7 +7,7 @@ import { inputFields, type InputField } from '../../lib/flowInputs'
 import { flowRunPath } from '../../lib/flows'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { GrantEditor } from './GrantEditor'
 import { useInputs } from './inputsForm'
 
