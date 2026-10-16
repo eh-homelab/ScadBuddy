@@ -624,6 +624,37 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect((await here.sessionTab('s-new')).tabId).toBe(OTHER_TAB)
   })
 
+  it('keeps a re-pairing to the same tab made while its compare-and-set was out (#3787 review)', async () => {
+    const { rows } = sharedRows()
+    let release!: () => void
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      get: async (sessionId) => rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        await new Promise<void>((resolve) => (release = resolve))
+        if (rows.has(sessionId) && rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(here, OTHER_TAB)
+    here.pairSession('s-aba', OTHER_TAB)
+    await tick()
+    const paired = here.pairSessionIfStill('s-aba', TAB, OTHER_TAB)
+    await tick()
+    here.pairSession('s-aba', OTHER_TAB) // the same tab again, while the write is out
+    release()
+    expect(await paired).toBe(true)
+    await tick()
+    expect(rows.get('s-aba')).toBe(OTHER_TAB) // its write was queued after the compare-and-set
+    rows.delete('s-aba')
+    expect((await here.sessionTab('s-aba')).tabId).toBe(OTHER_TAB)
+  })
+
   it('pairs only here when the compare-and-set fails, and queues no write that could land later (#3478 review)', async () => {
     const { rows } = sharedRows()
     const sets: string[] = []

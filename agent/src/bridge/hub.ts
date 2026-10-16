@@ -195,6 +195,13 @@ export class TabHub implements BrowserTabs {
   readonly #tabs = new Map<string, TabConnection>()
   /** sessionId → tabId, least recently paired first (Map keeps insertion order). */
   readonly #sessionTabs = new Map<string, string>()
+  /**
+   * sessionId → the sequence number of its latest pairing here, kept and evicted with
+   * `#sessionTabs`. A re-pairing to the same tab still changes it, which comparing tab
+   * ids could not tell apart (#3787 review).
+   */
+  readonly #sessionTabSeqs = new Map<string, number>()
+  #pairSeq = 0
   readonly #pairings: PairingStore | undefined
   readonly #relay: TabRelay | undefined
   readonly #sessionTabStore: SessionTabStore | undefined
@@ -290,9 +297,11 @@ export class TabHub implements BrowserTabs {
   #pairHere(sessionId: string, tabId: string): void {
     this.#sessionTabs.delete(sessionId)
     this.#sessionTabs.set(sessionId, tabId)
+    this.#sessionTabSeqs.set(sessionId, ++this.#pairSeq)
     while (this.#sessionTabs.size > MAX_SESSION_TABS) {
       const oldest = this.#sessionTabs.keys().next().value as string
       this.#sessionTabs.delete(oldest)
+      this.#sessionTabSeqs.delete(oldest)
       this.#sessionTabsUnstored.delete(oldest)
     }
     if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
@@ -328,8 +337,9 @@ export class TabHub implements BrowserTabs {
       // writes: no pairing, here or on another replica, lands between the two.
       const setIf = store.setIf.bind(store)
       // This replica's own pairing as the write leaves: one made here while it is out
-      // is newer, and its write is queued after this one, so it keeps the map.
-      const before = this.#sessionTabs.get(sessionId)
+      // is newer, and its write is queued after this one, so it keeps the map. Compared
+      // by sequence, not tab: a re-pairing to the same tab is newer too (#3787 review).
+      const before = this.#sessionTabSeqs.get(sessionId)
       const written = this.#sessionTabWrites.then(() => setIf(sessionId, tabId, seen))
       this.#sessionTabWrites = written.then(
         () => {},
@@ -347,7 +357,10 @@ export class TabHub implements BrowserTabs {
         this.#pairHere(sessionId, tabId)
         return true
       }
-      if (this.#sessionTabs.get(sessionId) === before) this.#pairHere(sessionId, tabId)
+      // No entry: none was made, or it was evicted with no newer one here, and the
+      // stored row is this write's, so the map takes it.
+      const now = this.#sessionTabSeqs.get(sessionId)
+      if (now === undefined || now === before) this.#pairHere(sessionId, tabId)
       return true
     }
     if (store) {
