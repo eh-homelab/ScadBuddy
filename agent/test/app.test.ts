@@ -146,6 +146,7 @@ describe('/api/v1/ai/credentials', () => {
       await app.request('/api/v1/ai/credentials'),
       await app.request('/api/v1/ai/credentials', { method: 'PUT', body: '{}' }),
       await app.request('/api/v1/ai/credentials/test', { method: 'POST' }),
+      await app.request('/api/v1/ai/credentials', { method: 'DELETE' }),
     ]
     for (const res of refused) {
       expect(res.status, res.url).toBe(403)
