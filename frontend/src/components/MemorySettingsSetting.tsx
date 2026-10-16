@@ -1,9 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Spinner } from './ui/Spinner'
+import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /**
  * The longest query automatic Hindsight memory recalls with, in characters, stored by the
@@ -43,12 +41,11 @@ export function MemorySettingsSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Hindsight memory</h2>
-      <form className="flex flex-col gap-3 p-4" onSubmit={(event) => void save(event)}>
-        <label className="flex flex-col gap-1 text-[13px]">
-          Recall query limit (characters)
-          <input
+    <SettingCard title="Hindsight memory">
+      <form className="contents" onSubmit={(event) => void save(event)}>
+        <SettingBody className="space-y-3">
+          <LabeledInput
+            label="Recall query limit (characters)"
             type="number"
             inputMode="numeric"
             min={0}
@@ -57,34 +54,24 @@ export function MemorySettingsSetting() {
             required
             value={charsText}
             onChange={(event) => setChars(event.target.value)}
-            className="sb-field sb-num w-32"
+            className="w-36"
             aria-describedby="memory-settings-help"
           />
-        </label>
-        <p id="memory-settings-help" className="text-[12px] text-muted">
-          With a <code>hindsight</code> plugin enabled, each message is recalled against the bank using its first
-          this many characters, as the Claude Code Hindsight plugin does (<code>recallMaxQueryChars</code>).{' '}
-          {current.default} is the default; 0 sends the whole message. The bank has its own limit in tokens (
-          <code>HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS</code>, 500 by default): a query it still finds too long is
-          retried once, shorter. Applies from the next message.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>
-            {saving && <Spinner />}
-            Save
-          </Button>
-          {saved && !changed && (
-            <span role="status" className="text-[12px] text-ok">
-              Saved. The next message uses it.
-            </span>
-          )}
-        </div>
-        {error && (
-          <p role="alert" className="text-[12px] text-warn">
-            {error}
+          <p id="memory-settings-help" className="text-xs text-muted-foreground">
+            With a <code>hindsight</code> plugin enabled, each message is recalled against the bank using its first
+            this many characters, as the Claude Code Hindsight plugin does (<code>recallMaxQueryChars</code>).{' '}
+            {current.default} is the default; 0 sends the whole message. The bank has its own limit in tokens (
+            <code>HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS</code>, 500 by default): a query it still finds too long is
+            retried once, shorter. Applies from the next message.
           </p>
-        )}
+        </SettingBody>
+        <SaveFooter
+          saving={saving}
+          disabled={!changed}
+          saved={saved && !changed ? 'Saved. The next message uses it.' : null}
+          error={error}
+        />
       </form>
-    </section>
+    </SettingCard>
   )
 }

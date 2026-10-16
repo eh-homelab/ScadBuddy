@@ -1,6 +1,7 @@
 import { listNames, type OutputRef } from '../lib/arrange'
 import { shortId } from '../lib/format'
-import { Button } from './ui/Button'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
 
 /** #902 — the question asked before outputs saved before Arrange are re-rendered. */
 export function BackfillPrompt({
@@ -13,21 +14,17 @@ export function BackfillPrompt({
   onCancel: () => void
 }) {
   return (
-    <div
-      role="group"
-      aria-label="Re-render first"
-      className="flex flex-col gap-2 rounded-[6px] border border-line bg-surface-2 px-3 py-2 text-[13px]"
-    >
+    <Card size="sm" role="group" aria-label="Re-render first" className="gap-2 px-3 text-[13px]">
       <p>Re-render {listNames(outputs)}, then arrange?</p>
       <div className="flex gap-2">
-        <Button size="sm" variant="primary" onClick={onConfirm}>
+        <Button type="button" size="sm" onClick={onConfirm}>
           Re-render
         </Button>
-        <Button size="sm" variant="ghost" onClick={onCancel}>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
       </div>
-    </div>
+    </Card>
   )
 }
 

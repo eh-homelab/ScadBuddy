@@ -28,6 +28,7 @@ from scadbuddy.library.catalogue import Catalogue, ModelRecord
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
 from scadbuddy.meshmodel.edits import Edit
 from scadbuddy.meshmodel.operations import hand_edited, read_scene
+from scadbuddy.meshmodel.paint import scene_notes
 from scadbuddy.meshmodel.scene import Scene
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
@@ -74,6 +75,8 @@ class SceneEdits(BaseModel):
 
 class SceneView(BaseModel):
     scene: Scene
+    #: What reading the file dropped, and where a painted object's painting is not
+    #: carried whole (meshmodel/paint.py `scene_notes`).
     notes: list[str]
     #: model.scad no longer matches what the scene compiled; edits are refused.
     hand_edited: bool
@@ -249,7 +252,9 @@ async def get_scene(slug: SlugPath, catalogue: CatalogueDep) -> SceneView:
 
     def read() -> SceneView:
         scene = read_scene(directory, slug)
-        return SceneView(scene=scene, notes=scene.notes, hand_edited=hand_edited(directory, scene))
+        return SceneView(
+            scene=scene, notes=scene_notes(scene), hand_edited=hand_edited(directory, scene)
+        )
 
     return await asyncio.to_thread(read)
 

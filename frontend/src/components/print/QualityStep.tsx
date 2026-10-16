@@ -1,3 +1,6 @@
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { StepCard } from './StepCard'
 import { useEffect } from 'react'
 import type { TierOption } from '../../api/types'
 
@@ -28,26 +31,24 @@ export function QualityStep({ size, tiers, processes, tier, processName, onChang
   }, [stale, tier, onChange])
 
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Quality — {size} mm nozzle</legend>
-      <div className="mt-1.5 flex flex-col gap-1">
-        <label htmlFor="quality-process" className="text-[12px] text-muted">
+    <StepCard title={`Quality — ${size} mm nozzle`}>
+      <div className="grid gap-1.5">
+        <Label htmlFor="quality-process" className="text-xs font-normal text-muted-foreground">
           Process
-        </label>
-        <select
-          id="quality-process"
-          aria-label="Process"
-          value={selectedProcess}
-          onChange={(event) => onChange({ tier: null, processName: event.target.value })}
-          className="sb-field"
-        >
-          {processes.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+        </Label>
+        <Select value={selectedProcess} onValueChange={(next) => onChange({ tier: null, processName: next })}>
+          <SelectTrigger id="quality-process" aria-label="Process" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {processes.map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
-    </fieldset>
+    </StepCard>
   )
 }

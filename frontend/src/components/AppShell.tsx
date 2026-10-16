@@ -41,6 +41,7 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
+import { retryFailedPages } from '../lib/lazyRetry'
 import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
@@ -63,11 +64,11 @@ import {
 } from '@/components/ui/sidebar'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
-import { ModalCompanionContext, focusInto, topmostDialog } from '../lib/modal'
+import { ModalCompanionContext, escapeTaken, focusInto, topmostDialog } from '../lib/modal'
 import { useMediaQuery } from '../lib/useMediaQuery'
 import { usePageTitle } from '../lib/usePageTitle'
 
@@ -260,7 +261,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   }, [shown, toggle])
 
   const onPanelKey = (event: ReactKeyboardEvent) => {
-    if (event.key === 'Escape' && !event.defaultPrevented) {
+    // Not `defaultPrevented`: a dialog beside the panel prevents the Escape it leaves to it.
+    if (event.key === 'Escape' && !escapeTaken(event.nativeEvent)) {
       event.preventDefault()
       closePanel()
     }
@@ -334,11 +336,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                     aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                     aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
                     title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                    // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                    // #1897 — above a dialog's overlay (ui/dialog, z-50), so the assistant
                     // opens beside a dialog that is already open, as the shortcut does. Only
                     // where the panel can sit beside one (#2013): on a phone the dialog covers
                     // the panel anyway, and a raised button would paint over the dialog.
-                    className={cn(!panelOverlays && 'relative z-[60]', open && 'bg-secondary text-secondary-foreground')}
+                    // Clickable over a Radix modal too, which turns pointer events off outside it;
+                    // the dialog leaves a press here alone (`data-modal-companion-toggle`).
+                    data-modal-companion-toggle=""
+                    className={cn(!panelOverlays && 'pointer-events-auto relative z-[60]', open && 'bg-secondary text-secondary-foreground')}
                   >
                     {working ? (
                       <span
@@ -387,11 +392,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
               >
                 {/* #361 — the last resort: one page that throws never blanks the app, and
-                    leaving it clears the error. Reload, not an in-place retry: what lands
-                    here is mostly a lazy chunk that failed, which React caches as failed. */}
+                    leaving it clears the error. What lands here is mostly a lazy chunk that
+                    failed; `retryFailedPages` drops that failure, so coming back to the
+                    page imports it again (#3241). PageFailed's Reload does it at once. */}
                 <ErrorBoundary
                   resetKey={location.pathname}
                   fallback={() => <PageFailed />}
+                  onError={retryFailedPages}
                 >
                   {/* #2356 — a page's own chunk loading. */}
                   <Suspense fallback={<PageLoading />}>

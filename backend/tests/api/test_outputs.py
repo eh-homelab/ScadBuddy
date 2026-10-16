@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tarfile
 import zipfile
 from types import SimpleNamespace
 from typing import Any
@@ -13,11 +14,16 @@ from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.inputs import InputsError
+from scadbuddy.render.jobs import SnapshotUnavailableError
+from scadbuddy.render.objects3mf import ReadObject
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
@@ -25,6 +31,7 @@ from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
+from tests.test_geometry import carrot
 
 
 def _finished_job(client: TestClient, slug: str, width: float = 12) -> str:
@@ -781,3 +788,183 @@ def test_a_copy_that_fails_otherwise_is_the_same_404_without_a_path(
     assert str(paths.root) not in response.text
     outputs = paths.output_dir(model, "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())
+
+
+def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: bool) -> str:
+    """An output of ``model`` whose 3MF is the test carrot; with ``scene``, the model is
+    a mesh model of that carrot (its scene's hash is the model.scad already there)."""
+    directory = paths.model_dir(model)
+    if scene:
+        read = [ReadObject("Carrot", 1, [ColourPart(0, "Body", "#F08A24", carrot())])]
+        built, files = scene_from_objects(
+            read, SceneSource(kind="upload", name="neck.stl", sha256="ab" * 32)
+        )
+        for name, data in files.items():
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_bytes(data)
+        source = (directory / "model.scad").read_text()
+        stamped = built.model_copy(update={"generated_sha256": text_sha256(source)})
+        (directory / SCENE_NAME).write_text(dump_scene(stamped))
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    part = ColourPart(1, "Body", "#F08A24", carrot())
+    write_plates_3mf(
+        [PlateParts((part,), (1,))],
+        ["#F08A24"],
+        paths.output_dir(model, created["id"]) / "model.3mf",
+        thumbnails=None,
+    )
+    return str(created["id"])
+
+
+COMMIT = "c" * 40
+
+
+def _recorded_at(paths: DataPaths, model: str, output: str, version: str | None) -> None:
+    """The output's meta.json as if it had been rendered at ``version``."""
+    path = paths.output_dir(model, output) / "meta.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["model_version"] = version
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _live_directory(monkeypatch: pytest.MonkeyPatch, paths: DataPaths, model: str) -> None:
+    """The test library has no git history, so a commit id has no export to read: the
+    revision's directory is the live one."""
+
+    async def live(slug: str, requested: str | None, **_: Any) -> tuple[Any, str | None]:
+        return paths.model_dir(model), requested
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", live)
+
+
+def _joint_object(client: TestClient, output: str) -> str | None:
+    response = client.get(f"/api/v1/outputs/{output}/geometry")
+    assert response.status_code == 200
+    [joint] = response.json()["weak_joints"]
+    found: str | None = joint["suggestion"]["object"]
+    return found
+
+
+def test_a_mesh_models_weak_joint_names_its_scene_object(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    _live_directory(monkeypatch, paths, model)
+    [joint] = client.get(f"/api/v1/outputs/{output}/geometry").json()["weak_joints"]
+    assert joint["suggestion"]["object"] == "o1"
+    assert joint["suggestion"]["edit"] == "split_at_plane"
+
+
+def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A template's render, and an arranged output (its objects moved off the scene's
+    frame): the joint is reported, with no object rather than a wrong one."""
+    _live_directory(monkeypatch, paths, model)
+    plain = _carrot_output(client, model, paths, scene=False)
+    _recorded_at(paths, model, plain, COMMIT)
+    assert _joint_object(client, plain) is None
+    arranged = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, arranged, COMMIT)
+    (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
+    assert _joint_object(client, arranged) is None
+
+
+def test_a_weak_joint_names_no_object_when_the_render_recorded_no_commit(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A content hash or no version at all: the live scene may have been edited since
+    the render, so naming its objects could name the wrong one."""
+    _live_directory(monkeypatch, paths, model)
+    output = _carrot_output(client, model, paths, scene=True)
+    assert json.loads((paths.output_dir(model, output) / "meta.json").read_text())[
+        "model_version"
+    ] == source_version(paths.model_dir(model))
+    assert _joint_object(client, output) is None
+    _recorded_at(paths, model, output, None)
+    assert _joint_object(client, output) is None
+
+
+def test_a_weak_joint_names_no_object_when_its_revision_or_model_is_gone(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    # No such revision to export: the answer is still the analysis.
+    assert _joint_object(client, output) is None
+    _live_directory(monkeypatch, paths, model)
+    shutil.rmtree(paths.model_dir(model))
+    assert _joint_object(client, output) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GitError("git failed"),
+        GitTimeoutError("slow"),
+        RevisionNotFoundError("gone"),
+        SnapshotUnavailableError("no history"),
+        tarfile.ReadError("damaged"),
+        OSError("disk"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_a_weak_joint_is_unattributed_when_the_revision_cannot_be_read(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """Everything `source_directory` raises for a deleted model or a missing revision
+    costs the object name, never the geometry read."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+
+    async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
+        raise error
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", refuse)
+    assert _joint_object(client, output) is None
+
+
+def test_an_attributed_analysis_is_cached_beside_the_geometry(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second ask reads the cache: no export of the revision, no scene and meshes
+    loaded again, and the same body."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    asked: list[str] = []
+
+    async def live(slug: str, requested: str | None, **_: Any) -> tuple[Any, str | None]:
+        asked.append(slug)
+        return paths.model_dir(model), requested
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", live)
+    url = f"/api/v1/outputs/{output}/geometry"
+    first = client.get(url).json()
+    assert first["weak_joints"][0]["suggestion"]["object"] == "o1"
+    assert client.get(url).json() == first
+    assert len(asked) == 1
+
+
+def test_an_unattributed_analysis_is_not_cached(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure to read the revision may pass: once it can be read, the joint is named."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+
+    async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
+        raise OSError("disk")
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", refuse)
+    assert _joint_object(client, output) is None
+    _live_directory(monkeypatch, paths, model)
+    assert _joint_object(client, output) == "o1"

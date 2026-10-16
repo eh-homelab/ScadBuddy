@@ -5,7 +5,9 @@ import { imageAsPng } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
 import { MediaPicker, type PickerItem, type PickerSection } from '../media/MediaPicker'
 import { mediaIdOf, mediaPickerItems } from '../media/pickerItems'
-import { Button } from '../ui/Button'
+import { Hint } from '../Hint'
+import { Button } from '@/components/ui/button'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Field } from './Field'
 import { paramLabel } from '../../lib/params'
 
@@ -159,11 +161,11 @@ export function FileWidget({
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
-        className={`flex items-center gap-2.5 rounded-[6px] border border-dashed p-2 transition-colors ${
-          dragging ? 'border-accent bg-accent/10' : 'border-line bg-surface-2/60'
+        className={`flex items-center gap-2.5 rounded-xl border border-dashed p-2 transition-colors ${
+          dragging ? 'border-primary bg-primary/10' : 'border-border bg-muted/40'
         }`}
       >
-        <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-[4px] border border-line bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">
+        <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-md border bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">
           {previewUrl ? (
             <img
               src={previewUrl}
@@ -171,22 +173,24 @@ export function FileWidget({
               className="size-full object-contain"
             />
           ) : (
-            <span aria-hidden className="text-[10px] text-faint">
+            <span aria-hidden className="text-[10px] text-muted-foreground">
               {accept.join('/').toUpperCase()}
             </span>
           )}
         </div>
 
-        <div className="min-w-0 flex-1 text-[12px]">
+        <div className="min-w-0 flex-1 text-xs">
           {uploading ? (
-            <span className="text-muted">Uploading…</span>
+            <span className="text-muted-foreground">Uploading…</span>
           ) : isAsset ? (
             <>
-              <span className="block truncate text-ink" title={asset?.name}>
-                {asset?.name ?? (lookup.error ? 'Uploaded file (unavailable)' : 'Uploaded file')}
-              </span>
+              <Hint content={asset?.name}>
+                <span className="block truncate font-medium">
+                  {asset?.name ?? (lookup.error ? 'Uploaded file (unavailable)' : 'Uploaded file')}
+                </span>
+              </Hint>
               {asset && (
-                <span className="sb-num text-faint">
+                <span className="sb-num text-muted-foreground">
                   {asset.kind.toUpperCase()}
                   {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
                 </span>
@@ -194,19 +198,19 @@ export function FileWidget({
             </>
           ) : isSample ? (
             <>
-              <span className="block truncate text-ink" title={value}>
-                {value}
-              </span>
-              <span className="text-faint">
+              <Hint content={value}>
+                <span className="block truncate font-medium">{value}</span>
+              </Hint>
+              <span className="text-muted-foreground">
                 {value === param.initial ? 'Model default · template sample' : 'Template sample'}
               </span>
             </>
           ) : value ? (
-            <span className="block truncate text-muted" title={value}>
-              Model default: {value}
-            </span>
+            <Hint content={value}>
+              <span className="block truncate text-muted-foreground">Model default: {value}</span>
+            </Hint>
           ) : (
-            <span className="text-muted">Drop a file here</span>
+            <span className="text-muted-foreground">Drop a file here</span>
           )}
         </div>
 
@@ -222,11 +226,12 @@ export function FileWidget({
             if (file) void upload(file)
           }}
         />
-        <Button size="sm" disabled={uploading} onClick={() => setPicking(true)}>
+        <Button type="button" variant="outline" size="sm" disabled={uploading} onClick={() => setPicking(true)}>
           Choose…
         </Button>
         {value !== '' && (
           <Button
+            type="button"
             size="sm"
             variant="ghost"
             aria-label={`Clear ${label}`}
@@ -241,37 +246,33 @@ export function FileWidget({
         )}
       </div>
       {samples.length > 0 && (
-        <div
-          role="group"
-          aria-labelledby={`${id}-samples`}
-          data-testid={`samples-${param.name}`}
-          className="mt-1.5"
-        >
-          <span id={`${id}-samples`} className="mb-1 block text-[11px] text-faint">
+        <div data-testid={`samples-${param.name}`} className="flex flex-col gap-1">
+          <span id={`${id}-samples`} className="text-xs text-muted-foreground">
             Samples
           </span>
-          <div className="flex flex-wrap gap-1.5">
-            {samples.map((name) => {
-              const chosen = name === value
-              return (
-                <button
-                  key={name}
-                  type="button"
-                  aria-pressed={chosen}
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            spacing={1.5}
+            aria-labelledby={`${id}-samples`}
+            value={samples.includes(value) ? value : ''}
+            disabled={uploading}
+            // A second press on the chosen sample leaves it chosen: Clear is the way out.
+            onValueChange={(name) => {
+              if (!name) return
+              setError(undefined)
+              onChange(name)
+            }}
+            className="flex-wrap"
+          >
+            {samples.map((name) => (
+              <Hint key={name} content={name}>
+                <ToggleGroupItem
+                  value={name}
                   aria-label={`Use sample ${name}`}
-                  title={name}
-                  disabled={uploading}
-                  onClick={() => {
-                    setError(undefined)
-                    onChange(name)
-                  }}
-                  className={`flex w-[72px] flex-col items-center gap-1 rounded-[6px] border p-1 text-[10px] transition-colors disabled:opacity-50 ${
-                    chosen
-                      ? 'border-accent bg-accent/10 text-ink'
-                      : 'border-line bg-surface-2/60 text-muted hover:border-accent/60'
-                  }`}
+                  className="h-auto w-[72px] flex-col gap-1 p-1 text-[10px] font-normal data-[state=on]:border-primary data-[state=on]:bg-primary/10"
                 >
-                  <span className="grid size-10 place-items-center overflow-hidden rounded-[4px] bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:10px_10px]">
+                  <span className="grid size-10 place-items-center overflow-hidden rounded-md bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:10px_10px]">
                     <img
                       src={api.sampleContentUrl(slug, name, version)}
                       alt=""
@@ -280,14 +281,14 @@ export function FileWidget({
                     />
                   </span>
                   <span className="w-full truncate text-center">{name}</span>
-                </button>
-              )
-            })}
-          </div>
+                </ToggleGroupItem>
+              </Hint>
+            ))}
+          </ToggleGroup>
         </div>
       )}
       {error && (
-        <p role="alert" className="mt-1.5 text-[12px] text-warn">
+        <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}

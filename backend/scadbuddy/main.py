@@ -661,6 +661,8 @@ async def _with_bambuddy(
     """Run ``sweep`` with a Bambuddy client; nothing to do when Bambuddy is not set up.
     What ``sweep`` raises it has logged, and is raised as it is."""
     settings = await asyncio.to_thread(state.settings_store.load)
+    # Held, not raised in place: a sweep's own ApiError must miss the handler below,
+    # which would log it again as Bambuddy unreachable, or drop it as NOT_CONFIGURED.
     failed: Exception | None = None
     try:
         async with client_for(settings) as client:

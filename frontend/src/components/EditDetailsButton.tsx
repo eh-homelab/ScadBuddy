@@ -7,9 +7,21 @@ import { isMarkdown, readmeProblem } from '../lib/modelFolder'
 import { addMedia, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { MediaPicker } from './media/MediaPicker'
 import { MEDIA_KEY, mediaIdOf, mediaPickerItems } from './media/pickerItems'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
+import { FileTextIcon, PencilIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 
 interface Props {
   slug: string
@@ -22,9 +34,6 @@ interface Baseline {
   model: ModelSummary
   readme: string
 }
-
-const FIELD =
-  'w-full rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent'
 
 function parseTags(text: string): string[] {
   return text
@@ -75,6 +84,7 @@ function sameDetails(a: Baseline, b: Baseline) {
 
 export function EditDetailsButton({ slug, onSaved }: Props) {
   const [open, setOpen] = useState(false)
+  const readmeFile = useRef<HTMLInputElement>(null)
   const [baseline, setBaseline] = useState<Baseline | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -243,83 +253,68 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => void show()}
-        className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-      >
-        Edit details
-      </button>
-      <Dialog
-        open={open}
-        title="Edit details"
-        description="Each change is saved as a revision in the model's history."
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={saving}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              onClick={() => void save()}
-              disabled={!model || saving || nameMissing || readmeTooLong !== null}
-            >
-              {saving && <Spinner />}
-              {saving ? 'Saving' : 'Save'}
-            </Button>
-          </>
-        }
-      >
+      <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void show()}>
+        <PencilIcon /> Edit details
+      </Button>
+      <Dialog open={open} onOpenChange={(next) => !next && close()}>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Edit details</DialogTitle>
+          <DialogDescription>Each change is saved as a revision in the model&apos;s history.</DialogDescription>
+        </DialogHeader>
         {!model && !loadError && (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading details
-          </p>
+          <div role="status" aria-label="Loading details" className="flex flex-col gap-3">
+            <span className="sr-only">Loading details</span>
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </div>
         )}
         {changedElsewhere && (
           <div
             role="status"
-            className="mb-3 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+            className="flex items-center gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs"
           >
             <span>These details were changed elsewhere since you opened them.</span>
-            <Button size="sm" onClick={() => void show()}>
+            <Button size="sm" variant="outline" onClick={() => void show()}>
               Load the latest
             </Button>
           </div>
         )}
         {loadError && (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-destructive">
             Could not load the model: {loadError}
           </p>
         )}
         {model && (
-          <div className="flex flex-col gap-3 text-[13px]">
-            <label className="flex flex-col gap-1">
-              <span className="text-muted">Name</span>
-              <input className={FIELD} value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-muted">Description</span>
-              <textarea
-                className={FIELD}
+          <div className="flex flex-col gap-4 text-sm">
+            <div className="grid gap-2">
+              <Label htmlFor="details-name">Name</Label>
+              <Input id="details-name" value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="details-description">Description</Label>
+              <Textarea
+                id="details-description"
                 rows={3}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-muted">Tags</span>
-              <input
-                className={FIELD}
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="details-tags">Tags</Label>
+              <Input
+                id="details-tags"
                 value={tags}
                 placeholder="comma, separated"
                 onChange={(e) => setTags(e.target.value)}
               />
-            </label>
+            </div>
 
             <fieldset className="flex flex-col gap-1.5">
-              <legend className="mb-1 text-muted">Thumbnail</legend>
-              <p className="text-[12px] text-faint" data-testid="thumbnail-state">
+              <legend className="mb-1 text-sm font-medium">Thumbnail</legend>
+              <p className="text-xs text-muted-foreground" data-testid="thumbnail-state">
                 {pendingCover
                   ? `${uploadedNames[cover ?? ''] ?? pendingCover.label} becomes the cover on save.`
                   : removeThumbnail
@@ -333,7 +328,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                           : 'None set. A render of the default settings stands in once it is ready; a generated plate takes precedence.'}
               </p>
               <div className="flex items-center gap-2">
-                <Button size="sm" onClick={() => setPicking(true)}>
+                <Button size="sm" variant="outline" onClick={() => setPicking(true)}>
                   {ownThumbnail || pendingCover ? 'Change…' : 'Choose…'}
                 </Button>
                 {(ownThumbnail || pendingCover) && (
@@ -348,7 +343,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                     {pendingCover ? 'Keep current' : 'Remove thumbnail'}
                   </Button>
                 )}
-                <span className="text-[12px] text-faint">From the template&apos;s media</span>
+                <span className="text-xs text-muted-foreground">From the template&apos;s media</span>
               </div>
               <MediaPicker
                 open={picking}
@@ -378,28 +373,29 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
               />
             </fieldset>
 
-            <label className="flex flex-col gap-1">
-              <span className="text-muted">README</span>
-              <textarea
-                className={`${FIELD} sb-num min-h-40 font-mono text-[12px]`}
+            <div className="grid gap-2">
+              <Label htmlFor="details-readme">README</Label>
+              <Textarea
+                id="details-readme"
+                className="sb-num min-h-40 font-mono text-xs"
                 rows={8}
                 value={readme}
                 placeholder="Markdown. Leave empty for no README."
                 onChange={(e) => setReadme(e.target.value)}
               />
-            </label>
+            </div>
             {readmeTooLong && (
-              <p role="alert" data-testid="readme-limit" className="text-[12px] text-warn">
+              <p role="alert" data-testid="readme-limit" className="text-xs text-destructive">
                 {readmeTooLong}
               </p>
             )}
             {pendingReadme === 'remove' && (
-              <p role="status" data-testid="readme-state" className="text-[12px] text-warn">
+              <p role="status" data-testid="readme-state" className="text-xs text-destructive">
                 Saving will remove the README.
               </p>
             )}
             {readmeBlank && readme !== '' && !model.has_readme && (
-              <p role="status" data-testid="readme-state" className="text-[12px] text-faint">
+              <p role="status" data-testid="readme-state" className="text-xs text-muted-foreground">
                 Only whitespace, so no README is saved.
               </p>
             )}
@@ -408,26 +404,38 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 Remove README
               </Button>
             )}
-            <label className="inline-flex w-fit cursor-pointer items-center rounded-[6px] border border-line bg-surface-2 px-2.5 py-1 text-[13px] hover:border-line-strong">
-              Load README from file
-              <input
-                type="file"
-                accept=".md,.markdown,text/markdown"
-                className="sr-only"
-                aria-label="README file"
-                onChange={(event) => {
-                  void loadReadme(event.target.files?.[0])
-                  event.target.value = ''
-                }}
-              />
-            </label>
+            <Button size="sm" variant="outline" className="w-fit" onClick={() => readmeFile.current?.click()}>
+              <FileTextIcon /> Load README from file
+            </Button>
+            <input
+              ref={readmeFile}
+              type="file"
+              accept=".md,.markdown,text/markdown"
+              className="sr-only"
+              tabIndex={-1}
+              aria-label="README file"
+              onChange={(event) => {
+                void loadReadme(event.target.files?.[0])
+                event.target.value = ''
+              }}
+            />
           </div>
         )}
         {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
+          <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         )}
+        <DialogFooter>
+          <Button variant="outline" onClick={close} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={() => void save()} disabled={!model || saving || nameMissing || readmeTooLong !== null}>
+            {saving && <Spinner />}
+            {saving ? 'Saving' : 'Save'}
+          </Button>
+        </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )

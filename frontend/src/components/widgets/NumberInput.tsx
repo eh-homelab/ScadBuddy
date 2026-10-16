@@ -1,4 +1,5 @@
 import { useState, type InputHTMLAttributes } from 'react'
+import { Input } from '@/components/ui/input'
 
 /** The draft as a number, or undefined while it is empty or partial (`-`, `.`, `1e`). */
 function parse(draft: string): number | undefined {
@@ -34,7 +35,7 @@ export function NumberInput({
   }
 
   return (
-    <input
+    <Input
       {...rest}
       type="number"
       value={draft}

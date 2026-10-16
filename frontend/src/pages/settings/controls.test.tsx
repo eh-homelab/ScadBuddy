@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { Settings } from '../../api/types'
 import { BytesInput, FieldRow, SourceBadge } from './controls'
 import { bestUnit, hasKey, inUnit } from './fields'
+import { choose } from '../../test/select'
 
 // #322 review: a byte limit must never change unless its number is edited.
 
@@ -24,12 +25,12 @@ describe('BytesInput', () => {
     render(<Harness initial="2000000000" />)
     const number = screen.getByRole('spinbutton')
     expect(number).toHaveValue(2)
-    await user.selectOptions(screen.getByLabelText('Unit for limit'), 'MB')
+    await choose(user, screen.getByLabelText('Unit for limit'), 'MB')
     expect(number).toHaveValue(2000)
     expect(screen.getByTestId('bytes')).toHaveTextContent(/^2000000000$/)
 
-    await user.selectOptions(screen.getByLabelText('Unit for limit'), 'MiB')
-    expect(screen.getByLabelText('Unit for limit')).toHaveValue('MiB')
+    await choose(user, screen.getByLabelText('Unit for limit'), 'MiB')
+    expect(screen.getByLabelText('Unit for limit')).toHaveTextContent('MiB')
     expect(screen.getByTestId('bytes')).toHaveTextContent(/^2000000000$/)
   })
 
@@ -45,7 +46,7 @@ describe('BytesInput', () => {
   it('shows a value round in no unit exactly, in bytes', () => {
     render(<Harness initial="123456789" />)
     expect(screen.getByRole('spinbutton')).toHaveValue(123456789)
-    expect(screen.getByLabelText('Unit for limit')).toHaveValue('B')
+    expect(screen.getByLabelText('Unit for limit')).toHaveTextContent(/^B$/)
   })
 })
 
