@@ -1,6 +1,7 @@
-import { Suspense, lazy, type ReactNode } from 'react'
+import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from './components/AppShell'
+import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
 
@@ -9,38 +10,39 @@ import { CataloguePage } from './pages/CataloguePage'
 // The shell's Suspense (`AppShell`) shows while a page's chunk loads: on a first visit.
 // A navigation does not blank the page it leaves, as `BrowserRouter` applies a location
 // change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
-// React keeps the old page up until the next one's chunk is in.
-const CustomizePage = lazy(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
-const EditPage = lazy(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
-const FlowPage = lazy(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
-const HistoryPage = lazy(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
-const LibraryPage = lazy(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
-const PrintDetailPage = lazy(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
+// React keeps the old page up until the next one's chunk is in. `lazyRetry`, not `lazy`:
+// a chunk that failed is imported again on the next visit (#3241).
+const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
+const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
+const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
+const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
+const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
+const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
 // Two pages of one module, so one chunk.
 const loadPrints = () => import('./pages/PrintsPage')
-const PrintsPage = lazy(async () => ({ default: (await loadPrints()).PrintsPage }))
-const TemplatePrintsPage = lazy(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
-const SettingsPage = lazy(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
-const VersionsPage = lazy(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
-const WorkflowRunPage = lazy(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
-const WorkflowsPage = lazy(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
+const PrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).PrintsPage }))
+const TemplatePrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
+const SettingsPage = lazyRetry(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
+const VersionsPage = lazyRetry(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
+const WorkflowRunPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
+const WorkflowsPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
 // #3653 — the component gallery, in the mocked build only: a production bundle has neither
 // the route nor the chunk.
 const UiGalleryPage =
   import.meta.env.VITE_MOCK_API === '1'
-    ? lazy(async () => ({ default: (await import('./pages/UiGalleryPage')).UiGalleryPage }))
+    ? lazyRetry(async () => ({ default: (await import('./pages/UiGalleryPage')).UiGalleryPage }))
     : null
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor. A flow's page
 // (#2487) loads the same chunk for its editor and diff only (`FlowPage`'s own lazy imports).
-const NewModelPage = lazy(async () => ({
+const NewModelPage = lazyRetry(async () => ({
   default: (await import('./pages/NewModelPage')).NewModelPage,
 }))
-const EditSourcePage = lazy(async () => ({
+const EditSourcePage = lazyRetry(async () => ({
   default: (await import('./pages/EditSourcePage')).EditSourcePage,
 }))
-const EditSourceFilePage = lazy(async () => ({
+const EditSourceFilePage = lazyRetry(async () => ({
   default: (await import('./pages/EditSourceFilePage')).EditSourceFilePage,
 }))
 
