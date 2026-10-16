@@ -566,7 +566,6 @@ async function reattach<T>(
       return await (within ? within(attempt) : attempt())
     } catch (caught) {
       if (last || !unanswered(caught)) throw caught
-      console.error('DEBUG3672 reattach', caught instanceof ApiError ? JSON.stringify({ s: caught.status, p: caught.problem }) : String(caught), new Error().stack)
       if (signal?.aborted) {
         if (!finish) throw caught
         last = true
