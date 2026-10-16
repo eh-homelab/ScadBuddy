@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -206,9 +206,10 @@ async def get_library_names(
             raise group_error.exceptions[0] from None
     names = [task.result() for task in tasks]
     if len(names) > 1 and all(file.name is None for file in names):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Bambuddy has none of these library files; is its URL right?",
+        raise ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            "Bambuddy has none of these library files; is its URL right?",
+            title="Bambuddy has none of these library files",
         )
     return names
 

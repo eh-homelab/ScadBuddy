@@ -186,12 +186,15 @@ export const handlers = [
   // #2349 — names by id; a file the mock library does not have is `name: null`.
   http.get(`${base}/print/library/names`, ({ request }) => {
     const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
-    return HttpResponse.json(
-      ids.map((id) => {
-        const file = listedFiles().find((row) => row.id === id)
-        return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
-      }) satisfies LibraryFileName[],
-    )
+    const names = ids.map((id) => {
+      const file = listedFiles().find((row) => row.id === id)
+      return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
+    }) satisfies LibraryFileName[]
+    // The route's rule: several files asked and none found reads as a misrouted Bambuddy.
+    if (names.length > 1 && names.every((file) => file.name === null)) {
+      return problem(502, 'Bambuddy has none of these library files', 'Bambuddy has none of these library files; is its URL right?')
+    }
+    return HttpResponse.json(names)
   }),
 
   http.get(`${base}/print/library/search`, ({ request }) => {

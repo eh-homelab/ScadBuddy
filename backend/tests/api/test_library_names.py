@@ -87,6 +87,8 @@ def test_every_file_missing_is_a_misrouted_bambuddy_not_every_file_deleted(
 
     assert response.status_code == 502
     assert "URL" in response.json()["detail"]
+    # A problem document like the module's other Bambuddy failures, not a bare detail.
+    assert response.json()["title"] == "Bambuddy has none of these library files"
     # One file asked and gone is just that file deleted.
     single = client.get("/api/v1/print/library/names?ids=719")
     assert single.status_code == 200

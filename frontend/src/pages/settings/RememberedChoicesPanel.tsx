@@ -105,7 +105,17 @@ export function RememberedChoicesPanel({
     for (let at = 0; at < fileIds.length; at += LIBRARY_NAMES_PER_REQUEST) {
       batches.push(fileIds.slice(at, at + LIBRARY_NAMES_PER_REQUEST))
     }
-    return (await Promise.all(batches.map((batch) => api.libraryFileNames(batch)))).flat()
+    const answers = await Promise.allSettled(batches.map((batch) => api.libraryFileNames(batch)))
+    // The route's 502 for "none of these" is per request: a batch of deleted files beside
+    // one that named a file is those files gone, not a misrouted Bambuddy.
+    const named = answers.some((answer) => answer.status === 'fulfilled' && answer.value.some((file) => file.name))
+    return answers.flatMap((answer, at) => {
+      if (answer.status === 'fulfilled') return answer.value
+      if (named && answer.reason instanceof ApiError && answer.reason.status === 502) {
+        return batches[at]!.map((id) => ({ id, name: null, folder_id: null }))
+      }
+      throw answer.reason
+    })
   }, [fileIds.join(',')])
   // A Forget changes the ids, and so asks again: the rows keep the last names meanwhile,
   // rather than every one blinking back to its id.
