@@ -44,4 +44,22 @@ describe('Grep matches line by line, as ripgrep does', () => {
     expect((await grep(ctx, { pattern: 'world[^x]+again', output_mode: 'content' })).text).toBe('No matches found')
     expect((await grep(ctx, { pattern: 'hello\\s+world', output_mode: 'content', multiline: true })).text).toBe('a.txt:1:hello\na.txt:2:world')
   })
+
+  it('maps a per-line hit back to its line for -o and context', async () => {
+    expect((await grep(ctx, { pattern: 'again$', output_mode: 'content', '-o': true })).text).toBe('a.txt:3:again')
+    expect((await grep(ctx, { pattern: '^world', output_mode: 'content', '-A': 1 })).text).toBe('a.txt:2:world\na.txt-3-hello again')
+  })
+
+  it('refuses a newline in the pattern unless multiline is set, as ripgrep does', async () => {
+    for (const pattern of ['hello\\nworld', 'hello[\\n]', 'hello\nworld']) {
+      expect(await grep(ctx, { pattern, output_mode: 'content' })).toMatchObject({
+        isError: true,
+        text: expect.stringContaining('set multiline: true'),
+      })
+    }
+    // An escaped backslash before n is not a newline.
+    expect((await grep(ctx, { pattern: 'hello\\\\n', output_mode: 'content' })).text).toBe('No matches found')
+    // A negated class never matches a newline, so ripgrep allows it.
+    expect((await grep(ctx, { pattern: '^hello[^\\n]*', output_mode: 'content' })).text).toBe('a.txt:1:hello\na.txt:3:hello again')
+  })
 })
