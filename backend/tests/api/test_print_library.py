@@ -716,7 +716,9 @@ def test_a_sliced_file_leaves_out_chosen_plates_it_does_not_hold(
     client: TestClient, plate_ids: list[int], warning: str, queued_plates: list[int]
 ) -> None:
     """#3762 review: of several chosen plates, the ones a sliced file holds are queued
-    and the rest are named in a warning, never refused (#2671)."""
+    and the rest are named in a warning, never refused (#2671). Like every sliced
+    mismatch, each is held for a manual start (#2954)."""
+    warning += " Held for a manual start."
     configure(client)
     sliced_file(104, sliced_3mf(plates=(1, 3)))
     run_routes()
@@ -733,8 +735,9 @@ def test_a_sliced_file_leaves_out_chosen_plates_it_does_not_hold(
     ]
     assert run.status_code == 200, run.text
     assert any(w["message"] == warning for w in run.json()["warnings"])
-    sent = [json.loads(call.request.content)["plate_id"] for call in queued.calls]
-    assert sorted(sent) == queued_plates
+    sent = [json.loads(call.request.content) for call in queued.calls]
+    assert sorted(body["plate_id"] for body in sent) == queued_plates
+    assert all(body["manual_start"] is True for body in sent)
 
 
 @respx.mock
