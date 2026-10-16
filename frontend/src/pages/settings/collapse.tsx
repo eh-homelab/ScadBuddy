@@ -16,6 +16,14 @@ export function SettingsCollapseProvider({ children, known }: { children: ReactN
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const knownIds = useMemo(() => (known ? new Set(known) : undefined), [known])
   const [empty, setEmptyIds] = useState<ReadonlySet<string>>(new Set())
+  // Pruned once on mount too, so a browser that never toggles a fold drops stale ids
+  // as well (#3415 review).
+  useEffect(() => {
+    if (!knownIds) return
+    const stored = readCollapsed()
+    const kept = new Set([...stored].filter((fold) => knownIds.has(fold)))
+    if (kept.size !== stored.size) writeCollapsed(kept)
+  }, [knownIds])
   const setOpen = useCallback((id: string, open: boolean) => {
     setCollapsed((current) => {
       if (current.has(id) !== open) return current

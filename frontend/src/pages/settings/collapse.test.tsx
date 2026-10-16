@@ -86,6 +86,12 @@ describe('SubSection and SectionContents (#2769)', () => {
     expect(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')).toEqual(['g-hidden-today', 'g-audit'])
   })
 
+  it('drops a stale fold on mount, without waiting for a toggle (#3415 review)', () => {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(['g-renamed', 'g-audit']))
+    render(<Harness known={GROUPS.map((group) => group.id)} />)
+    expect(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')).toEqual(['g-audit'])
+  })
+
   it('opens everything when the browser keeps nothing readable', () => {
     localStorage.setItem(COLLAPSED_KEY, 'not json')
     render(<Harness />)

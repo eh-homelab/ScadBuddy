@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { lazyRetry } from '../lib/lazyRetry'
@@ -126,6 +126,11 @@ describe('the shell’s orientation (#2454)', () => {
     expect(skip).toHaveFocus()
     await user.click(skip)
     expect(screen.getByRole('main')).toHaveFocus()
+    // Activated again while <main> has focus, it does not stack another blur listener.
+    const added = vi.spyOn(screen.getByRole('main'), 'addEventListener')
+    fireEvent.click(skip)
+    expect(added).not.toHaveBeenCalled()
+    added.mockRestore()
     // Focusable only while the skip link has put focus there.
     await user.tab()
     expect(screen.getByRole('main')).not.toHaveFocus()
