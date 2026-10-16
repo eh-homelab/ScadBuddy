@@ -510,7 +510,8 @@ def suggest(
 
     A slot that declares no material (every generated template's) stays in the plate's
     material family (#2461): the declared ones, else the family that matches the most
-    slots with a loaded spool, then the most slots at all, then the best match (#2850).
+    slots with a loaded spool, then the most slots at all, then the best match (#2850);
+    :func:`_anchor_family` has the full rule, including that it counts slots, not spools.
     One PETG loaded beside the PLA does not make a mostly-PLA plate a PETG one because
     it is the closest colour for a single slot. Opening a PLA print with an unloaded
     TPU in one slot looks deliberate, for the reason :func:`_match_score` gives for PETG
