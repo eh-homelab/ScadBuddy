@@ -503,8 +503,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          # No selection: "Count this shard's tests" failed and says why; a second
-          # error here, and the split job's "expected 3", would only hide it.
+          # No selection: "Count this shard's tests" failed and says why, and the
+          # split job names this shard as the one with no count.
           [ -f counts/selected.txt ] || exit 0
           ran=0
           # `|| true`: grep finds no testcase in an empty suite and exits 1, which
@@ -519,6 +519,7 @@ jobs:
         with:
           name: frontend-e2e-count-${{ matrix.shard }}
           path: frontend/counts/shard-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
 
       - name: Upload the Playwright report
         if: ${{ failure() }}
@@ -547,9 +548,15 @@ jobs:
       - name: Check the counts
         run: |
           set -euo pipefail
+          missing=()
+          for shard in 1 2 3; do
+            [ -f "counts/shard-${shard}.txt" ] || missing+=("${shard}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::no count from shard ${missing[*]}: see that shard's 'Count this shard's tests' step"
+            exit 1
+          fi
           cat counts/shard-*.txt
-          files=(counts/shard-*.txt)
-          [ "${#files[@]}" -eq 3 ] || { echo "::error::expected 3 shard counts, got ${#files[@]}"; exit 1; }
           totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards listed different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
