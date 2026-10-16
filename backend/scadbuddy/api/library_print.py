@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,7 @@ from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
@@ -207,9 +208,11 @@ async def get_library_names(
             raise group_error.exceptions[0] from None
     names = [task.result() for task in tasks]
     if len(names) > 1 and all(file.name is None for file in names):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Bambuddy has none of these library files; is its URL right?",
+        raise ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            "Bambuddy has none of these library files; is its URL right?",
+            title="Bambuddy has none of these library files",
+            type_=LIBRARY_FILES_MISSING_PROBLEM,
         )
     return names
 

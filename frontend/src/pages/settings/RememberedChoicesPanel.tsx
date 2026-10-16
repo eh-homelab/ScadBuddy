@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, BAMBUDDY_LIBRARY_FILES_MISSING } from '../../api/client'
 import type {
   BambuddyTargets,
   ModelPrintChoices,
@@ -105,7 +105,18 @@ export function RememberedChoicesPanel({
     for (let at = 0; at < fileIds.length; at += LIBRARY_NAMES_PER_REQUEST) {
       batches.push(fileIds.slice(at, at + LIBRARY_NAMES_PER_REQUEST))
     }
-    return (await Promise.all(batches.map((batch) => api.libraryFileNames(batch)))).flat()
+    const answers = await Promise.allSettled(batches.map((batch) => api.libraryFileNames(batch)))
+    // The route's "none of these" is per request: a batch of deleted files beside one
+    // that named a file is those files gone, not a misrouted Bambuddy. Only that problem:
+    // any other 502 (a Bambuddy limiting requests, say) fails the lookup to ids.
+    const named = answers.some((answer) => answer.status === 'fulfilled' && answer.value.some((file) => file.name))
+    return answers.flatMap((answer, at) => {
+      if (answer.status === 'fulfilled') return answer.value
+      if (named && answer.reason instanceof ApiError && answer.reason.problem.type === BAMBUDDY_LIBRARY_FILES_MISSING) {
+        return batches[at]!.map((id) => ({ id, name: null, folder_id: null }))
+      }
+      throw answer.reason
+    })
   }, [fileIds.join(',')])
   // A Forget changes the ids, and so asks again: the rows keep the last names meanwhile,
   // rather than every one blinking back to its id.
