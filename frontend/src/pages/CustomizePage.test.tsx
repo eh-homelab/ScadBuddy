@@ -1367,7 +1367,7 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const again = await screen.findByRole('dialog', { name: 'Print' })
-    await user.selectOptions(await within(again).findByLabelText('Printer'), '2')
+    await selectOption(user, await within(again).findByLabelText('Printer'), /^Mini/)
 
     await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('A1 mini 180 × 180'))
     expect(screen.getByTestId('plate-fit')).toHaveTextContent(/X is 132\.1 mm over the A1 mini/)

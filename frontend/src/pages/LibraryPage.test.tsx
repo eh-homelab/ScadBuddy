@@ -88,7 +88,7 @@ describe('LibraryPage', () => {
     expect(await within(dialog).findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
     expect(await within(dialog).findByLabelText("Copies of Wand — Clara's Wand.3mf")).toHaveValue(1)
     // #2284 — a plain file in the mix: where the result is filed is shown, by name.
-    expect(within(dialog).getByLabelText('File under')).toHaveDisplayValue('Name Keychain')
+    expect(within(dialog).getByLabelText('File under')).toHaveTextContent('Name Keychain')
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
     const done = await screen.findByRole('status', { name: 'Arranged' })
     expect(done).toHaveTextContent('Arranged onto 2 plates.')

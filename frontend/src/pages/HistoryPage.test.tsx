@@ -9,6 +9,7 @@ import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { setDisplayUnit } from '../lib/units'
+import { choose } from '../test/select'
 import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -561,14 +562,16 @@ describe('HistoryPage', () => {
     await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
     await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
     await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
-    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name!
+    const model = await screen.findByLabelText('Model')
+    await waitFor(() => expect(model).toBeEnabled())
+    await choose(user, model, binName)
     await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
-    await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
+    await choose(user, screen.getByLabelText('File under'), binName)
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     const note = await screen.findByRole('status', { name: 'Arranged' })
-    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name
     expect(note).toHaveTextContent(`in ${binName}'s history.`)
     expect(within(note).getByRole('link', { name: 'Open in History' })).toHaveAttribute(
       'href',

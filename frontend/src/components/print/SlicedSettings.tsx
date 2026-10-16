@@ -1,4 +1,5 @@
 import type { SlicedProfile } from '../../api/types'
+import { Card, CardContent } from '@/components/ui/card'
 
 /**
  * #2671 — a sliced file's slicer choices, read-only: they are baked into its G-code, so
@@ -14,20 +15,18 @@ export function SlicedSettings({ profile }: { profile: SlicedProfile }) {
     ['Plate type', profile.bed_type],
   ]
   return (
-    <section
-      aria-label="Sliced settings"
-      data-testid="sliced-settings"
-      className="rounded-[6px] border border-line bg-surface-2 px-3 py-2 text-[13px]"
-    >
-      <p className="text-ink">Sliced already: Bambuddy queues it as it is, with these settings.</p>
+    <Card size="sm" role="region" aria-label="Sliced settings" data-testid="sliced-settings" className="text-[13px]">
+      <CardContent>
+      <p className="text-foreground">Sliced already: Bambuddy queues it as it is, with these settings.</p>
       <dl className="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[12.5px]">
         {rows.map(([name, value]) => (
           <div key={name} className="contents">
-            <dt className="text-muted">{name}</dt>
-            <dd className="min-w-0 truncate text-ink">{value || 'not stated in the file'}</dd>
+            <dt className="text-muted-foreground">{name}</dt>
+            <dd className="min-w-0 truncate text-foreground">{value || 'not stated in the file'}</dd>
           </div>
         ))}
       </dl>
-    </section>
+      </CardContent>
+    </Card>
   )
 }

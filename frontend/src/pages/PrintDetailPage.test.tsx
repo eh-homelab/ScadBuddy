@@ -564,7 +564,7 @@ describe('PrintDetailPage (#311)', () => {
     expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
     const colours = outputs[0]!.colors ?? []
     expect(colours.length).toBeGreaterThan(0)
-    for (const colour of colours) expect(within(dialog).getByTitle(colour.toUpperCase())).toBeInTheDocument()
+    for (const colour of colours) expect(dialog.querySelector(`[data-colour="${colour.toUpperCase()}"]`)).not.toBeNull()
     expect(within(dialog).queryByRole('list', { name: 'Plates' })).not.toBeInTheDocument()
     await user.keyboard('{Escape}')
 
@@ -596,7 +596,8 @@ describe('PrintDetailPage (#311)', () => {
     const files = await section('Files')
     await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
     const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
-    await within(dialog).findByTitle((outputs[0]!.colors ?? [])[0]!.toUpperCase())
+    const first = (outputs[0]!.colors ?? [])[0]!.toUpperCase()
+    await waitFor(() => expect(dialog.querySelector(`[data-colour="${first}"]`)).not.toBeNull())
     expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
   })
 

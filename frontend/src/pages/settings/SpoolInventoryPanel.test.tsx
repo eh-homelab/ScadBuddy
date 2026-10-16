@@ -86,8 +86,8 @@ describe('SpoolInventoryPanel (#2351)', () => {
     renderPage(<SpoolInventoryPanel />)
     const clear = await screen.findByTestId('spool-15')
     expect(within(clear).getByTestId('clear-swatch')).toBeInTheDocument()
-    expect(clear.querySelector('[title="#000000"]')).toBeNull()
-    expect(within(screen.getByTestId('spool-2')).getByTitle('#F5547C')).toBeInTheDocument()
+    expect(clear.querySelector('[data-colour="#000000"]')).toBeNull()
+    expect(screen.getByTestId('spool-2').querySelector('[data-colour="#F5547C"]')).not.toBeNull()
   })
 
   it('keeps the last table while a re-read is in flight, then shows the new one (#2971 review)', async () => {
@@ -168,9 +168,9 @@ describe('SpoolInventoryPanel (#2351)', () => {
     renderPage(<SpoolInventoryPanel />)
     for (const id of [40, 41]) {
       const row = await screen.findByTestId(`spool-${id}`)
-      expect(within(row).getByTestId('unknown-swatch')).toHaveAttribute('title', 'colour not recorded')
+      expect(within(row).getByTestId('unknown-swatch')).toHaveAttribute('data-colour', 'colour not recorded')
       expect(within(row).queryByTestId('clear-swatch')).toBeNull()
-      expect(row.querySelector('[title="#000000"]')).toBeNull()
+      expect(row.querySelector('[data-colour="#000000"]')).toBeNull()
     }
   })
 

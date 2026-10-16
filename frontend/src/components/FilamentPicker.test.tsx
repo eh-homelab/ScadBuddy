@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { FilamentOptions, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
+import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
 import { Dialog } from './ui/Dialog'
@@ -135,7 +136,7 @@ describe('FilamentPicker', () => {
 
     // Scoped to the heading: a spool row may legitimately read "1000 g", and it is the
     // slot's own requirement that must never be spelled as a weight it does not have.
-    const heading = (id: number) => slot(id).querySelector('legend') as HTMLElement
+    const heading = (id: number) => document.getElementById(`filament-slot-${id}-heading`) as HTMLElement
     expect(heading(1)).toHaveTextContent('grams unknown until this is sliced')
     expect(heading(1)).not.toHaveTextContent('0 g')
     expect(heading(2)).not.toHaveTextContent('0 g')
@@ -285,7 +286,7 @@ describe('FilamentPicker', () => {
     await expand(user, 2)
     expect(within(slot(1)).queryByTestId('spool-9')).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByTestId('filter-material'), 'PLA')
+    await choose(user, screen.getByTestId('filter-material'), 'PLA')
 
     // The PETG spools go from BOTH slots: one inventory, one filter row.
     expect(within(slot(1)).queryByTestId('spool-9')).not.toBeInTheDocument()
@@ -344,7 +345,7 @@ describe('FilamentPicker', () => {
     await expand(user, 2)
     // Slot 2 starts on the Elegoo pink, which is PLA; filter to PETG and it must stay,
     // or the radio group would show nothing selected and read as an empty slot.
-    await user.selectOptions(screen.getByTestId('filter-material'), 'PETG')
+    await choose(user, screen.getByTestId('filter-material'), 'PETG')
 
     expect(within(slot(2)).getByTestId('spool-27')).toBeChecked()
   })

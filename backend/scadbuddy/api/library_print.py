@@ -51,7 +51,7 @@ from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
-from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
     LibraryListing,
@@ -942,6 +942,9 @@ async def get_library_filaments(
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
+    plate_ids: Annotated[
+        list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
+    ] = None,
 ) -> FilamentOptions:
     settings = store.load()
     async with client_for(settings) as client:
@@ -953,6 +956,7 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            plate_ids=plate_ids,
             filaments=partial(
                 library_filaments, client, paths.cache, budget=budget, downloads=downloads
             ),

@@ -1,3 +1,5 @@
+import { Card, CardContent } from '@/components/ui/card'
+
 type Props = {
   /** The template's `print_settings`: Bambu Studio process keys and values. */
   settings: Record<string, string> | undefined
@@ -52,27 +54,26 @@ export function SlicerDefaults({ settings, overridden = [] }: Props) {
   const entries = Object.entries(settings ?? {})
   if (entries.length === 0) return null
   return (
-    <section
-      aria-labelledby="slicer-defaults-heading"
-      className="rounded-[6px] border border-line bg-surface-2 px-3 py-2"
-    >
-      <h3 id="slicer-defaults-heading" className="text-[13px] text-ink">
+    <Card size="sm" role="region" aria-labelledby="slicer-defaults-heading">
+      <CardContent>
+      <h3 id="slicer-defaults-heading" className="text-[13px] font-medium text-foreground">
         Slicer defaults from this template
       </h3>
       <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
         {entries.map(([key, value]) => (
           <div key={key} className="contents">
-            <dt className="text-muted">{LABELS[key] ?? key}</dt>
+            <dt className="text-muted-foreground">{LABELS[key] ?? key}</dt>
             {overridden.includes(key) ? (
-              <dd className="text-muted">
+              <dd className="text-muted-foreground">
                 <del>{valueOf(key, value)}</del> (overridden above)
               </dd>
             ) : (
-              <dd className="text-ink">{valueOf(key, value)}</dd>
+              <dd className="text-foreground">{valueOf(key, value)}</dd>
             )}
           </div>
         ))}
       </dl>
-    </section>
+      </CardContent>
+    </Card>
   )
 }

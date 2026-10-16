@@ -917,6 +917,7 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
                 "filament_profiles",
                 "supports",
                 "prime_tower",
+                "plate_ids",
             },
         ),
         sort_keys=True,
@@ -971,6 +972,18 @@ def test_the_prime_tower_is_part_of_the_key_only_when_chosen() -> None:
         {**body(), "prime_tower": {"enabled": False, "no_sparse_layers": True}}
     )
     assert run_key("a" * 32, off_sparse) == run_key("a" * 32, off)
+
+
+def test_chosen_plates_are_part_of_the_key_only_when_sent() -> None:
+    """#3652: no plate list keeps the key from before the field existed; the same plates
+    in another order or named twice are the same print."""
+    plain = PrintRunRequest.model_validate(body())
+    some = PrintRunRequest.model_validate({**body(), "plate_ids": [1, 3]})
+    again = PrintRunRequest.model_validate({**body(), "plate_ids": [3, 1, 3]})
+    other = PrintRunRequest.model_validate({**body(), "plate_ids": [1, 2]})
+    assert "plate_ids" not in json.dumps(plain.model_dump(mode="json", exclude_none=True))
+    assert run_key("a" * 32, some) == run_key("a" * 32, again)
+    assert len({run_key("a" * 32, r) for r in (plain, some, other)}) == 3
 
 
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:

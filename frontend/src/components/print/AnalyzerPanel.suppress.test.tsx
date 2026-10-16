@@ -21,6 +21,7 @@ import { storedDecisions } from '../../mocks/features/analyzers'
 import * as fixtures from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { choose, optionsOf } from '../../test/select'
 import { AnalyzerPanel } from './AnalyzerPanel'
 import { SuppressForm } from './SuppressForm'
 
@@ -84,12 +85,12 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     const submit = within(form).getByRole('button', { name: 'Suppress' })
     // The narrowest scope is the default, as simple mode's is in #284.
-    expect(within(form).getByLabelText('Scope')).toHaveDisplayValue('This print')
+    expect(within(form).getByLabelText('Scope')).toHaveTextContent('This print')
     expect(submit).toBeDisabled()
     await user.type(within(form).getByLabelText('Reason'), '   ')
     expect(submit).toBeDisabled()
 
-    await user.selectOptions(within(form).getByLabelText('Scope'), 'This template')
+    await choose(user, within(form).getByLabelText('Scope'), 'This template')
     await user.type(within(form).getByLabelText('Reason'), 'the seam is inside the ring')
     await user.click(submit)
 
@@ -188,15 +189,18 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
     await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
-    const ask = setAside().getByRole('group', { name: 'Remove the suppression of SB1002:part-2?' })
+    const ask = await screen.findByRole('alertdialog', { name: 'Remove the suppression of SB1002:part-2?' })
     expect(ask).toHaveTextContent('Remove it for every print?')
     await user.click(within(ask).getByRole('button', { name: 'Keep the suppression of SB1002:part-2' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(deleted).toHaveLength(0)
     expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' })).toBeEnabled()
 
     await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
     await user.click(
-      setAside().getByRole('button', { name: 'Confirm removing the suppression of SB1002:part-2' }),
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Confirm removing the suppression of SB1002:part-2',
+      }),
     )
     expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
     expect(deleted).toHaveLength(1)
@@ -236,7 +240,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
     const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
-    expect(within(form).getAllByRole('option').map((option) => option.textContent)).toEqual([
+    expect(await optionsOf(user, within(form).getByLabelText('Scope'))).toEqual([
       'This template',
       'These parameters',
       'This print',
@@ -246,7 +250,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const every = within(form).getByRole('checkbox', { name: 'Every SB1002 finding' })
     await user.click(every)
     expect(every).toBeChecked()
-    await user.selectOptions(within(form).getByLabelText('Scope'), 'This template')
+    await choose(user, within(form).getByLabelText('Scope'), 'This template')
     expect(form).toHaveTextContent('This replaces the fix accepted for this template')
     expect(every).toBeDisabled()
     expect(every).not.toBeChecked()
@@ -311,9 +315,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
       const row = await screen.findByTestId(`diagnostic-${key}`)
       await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
       const form = within(row).getByRole('form', { name: `Suppress ${key}` })
-      return within(form)
-        .getAllByRole('option')
-        .map((option) => option.textContent)
+      return optionsOf(user, within(form).getByLabelText('Scope'))
     }
     const slotted = await options('SB1002:part-2')
     expect(slotted).not.toContain('Every pla print')
@@ -370,9 +372,9 @@ describe('SuppressForm', () => {
     const user = userEvent.setup()
     const props = { diagnostic: openEdgesDiagnostic, onDone: () => {}, onCancel: () => {} }
     const view = render(<SuppressForm {...props} scopes={scopesFor(1)} />)
-    await user.selectOptions(screen.getByLabelText('Scope'), 'This printer (#1)')
+    await choose(user, screen.getByLabelText('Scope'), 'This printer (#1)')
     view.rerender(<SuppressForm {...props} scopes={scopesFor(2)} />)
-    expect(screen.getByLabelText('Scope')).toHaveDisplayValue('This print')
+    expect(screen.getByLabelText('Scope')).toHaveTextContent('This print')
     await user.type(screen.getByLabelText('Reason'), 'switched printers')
     await user.click(screen.getByRole('button', { name: 'Suppress' }))
     await waitFor(() => expect(posted).toHaveLength(1))
@@ -391,7 +393,7 @@ describe('SuppressForm', () => {
     expect(submit).toBeEnabled()
     expect(screen.queryByRole('checkbox', { name: /is a problem/ })).toBeNull()
 
-    await user.selectOptions(screen.getByLabelText('Scope'), 'Every print')
+    await choose(user, screen.getByLabelText('Scope'), 'Every print')
     expect(submit).toBeDisabled()
     await user.click(
       screen.getByRole('checkbox', {
@@ -399,9 +401,9 @@ describe('SuppressForm', () => {
       }),
     )
     expect(submit).toBeEnabled()
-    await user.selectOptions(screen.getByLabelText('Scope'), 'Every pla print')
+    await choose(user, screen.getByLabelText('Scope'), 'Every pla print')
     expect(submit).toBeDisabled()
-    await user.selectOptions(screen.getByLabelText('Scope'), 'This template')
+    await choose(user, screen.getByLabelText('Scope'), 'This template')
     expect(submit).toBeEnabled()
     await user.click(submit)
     await waitFor(() => expect(posted).toHaveLength(1))

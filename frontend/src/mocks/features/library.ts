@@ -123,7 +123,7 @@ export const SLICED_PROFILES: Record<number, SlicedProfile> = {
   },
 }
 
-/** The two-plate file; every other 3MF is one plate and an STL none. */
+/** The three-plate file; every other 3MF is one plate and an STL none. */
 export const MULTI_PLATE_FILE = 67
 
 /** What the library routes answer for a file that is gone or not printable. */
@@ -360,10 +360,17 @@ export const handlers = [
       return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read the plates of library file ${params['id']}`)
     }
     if (file.file_type === 'stl') return HttpResponse.json([] satisfies OutputPlate[])
-    const count = file.id === MULTI_PLATE_FILE ? 2 : 1
-    return HttpResponse.json(
-      Array.from({ length: count }, (_, n) => ({ index: n + 1, has_thumbnail: true })) satisfies OutputPlate[],
-    )
+    // #3652 — the multi-plate file's first two plates share a name, as ReWindr's do.
+    if (file.id === MULTI_PLATE_FILE) {
+      return HttpResponse.json(
+        (['Side', 'Side', 'Roller Bolt'] as const).map((name, n) => ({
+          index: n + 1,
+          has_thumbnail: true,
+          name,
+        })) satisfies OutputPlate[],
+      )
+    }
+    return HttpResponse.json([{ index: 1, has_thumbnail: true }] satisfies OutputPlate[])
   }),
 
   http.get(`${base}/print/library/:id/choices`, ({ params, request }) => {
