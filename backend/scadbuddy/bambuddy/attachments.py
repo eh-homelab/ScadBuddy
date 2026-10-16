@@ -110,6 +110,14 @@ class AttachmentStore:
     async def remove(self, attachment_id: int) -> None:
         await asyncio.to_thread(self._remove, attachment_id)
 
+    async def archive_ids(self) -> list[int]:
+        """Every archive with an attachment, lowest first."""
+        return await asyncio.to_thread(self._archive_ids)
+
+    async def forget_archive(self, archive_id: int) -> int:
+        """Delete every row of ``archive_id``; how many there were."""
+        return await asyncio.to_thread(self._forget_archive, archive_id)
+
     def _add(self, attachment: Attachment) -> Attachment:
         with self._pool.connection() as conn, conn.transaction():
             # The cap holds at insert, not only in the operation's check (#2831 review).
@@ -187,6 +195,44 @@ class AttachmentStore:
     def _remove(self, attachment_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM print_attachments WHERE id = %s", (attachment_id,))
+
+    def _archive_ids(self) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT archive_id FROM print_attachments ORDER BY archive_id"
+            ).fetchall()
+        return [int(row["archive_id"]) for row in rows]
+
+    def _forget_archive(self, archive_id: int) -> int:
+        with self._pool.connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM print_attachments WHERE archive_id = %s", (archive_id,)
+            )
+        return deleted.rowcount
+
+
+async def sweep_gone_archives(client: BambuddyClient, store: AttachmentStore) -> int:
+    """#3047: forget the attachments of each archive Bambuddy no longer has. The photos
+    went with the archive; a promoted copy is the template's own now, and stays. Only
+    Bambuddy's 404 is "gone": any other failure stops the sweep, which the next tick
+    runs again, so an outage never forgets anything. Returns how many archives.
+
+    Bambuddy's own answer is checked first: a URL that is not Bambuddy's answers every
+    archive 404 too, and would otherwise forget them all."""
+    archive_ids = await store.archive_ids()
+    if not archive_ids:
+        return 0
+    await client.version()
+    gone = 0
+    for archive_id in archive_ids:
+        try:
+            await client.archive(archive_id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            await store.forget_archive(archive_id)
+            gone += 1
+    return gone
 
 
 #: One lock per project while its ``Media/`` is looked for and made, so two prints of a
