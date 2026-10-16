@@ -32,10 +32,11 @@ const (
 	SLICEDUNCHECKED_FILAMENTWARNING_KIND
 	SLICEDSAMEFAMILY_FILAMENTWARNING_KIND
 	SLICEREUSED_FILAMENTWARNING_KIND
+	MIXEDMATERIALS_FILAMENTWARNING_KIND
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -93,6 +94,8 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = SLICEDSAMEFAMILY_FILAMENTWARNING_KIND
 	case "slice-reused":
 		result = SLICEREUSED_FILAMENTWARNING_KIND
+	case "mixed-materials":
+		result = MIXEDMATERIALS_FILAMENTWARNING_KIND
 	default:
 		return nil, nil
 	}

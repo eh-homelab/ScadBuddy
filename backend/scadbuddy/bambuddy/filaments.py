@@ -110,6 +110,8 @@ WarningKind = Literal[
     "sliced-same-family",
     # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
     "slice-reused",
+    # #2722 — the chosen spools mix material families.
+    "mixed-materials",
 ]
 
 
