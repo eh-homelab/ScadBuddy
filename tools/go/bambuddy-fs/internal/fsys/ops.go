@@ -509,22 +509,27 @@ func retypes(from, to string) bool {
 // renames it to "x.3mf" would leave a file Bambuddy cannot print.
 //
 // The upload's Idempotency-Key comes from f and the new name, so a rename retried
-// after a lost answer is answered with the same file instead of a second copy. If f
-// cannot then be deleted the new copy is, and the rename fails with f as it was.
+// after a lost answer is answered with the same file instead of a second copy. That
+// answer can name a copy a rolled-back try deleted, so the copy is looked for before f
+// is deleted, and sent again under a fresh key if it is gone. If f cannot be deleted
+// the new copy is, and the rename fails with f as it was.
 func (d *dir) retype(ctx context.Context, f api.File, folder int, name string) (api.File, syscall.Errno) {
-	fh, err := d.tree.cache.open(ctx, d.tree.lib, f, "")
-	if err != nil {
-		return api.File{}, failed("rename: read", err, "file", f.ID)
+	got, errno := d.upload(ctx, f, folder, name, retypeKey(f, folder, name))
+	if errno != 0 {
+		return api.File{}, errno
 	}
-	got, err := d.tree.lib.Upload(ctx, folder, name, retypeKey(f, folder, name), fh)
-	_ = fh.Close()
-	if err != nil {
-		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+	if l, err := d.tree.lib.List(ctx, folder, true); err != nil {
+		return api.File{}, failed("rename: list", err, "folder", folder)
+	} else if !slices.ContainsFunc(l.Files, func(x api.File) bool { return x.ID == got.ID }) {
+		if got, errno = d.upload(ctx, f, folder, name, api.NewKey()); errno != 0 {
+			return api.File{}, errno
+		}
 	}
 	if err := d.tree.lib.DeleteFiles(ctx, f.ID); err != nil {
 		slog.Error("rename: the old file could not be deleted, so the copy under the new name is", "file", f.ID, "new", got.ID, "err", err)
 		if err := d.tree.lib.DeleteFiles(ctx, got.ID); err != nil {
 			slog.Error("rename: the copy under the new name remains beside the old file", "file", f.ID, "new", got.ID, "err", err)
+			d.tree.forget(folder)
 		}
 		return api.File{}, syscall.EIO
 	}
@@ -532,17 +537,37 @@ func (d *dir) retype(ctx context.Context, f api.File, folder int, name string) (
 	if got.FolderID == 0 {
 		got.FolderID = folder
 	}
-	if err := d.tree.cache.claim(ctx, got.ID); err == nil {
-		if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+	// Both IDs are claimed, so no download of either writes its cache file meanwhile.
+	if err := d.tree.cache.claim(ctx, f.ID); err != nil {
+		d.tree.cache.drop(f.ID)
+	} else {
+		if err := d.tree.cache.claim(ctx, got.ID); err == nil {
+			if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+				d.tree.cache.drop(f.ID)
+			}
+			d.tree.cache.release(got.ID)
+		} else {
 			d.tree.cache.drop(f.ID)
 		}
-		d.tree.cache.release(got.ID)
-	} else {
-		d.tree.cache.drop(f.ID)
+		d.tree.cache.release(f.ID)
 	}
 	d.tree.unremember(f.ID)
 	d.tree.remember(got)
 	d.tree.rebase(f.ID, got)
+	return got, 0
+}
+
+// upload sends f's contents (cached, or downloaded first) as name in folder.
+func (d *dir) upload(ctx context.Context, f api.File, folder int, name, key string) (api.File, syscall.Errno) {
+	fh, err := d.tree.cache.open(ctx, d.tree.lib, f, "")
+	if err != nil {
+		return api.File{}, failed("rename: read", err, "file", f.ID)
+	}
+	got, err := d.tree.lib.Upload(ctx, folder, name, key, fh)
+	_ = fh.Close()
+	if err != nil {
+		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+	}
 	return got, 0
 }
 

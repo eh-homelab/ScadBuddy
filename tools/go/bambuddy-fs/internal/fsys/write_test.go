@@ -1093,6 +1093,45 @@ func TestARetypeThatCannotDeleteTheOldFileRollsBack(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(top, "x.3mf.tmp")); err != nil || string(data) != "model" {
 		t.Fatalf("%q %v", data, err)
 	}
+	// Retried once the file is free, the rename must not take the rolled-back copy the
+	// first try's key recorded (deleted now) for the result and lose the file.
+	lib.locked(func() { delete(lib.busy, 10) })
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if len(lib.files) != 1 {
+			t.Fatalf("%+v", lib.files)
+		}
+		for id, f := range lib.files {
+			if f.Name != "x.3mf" || string(lib.data[id]) != "model" {
+				t.Fatalf("%+v %q", f, lib.data[id])
+			}
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+// A retype of a file never read through the mount downloads it first.
+func TestARetypeOfAnUncachedFileDownloadsIt(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.downloads != 1 || len(lib.files) != 1 {
+			t.Fatalf("downloads %d files %+v", lib.downloads, lib.files)
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
 }
 
 func TestARetypeIntoAnotherFolder(t *testing.T) {
