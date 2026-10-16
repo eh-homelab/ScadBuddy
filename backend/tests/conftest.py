@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import time
@@ -82,6 +83,16 @@ def _forget_catalogues() -> Iterator[None]:
 @pytest.fixture
 def spans() -> InMemorySpanExporter:
     return _SPANS
+
+
+@pytest.fixture
+def health_socket() -> Iterator[socket.socket]:
+    """A socket bound to a free port, for a worker's health server to serve on (#3807).
+    Held from picking the port to serving it: a port picked, let go and bound again
+    later can be taken by anything else on the runner in between."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock
 
 
 def wait_for_span(
