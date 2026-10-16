@@ -1107,6 +1107,23 @@ describe('SettingsPage folded sections (#2173)', () => {
     localStorage.clear()
   })
 
+  it('keeps every fold the page renders in the stored list (#3415 review)', async () => {
+    // A Section or SubSection whose id is missing from FOLD_IDS would be pruned as stale.
+    const first = renderPage(<SettingsPage />)
+    await seeded()
+    const ids = [...document.querySelectorAll('[data-collapsible]')].map((fold) => fold.id)
+    expect(ids.length).toBeGreaterThan(0)
+    first.unmount()
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(ids))
+    try {
+      renderPage(<SettingsPage />)
+      await seeded()
+      expect(JSON.parse(localStorage.getItem('scadbuddy.settings.collapsed') ?? '[]')).toEqual(ids)
+    } finally {
+      localStorage.clear()
+    }
+  })
+
   it('unfolds the section a link or the nav goes to', async () => {
     localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['libraries', 'rendering']))
     const { user } = renderPage(<SettingsPage />, { route: '/settings#libraries' })
