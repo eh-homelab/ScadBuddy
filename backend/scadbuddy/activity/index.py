@@ -152,6 +152,8 @@ _VISIBLE = sql.SQL("source <> ''")
 #: A model slug of exactly 32 hex digits would read as an output: none is made that way.
 _LIBRARY_RUN = re.compile(r"library-([0-9]+)")
 _OUTPUT_ID = re.compile(r"[0-9a-f]{32}")
+# The subject filter compares this expression, so a plain index on ``activity.subject``
+# cannot serve it: one added for that filter has to be an expression index on this CASE.
 _SUBJECT_KEY = sql.SQL(
     "CASE WHEN subject ~ '^library-[0-9]+$' THEN 'library:' || substr(subject, 9)"
     " WHEN subject ~ '^[0-9a-f]{32}$' THEN 'output:' || subject ELSE subject END"

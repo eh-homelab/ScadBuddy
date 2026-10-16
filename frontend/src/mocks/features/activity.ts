@@ -14,6 +14,13 @@ const LIST_PARAMS = new Set([
 const ADVANCED_FIELDS = ['workflow_id', 'run_id', 'traceparent', 'source', 'source_id', 'facets'] as const
 const ADVANCED_DETAIL = new Set(['request', 'result', 'error'])
 
+/** backend/scadbuddy/activity/index.py's ``subject_key``: one subject's key under either spelling. */
+function subjectKey(subject: string): string {
+  const library = /^library-(\d+)$/.exec(subject)
+  if (library) return `library:${library[1]}`
+  return /^[0-9a-f]{32}$/.test(subject) ? `output:${subject}` : subject
+}
+
 function row(id: string, fields: Partial<Activity> & Pick<Activity, 'kind' | 'status' | 'title'>): Activity {
   return {
     id,
@@ -207,7 +214,7 @@ export const handlers = [
       .filter((r) => !sp.has('principal') || r.principal === sp.get('principal'))
       .filter((r) => !sp.has('session') || r.session === sp.get('session'))
       .filter((r) => !sp.has('via_tool') || r.via_tool === sp.get('via_tool'))
-      .filter((r) => !sp.has('subject') || r.subject === sp.get('subject'))
+      .filter((r) => !sp.has('subject') || subjectKey(r.subject) === subjectKey(sp.get('subject')!))
       .filter((r) => !sp.has('parent') || r.parent_id === sp.get('parent'))
       .filter((r) => !since || at(r) >= Date.parse(since))
       .filter((r) => !until || at(r) <= Date.parse(until))
