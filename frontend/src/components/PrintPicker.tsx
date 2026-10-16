@@ -734,7 +734,12 @@ export function PrintPicker({
   const slicedFor = `${plate}|${currentKey}|${check.request}`
   const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
   useEffect(() => {
-    if (!slicedNow) return
+    // New choices or another plate: the last slice's sides no longer hold, so they go
+    // rather than wait to be overwritten (#2737 review).
+    if (!slicedNow) {
+      setLastSliced((last) => (last === null || last.key === slicedFor ? last : null))
+      return
+    }
     setLastSliced((last) =>
       last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
     )
