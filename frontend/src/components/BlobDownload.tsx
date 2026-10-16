@@ -1,5 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { Spinner } from './ui/Spinner'
 
 /**
  * The name a `Content-Disposition` gives the file: `filename*` (RFC 5987) before
@@ -31,7 +34,7 @@ export function BlobDownload({
   url,
   filename,
   children,
-  className = 'text-accent underline',
+  className,
 }: {
   url: string
   filename: string
@@ -65,11 +68,18 @@ export function BlobDownload({
 
   return (
     <>
-      <button type="button" className={className} onClick={() => void download()} disabled={busy} aria-busy={busy}>
+      <Button
+        variant="link"
+        className={cn('h-auto px-0 py-0 text-[length:inherit] underline', className)}
+        onClick={() => void download()}
+        disabled={busy}
+        aria-busy={busy}
+      >
+        {busy && <Spinner />}
         {children}
-      </button>
+      </Button>
       {error && (
-        <span role="alert" className="text-[12px] text-warn">
+        <span role="alert" className="text-[12px] text-destructive">
           {error}
         </span>
       )}
