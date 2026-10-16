@@ -155,8 +155,8 @@ export function ActionBar({
   /**
    * #317 — the project Generate files the editable 3MF into, shared with the print
    * dialog's picker so both show one choice. It opens on the project remembered for this
-   * model (#1660), never on another model's: a change on either picker still becomes the
-   * new `last_project_id`, which a print without a project of its own falls back to.
+   * model (#1660), never on another model's. A change on either picker applies to this
+   * page only: the default project (`last_project_id`) changes only in Settings (#3188).
    */
   const [projectId, setProjectId] = useState<number | null>(null)
   const [project, setProject] = useState<ProjectView | null>(null)
@@ -224,8 +224,6 @@ export function ActionBar({
 
   function chooseProject(next: number | null) {
     setProjectId(next)
-    // Only a preference: the picker still shows the choice if it is not remembered.
-    void api.rememberProject(next).catch(() => undefined)
   }
 
   /** #1660 — the remembered project, when Generate into `target` would file elsewhere. */

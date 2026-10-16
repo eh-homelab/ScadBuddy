@@ -261,9 +261,9 @@ describe('ProjectPicker', () => {
   })
 
   it('re-reads a list missing the value without moving the value back to the remembered one', async () => {
-    // The remembered project stays 1, as while the PUT for the new choice is in flight;
-    // the re-read lists the new project (the mock's own list) but still remembers 1.
-    await api.rememberProject(1)
+    // The default project stays 1: a choice never changes it (#3188). The re-read lists
+    // the new project (the mock's own list) but still reports 1.
+    await api.putSettings({ last_project_id: 1 })
     function Harness() {
       const [value, setValue] = useState<number | null>(null)
       return (

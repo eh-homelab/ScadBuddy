@@ -290,9 +290,6 @@ describe('extractors', () => {
     expect(touches('remember_model_print_choices', { slug: 'box', tier: 'fast' }, {})).toEqual([
       { type: 'setting', id: 'print_choices:box', action: 'modified', model: 'box' },
     ])
-    expect(touches('remember_last_project', { project_id: 4 }, { project_id: 4 })).toEqual([
-      { type: 'setting', id: 'last_project', action: 'modified', after: '4' },
-    ])
     expect(touches('remember_printer_bed_type', { printer_id: 2, bed_type: 'pei' }, {})).toEqual([
       { type: 'setting', id: 'bed_type:2', action: 'modified' },
     ])

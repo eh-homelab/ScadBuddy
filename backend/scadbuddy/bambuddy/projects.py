@@ -65,7 +65,7 @@ class ProjectView(BaseModel):
 
 class ProjectChoices(BaseModel):
     projects: list[ProjectView] = Field(default_factory=list)
-    #: The project the last send went to, so the picker opens where it was left.
+    #: The default project (Settings' `last_project_id`), which only Settings changes (#3188).
     last_project_id: int | None = None
 
 
