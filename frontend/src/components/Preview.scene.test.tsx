@@ -307,11 +307,38 @@ describe('Preview scene (#364)', () => {
     scene.failing.add('/api/v1/jobs/a/preview.glb')
     onTestFinished(() => scene.failing.clear())
 
-    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
     // Plate 2's own mesh loads, and stays chosen: it is not blamed, nor taken away.
     await act(async () => {})
-    expect(screen.getByRole('button', { name: 'Plate 2 alone' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('radio', { name: 'Plate 2 alone' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByText(/could not be shown alone/)).not.toBeInTheDocument()
+  })
+
+  it("does not blame the next job's plate for the last job's plate mesh failing (#3646 review)", async () => {
+    const plates = [1, 2].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const user = userEvent.setup()
+    const done = job('a', box([0, 0, 0], [10, 10, 5]), { plates })
+    const { rerender } = render(<Preview job={done} rendering={false} />)
+    await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
+
+    // The next render runs; the last one's plate 2 stays on screen until it is done.
+    const next = job('b', box([0, 0, 0], [10, 10, 5]), { status: 'running', preview_url: null, plates })
+    rerender(<Preview job={next} rendering />)
+    scene.failing.add('/api/v1/jobs/a/preview.glb?plate=2')
+    onTestFinished(() => scene.failing.clear())
+    rerender(<Preview job={{ ...next }} rendering />)
+    await act(async () => {})
+
+    // That mesh was job a's: job b never had a plate picked, so nothing says one failed.
     expect(screen.queryByText(/could not be shown alone/)).not.toBeInTheDocument()
   })
 

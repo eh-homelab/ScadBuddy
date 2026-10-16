@@ -198,6 +198,8 @@ export function Preview({
         plateBoxes: BoundingBox[]
         /** #2914 — the plate this mesh is alone, or null for every plate together. */
         plate: number | null
+        /** The job whose render this is: the last one stays on screen while the next runs. */
+        jobId: string
       }
     | undefined
   >()
@@ -233,6 +235,7 @@ export function Preview({
         plates: 1,
         plateBoxes: [],
         plate: alone,
+        jobId: job.id,
       })
     } else if (job?.status === 'done' && job.preview_url) {
       setShown({
@@ -247,6 +250,7 @@ export function Preview({
         plates: Math.max(job.plates?.length ?? 0, 1),
         plateBoxes: (job.plates ?? []).map((plate) => plate.bbox_mm),
         plate: null,
+        jobId: job.id,
       })
     }
   }, [job, alone])
@@ -310,7 +314,8 @@ export function Preview({
           useLoader.clear(GLTFLoader, shown.url)
           // The mesh on screen is what failed: for one render after a pick it is still
           // every plate together, which is no plate's fault (#3036 review).
-          if (shown.plate !== null && job) {
+          // A plate mesh another job left on screen is not this job's plate either.
+          if (shown.plate !== null && job && shown.jobId === job.id) {
             // One plate's mesh: every plate together still loads, so go back to it.
             setPlateFailed({ jobId: job.id, plate: shown.plate })
             setChosen(undefined)
