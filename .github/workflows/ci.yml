@@ -43,8 +43,8 @@ name: CI
 # two independent networks on 2026-09-02, and an 880 ms failure is too fast to
 # be congestion -- but the cause is UNIDENTIFIED; do not merge the two.
 #
-# `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
-# build-image.yml, so no job here needs a bigger or different runner.
+# `ubuntu-latest` provides docker + buildx, so no job here needs a bigger or
+# different runner.
 on:
   pull_request:
   # The merge queue (#508): a queued PR is re-checked on the queue's own commit --

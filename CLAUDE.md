@@ -381,12 +381,10 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
   scope's hit rate drops, move it to `type=registry` on GHCR, which works only on
   pushes and same-repo PRs, not forks (#743).
-- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
-  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
-  arm64 under QEMU and runs `openscad-lsp --version`, caching under
-  `scope=openscad-lsp-arm64` with `mode=min`. It is not a required check. Making it one needs its
-  `pull_request.paths` filter dropped first: a required check that never runs on a PR
-  outside those paths leaves that PR waiting for it forever.
+- `build-image.yml` publishes `linux/amd64` only, and nothing in it runs on PRs. arm64
+  (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
+  Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
+  `docker/setup-qemu-action`.
 
 ## PR conventions
 
