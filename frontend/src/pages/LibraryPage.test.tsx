@@ -4,7 +4,6 @@ import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles, libraryFolders } from '../mocks/features/library'
-import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -200,7 +199,8 @@ describe('LibraryPage', () => {
       expect(count('/api/v1/print/projects')).toBe(1)
       expect(count('/api/v1/settings/print-options')).toBe(1)
       // The file the page listed is not read again to open its dialog.
-      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
+      // #3651 — the dialog's default destination names the file, which is not a read of it.
+      expect(asked.filter((line) => line.includes('file_id=') && !line.includes('/print/projects/default'))).toEqual([])
       // No analysis of an empty plan before the suggested spools are set.
       for (const body of await Promise.all(analysed)) {
         expect((body as { request: { filament_plan: { slots: unknown[] } } }).request.filament_plan.slots).not.toEqual([])
@@ -229,18 +229,15 @@ describe('LibraryPage', () => {
       await waitFor(() => expect(lists()).toBeGreaterThan(before))
       await screen.findByTestId('library-file-104')
 
-      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
+      // #3651 — the dialog's default destination names the file, which is not a read of it.
+      expect(asked.filter((line) => line.includes('file_id=') && !line.includes('/print/projects/default'))).toEqual([])
     } finally {
       server.events.removeListener('request:start', listen)
     }
   })
 
   it('prints a file in Simple mode under the last project printed to (#768)', async () => {
-    server.use(
-      http.get('/api/v1/print/projects', () =>
-        HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 2 }),
-      ),
-    )
+    await api.rememberProject(2)
     const run = vi.spyOn(api, 'runLibraryPrint')
     // MSW's answers to the run's POST, the choices it remembers and the progress read
     // the sent dialog makes, counted until the test ends (see below).

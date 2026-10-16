@@ -81,6 +81,11 @@ logger = logging.getLogger(__name__)
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
+#: How the destination picker orders projects and folders (#3651), as a file explorer
+#: would: most recently touched first (printed, filed or chosen here, or written to in
+#: Bambuddy), most recently modified in Bambuddy first, or by name.
+DestinationSort = Literal["touched", "modified", "name"]
+
 #: The longest retention (``print_run_retention_seconds``, ``operation_retention_seconds``,
 #: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
 #: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
@@ -268,6 +273,11 @@ class StoredSettings(BambuddyIds):
     #: defaults for the next filing (this, and ``model_projects`` below) rather than
     #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
+    #: The project a print or Generate defaults to when its content is not all in one
+    #: project already (#3651). ``None``: the project the last send went to.
+    default_project_id: int | None = None
+    #: How the destination picker opens sorted (#3651); the dialog can re-sort.
+    destination_sort: DestinationSort = "touched"
     #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
     #: the picker moves there when the model or the preset is opened, and Generate asks
     #: before filing it elsewhere. Set one key at a time
@@ -298,6 +308,13 @@ class StoredSettings(BambuddyIds):
         """A retention stored before :data:`RETENTION_MAX_SECONDS` was enforced is read
         as the maximum, so it cannot fail every prune (or every insert that prunes)."""
         return None if value is None else min(value, RETENTION_MAX_SECONDS)
+
+    @field_validator("destination_sort", mode="before")
+    @classmethod
+    def _known_sort(cls, value: Any) -> Any:
+        """A sort this version does not know (a newer one wrote it) is the default, so
+        it cannot stop the settings loading."""
+        return value if value in get_args(DestinationSort) else "touched"
 
     @field_validator("printer_rack_algorithms", mode="before")
     @classmethod
@@ -417,6 +434,10 @@ class SettingsPatch(BaseModel):
     )
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
+    #: The project prints and Generate default to (#3651); ``null``: the last one sent to.
+    default_project_id: int | None = None
+    #: How the destination picker opens sorted (#3651); ``null`` puts back "touched".
+    destination_sort: DestinationSort | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)

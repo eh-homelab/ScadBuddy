@@ -75,6 +75,7 @@ import type {
   MigrateResult,
   ModelPatch,
   LastProject,
+  DefaultDestination,
   ModelProjectPut,
   ModelProjects,
   ModelPrintChoices,
@@ -1666,6 +1667,18 @@ export const api = {
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
   /**
+   * #3651 — the project a print of this content opens on: the one project it is all in
+   * already, else the Settings default, else the last send's.
+   */
+  getDefaultProject: (content: { outputIds?: readonly string[]; libraryFileIds?: readonly number[] }) => {
+    const search = new URLSearchParams()
+    for (const id of content.outputIds ?? []) search.append('output_id', id)
+    for (const id of content.libraryFileIds ?? []) search.append('library_file_id', String(id))
+    const query = search.toString()
+    return request<DefaultDestination>(`/print/projects/default${query ? `?${query}` : ''}`)
+  },
+
+  /**
    * `project_id` links an existing project; otherwise `name` creates one. Either way the
    * project comes back with a library folder, because it is the folder — not the project
    * row — that makes Bambuddy's project page list the files.
@@ -1698,6 +1711,13 @@ export const api = {
     command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
       method: 'POST',
       body: JSON.stringify({ project_id: projectId }),
+    }),
+
+  /** #3651 — the same, into a library folder of no project. */
+  fileIntoFolder: (outputId: string, folderId: number) =>
+    command<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+      method: 'POST',
+      body: JSON.stringify({ folder_id: folderId }),
     }),
 
   /** Filed after the run, never during it: a plate's queue item only exists once it has

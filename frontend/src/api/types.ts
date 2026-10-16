@@ -300,6 +300,12 @@ export type PrintStage = PrintProgress['stage']
  */
 export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
+/** #3651 — a library folder of no project, a destination of its own. */
+export type FolderView = Schemas['FolderView']
+/** #3651 — how the destination picker orders projects and folders. */
+export type DestinationSort = Schemas['ProjectChoices']['sort']
+/** #3651 — where some content is filed by default, and why. */
+export type DefaultDestination = Schemas['DefaultDestination']
 export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type ProjectFile = Schemas['ProjectFile']

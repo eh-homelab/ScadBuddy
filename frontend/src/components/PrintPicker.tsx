@@ -155,6 +155,8 @@ interface Props {
   project?: {
     value: number | null
     onChange: (projectId: number | null) => void
+    /** #3651 — the page's library folder of no project, chosen instead of a project. */
+    folder?: { value: number | null; onChange: (folderId: number | null) => void }
     /** The page's project list, so the dialog does not fetch it a second time. */
     list?: ProjectList
     /** #665 — frozen while the page's Generate is filing into the chosen project. */
@@ -172,6 +174,11 @@ interface Props {
    * the print waits in Bambuddy's queue rather than starting. It can be unticked.
    */
   queue?: boolean
+  /**
+   * #3651 — the content whose project the dialog opens on, in place of the source: an
+   * arranged output's own sources, say, since the new output is in no project yet.
+   */
+  content?: { outputIds?: readonly string[]; libraryFileIds?: readonly number[] }
 }
 
 export function PrintPicker({
@@ -183,6 +190,7 @@ export function PrintPicker({
   project,
   printSettings,
   queue = false,
+  content,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
@@ -437,31 +445,99 @@ export function PrintPicker({
   }
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
+  /** #3651 — or a library folder of no project, chosen in its place. */
+  const [ownFolderId, setOwnFolderId] = useState<number | null>(null)
   /**
    * #768 — the dialog's own list, read here rather than by its picker, which is an
-   * Advanced step: Simple mode must still seed the project from the last one printed to.
-   * Read on each open, as the picker was, and never when the page passes its project.
+   * Advanced step. Read on each open, as the picker was, and never when the page passes
+   * its project.
    */
-  const ownProjects = useProjectList(setOwnProjectId, open && !project)
+  const ownProjects = useProjectList(undefined, open && !project)
   /**
-   * #1045 — while the list has not been read (still loading, or failed) an unset picker
-   * is not a choice of "No project": the run leaves `project_id` out, so the server files
-   * it under the remembered project instead.
+   * #3651 — where the dialog opens: the one project all of the content is in already,
+   * else the Settings default, else the last send's. Asked on each open of a new source;
+   * a choice made before it answers stands.
+   */
+  const [ownDefaultKnown, setOwnDefaultKnown] = useState(false)
+  /** The content the default was last answered (or failed) for: Print waits for it. */
+  const [ownDefaultFor, setOwnDefaultFor] = useState<string | null>(null)
+  const ownChosen = useRef(false)
+  const contentOutputs = content
+    ? (content.outputIds ?? [])
+    : given?.kind === 'output'
+      ? [given.output.id]
+      : []
+  const contentFiles = content ? (content.libraryFileIds ?? []) : given?.kind === 'library' ? [given.file.id] : []
+  const contentKey = `${contentOutputs.join(',')}|${contentFiles.join(',')}`
+  const pageProject = project !== undefined
+  useEffect(() => {
+    if (!open || pageProject) return
+    ownChosen.current = false
+    setOwnDefaultKnown(false)
+    setOwnDefaultFor(null)
+    setOwnFolderId(null)
+    let live = true
+    const [outputIds, libraryFileIds] = contentKey.split('|').map((ids) => (ids ? ids.split(',') : []))
+    api
+      .getDefaultProject({ outputIds, libraryFileIds: libraryFileIds?.map(Number) })
+      .then((answer) => {
+        if (!live || ownChosen.current) return
+        setOwnProjectId(answer.project_id ?? null)
+        setOwnDefaultKnown(true)
+      })
+      // Unknown, the run leaves the project out and the server applies its default.
+      .catch(() => undefined)
+      .finally(() => {
+        if (live) setOwnDefaultFor(contentKey)
+      })
+    return () => {
+      live = false
+    }
+  }, [open, pageProject, contentKey])
+  /** #3651 — Print waits for the default, so a Simple-mode print goes where it says. */
+  const ownDefaultPending = open && !pageProject && ownDefaultFor !== contentKey
+  function chooseOwnProject(next: number | null) {
+    ownChosen.current = true
+    setOwnDefaultKnown(true)
+    setOwnDefaultFor(contentKey)
+    setOwnProjectId(next)
+    setOwnFolderId(null)
+  }
+  function chooseOwnFolder(next: number | null) {
+    ownChosen.current = true
+    setOwnDefaultKnown(true)
+    setOwnDefaultFor(contentKey)
+    setOwnFolderId(next)
+    if (next !== null) setOwnProjectId(null)
+  }
+  /**
+   * #1045 — while the default is not known (still loading, or failed) an unset picker is
+   * not a choice of "No project": the run leaves `project_id` out, so the server files it
+   * under its own default instead.
    */
   const pickedProject = project ? project.value : ownProjectId
+  const folderId = project ? (project.folder?.value ?? null) : ownFolderId
   // A page project without a shared list is read by its own picker, out of sight here.
-  const projectKnown = project ? project.list?.choices !== null : ownProjects.choices !== null
-  const projectId = pickedProject === null && !projectKnown ? undefined : pickedProject
+  const projectKnown = project ? project.list?.choices !== null : ownDefaultKnown
+  const projectId = pickedProject === null && folderId === null && !projectKnown ? undefined : pickedProject
 
   /**
    * #1660 — the project the print is filed under, named, for Simple mode: its picker is an
    * Advanced step, so a project carried over from earlier would otherwise go unseen. None
-   * while the list is unread, when the server chooses (`projectId` undefined).
+   * while the default is unknown, when the server chooses (`projectId` undefined).
    */
-  const shownProjects = (project ? project.list : ownProjects)?.choices?.projects
+  const shownChoices = (project ? project.list : ownProjects)?.choices
+  const shownProjects = shownChoices?.projects
   const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
+  const shownFolder = folderId === null ? undefined : shownChoices?.folders?.find((entry) => entry.id === folderId)
   const filedUnderLabel =
-    projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
+    folderId !== null
+      ? `${shownFolder?.path ?? `folder ${folderId}`} (folder)`
+      : projectId === undefined
+        ? null
+        : projectId === null
+          ? 'No project'
+          : (projectPaths.get(projectId) ?? `project ${projectId}`)
   /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
   const focusProject = useRef(false)
   useEffect(() => {
@@ -501,6 +577,7 @@ export function PrintPicker({
     planChanged,
     copies,
     projectId,
+    folderId,
     options: sentOptions,
     printSequence,
     supports,
@@ -892,8 +969,8 @@ export function PrintPicker({
             <Button
               type="button"
               onClick={() => void run()}
-              // Held while the dialog's own project list loads, so a Simple-mode print
-              // cannot go out before the last project has seeded it.
+              // Held while the dialog's own project list and default (#3651) load, so a
+              // Simple-mode print cannot go out before the default project has seeded it.
               disabled={
                 running ||
                 loading ||
@@ -903,6 +980,7 @@ export function PrintPicker({
                 refused ||
                 runRefuses ||
                 ownProjects.loading ||
+                ownDefaultPending ||
                 projectCreating
               }
               data-testid="run-print"
@@ -1331,6 +1409,7 @@ export function PrintPicker({
                         <ProjectPicker
                           value={project.value}
                           onChange={project.onChange}
+                          folder={project.folder}
                           list={project.list}
                           disabled={project.disabled || projectCreating}
                           onCreating={reportProjectCreating}
@@ -1338,7 +1417,8 @@ export function PrintPicker({
                       ) : (
                         <ProjectPicker
                           value={ownProjectId}
-                          onChange={setOwnProjectId}
+                          onChange={chooseOwnProject}
+                          folder={{ value: ownFolderId, onChange: chooseOwnFolder }}
                           list={ownProjects}
                           disabled={projectCreating}
                           onCreating={reportProjectCreating}

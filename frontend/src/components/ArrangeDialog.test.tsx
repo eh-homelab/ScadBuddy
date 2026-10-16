@@ -410,6 +410,8 @@ describe('ArrangeDialog', () => {
       output: expect.objectContaining({ arranged_from: [first.id] }),
       plates: 2,
       filedUnder: 'Name Keychain',
+      // #3651 — what its print opens on the project of.
+      from: { outputIds: [first.id], libraryFileIds: [] },
     })
     expect(lastArrangeRequest()).toMatchObject({
       goal: 'by_colour',

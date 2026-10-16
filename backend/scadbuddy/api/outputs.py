@@ -1308,7 +1308,12 @@ async def post_project_file(
         response,
         kind=ops.kinds["project_file"],
         subject=output_id,
-        request={"output_id": output_id, "project_id": body.project_id},
+        # A folder only when one was chosen, so a project's request is what it was.
+        request={
+            "output_id": output_id,
+            "project_id": body.project_id,
+            **({"folder_id": body.folder_id} if body.folder_id is not None else {}),
+        },
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, ProjectFile)

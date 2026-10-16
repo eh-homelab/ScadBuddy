@@ -644,7 +644,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           const filedUnder = [...(models ?? []), ...(made ? [made] : [])].find(
             (model) => model.slug === arranged.output.slug,
           )?.name
-          const filed = filedUnder ? { ...arranged, filedUnder } : arranged
+          const from = {
+            outputIds: [...new Set(body.objects.flatMap((entry) => (entry.output_id ? [entry.output_id] : [])))],
+            libraryFileIds: [
+              ...new Set(body.objects.flatMap((entry) => (entry.library_file_id != null ? [entry.library_file_id] : []))),
+            ],
+          }
+          const filed = { ...arranged, from, ...(filedUnder ? { filedUnder } : {}) }
           span.setAttribute('scadbuddy.output_id', arranged.output.id)
           onArranged(skipped ? { ...filed, skipped } : filed)
         },

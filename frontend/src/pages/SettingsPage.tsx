@@ -55,6 +55,7 @@ import { safeHttpUrl } from '../lib/safeUrl'
 import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
 import { formatBytes } from '../lib/format'
+import { breadcrumbs } from '../lib/projects'
 import { useAsync } from '../lib/useAsync'
 import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -90,14 +91,14 @@ function isSecret(name: FieldName): name is Secret {
   return (SECRETS as readonly string[]).includes(name)
 }
 
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
+const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'default_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
   printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #426 — the blob store beside the inbox folder it needs.
-  projects: ['library_folder_id', 'last_project_id', 'store_backend'],
+  projects: ['library_folder_id', 'default_project_id', 'destination_sort', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
 }
@@ -156,6 +157,7 @@ const FOLLOW_NOBODY = 'none'
 
 function baseline(settings: Settings, name: FieldName): string {
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
+  if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
   if (name === 'activity_follow') {
     const follow = settings.activity_follow
     return follow == null ? '' : follow.length === 0 ? FOLLOW_NOBODY : follow.join(', ')
@@ -175,7 +177,7 @@ type Problem = { problem: string }
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
 function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown {
   if (ID_FIELDS.includes(name)) return raw === '' ? null : Number(raw)
-  if (name === 'display_unit') return raw
+  if (name === 'display_unit' || name === 'destination_sort') return raw
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
@@ -724,7 +726,8 @@ function SettingsSections() {
 
   const bambuddy = bambuddyState.data
   const projects = projectsState.data?.projects ?? []
-  const project = value('last_project_id')
+  const project = value('default_project_id')
+  const projectPaths = breadcrumbs(projects)
   const unit = value('display_unit') as DisplayUnit
 
   return (
@@ -1151,19 +1154,36 @@ function SettingsSections() {
                 help={
                   projectsState.error
                     ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-                    : "Where a library file's print opens its project picker, and the project a send without one is filed under. A model opens on the project it was last filed in."
+                    : 'Where a print, Arrange or Generate is filed when what it holds is not all in one project already (then it opens on that project). A model opens on the project it was last filed in. None set: the project the last send went to.'
                 }
               >
                 <ChoiceSelect
                   id="default-project"
                   value={project}
-                  onValueChange={(next) => setField('last_project_id', next)}
+                  onValueChange={(next) => setField('default_project_id', next)}
                   choices={[
-                    { value: '', label: 'No project' },
+                    { value: '', label: 'None: the last project sent to' },
                     ...(project && !projects.some((entry) => String(entry.id) === project)
                       ? [{ value: project, label: `Project ${project}` }]
                       : []),
-                    ...projects.map((entry) => ({ value: String(entry.id), label: entry.name })),
+                    ...projects.map((entry) => ({ value: String(entry.id), label: projectPaths.get(entry.id) ?? entry.name })),
+                  ]}
+                />
+              </FieldRow>
+
+              <FieldRow
+                id="destination-sort"
+                label="Sort projects and folders by"
+                help="How the project and folder picker opens. It can be re-sorted there."
+              >
+                <ChoiceSelect
+                  id="destination-sort"
+                  value={value('destination_sort')}
+                  onValueChange={(next) => setField('destination_sort', next)}
+                  choices={[
+                    { value: 'touched', label: 'Last touched: printed, filed or chosen' },
+                    { value: 'modified', label: 'Modified in Bambuddy' },
+                    { value: 'name', label: 'Name' },
                   ]}
                 />
               </FieldRow>

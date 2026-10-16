@@ -35,6 +35,8 @@ interface RunInput {
    * applies the remembered `last_project_id` rather than an explicit "No project" (#1045).
    */
   projectId: number | null | undefined
+  /** #3651 — a library folder of no project chosen instead of a project; `projectId` is then left out. */
+  folderId?: number | null
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   options: PrintOptions
   /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
@@ -85,6 +87,7 @@ export function useRunPrint({
   planChanged,
   copies,
   projectId,
+  folderId = null,
   options,
   printSequence,
   supports = null,
@@ -189,7 +192,7 @@ export function useRunPrint({
         choices: printChoices,
         ...(copies === null ? {} : { copies }),
         ...plateFields(plate),
-        ...(projectId === undefined ? {} : { project_id: projectId }),
+        ...(folderId !== null ? { folder_id: folderId } : projectId === undefined ? {} : { project_id: projectId }),
         options,
         ...sliceOverrides(printSequence, supports, filamentProfiles, primeTower),
         rack_position: rackPosition,

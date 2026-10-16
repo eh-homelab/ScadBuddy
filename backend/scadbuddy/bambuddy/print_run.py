@@ -14,10 +14,10 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, Self
 
 from fastapi import status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.clearance import (
@@ -183,6 +183,9 @@ class PrintRunRequest(BaseModel):
     #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
     #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
+    #: A library folder of no project to put the 3MF in (#3651), in place of a project:
+    #: sent, the print is filed under no project. Refused together with ``project_id``.
+    folder_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
     #: alongside it.
@@ -226,6 +229,12 @@ class PrintRunRequest(BaseModel):
     def _plates_in_order(cls, ids: list[int] | None) -> list[int] | None:
         # Each once and in plate order, so the same plates are the same run's key.
         return None if ids is None else sorted(set(ids))
+
+    @model_validator(mode="after")
+    def _one_destination(self) -> Self:
+        if self.folder_id is not None and self.project_id is not None:
+            raise ValueError("choose a project or a library folder, not both")
+        return self
 
     def asked_plates(self) -> list[int] | None:
         """The plates asked for, in plate order; ``None`` for every plate."""
@@ -434,9 +443,14 @@ class ChoosesProject(Protocol):
 
 def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
     """The request's ``project_id`` when it sent one, ``null`` included ("No project");
-    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    when it left the field out, none if it chose a library folder instead (#3651), else
+    the Settings default project, else the remembered ``last_project_id`` (#317)."""
     if "project_id" in request.model_fields_set:
         return request.project_id
+    if getattr(request, "folder_id", None) is not None:
+        return None
+    if settings.default_project_id is not None:
+        return settings.default_project_id
     return settings.last_project_id
 
 
@@ -1337,6 +1351,7 @@ async def plan_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
         # Only the sides the plan uses, or else the sides with the nozzle, are offered
         # to the slicer (#834, #2181), and each side states the flow chosen for it (#484).
         nozzle_stats=(
@@ -1541,6 +1556,7 @@ async def _plan_sliced(
         nozzle_size=nozzle_size,
         plan=request.filament_plan,
         project_id=project_id,
+        folder_id=request.folder_id,
     )
     per_plate = await gather_plate_options(
         client,

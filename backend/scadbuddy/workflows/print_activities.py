@@ -57,7 +57,7 @@ from scadbuddy.bambuddy.print_source import (
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import PlateSend
@@ -363,6 +363,23 @@ class PrintActivities:
         if file_hash is not None:
             await self.d.uploads.record_slice_hash(subject.run_subject, sliced_id, file_hash)
 
+    async def _touch(self, planned: PlannedRun) -> None:
+        """The project or library folder printed into, touched for the destination
+        picker's order (#3651). Best effort and bounded, like remembering the project:
+        every plate is queued by now."""
+        if planned.project_id is not None:
+            kind: DestinationKind = "project"
+            target = planned.project_id
+        elif planned.folder_id is not None:
+            kind, target = "folder", planned.folder_id
+        else:
+            return
+        try:
+            async with asyncio.timeout(REMEMBER_BUDGET):
+                await self.d.uploads.touch_destination(kind, target)
+        except Exception:
+            logger.exception("could not touch %s %s", kind, target)
+
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
         """What the run queued, for ``print_succeed`` to record, and the project's
@@ -387,6 +404,7 @@ class PrintActivities:
                     )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
+        await self._touch(planned)
         try:
             config: BambuddyConfig | None = BambuddyConfig.from_settings(settings)
         except ApiError as error:
