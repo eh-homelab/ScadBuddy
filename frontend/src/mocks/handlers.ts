@@ -114,6 +114,8 @@ const INITIAL_LIBRARY_OUTPUTS: [number, string][] = [
 
 const state = {
   models: [...fixtures.models] as ModelSummary[],
+  /** A duplicate's copy by its `Idempotency-Key`: a re-send gets the first answer, as from the API. */
+  duplicates: new Map<string, ModelSummary>(),
   /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
   printRuns: new Map<string, PrintRun>(),
   schemas: { ...fixtures.schemas },
@@ -291,6 +293,7 @@ export function resetMockState(): void {
   resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
+  state.duplicates.clear()
   state.printRuns = new Map()
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -1600,6 +1603,10 @@ export const handlers = [
   // #156 — any template, built-in or mine, copied to a new one of mine that records
   // it as `upstream`, with `base` its current revision (`catalogue.duplicate`).
   http.post(`${base}/models/:slug/duplicate`, async ({ params, request }) => {
+    // A re-send after an answer that never arrived (`command`) is answered as the first was.
+    const key = request.headers.get('Idempotency-Key')
+    const replay = key ? state.duplicates.get(key) : undefined
+    if (replay) return HttpResponse.json(view(replay), { status: 201 })
     const id = String(params['slug'])
     const upstream = state.models.find((m) => m.slug === id)
     if (!upstream) return problem(404, 'Not Found', `no model named '${id}'`)
@@ -1643,6 +1650,7 @@ export const handlers = [
       },
     }
     state.models = [copy, ...state.models]
+    if (key) state.duplicates.set(key, copy)
     // #274: `duplicate` copies `media/`, videos (which are not in git) included.
     for (const [key, bytes] of [...state.mediaFiles]) {
       if (key.startsWith(`${id}/`)) state.mediaFiles.set(`${slug}/${key.slice(id.length + 1)}`, bytes)
