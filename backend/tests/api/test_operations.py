@@ -510,8 +510,15 @@ def test_an_operation_still_accepting_answers_202_to_a_client_that_follows(
         assert time.monotonic() < deadline, answer.text
         answer = client.post(accepting["follow_url"])
 
-    assert answer.status_code == 200, answer.text
-    assert answer.json() == {"done": True, "n": 1}
+    if answer.status_code == 202:
+        # The route's own answer past its deadline: a run that outlasted it under load
+        # (CI, #2849) is a 202 Operation to follow, exactly as the route would answer.
+        op = follow_operation(client, answer.json())
+        assert op["status"] == "succeeded", op
+        assert op["result"] == {"done": True, "n": 1}
+    else:
+        assert answer.status_code == 200, answer.text
+        assert answer.json() == {"done": True, "n": 1}
     assert counts.runs == 1
 
 
