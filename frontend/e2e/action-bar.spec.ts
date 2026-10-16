@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { choose } from './select'
 
 /** The DOM this file reads, typed here because the e2e build has no DOM lib. */
 interface Box {
@@ -89,12 +90,12 @@ test.describe('action bar', () => {
     const generate = page.getByTestId('generate')
 
     // Tiny filed in Gridfinity Bins, the model with no preset in Reagan Keychain.
-    await presets.selectOption('template-tiny')
+    await choose(page, presets, 'Tiny')
     await chooseProject(page, project, '2')
     await expect(generate).toBeEnabled()
     await generate.click()
     await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')
-    await presets.selectOption('')
+    await choose(page, presets, 'No preset')
     await chooseProject(page, project, '1')
     await expect(generate).toBeEnabled()
     await generate.click()
@@ -102,15 +103,15 @@ test.describe('action bar', () => {
 
     // Loading Tiny again moves the picker to its project. Its values are on screen with
     // no preset selected, so the picker asks before replacing them.
-    await presets.selectOption('template-tiny')
-    await page.getByRole('dialog', { name: 'Apply preset Tiny?' }).getByRole('button', { name: 'Replace my changes' }).click()
+    await choose(page, presets, 'Tiny')
+    await page.getByRole('alertdialog', { name: 'Apply preset Tiny?' }).getByRole('button', { name: 'Replace my changes' }).click()
     await expect(project).toHaveAttribute('data-value', '2')
 
     // Moved off it, Generate asks first.
     await chooseProject(page, project, '1')
     await expect(generate).toBeEnabled()
     await generate.click()
-    const dialog = page.getByRole('dialog', { name: 'File in another project?' })
+    const dialog = page.getByRole('alertdialog', { name: 'File in another project?' })
     await expect(dialog).toContainText('Tiny was last filed in Gridfinity Bins. File this in Reagan Keychain?')
     await dialog.getByRole('button', { name: 'Use Gridfinity Bins' }).click()
     await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')

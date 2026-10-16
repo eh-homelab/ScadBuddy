@@ -112,8 +112,8 @@ test.describe('real backend', () => {
 
     await page.getByRole('button', { name: 'Browse' }).click()
     const dialog = page.getByRole('dialog', { name: 'Choose a font' })
-    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Pacifico')
-    const row = dialog.getByRole('button', { name: /^Pacifico/ })
+    await dialog.getByRole('combobox', { name: 'Search fonts' }).fill('Pacifico')
+    const row = dialog.getByRole('option', { name: /^Pacifico/ })
     await expect(row).toBeVisible({ timeout: 60_000 })
     await row.click()
     await expect(dialog).toBeHidden({ timeout: 120_000 })

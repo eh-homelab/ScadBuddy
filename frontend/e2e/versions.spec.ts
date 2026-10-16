@@ -25,7 +25,7 @@ test.describe('model versions', () => {
     const oldest = versions.locator('li').last()
     await oldest.getByRole('button', { name: 'Restore this version' }).click()
     // #975 — asked first: a mis-press among many identically placed buttons rewrites the model.
-    await page.getByRole('dialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
+    await page.getByRole('alertdialog', { name: /^Restore version / }).getByRole('button', { name: 'Restore', exact: true }).click()
 
     await expect(versions.locator('li')).toHaveCount(4)
     const head = versions.locator('li').first()
@@ -55,7 +55,8 @@ test.describe('model versions', () => {
     await page.goto('/m/name-keychain/versions')
     await expect(page.getByTestId('diff')).toBeVisible()
 
-    await page.getByLabel('Compare with').selectOption({ index: 2 })
+    await page.getByLabel('Compare with').click()
+    await page.getByRole('listbox').getByRole('option').nth(2).click()
 
     await expect(page.getByTestId('diff')).toContainText('+text_depth = 1.6;')
     await expect(page.getByTestId('diff')).toContainText('Two-colour keychain with raised text.')

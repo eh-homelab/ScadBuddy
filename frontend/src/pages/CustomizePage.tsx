@@ -1230,7 +1230,7 @@ export function CustomizePage() {
           hidden={full && !flyout}
           className={
             full
-              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) border-r bg-card shadow-2xl'
+              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) bg-card shadow-2xl'
               : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b'
           }
         >

@@ -793,7 +793,13 @@ export function PresetPicker({
       </Dialog>
 
       <AlertDialog open={pending !== null} onOpenChange={(open) => !open && setPending(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent
+          // Opened from the select's list, which is gone by now: back to the select (#1457).
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            trigger.current?.focus()
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>{`Apply preset ${pending?.name ?? ''}?`}</AlertDialogTitle>
             <AlertDialogDescription>
