@@ -8,7 +8,7 @@ import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
 import { GrantPanel } from '../components/flows/GrantPanel'
 import { ResetPanel } from '../components/flows/ResetPanel'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { ChevronRightIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -38,7 +38,7 @@ import { usePollWhile, usePollWhileUnavailable } from '../lib/usePollWhileUnavai
 import { ATTENTION_POLL_MS } from '../agent/attention'
 
 /** A box of text set apart: a result, a proposal, what a session wrote. */
-const INSET = 'rounded-lg bg-ui-muted/50 p-2 ring-1 ring-foreground/10'
+const INSET = 'rounded-lg bg-muted/50 p-2 ring-1 ring-foreground/10'
 
 /** A call waiting on the person: a card marked as needing them. */
 const WAITING = 'mb-3 ring-destructive/40'
@@ -225,7 +225,7 @@ function Images({ runId, images }: { runId: string; images: NonNullable<FlowRunV
                       src={url}
                       alt={label}
                       loading="lazy"
-                      className="size-24 rounded-lg bg-ui-muted object-contain ring-1 ring-foreground/10"
+                      className="size-24 rounded-lg bg-muted object-contain ring-1 ring-foreground/10"
                     />
                   </a>
                 </TooltipTrigger>

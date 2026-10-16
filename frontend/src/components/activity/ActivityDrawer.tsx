@@ -131,7 +131,7 @@ function Json({ label, value }: { label: string; value: unknown }) {
           {label}
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <pre className="max-h-72 overflow-auto rounded-lg border bg-ui-muted/50 p-2.5 font-mono text-xs">
+          <pre className="max-h-72 overflow-auto rounded-lg border bg-muted/50 p-2.5 font-mono text-xs">
             {JSON.stringify(value, null, 2)}
           </pre>
         </CollapsibleContent>

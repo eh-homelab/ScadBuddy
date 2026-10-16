@@ -186,8 +186,8 @@ export function LibraryTree({
       'flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md pr-2 text-left text-sm transition-colors',
       'group-focus-visible/item:ring-2 group-focus-visible/item:ring-ring',
       selectedKey === key
-        ? 'bg-ui-accent font-medium text-accent-foreground'
-        : 'text-muted-foreground hover:bg-ui-accent/60 hover:text-foreground',
+        ? 'bg-accent font-medium text-accent-foreground'
+        : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
     )
 
   function renderFolder(folder: LibraryFolderView, level: number) {
@@ -208,7 +208,7 @@ export function LibraryTree({
               event.stopPropagation()
               toggle(folder.id)
             }}
-            className="grid size-5 shrink-0 cursor-pointer place-items-center rounded-sm text-muted-foreground hover:bg-ui-muted hover:text-foreground"
+            className="grid size-5 shrink-0 cursor-pointer place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             <ChevronRightIcon className={cn('size-3.5 transition-transform', open && 'rotate-90')} />
           </span>

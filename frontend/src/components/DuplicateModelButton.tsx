@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router'
 import { ApiError, api } from '../api/client'
 import type { Upstream } from '../api/types'
 import { modelPath } from '../lib/deeplink'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { CopyPlusIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {

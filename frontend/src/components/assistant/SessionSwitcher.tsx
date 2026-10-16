@@ -220,7 +220,7 @@ function SessionRow({
   return (
     <li>
       <div
-        className={`group/row flex items-start gap-0.5 rounded-md hover:bg-ui-muted ${open ? 'bg-ui-muted' : ''}`}
+        className={`group/row flex items-start gap-0.5 rounded-md hover:bg-muted ${open ? 'bg-muted' : ''}`}
       >
         <button
           type="button"

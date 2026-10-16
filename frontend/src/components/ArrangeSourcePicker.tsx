@@ -57,7 +57,7 @@ function PickList<T>({
   return (
     <>
       {items.length === 0 ? (
-        <p className="text-[12px] text-muted">No {what} here.</p>
+        <p className="text-[12px] text-subtle">No {what} here.</p>
       ) : (
         <ScrollArea className="rounded-lg border [&_[data-slot=scroll-area-viewport]]:max-h-48">
           <ul className="flex flex-col gap-0.5 p-1">
@@ -66,7 +66,7 @@ function PickList<T>({
               const already = chosen(item)
               return (
                 <li key={key} className="text-[13px]">
-                  <Label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-normal hover:bg-ui-muted has-disabled:cursor-default has-disabled:hover:bg-transparent">
+                  <Label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-normal hover:bg-muted has-disabled:cursor-default has-disabled:hover:bg-transparent">
                     <Checkbox
                       checked={already || ticked.includes(key)}
                       disabled={already}

@@ -37,7 +37,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 
 type Props = {
   open: boolean
@@ -698,7 +698,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
-          <p role="status" className="text-[12px] text-muted">
+          <p role="status" className="text-[12px] text-subtle">
             {backfillNote(unusable.map(refOf))}
           </p>
         )}

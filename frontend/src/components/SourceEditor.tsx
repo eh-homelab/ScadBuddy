@@ -218,7 +218,7 @@ export function SourceEditor({
       {shown && (
         <div
           data-testid="definition-bar"
-          className="flex shrink-0 items-center justify-between gap-3 border-b bg-ui-muted/60 px-3 py-1"
+          className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/60 px-3 py-1"
         >
           <span className="min-w-0 truncate text-xs text-muted-foreground">
             <span className="sb-num text-foreground">{shown.label}</span> — read-only

@@ -6,7 +6,7 @@ import { addMedia, failure, fileStamp, makeCover, mediaProblem, useUploadLimit }
 import { framedSize, type CameraView } from '../lib/framing'
 import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
 import { FramingSurface } from './FramingSurface'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'

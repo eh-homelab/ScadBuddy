@@ -43,7 +43,7 @@ import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFile
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -1055,7 +1055,7 @@ function ProjectList({
     <ul aria-label="Projects" className="grid grid-cols-[repeat(auto-fill,minmax(min(220px,100%),1fr))] gap-3">
       {projects.map((project) => (
         <li key={project.id}>
-          <Card size="sm" className="h-full gap-2 px-3 transition-colors hover:bg-ui-muted/40">
+          <Card size="sm" className="h-full gap-2 px-3 transition-colors hover:bg-muted/40">
             <button
               type="button"
               onClick={() => onSelect(project.id)}
@@ -1359,7 +1359,7 @@ function Subfolders({
           return (
             <li key={folder.id}>
               <RowContextMenu label={folder.name} entries={menu(folder)}>
-                <Card size="sm" className="flex-row items-center gap-1 py-0 pr-1 pl-0 transition-colors hover:bg-ui-muted/50">
+                <Card size="sm" className="flex-row items-center gap-1 py-0 pr-1 pl-0 transition-colors hover:bg-muted/50">
                   <button
                     type="button"
                     data-testid={`library-subfolder-${folder.id}`}
@@ -1439,10 +1439,10 @@ function FileCard({
                 src={api.libraryThumbnailUrl(file.id)}
                 alt=""
                 loading="lazy"
-                className="aspect-square w-full rounded-lg bg-ui-muted/50 object-contain"
+                className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
               />
             ) : (
-              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-ui-muted/50">
+              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
                 <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
                   {nameParts(file.filename).extension || 'file'}
                 </span>

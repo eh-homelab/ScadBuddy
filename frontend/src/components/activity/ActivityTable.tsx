@@ -37,7 +37,7 @@ export function ActivityTable({ items, facets, onOpen }: Props) {
     <Card className="gap-0 py-0">
       <div className="overflow-x-auto">
         <table className="w-full text-left text-[13px]" aria-label="Activity">
-          <thead className="bg-ui-muted/50 text-xs text-muted-foreground">
+          <thead className="bg-muted/50 text-xs text-muted-foreground">
             <tr>
               <th className={HEAD}>Status</th>
               <th className={HEAD}>What</th>
@@ -51,7 +51,7 @@ export function ActivityTable({ items, facets, onOpen }: Props) {
               <tr
                 key={item.id}
                 data-testid={`activity-row-${item.id}`}
-                className="border-t border-border align-top transition-colors hover:bg-ui-muted/40"
+                className="border-t border-border align-top transition-colors hover:bg-muted/40"
               >
                 <td className={CELL}>
                   <StatusBadge status={item.status} />

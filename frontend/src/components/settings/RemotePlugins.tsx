@@ -28,7 +28,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './form'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /**
  * Settings → Plugins (#297, #464, #1953). First ScadBuddy's own tool sets (`built_in`): the

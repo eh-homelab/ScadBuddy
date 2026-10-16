@@ -25,7 +25,7 @@ import { PlateWarning } from './PlateWarning'
 export const NOW_POLL_MS = 15_000
 
 const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> = {
-  printing: { label: 'Printing', tone: 'border-primary/30 bg-ui-muted' },
+  printing: { label: 'Printing', tone: 'border-primary/30 bg-muted' },
   paused: { label: 'Paused', tone: 'border-warn/40 bg-warn/10 text-warn' },
   idle: { label: 'Idle', tone: 'text-muted-foreground' },
   finished: { label: 'Finished', tone: 'border-ok/40 bg-ok/10 text-ok' },
@@ -186,7 +186,7 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={Math.round(progress)}
-              className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-ui-muted"
+              className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"
             >
               <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
             </div>
@@ -300,7 +300,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
             ref={dropStreamOnUnmount}
             src={api.printerCameraStreamUrl(printer.printer_id)}
             alt={`Live camera of ${printer.name}`}
-            className="w-full rounded-lg border bg-ui-muted"
+            className="w-full rounded-lg border bg-muted"
             onError={() => {
               if (leaving.current) return
               // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
@@ -313,7 +313,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
             <img
               src={api.printerCameraUrl(printer.printer_id, at)}
               alt={`Camera snapshot of ${printer.name}`}
-              className="w-full rounded-lg border bg-ui-muted"
+              className="w-full rounded-lg border bg-muted"
             />
             <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
               The live stream stopped; this is a snapshot.

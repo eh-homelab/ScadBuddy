@@ -195,7 +195,7 @@ export function ActivityBell() {
         ) : (
           <ul className="flex max-h-80 flex-col overflow-y-auto">
             {listed.map((row) => (
-              <li key={row.id} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-ui-muted">
+              <li key={row.id} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted">
                 <span className="min-w-0 truncate">{row.title}</span>
                 <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
                   <StatusBadge status={row.status} />

@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 const Preview = lazy(async () => ({ default: (await import('../Preview')).Preview }))
 
@@ -315,7 +315,7 @@ function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | n
               <img
                 src={api.outputPlateThumbnailUrl(id, plate.index)}
                 alt={`Plate ${plate.index}`}
-                className="h-28 w-auto rounded-lg bg-ui-muted"
+                className="h-28 w-auto rounded-lg bg-muted"
               />
               Plate {plate.index}
             </li>
@@ -338,7 +338,7 @@ function SlicedView({ print }: { print: PrintDetail }) {
               <img
                 src={plate.url}
                 alt={plate.name ?? `Plate ${plate.index}`}
-                className="h-48 w-auto rounded-lg bg-ui-muted"
+                className="h-48 w-auto rounded-lg bg-muted"
               />
               {plate.name ?? `Plate ${plate.index}`}
             </li>

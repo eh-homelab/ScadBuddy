@@ -68,7 +68,7 @@ export function PlatesToPrint({ plates, value, onChange, thumbnailUrl, previewed
               data-checked={checked || undefined}
               className={cn(
                 'flex min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg border bg-card p-2 text-sm transition-colors',
-                'hover:bg-ui-muted has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50',
+                'hover:bg-muted has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50',
                 checked ? 'border-primary' : 'border-border',
               )}
             >
@@ -92,7 +92,7 @@ export function PlatesToPrint({ plates, value, onChange, thumbnailUrl, previewed
                 <img
                   src={thumbnailUrl(entry.index)}
                   alt=""
-                  className={cn('aspect-square w-full rounded-md bg-ui-muted object-contain', !checked && 'opacity-60')}
+                  className={cn('aspect-square w-full rounded-md bg-muted object-contain', !checked && 'opacity-60')}
                 />
               )}
               <span className="flex min-w-0 flex-col gap-0.5 leading-tight">

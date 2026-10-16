@@ -28,7 +28,7 @@ import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { ErrorBoundary } from './ErrorBoundary'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -951,7 +951,7 @@ function PlateOutline({
       <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
         <span
           data-testid="plate-label"
-          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-muted select-none"
+          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-subtle select-none"
         >
           Plate {number}
         </span>

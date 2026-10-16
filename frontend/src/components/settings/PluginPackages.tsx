@@ -45,7 +45,7 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { cn } from '@/lib/utils'
 import { LoadingLines, SettingBody, SettingCard } from './form'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { PackageFiles } from './PackageFiles'
 
 /**

@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { ChoiceSelect, Tip } from '../../components/settings/form'
-import { Spinner } from '../../components/ui/Spinner'
+import { Spinner } from '../../components/ui/spinner'
 import { useCollapsible } from './collapseState'
 import {
   BYTE_UNITS,

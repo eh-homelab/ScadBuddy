@@ -1,6 +1,6 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { failure } from '../../lib/mediaFiles'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 import { UploadIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -128,7 +128,7 @@ export function MediaPicker({
             onDrop={onDrop}
             className={cn(
               'flex items-center gap-3 rounded-xl border-2 border-dashed px-3 py-2.5 transition-colors',
-              dragging ? 'border-primary bg-primary/10' : 'bg-ui-muted/40',
+              dragging ? 'border-primary bg-primary/10' : 'bg-muted/40',
             )}
           >
             <div className="min-w-0 flex-1 text-xs">
@@ -188,7 +188,7 @@ export function MediaPicker({
                           'relative flex flex-col gap-1 rounded-lg border p-1 text-left text-xs transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60',
                           chosen
                             ? 'border-primary bg-primary/10 text-foreground ring-2 ring-primary/40'
-                            : 'bg-ui-muted/40 text-muted-foreground hover:border-primary/60',
+                            : 'bg-muted/40 text-muted-foreground hover:border-primary/60',
                         )}
                       >
                         <span className="grid aspect-square w-full place-items-center overflow-hidden rounded-md bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">

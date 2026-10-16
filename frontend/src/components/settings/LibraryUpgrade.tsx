@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { ChoiceSelect, LoadingLines } from './form'
-import { Spinner } from '../ui/Spinner'
+import { Spinner } from '../ui/spinner'
 
 /**
  * Settings → Libraries (#169): move a library to another ref across the models that pin
@@ -455,7 +455,7 @@ function LogFold({ log }: { log: readonly string[] }) {
         OpenSCAD log
       </CollapsibleTrigger>
       <CollapsibleContent forceMount hidden={!open}>
-        <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-md bg-ui-muted p-2 text-[11px] whitespace-pre-wrap">
+        <pre className="sb-num mt-1 max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px] whitespace-pre-wrap">
           {log.join('\n')}
         </pre>
       </CollapsibleContent>

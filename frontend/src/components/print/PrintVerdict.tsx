@@ -14,7 +14,7 @@ interface Props {
 /** A callout, as shadcn's alert draws one: an icon beside the text, in a bordered card. */
 const CALLOUT = 'flex items-start gap-2 rounded-lg border px-3 py-2 text-[12.5px] [&>svg]:mt-0.5 [&>svg]:size-4 [&>svg]:shrink-0'
 const ERROR = 'border-destructive/40 bg-destructive/10 text-destructive'
-const WARNING = 'border-accent/50 bg-accent/10 text-foreground [&>svg]:text-accent'
+const WARNING = 'border-primary/50 bg-primary/10 text-foreground [&>svg]:text-primary'
 
 /**
  * #755, #760 — the run's own refusals and nozzle advisories, shown in Checks before
