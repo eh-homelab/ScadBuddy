@@ -46,7 +46,9 @@ describe('closeOnUntakenEscape', () => {
     expect(close).not.toHaveBeenCalled()
   })
 
-  it('does not close on a later key once a stopped one has passed', async () => {
+  // Only that the listener for a stopped key is removed: the later key has no
+  // closeOnUntakenEscape of its own.
+  it('leaves no listener behind for a stopped key, so a later one does not close', async () => {
     const close = vi.fn()
     const field = inside()
     const stop = (event: Event) => event.stopPropagation()
