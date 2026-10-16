@@ -161,15 +161,15 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
           <DialogHeader>
             <DialogTitle>Print files</DialogTitle>
           </DialogHeader>
-        {error ? (
-          <p role="alert" className="text-[13px] text-warn">
-            {error}
-          </p>
-        ) : (
-          <p className="flex items-center gap-2 text-[13px] text-subtle">
-            <Spinner /> Reading the batch print
-          </p>
-        )}
+            {error ? (
+              <p role="alert" className="text-[13px] text-warn">
+                {error}
+              </p>
+            ) : (
+              <p className="flex items-center gap-2 text-[13px] text-subtle">
+                <Spinner /> Reading the batch print
+              </p>
+            )}
         </DialogContent>
       </Dialog>
     )
@@ -319,70 +319,75 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
           <DialogTitle>{queued ? 'Batch print queued' : `Review ${items.length} files`}</DialogTitle>
           <DialogDescription>
             {queued
-          ? 'Each file went to its own print. One that was refused did not stop the rest.'
-          : sentBefore
-            ? 'Some files are not queued yet. Edit a refused one, then Queue all again: a file still being checked is followed, never queued twice.'
-            : 'Check each file, then Queue all. A file that is refused does not stop the rest.'}
+              ? 'Each file went to its own print. One that was refused did not stop the rest.'
+              : sentBefore
+                ? 'Some files are not queued yet. Edit a refused one, then Queue all again: a file still being checked is followed, never queued twice.'
+                : 'Check each file, then Queue all. A file that is refused does not stop the rest.'}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-      {strip(goTo)}
-      {error && (
-        <p role="alert" className="mb-2 text-[13px] text-warn">
-          {error}
-        </p>
-      )}
-      <ul className="divide-y divide-line" aria-label="Files to print">
-        {items.map((item) => (
-          <ReviewRow
-            key={item.position}
-            item={item}
-            run={item.outcome?.run_id ? runs[item.outcome.run_id] : undefined}
-            queued={queued}
-            busy={busy || queueing}
-            onEdit={() => goTo(item.position)}
-            onRemove={() =>
-              void save(() =>
-                api.putPrintBatchItem(batchId, item.position, {
-                  request: item.request ?? null,
-                  skipped: item.skipped ?? false,
-                  removed: true,
-                  summary: item.summary ?? null,
-                  problems: item.problems ?? [],
-                }),
-              )
-            }
-          />
-        ))}
-      </ul>
+          {strip(goTo)}
+          {error && (
+            <p role="alert" className="mb-2 text-[13px] text-warn">
+              {error}
+            </p>
+          )}
+          <ul className="divide-y divide-line" aria-label="Files to print">
+            {items.map((item) => (
+              <ReviewRow
+                key={item.position}
+                item={item}
+                run={item.outcome?.run_id ? runs[item.outcome.run_id] : undefined}
+                queued={queued}
+                busy={busy || queueing}
+                onEdit={() => goTo(item.position)}
+                onRemove={() =>
+                  void save(() =>
+                    api.putPrintBatchItem(batchId, item.position, {
+                      request: item.request ?? null,
+                      skipped: item.skipped ?? false,
+                      removed: true,
+                      summary: item.summary ?? null,
+                      problems: item.problems ?? [],
+                    }),
+                  )
+                }
+              />
+            ))}
+          </ul>
         </div>
         <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">
-        queued ? (
-          <Button type="button" variant="outline" onClick={close}>
-            Done
-          </Button>
-        ) : (
-          <>
-            <Button type="button" variant="outline" onClick={close} disabled={queueing}>
-              Cancel
+          {queued ? (
+            <Button type="button" onClick={close}>
+              Done
             </Button>
-            {before(total) !== undefined && (
-              <Button type="button" variant="outline" onClick={() => goTo(before(total) as number)} disabled={queueing || busy}>
-                Back
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={close} disabled={queueing}>
+                Cancel
               </Button>
-            )}
-            <Button
-              
-              onClick={() => void queueAll()}
-              disabled={queueing || busy || toQueue.length === 0}
-              data-testid="batch-queue-all"
-              {...USER_ONLY}
-            >
-              {queueing && <Spinner />}
-              Queue all ({toQueue.length})
-            </Button>
-          </>
-        )
+              {before(total) !== undefined && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => goTo(before(total) as number)}
+                  disabled={queueing || busy}
+                >
+                  Back
+                </Button>
+              )}
+              <Button
+                type="button"
+                onClick={() => void queueAll()}
+                disabled={queueing || busy || toQueue.length === 0}
+                data-testid="batch-queue-all"
+                {...USER_ONLY}
+              >
+                {queueing && <Spinner />}
+                Queue all ({toQueue.length})
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

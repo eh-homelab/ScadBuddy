@@ -153,9 +153,20 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-row-1')).toHaveTextContent('Skipped')
     expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (2)')
     expect(screen.getByTestId('batch-queue-all')).toHaveAttribute('data-agent-user-only')
+    // An open review offers Cancel and Queue all, never Done, and its footer is only buttons (#2718 review).
+    const footer = (name: string) => screen.getByRole('dialog', { name }).querySelector('[data-slot="dialog-footer"]')!
+    expect(within(footer('Review 3 files') as HTMLElement).queryByRole('button', { name: 'Done' })).toBeNull()
+    expect(within(footer('Review 3 files') as HTMLElement).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(footer('Review 3 files')).not.toHaveTextContent('queued ?')
     await user.click(screen.getByTestId('batch-queue-all'))
 
     await screen.findByRole('dialog', { name: 'Batch print queued' })
+    // A queued one offers only Done.
+    expect(
+      within(footer('Batch print queued') as HTMLElement)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Done'])
     await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.'))
     await waitFor(() => expect(screen.getByTestId('batch-outcome-2')).toHaveTextContent('Queued in Bambuddy.'))
     expect(screen.queryByTestId('batch-outcome-1')).toBeNull()
