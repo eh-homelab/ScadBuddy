@@ -177,7 +177,10 @@ export interface ChatState {
   /** The panel sent a first turn and waits for its `session.started`. */
   awaitingStart: boolean
   connected: boolean
-  /** #3616 — a session list has come in, so an empty `order` means the viewer has no chats. */
+  /**
+   * #3616 — a session list has come in, so an empty `order` means the viewer has no chats.
+   * Stays true across reconnects on purpose: the panel's restore reads it once per mount.
+   */
   listed: boolean
   /** Errors not tied to a session (a dropped connection, a malformed frame). */
   notice: string | null

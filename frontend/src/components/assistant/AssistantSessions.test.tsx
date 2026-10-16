@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
-import type { ClientMessage } from '../../agent/chat/protocol'
+import type { ClientMessage, ServerEvent } from '../../agent/chat/protocol'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, mockAgentSessions, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
 import { sessionWrites } from '../../mocks/features/assistantSessions'
 import { server } from '../../mocks/server'
@@ -426,8 +426,11 @@ describe('a reload (#2372)', () => {
       connect: (h) =>
         inner.connect({
           ...h,
-          onFrame: (frame) =>
-            h.onFrame((frame as { type?: string }).type === 'sessions.snapshot' ? ({ ...(frame as object), sessions: [] } as never) : frame),
+          // The mock delivers parsed events, so the frame is a ServerEvent.
+          onFrame: (frame) => {
+            const event = frame as ServerEvent
+            h.onFrame(event.type === 'sessions.snapshot' ? ({ ...event, sessions: [] } satisfies ServerEvent) : event)
+          },
         }),
     }
 
