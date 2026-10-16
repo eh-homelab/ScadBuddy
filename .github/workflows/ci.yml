@@ -503,7 +503,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          # No selection: "Count this shard's tests" failed and says why, and the
+          # No selection: an earlier step of this shard failed and says why, and the
           # split job names this shard as the one with no count.
           [ -f counts/selected.txt ] || exit 0
           ran=0
@@ -553,7 +553,7 @@ jobs:
             [ -f "counts/shard-${shard}.txt" ] || missing+=("${shard}")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::no count from shard ${missing[*]}: see that shard's 'Count this shard's tests' step"
+            echo "::error::no count from shard ${missing[*]}: see that shard's first failed step"
             exit 1
           fi
           cat counts/shard-*.txt
