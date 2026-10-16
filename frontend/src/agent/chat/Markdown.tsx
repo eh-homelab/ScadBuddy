@@ -19,7 +19,12 @@ import { parseBlocks } from './markdownBlocks'
  * unclosed `**` is plain text until its partner arrives.
  */
 export function Markdown({ text, base }: { text: string; base?: ImageBase }) {
-  return <div className="space-y-2 break-words">{blocks(text, base)}</div>
+  // data-markdown: prose a page renders is never its title (usePageTitle, #3392).
+  return (
+    <div data-markdown="" className="space-y-2 break-words">
+      {blocks(text, base)}
+    </div>
+  )
 }
 
 function blocks(text: string, base: ImageBase | undefined): ReactNode[] {

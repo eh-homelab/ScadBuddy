@@ -38,6 +38,9 @@ for (const path of PAGES) {
 
 test('covers every route App.tsx declares', () => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  // Only literal path="…" routes are seen here, so any other form fails the check (#3394).
+  // The index route is '/', which PAGES lists.
+  expect(app, 'declare each route with a literal path="…"').not.toMatch(/\bpath=\{/)
   const routes = [...app.matchAll(/path="([^"]+)"/g)].map((m) => m[1]!).filter((p) => p !== '*')
   const pattern = (route: string) =>
     new RegExp(`^/${route.replace(/:[a-zA-Z]+/g, '[^/]+').replace(/\/\*$/, '(/.*)?')}$`)

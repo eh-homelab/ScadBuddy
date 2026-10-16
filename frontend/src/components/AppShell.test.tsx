@@ -86,11 +86,18 @@ describe('the shell’s orientation (#2454)', () => {
         </Route>
       </Routes>,
     )
+    // #3393: a click on a bare spot of the page does not focus <main>.
+    await user.click(screen.getByRole('heading', { name: 'Models' }))
+    expect(screen.getByRole('main')).not.toHaveFocus()
     await user.tab()
     const skip = screen.getByRole('link', { name: 'Skip to main content' })
     expect(skip).toHaveFocus()
     await user.click(skip)
     expect(screen.getByRole('main')).toHaveFocus()
+    // Focusable only while the skip link has put focus there.
+    await user.tab()
+    expect(screen.getByRole('main')).not.toHaveFocus()
+    expect(screen.getByRole('main')).not.toHaveAttribute('tabindex')
     // Its visible text, not a shorter label (axe label-content-name-mismatch).
     expect(screen.getByRole('link', { name: /^ScadBuddy/ })).toHaveAccessibleName('ScadBuddy OpenSCAD customizer')
   })
