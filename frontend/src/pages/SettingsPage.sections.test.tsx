@@ -145,18 +145,17 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
     const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
-    const timeouts = vi.spyOn(window, 'setTimeout')
+    // Time itself, not one timer picked out by its closure's text (#3247 review).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
       await seeded()
       await waitFor(() => expect(scrolls).toContain(4992))
-      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
-      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
-      expect(settle).toBeDefined()
-      act(() => (settle![0] as () => void)())
+      expect(observers[0]!.disconnected).toBe(false)
+      act(() => vi.advanceTimersByTime(SETTLE_MS))
       expect(observers[0]!.disconnected).toBe(true)
     } finally {
-      timeouts.mockRestore()
+      vi.useRealTimers()
       restore()
       vi.unstubAllGlobals()
     }
