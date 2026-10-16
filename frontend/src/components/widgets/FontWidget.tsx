@@ -235,7 +235,11 @@ export function FontWidget({
 
   const styleTrigger = useRef<HTMLButtonElement>(null)
   useFillable(styleTrigger, {
-    options: () => styles.map((name) => ({ value: name, label: name })),
+    // As the list offers them: the current style first when the family does not list it.
+    options: () => [
+      ...(styles.includes(style) ? [] : [{ value: style, label: style || 'Default' }]),
+      ...styles.map((name) => ({ value: name, label: name })),
+    ],
     value: () => style,
     set: (next) => onChange(formatFontValue(family, next)),
   })

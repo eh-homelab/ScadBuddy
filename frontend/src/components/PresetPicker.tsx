@@ -545,7 +545,11 @@ export function PresetPicker({
 
   // #1445 — the assistant's fill picks a preset as it did on the native select: by id or name.
   useFillable(trigger, {
-    options: () => presets.map((preset) => ({ value: preset.id, label: preset.name })),
+    // "No preset" as the list offers it, so fill can clear the pick with "" as before.
+    options: () => [
+      ...(selected ? [{ value: '', label: 'No preset' }] : []),
+      ...presets.map((preset) => ({ value: preset.id, label: preset.name })),
+    ],
     value: () => selected?.id ?? '',
     set: choose,
   })

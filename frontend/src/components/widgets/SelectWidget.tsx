@@ -23,10 +23,11 @@ export function SelectWidget({
   const trigger = useRef<HTMLButtonElement>(null)
   // The assistant's fill sets it by value or label, as it did the native select (#3672).
   useFillable(trigger, {
-    options: () => options.map((option) => ({ value: keyOf(option.value), label: option.name })),
-    value: () => keyOf(value),
+    // The raw values, "" included: the sentinel is only for Radix, which refuses "".
+    options: () => options.map((option) => ({ value: String(option.value), label: option.name })),
+    value: () => String(value),
     set: (next) => {
-      const picked = options.find((option) => keyOf(option.value) === next)
+      const picked = options.find((option) => String(option.value) === next)
       onChange(picked ? picked.value : next)
     },
   })
