@@ -47,30 +47,47 @@ describe('the bundled Claude Code (spec §2.1)', () => {
   it('E4: a killed call is never re-run on resume and is marked unknown', async () => {
     let n = 0
     fake = await startFakeAnthropic(() => (++n === 1 ? { toolUse: { name: 'mcp__x__slow', input: { a: 1 } } } : { text: `reply ${n}` }))
+    // The eager flush's appends, so the kill waits for the tool_use entry to be stored, not for a fixed time (#3450).
     const store = new InMemorySessionStore()
+    const appended: unknown[] = []
+    const append = store.append.bind(store)
+    store.append = async (key, entries) => {
+      appended.push(...entries)
+      await append(key, entries)
+    }
     let started!: () => void
     const running = new Promise<void>((r) => (started = r))
+    // The tool waits until the test lets it go: no timer outlives the test.
+    const release = new AbortController()
     let calls = 0
     const server = createSdkMcpServer({ name: 'x', tools: [tool('slow', 'slow', { a: z.number() }, async () => {
-      calls++; started(); await new Promise((r) => setTimeout(r, 60_000)); return { content: [{ type: 'text', text: 'done' }] } })] })
+      calls++; started(); await new Promise((r) => release.signal.addEventListener('abort', r, { once: true })); return { content: [{ type: 'text', text: 'done' }] } })] })
     let child: ReturnType<typeof spawn> | undefined
     let sessionId = ''
     const q = query({ prompt: 'go', options: { ...base(), env: await env(fake), sessionStore: store, sessionStoreFlush: 'eager',
       mcpServers: { x: server }, allowedTools: ['mcp__x__slow'],
       spawnClaudeCodeProcess: (o) => (child = spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'inherit'] })) } })
-    void (async () => { try { for await (const m of q) if ('session_id' in m && m.session_id) sessionId = m.session_id } catch { /* the SIGKILL ends the stream with an error */ } })()
-    await running
-    await new Promise((r) => setTimeout(r, 500))
-    child?.kill('SIGKILL')
-    await new Promise((r) => setTimeout(r, 1500))
-    const before = fake.messageCalls().length
-    let asked = false
-    for await (const _ of query({ prompt: 'continue', options: { ...base(), env: await env(fake), sessionStore: store, resume: sessionId,
-      mcpServers: { x: server }, canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) { /* drain */ }
-    const resumed = JSON.stringify(fake.messageCalls()[before]?.body?.messages)
-    expect(calls).toBe(1)
-    expect(asked).toBe(false)
-    expect(resumed).toContain('outcome is unknown')
+    const drained = (async () => { try { for await (const m of q) if ('session_id' in m && m.session_id) sessionId = m.session_id } catch { /* the SIGKILL ends the stream with an error */ } })()
+    try {
+      await running
+      await expect.poll(() => appended.some((e) => JSON.stringify(e).includes('"tool_use"')), { timeout: 30_000 }).toBe(true)
+      const exited = new Promise<void>((r) => (child!.exitCode !== null || child!.signalCode !== null ? r() : child!.once('exit', () => r())))
+      child!.kill('SIGKILL')
+      await exited
+      await drained
+      const before = fake.messageCalls().length
+      let asked = false
+      for await (const _ of query({ prompt: 'continue', options: { ...base(), env: await env(fake), sessionStore: store, resume: sessionId,
+        mcpServers: { x: server }, canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) { /* drain */ }
+      const resumed = JSON.stringify(fake.messageCalls()[before]?.body?.messages)
+      expect(calls).toBe(1)
+      expect(asked).toBe(false)
+      expect(resumed).toContain('outcome is unknown')
+    } finally {
+      release.abort()
+      q.close()
+      await drained
+    }
   }, 120_000)
 
   it('E5: maxBudgetUsd is cumulative per process; maxTurns is per message', async () => {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
 import { carriedPlan, seedPlan } from './filaments'
+import { plateKey, type PlateChoice } from './plateChoice'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { useLatest } from './useLatest'
 
@@ -44,7 +45,7 @@ export class CarryBox {
 export function useFilamentPlan(
   source: PrintSource | undefined,
   choices: ChoicesView | null,
-  plate: number | 'all',
+  plate: PlateChoice,
   carry?: CarryBox,
 ) {
   const key = sourceKey(source)
@@ -60,9 +61,9 @@ export function useFilamentPlan(
 
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
-  // later plate uses still gets a row (spec §2 step 1).
-  const chosenPlate = plate === 'all' ? 1 : plate
-  const allPlates = plate === 'all'
+  // later plate uses still gets a row (spec §2 step 1); several plates read just theirs
+  // (#3652). A string, so the effect below sees a change of plates, not of array.
+  const chosenPlates = plateKey(plate)
   const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
 
   /**
@@ -131,15 +132,21 @@ export function useFilamentPlan(
       held.current = { choices, slots: new Map() }
       setPlan(seeded)
     }
-    if (chosenPlate === 1 && !allPlates) {
+    const printerId = choices.printer_id ?? null
+    const chosen = chosenPlates === 'all' ? [] : chosenPlates.split(',').filter(Boolean).map(Number)
+    // Plate 1 is in the choices read already; so is a set emptied while it is changed,
+    // which nothing prints until a plate is chosen.
+    if (chosenPlates !== 'all' && chosen.length <= 1 && (chosen[0] ?? 1) === 1) {
       seed(choices.filaments)
       return
     }
     sourceApi(current)
       .getFilaments(
-        allPlates
-          ? { printerId: choices.printer_id ?? null, allPlates: true }
-          : { printerId: choices.printer_id ?? null, plateId: chosenPlate },
+        chosenPlates === 'all'
+          ? { printerId, allPlates: true }
+          : chosen.length > 1
+            ? { printerId, plateIds: chosen }
+            : { printerId, plateId: chosen[0] ?? 1 },
       )
       .then((next) => token === filamentAttempt.current && seed(next))
       .catch((cause: unknown) => {
@@ -151,7 +158,7 @@ export function useFilamentPlan(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry, retries])
+  }, [choices, key, latest, chosenPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =

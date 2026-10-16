@@ -505,7 +505,9 @@ class PrinterStatus(BambuddyModel):
     layer_num: int | None = None
     total_layers: int | None = None
     current_archive_id: int | None = None
-    awaiting_plate_clear: bool = False
+    #: ``None`` when Bambuddy sent something other than a bool (#3632): unknown, which
+    #: /prints shows as "check the plate", never as a quiet "no".
+    awaiting_plate_clear: bool | None = False
     cover_url: str | None = None
     hms_errors: list[HmsError] = Field(default_factory=list)
 
@@ -532,7 +534,7 @@ class PrinterStatus(BambuddyModel):
     @field_validator("awaiting_plate_clear", mode="before")
     @classmethod
     def _flag(cls, value: Any) -> Any:
-        return value if isinstance(value, bool) else False
+        return value if isinstance(value, bool) else None
 
     @field_validator("hms_errors", mode="before")
     @classmethod
@@ -748,7 +750,9 @@ class SliceRequest(BambuddyModel):
         )
         if self.process_overrides:
             key += "/" + ",".join(
-                f"{k}={'|'.join(v) if isinstance(v, list) else v}"
+                # Each value as JSON, so a list and a string, or a value holding a
+                # separator, can never key the same slice (#2804, #3585 review).
+                f"{k}={json.dumps(v)}"
                 for k, v in sorted(self.process_overrides.items())
             )
         return key

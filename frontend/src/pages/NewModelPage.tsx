@@ -2,10 +2,13 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api/client'
 import { SourceWorkbench } from '../components/SourceWorkbench'
-import { Button } from '../components/ui/Button'
 import { modelPath } from '../lib/deeplink'
 import { detectLibraries } from '../lib/libraryImports'
 import { useAsync } from '../lib/useAsync'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 /** Paste `.scad` source, name it, save it. The schema is derived exactly as on upload. */
 export function NewModelPage() {
@@ -51,61 +54,56 @@ export function NewModelPage() {
     <SourceWorkbench
       breadcrumb={
         <>
-          <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
+          <Link to="/" className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
             Models
           </Link>
-          <span className="text-faint">/</span>
-          <h1 className="truncate text-[13px] font-medium">New model</h1>
+          <span className="text-muted-foreground">/</span>
+          <h1 className="truncate text-sm font-medium">New model</h1>
         </>
       }
       fields={
         <>
-          <div className="flex items-center gap-2 border-t border-line px-3 py-2">
-            <label htmlFor="model-name" className="text-[13px] text-muted">
+          <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2">
+            <Label htmlFor="model-name" className="font-normal text-muted-foreground">
               Name
-            </label>
-            <input
+            </Label>
+            <Input
               id="model-name"
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Name Keychain"
-              className="h-7 w-64 rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong"
+              className="h-7 w-64"
             />
-            <span className="text-[12px] text-faint">
+            <span className="text-xs text-muted-foreground">
               The URL slug is derived from it, as a filename would be.
             </span>
             {/* Only into an empty editor: it would replace whatever was pasted. */}
             {blank && source === '' && (
-              <Button size="sm" className="ml-auto" onClick={() => setSource(blank.source)}>
+              <Button size="sm" variant="outline" className="ml-auto" onClick={() => setSource(blank.source)}>
                 Start from blank template
               </Button>
             )}
           </div>
           {detected.length > 0 && (
             <fieldset
-              className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-3 py-2"
+              className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t px-3 py-2"
               data-testid="detected-libraries"
             >
-              <legend className="float-left mr-2 text-[13px] text-muted">Libraries</legend>
+              <legend className="float-left mr-2 text-sm text-muted-foreground">Libraries</legend>
               {detected.map((library) => {
                 const ref = catalogue?.find((entry) => entry.name === library)?.ref
                 return (
-                  <label
-                    key={library}
-                    className="flex cursor-pointer items-center gap-2 text-[13px]"
-                  >
-                    <input
-                      type="checkbox"
+                  <Label key={library} className="cursor-pointer font-normal">
+                    <Checkbox
                       checked={!declined.has(library)}
-                      onChange={(event) => toggle(library, event.target.checked)}
-                      className="accent-[var(--sb-accent)]"
+                      onCheckedChange={(checked) => toggle(library, checked === true)}
                     />
                     {library}
-                    {ref && <span className="font-mono text-[12px] text-faint">{ref}</span>}
-                  </label>
+                    {ref && <span className="font-mono text-xs text-muted-foreground">{ref}</span>}
+                  </Label>
                 )
               })}
-              <span className="text-[12px] text-faint">
+              <span className="text-xs text-muted-foreground">
                 Named by the source's use/include lines; pinned to the model when it is saved.
               </span>
             </fieldset>

@@ -56,7 +56,7 @@ describe('NewModelPage, unsaved source (#997)', () => {
     await paste(user, 'cube(1);\n')
 
     await user.click(screen.getByRole('link', { name: 'Models' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('OpenSCAD source')).toHaveValue('cube(1);\n')
 

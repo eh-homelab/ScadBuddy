@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -195,6 +196,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert samples['scadbuddy_render_jobs_finished_total{kind="render",outcome="done"}'] == 1
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
+    # A model with no scene.json (not a mesh model) never runs the paint stage.
+    assert samples.get('scadbuddy_render_stage_seconds_count{stage="paint"}', 0) == 0
     assert f'revision="{build_id}"' in metrics
     # Refreshed per scrape from this process's store (the local one: no cache to size).
     assert samples["scadbuddy_store_render_key_fallback"] == 0
@@ -449,6 +452,67 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         assert not await _is_current_answer(client, "other")
 
 
+async def _write_refusal(
+    write: Callable[[], Awaitable[None]],
+    routing: Callable[[], Awaitable[str | None]],
+    build_id: str,
+    *,
+    attempts: int | None = None,
+    max_wait: float | None = None,
+) -> RPCStatusCode | None:
+    """A deployment write's refusal, or None when it is accepted; asked again while the
+    server is busy, the way `_is_current_answer` is, so a transient error is never read as
+    the conflict (or as the acceptance) the test is about (#3293).
+
+    A transient error can come after the server applied the write: sent again, the same
+    token is stale by then and refused. So before each retry the routing is read, and a
+    build already current is the write accepted. A server busy through every attempt is
+    said as such, not returned as a status that reads like the wrong refusal.
+
+    That check is best-effort. Just after a write the deployment's own workflow is still
+    propagating it (`_routing_once_current`), so the routing is read a few times before
+    the retry; a read the busy server refuses counts as "not known current" (#3293)."""
+    attempts = IS_CURRENT_ATTEMPTS if attempts is None else attempts
+    max_wait = IS_CURRENT_MAX_WAIT if max_wait is None else max_wait
+    for attempt in range(attempts):
+        if attempt > 0 and await _known_current(routing, build_id, every=min(0.25, max_wait)):
+            return None
+        try:
+            await write()
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT:
+                return error.status
+            if attempt == attempts - 1:
+                raise AssertionError(
+                    f"the server stayed busy through {attempts} attempts ({error.status.name})"
+                ) from error
+            await asyncio.sleep(min(2.0**attempt * 0.5, max_wait))
+        else:
+            return None
+    raise AssertionError("unreachable")
+
+
+async def _known_current(
+    routing: Callable[[], Awaitable[str | None]],
+    build_id: str,
+    *,
+    reads: int | None = None,
+    every: float = 0.25,
+) -> bool:
+    """Whether ``build_id`` is seen current within ``reads`` reads of the routing. A
+    transient refusal of a read is a read that saw nothing; any other error is raised."""
+    for read in range(ROUTING_READS if reads is None else reads):
+        if read > 0:
+            await asyncio.sleep(every)
+        try:
+            if await routing() == build_id:
+                return True
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT:
+                raise
+    return False
+
+
 async def _routing_once_current(
     client: Client, deployment: str, build_id: str
 ) -> tuple[str | None, bytes]:
@@ -512,19 +576,16 @@ async def test_temporal_refuses_a_write_with_a_stale_conflict_token() -> None:
         return (await _routing_once_current(client, deployment, build_id))[1]
 
     async def write_refusal(client: Client, build_id: str, token: bytes) -> RPCStatusCode | None:
-        """The write's refusal, or None when it is accepted; asked again while the server
-        is busy, the way `_is_current_answer` is, so a transient error is never read as
-        the conflict (or as the acceptance) the test is about."""
-        for attempt in range(IS_CURRENT_ATTEMPTS):
-            try:
-                await made_current(client, build_id, token)
-            except RPCError as error:
-                if error.status not in IS_CURRENT_TRANSIENT or attempt == IS_CURRENT_ATTEMPTS - 1:
-                    return error.status
-                await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
-            else:
-                return None
-        raise AssertionError("unreachable")
+        async def routing() -> str | None:
+            return (
+                await current_routing(
+                    client, namespace=client.namespace, deployment_name=deployment
+                )
+            )[0]
+
+        return await _write_refusal(
+            lambda: made_current(client, build_id, token), routing, build_id
+        )
 
     async with temporal_client() as client, versioned(client, old), versioned(client, new):
         stale = await polled_then_current(client, old)
@@ -545,6 +606,8 @@ IS_CURRENT_MAX_WAIT = 5.0
 #: How Temporal refuses a deployment write carrying a conflict token read before another
 #: write (#2538): what `deployment_writes` relies on.
 STALE_TOKEN_REFUSAL = RPCStatusCode.FAILED_PRECONDITION
+#: How many times `_write_refusal` reads the routing before it resends a write.
+ROUTING_READS = 3
 #: What a busy server answers meanwhile; anything else is a real error, raised at once.
 IS_CURRENT_TRANSIENT = frozenset(
     {
@@ -1481,5 +1544,106 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
         lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
     )
 
+    def past_the_guard(*args: object, **__: object) -> None:
+        for arg in args:
+            if asyncio.iscoroutine(arg):
+                arg.close()  # never awaited, so no warning beside the failure (#3491 review)
+        raise AssertionError("main() went past the service-name check")
+
+    # A backstop, not the first point of failure: should the check regress, building
+    # tracing's arguments likely fails on the missing name first. Either way the test
+    # fails rather than starting a worker (#3354, #3491 review).
+    monkeypatch.setattr(worker_module, "configure_tracing", past_the_guard)
+    monkeypatch.setattr(asyncio, "run", past_the_guard)
+
     with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
-        worker_module.main()
+        try:
+            worker_module.main()
+        except KeyError as error:
+            # The likelier failure of a regressed check: said as what it means (#3491 review).
+            raise AssertionError("main() went past the service-name check") from error
+
+
+def _transient() -> RPCError:
+    return RPCError("busy", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def test_a_write_applied_before_a_transient_error_is_accepted_not_refused() -> None:
+    """#3293: the server applied the write, then answered UNAVAILABLE. Sent again, the
+    same token is stale and refused; the routing read first shows it was accepted."""
+    current: list[str | None] = ["new"]
+    sent: list[int] = []
+
+    async def write() -> None:
+        sent.append(1)
+        if len(sent) == 1:
+            current[0] = "old"  # applied, then the answer was lost
+            raise _transient()
+        raise RPCError("stale", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+    async def routing() -> str | None:
+        return current[0]
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) is None
+    assert len(sent) == 1
+
+
+async def test_a_server_busy_through_every_attempt_is_said_not_returned_as_a_refusal() -> None:
+    """#3293: the last transient status is not handed back as if it were the refusal."""
+
+    async def write() -> None:
+        raise _transient()
+
+    async def routing() -> str | None:
+        return "new"
+
+    with pytest.raises(AssertionError, match="stayed busy through 3 attempts"):
+        await _write_refusal(write, routing, "old", attempts=3, max_wait=0)
+
+
+async def test_a_conflict_is_returned_as_the_refusal() -> None:
+    """#3293: a refusal that is not transient is handed back at once."""
+
+    async def write() -> None:
+        raise RPCError("stale", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+    async def routing() -> str | None:
+        return "new"
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) == STALE_TOKEN_REFUSAL
+
+
+async def test_a_busy_routing_read_is_not_known_current_and_the_write_is_resent() -> None:
+    """#3293 review: the busy server can refuse the routing read too; that is a read that
+    saw nothing, not a failed test."""
+    sent: list[int] = []
+
+    async def write() -> None:
+        sent.append(1)
+        if len(sent) == 1:
+            raise _transient()
+
+    async def routing() -> str | None:
+        raise _transient()
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) is None
+    assert len(sent) == 2
+
+
+async def test_a_write_still_propagating_is_seen_before_it_is_resent() -> None:
+    """#3293 review: just after a write the routing can still name the old build; a few
+    reads see the write land rather than resending a token it has made stale."""
+    reads: list[str] = ["new", "old"]
+    sent: list[int] = []
+
+    async def write() -> None:
+        sent.append(1)
+        if len(sent) == 1:
+            raise _transient()
+        raise RPCError("stale", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+    async def routing() -> str | None:
+        return reads.pop(0) if len(reads) > 1 else reads[0]
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) is None
+    assert len(sent) == 1

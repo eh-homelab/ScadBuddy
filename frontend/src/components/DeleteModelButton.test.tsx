@@ -30,11 +30,11 @@ describe('DeleteModelButton', () => {
     const { user } = render()
 
     await user.click(screen.getByRole('button', { name: 'Delete' }))
-    const dialog = screen.getByRole('dialog', { name: 'Delete Name Keychain?' })
+    const dialog = screen.getByRole('alertdialog', { name: 'Delete Name Keychain?' })
     expect(dialog).toHaveTextContent('name-keychain')
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(deletes).toEqual([])
   })
 
@@ -71,7 +71,7 @@ describe('DeleteModelButton', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Delete model' })).toBeEnabled(),
     )
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
   })
 
   it('names the duplicates that track the model and deletes only on "Delete anyway"', async () => {
@@ -88,7 +88,7 @@ describe('DeleteModelButton', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('1 template is a duplicate of this one')
     expect(alert).toHaveTextContent('my-keychain')
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
 
     await user.click(await screen.findByRole('button', { name: 'Delete anyway' }))
 

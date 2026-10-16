@@ -246,6 +246,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/meshmodel/` — mesh models (#2146, spec 2026-10-11): `scene.py`,
+  `compile.py`, `edits.py`, `shared.py` (what `edits` shares with the render and geometry
+  analysis, which must not import `edits`: `JointSpec`, `WALL`, `MeshOf`, `SceneEditError`,
+  `transform_matrix`), `operations.py` (the `library` kinds), `paint.py` (paint
+  transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
+  render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
+  codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
+  `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
+  matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
@@ -258,11 +267,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
   Housekeeping (#1054): `housekeeping.py` (`Housekeeping`, `ensure_schedule`), the
-  periodic sweeps as Temporal Schedules (every sweep, and the render prune on its own
-  300 s one) on the `library` queue
-  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
-  process (it holds the data volume). A new periodic pass is an activity in its
-  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  periodic sweeps as Temporal Schedules (every sweep, and `PRUNE_SWEEPS` on its own
+  300 s one: the render prune, claims, lost slice starts and activity) on the `library`
+  queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
+  process (it holds the data volume). Sweeps off (`asset_sweep_interval` 0) deletes the
+  first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
+  (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
+  activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
@@ -641,11 +652,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     list as a workspace file), each outward, and the listing's `system_note` tells the
     model; `src/builtins/schemas.json` is Claude Code's own input schemas
     (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
-    `CronList`, `ScheduleWakeup`, `Monitor` and `TaskStop` are the session's own in both modes
+    `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
     (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
     `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source
     runs where the session's Bash runs, the replica's own queue or agent-durable's
-    `scadbuddy_durable/background.py`, its events in `ai_background_events`; a classic turn
+    `scadbuddy_durable/background.py`, its events in `ai_background_events`; a Workflow's
+    script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
+    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; a classic turn
     gets them as the in-process `builtin` server in place of Claude Code's, which end
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
@@ -823,12 +836,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
   scope's hit rate drops, move it to `type=registry` on GHCR, which works only on
   pushes and same-repo PRs, not forks (#743).
-- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
-  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
-  arm64 under QEMU and runs `openscad-lsp --version`, caching under
-  `scope=openscad-lsp-arm64` with `mode=min`. It is not a required check. Making it one needs its
-  `pull_request.paths` filter dropped first: a required check that never runs on a PR
-  outside those paths leaves that PR waiting for it forever.
+- No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
+  publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
+  (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
+  Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
+  `docker/setup-qemu-action`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
   `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
@@ -840,7 +852,7 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   pushes it to a same-repo PR with the `RUNNER_APP` token.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
-  touching Go, a `v*` tag or a dispatch, for amd64 and arm64: `sha-<7>` always,
+  touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)

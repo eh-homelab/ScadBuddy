@@ -111,7 +111,7 @@ and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`
 on shutdown.
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
-  secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
+  secret needed), built for `linux/amd64` only. It has these tags:
   `main` (latest `main`), `sha-<short>`, and `X.Y.Z` / `X.Y` for releases.
 - **LAN only.** ScadBuddy has **no authentication**. Anyone who can reach it can
   add, edit and delete models, and send prints using the stored Bambuddy key.
@@ -193,7 +193,10 @@ on shutdown.
     paused across restarts, and a start does not trigger it: while it is paused nothing
     sweeps the uploads or reconciles them with the store, and a start only backfills
     them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
-    Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
+    Schedule, `scadbuddy-prune-library`, which 0 leaves alone; it also sweeps request
+    claims, the activity record and the files of print runs' lost slice starts. The
+    print dialog's background slices are removed from Bambuddy's library (6 hours after
+    no run queued them) only by the first Schedule, so 0 leaves them there. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
     (`temporal schedule delete --schedule-id scadbuddy-housekeeping-<old queue>`, and
@@ -223,6 +226,12 @@ on shutdown.
     `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
     own `gc --auto` waits for 6700 and every model listing walks the whole history. It
     needs the same `Recreate` rollout. Its first run is the boot's.
+  - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
+    runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
+    so it stays on the prune Schedule while the background-slice sweep obeys 0. It
+    needs the same `Recreate` rollout: until it finishes, a prune run whose sweep an
+    old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
+    sweep waits for the next tick (300 s).
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -299,7 +308,9 @@ on shutdown.
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
-  the app.
+  the app. Alert on `scadbuddy_render_project_retries_total` rising, not on its log
+  line: a job's row write is retried without limit, and the warning is logged only at
+  the 12th attempt and every 100th after, hours apart once the backoff is capped.
 
 **Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
 backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
@@ -737,6 +748,8 @@ workers restart.
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
 | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
+| `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked, so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
+| `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` | 4 GiB | Its cap, least recently used first, trimmed on each write. An entry used within the activity timeout is kept even past it, so a read under way keeps its file. `0` keeps nothing. |
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →

@@ -118,8 +118,8 @@ describe('the library routes', () => {
       plates: [],
       plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
     })
-    // #1814: the log names the error; its message (the model sees it above) is not logged.
-    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError)']])
+    // #1814: the log names the error and the backend's status; its message (the model sees it above) is not logged.
+    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError 502)']])
   })
 
   it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {
@@ -299,6 +299,29 @@ describe('the library routes', () => {
     expect(result.folders).toHaveLength(1)
     expect(result.total).toBe(2)
     expect(result.next_cursor).toBeTruthy()
+  })
+
+  it('finds files by name in every folder (#3630)', async () => {
+    let query = ''
+    const found = {
+      query: 'dino',
+      all: false,
+      files: [{ id: 7, filename: 'dino.3mf', file_type: '3mf', printable: true, folder_path: ['Toys'] }],
+      total: 1,
+      hidden: 0,
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/library/search`, ({ request }) => {
+        query = new URL(request.url).search
+        return HttpResponse.json(found)
+      }),
+    )
+    expect(tool('search_library').risk).toBe('read')
+    const result = firstText(await tool('search_library').execute({ query: 'dino' }, ctx()))
+    expect(query).toBe('?q=dino')
+    expect(result).toEqual(found)
+    await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
+    expect(query).toBe('?q=dino&fresh=true')
   })
 })
 

@@ -2,6 +2,7 @@ import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import {
+  type EffortLevel,
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
@@ -14,17 +15,13 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { type CredentialSource, type PooledCredential, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
-import {
-  DEFAULT_MAX_BUDGET_USD,
-  DEFAULT_MAX_TURNS,
-  type HarnessRun,
-  runHarness,
-} from '../harness/run.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -72,7 +69,9 @@ import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
 import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.js'
-import { createTurnSlot } from './turnSlot.js'
+import { type WarmEntry, type WarmQuery, WarmSessions, type WarmTurn } from './warm.js'
+import { notifyWarmEvict } from './warmEvict.js'
+import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
 import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -125,7 +124,17 @@ import { FlowQueue } from '../flows/queue.js'
 // and the session back to idle, since its own finish() never ran. The same
 // renewal reads `interrupt_requested`, which is how an interrupt reaches a turn
 // running on another replica. On SIGTERM, `stopTurns` drains: no new turn,
-// running ones may finish, the rest are aborted and waited for.
+// running ones may finish, the rest are aborted and waited for, and the warm
+// processes are closed.
+//
+// Processes (unified runtime spec 2026-10-13 §5.3). A classic session's turns
+// run on one warm Claude Code per replica (`warm`, warm.ts), a streaming-input
+// query that each turn pushes its prompt into (warmTurn.ts): a turn after the
+// first spawns nothing while the process still matches it (its fingerprint,
+// the transcript tail, the budget), and respawns from the transcript when not.
+// A turn's cost is the difference of its process's cumulative total (§6.6).
+// An interrupt is `query.interrupt()`; the process answers with its result and
+// stays. A fallback to another credential respawns (§6.7).
 //
 // Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
 // call parks the turn in `waiting_approval` until a human decides
@@ -519,6 +528,10 @@ export type SessionRecord = {
  */
 export type ClaimedSession = SessionRecord & {
   unpricedCostUsd: number
+  /** A Workflow agent's chat (startChild): its own model, effort and subagent definition. */
+  agentModel: string | null
+  agentEffort: EffortLevel | null
+  agentType: string | null
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -529,9 +542,14 @@ export type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+
+const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  agentModel: row.agent_model,
+  agentEffort: row.agent_effort,
+  agentType: row.agent_type,
   claimedAt: row.claimed_at,
 })
 
@@ -618,8 +636,46 @@ export type ListFilter = {
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
 
-/** Runs one query; `runHarness` in production, a scripted stand-in in unit tests. */
+/**
+ * Starts one Claude Code process's query (the warm cache's spawn, warm.ts);
+ * `runHarness` in production, a scripted stand-in in unit tests. The stream
+ * serves every turn of the process: its `prompt` is the process's inbox.
+ */
 export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
+
+/** A warm process per replica past which the least recently used idle one goes (spec 2026-10-13 §5.3, D3) (main.ts passes the stored `warm_max_per_replica`). */
+export const DEFAULT_WARM_MAX_ENTRIES = 8
+/** How long a warm process may sit idle (spec §5.3: the same 10 min as temporal/sessionClients.ts) (main.ts passes the stored `warm_idle_seconds`). */
+export const DEFAULT_WARM_IDLE_MS = 600_000
+
+const isWarmQuery = (stream: AsyncIterable<SDKMessage>): stream is WarmQuery =>
+  typeof (stream as Partial<WarmQuery>).interrupt === 'function' && typeof (stream as Partial<WarmQuery>).close === 'function'
+
+/**
+ * The cache's `start` over a QueryRunner: a stream with its own `interrupt`
+ * and `close` (the SDK's Query, as runHarness returns it) is used as it is; a
+ * plain one (a scripted stand-in) is given an abort signal, which `interrupt`
+ * and `close` abort, as the SDK's abort ends a query.
+ */
+function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
+  return (spawn) => {
+    const controller = new AbortController()
+    const started = run({ ...spawn, signal: controller.signal })
+    if (isWarmQuery(started)) return started
+    const iterator = started[Symbol.asyncIterator]()
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      interrupt: () => {
+        controller.abort(new Error('the turn was interrupted'))
+        return Promise.resolve(undefined)
+      },
+      close: () => {
+        controller.abort(new Error('the process was closed'))
+        void iterator.return?.().catch(() => {})
+      },
+    }
+  }
+}
 
 export type SessionManagerDeps = {
   sql: Sql
@@ -703,6 +759,12 @@ export type SessionManagerDeps = {
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner
+  /**
+   * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
+   * DEFAULT_WARM_MAX_ENTRIES and DEFAULT_WARM_IDLE_MS when omitted, and where
+   * it says why each process went.
+   */
+  warm?: { maxEntries?: number; idleMs?: number; log?: (message: string) => void }
   /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
   nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
@@ -714,6 +776,8 @@ export type SessionManagerDeps = {
    * these (`resumeApproved`).
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
+  payloadKeys?: PayloadKeys
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
   /**
@@ -953,8 +1017,14 @@ export class SessionManager {
    * are both configured; main.ts sets it. Without it a durable session is refused.
    */
   durableTurns: DurableTurns | undefined
+  /**
+   * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
+   * one per classic session, serving its turns until it no longer matches
+   * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
+   * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
+   */
+  readonly warm: WarmSessions
   private readonly deps: SessionManagerDeps
-  private readonly run: QueryRunner
   private readonly leaseMs: number
   private readonly renewMs: number
   /** Turns running in THIS process, by session id. */
@@ -971,7 +1041,7 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql)
+    this.store = new PostgresSessionStore(deps.sql, deps.payloadKeys ? { keys: deps.payloadKeys } : {})
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
     this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
@@ -998,10 +1068,19 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.warm = new WarmSessions({
+      sql: deps.sql,
+      store: this.store,
+      maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
+      idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
+      ...(deps.run ? { start: startedQuery(deps.run) } : {}),
+      ...(deps.warm?.log ? { log: deps.warm.log } : {}),
+    })
     this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
+      ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
       send: async (id, owner, text, tiers) => {
         await this.send(id, owner, text, { tiers })
@@ -1013,10 +1092,10 @@ export class SessionManager {
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
     this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
-    this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
   }
@@ -1029,6 +1108,31 @@ export class SessionManager {
     if (!isUuid(id)) return undefined
     const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_sessions WHERE id = $1`, [id])
     return row ? record(row) : undefined
+  }
+
+  /**
+   * Drops each idle warm process that a fresh assembly of its session would
+   * not reuse (warm.ts `revalidate`): the periodic backstop for a NOTIFY that
+   * never arrived (sessions/runtimeSync.ts). The session's owner and the
+   * process's own tiers and retry bound stand in for the turn's, as they are
+   * all fingerprint inputs a turn does not change.
+   */
+  revalidateWarm(): Promise<void> {
+    return this.warm.revalidate(async (entry) => {
+      // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
+      const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        [entry.sessionId],
+      )
+      if (!row) return undefined
+      const parts = entry.turn.fingerprintParts
+      const fresh = await this.runner.assemble(claimed(row), parts.tiers ? { tiers: parts.tiers as Tier[] } : {}, {
+        // A rate-limited credential is still the one a healthy process runs on.
+        includeCooling: true,
+      })
+      fresh.fingerprintParts.transientRetries = parts.transientRetries
+      return fresh
+    })
   }
 
   /** The session if the principal may see it; otherwise not_found (existence is not revealed). */
@@ -1252,6 +1356,38 @@ export class SessionManager {
   }
 
   /**
+   * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
+   * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
+   * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
+   * It starts empty: the agent's task is its first turn.
+   */
+  async startChild(
+    parentId: string,
+    principal: Owner,
+    options: { title: string; tags?: string[]; agent?: { model?: string | undefined; effort?: string | undefined; type?: string | undefined } },
+  ): Promise<SessionRecord> {
+    const parent = await this.get(parentId, principal)
+    const id = randomUUID()
+    const session = await this.insert(
+      id,
+      principal,
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
+      { budgetOf: parent },
+    )
+    const agent = options.agent
+    if (agent && (agent.model || agent.effort || agent.type)) {
+      await this.deps.sql`
+        UPDATE ai_sessions SET agent_model = ${agent.model ?? null}, agent_effort = ${agent.effort ?? null}, agent_type = ${agent.type ?? null}
+         WHERE id = ${id}`
+    }
+    await this.events.append(id, [
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
+      event({ type: 'session.status', sessionId: id, status: 'idle' }),
+    ])
+    return session
+  }
+
+  /**
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
@@ -1277,13 +1413,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1321,13 +1457,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
+    const [claim] = await this.deps.sql.unsafe<ClaimRow[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1501,7 +1637,11 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    /** The turn's options (TurnRunner), once assembled: the tiers below read them. */
+    /**
+     * The assembly whose process serves the turn (TurnRunner): the turn's own
+     * until the cache answers with a process spawned from another (warmTurn.ts),
+     * whose tiers, redactions and hooks are the turn's from then on.
+     */
     let turn: AssembledTurn | undefined
     const eventTierOf: TierResolver = (name, input) => turn?.eventTierOf(name, input)
     const shownTierOf: TierResolver = (name, input) => turn?.shownTierOf(name, input)
@@ -1523,9 +1663,11 @@ export class SessionManager {
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
     let result: SDKResultMessage | undefined
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
+    /** The warm entries the turn ran on (one per attempt): each one's slot is cleared once the turn has finished. */
+    const served: WarmEntry[] = []
     try {
       let lost = false
-      /** Redacted from everything this turn writes to the durable event log. */
+      /** Redacted from everything this turn writes to the durable event log: every assembly's secrets the turn ran with. */
       let secrets: readonly string[] = []
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
@@ -1596,16 +1738,24 @@ export class SessionManager {
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
       }
-      // What the assembled options' callbacks read as the turn (turnSlot.ts).
-      // Each turn has its own query, so its own slot, never cleared: a hook
-      // Claude Code fires after the result (a late Stop retain) still reaches
-      // this turn, as the closures it replaced did.
-      const slot = createTurnSlot()
+      /** The turn's attempts on the session's warm process (warmTurn.ts). */
+      let attempts: WarmTurnRun | undefined
+      /** Whether the attempt about to start continues an earlier one with CONTINUE_PROMPT (fallback.ts): no recall again (#1896). */
+      let continuing = false
       // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      // It reaches the session row when the turn finishes, so it is not checked against
+      // the turn's budget while the turn runs. That is bounded, not open-ended: each call
+      // is outward, so it needs its own approval, and each is capped at ASK_BUDGET_USD
+      // (builtins/nested.ts, 0.5 USD) (#2973).
       const nested = { usd: 0 }
+      // The credential the turn is on, moved by each fallback (#2973), for WebFetch's model call.
+      const onCredential: { current: PooledCredential | undefined } = { current: undefined }
       try {
-        turn = await this.runner.assemble(session, principal, slot)
+        turn = await this.runner.assemble(session, principal)
         secrets = turn.secrets
+        // The first attempt is on the first candidate; none in an empty pool, which
+        // runWithFallback refuses before any WebFetch can ask (#3508 review).
+        onCredential.current = turn.candidates[0]
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1634,43 +1784,72 @@ export class SessionManager {
               turnStartedAt: session.claimedAt,
             })
           : undefined
-        const memory = turn.memory?.(userText, turnId)
-        slot.set({
-          turnId,
-          principal,
-          approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-          ...(questionGate
-            ? {
-                questionGate,
-                waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
-              }
-            : {}),
-          ...(auditor ? { auditor } : {}),
+        const approvalGate = auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate
+        // What the process's callbacks read as the turn (turnSlot.ts): set on
+        // the slot of the assembly its process was spawned from, at each
+        // acquire, before the prompt goes in. On a hit that is not this turn's
+        // own assembly: its secrets, tiers and hooks are the turn's from then on.
+        const onAcquired = ({ entry }: WarmTurn) => {
+          turn = entry.turn
+          secrets = [...new Set([...secrets, ...entry.turn.secrets])]
+          served.push(entry)
+          const memory = entry.turn.memory?.(userText, turnId)
+          entry.turn.slot.set({
+            turnId,
+            principal,
+            approvalGate,
+            ...(questionGate
+              ? {
+                  questionGate,
+                  waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
+                }
+              : {}),
+            ...(auditor ? { auditor } : {}),
+            trace: traced,
+            http: { turnId, signal: controller.signal },
+            nested,
+            credential: onCredential,
+            ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
+            signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
+          })
+        }
+        const warm = warmAttempts({
+          warm: this.warm,
+          sessionId: id,
+          first: turn,
+          assemble: () => this.runner.assemble(session, principal),
+          stop: controller.signal,
+          acquired: onAcquired,
           trace: traced,
-          http: { turnId, signal: controller.signal },
-          nested,
-          ...(memory ? { memory } : {}),
-          signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
         })
+        attempts = warm
         const resume = turn.run.resume !== undefined
-        const attempts = runWithFallback(
+        const stream = runWithFallback(
           { ...turn.run, prompt, signal: controller.signal },
           {
             candidates: turn.candidates,
             report: this.deps.credentials.reporter({ sessionId: id, turnId }),
-            // Each attempt's query starts inside the turn's span (runHarness starts it at once).
-            run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
+            // Each attempt runs on the session's warm process, acquired inside the turn's span.
+            run: (attempt) => otelContext.with(traced.context(), () => warm.run(attempt)),
             ...(this.deps.probe ? { probe: this.deps.probe } : {}),
             // A resumed query's total includes what the session spent before
             // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
             ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
+            // The warm process is the session's own: a turn it serves after
+            // its first sees no init message, and a failed attempt still
+            // continues there (fallback.ts `session`).
+            session: id,
             onRefused: (evidence, judged) => {
               refused = { evidence, ...judged }
             },
-            onAttempt: () => unpriced.newAttempt(),
+            onAttempt: (credential) => {
+              onCredential.current = credential
+              continuing = true
+              unpriced.newAttempt()
+            },
           },
         )
-        for await (const message of attempts) {
+        for await (const message of stream) {
           unpriced.observe(message)
           if (message.type === 'assistant' && message.error) {
             heldErrors.push(message)
@@ -1699,7 +1878,8 @@ export class SessionManager {
           traced.fail(cause)
         }
       } finally {
-        turn?.release()
+        // An assembly the cache never took (the turn ended before an acquire) is still ours to release.
+        attempts?.unused()?.release()
         local.settling = true
         clearInterval(renew)
         await renewing
@@ -1707,12 +1887,15 @@ export class SessionManager {
           controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
       }
-      // The loop has ended only after the SDK's last transcript append (measured:
+      // The entry was settled on the result, after the SDK's last transcript
+      // append of the turn (warm.ts `settle` waits for the mirror; measured:
       // `last-prompt` and `cost-state` entries arrive after the `result`
       // message), so releasing the claim here means the next turn, on any
       // replica, resumes from a complete transcript.
       if (lost) {
         outcome = { kind: 'lost_claim' }
+        // Another turn owns the session now, wherever it runs: this process is not kept for it.
+        for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
         return outcome
       }
       const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
@@ -1726,6 +1909,7 @@ export class SessionManager {
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
+        attempts?.spentUsd() ?? 0,
         // Only a turn that did not end on its own can be cut off mid-request;
         // one that did has every request priced in its result. WebFetch's own
         // model calls are in no result, so they are added the same way.
@@ -1737,6 +1921,12 @@ export class SessionManager {
       throw err
     } finally {
       traced.finish(outcome, result)
+      // The turn has finished, its events written: a hook its process fires
+      // from now on finds no turn (turnSlot.ts). Only this turn's: the next
+      // one may already have claimed the session and set the slot for itself.
+      for (const entry of served) {
+        if (entry.turn.slot.current?.turnId === turnId) entry.turn.slot.clear()
+      }
     }
   }
 
@@ -1756,6 +1946,14 @@ export class SessionManager {
     failure: string | undefined,
     secrets: readonly string[],
     /**
+     * What the turn's attempts spent as their results priced it (warmTurn.ts
+     * `spentUsd`): each the difference of its process's cumulative
+     * `total_cost_usd` before and after (spec §6.6; warm.ts `turnCostUsd`), so
+     * a resumed process's carried history and the session's unpriced spend
+     * (#991), which no total holds, are neither counted again nor lost.
+     */
+    turnUsd: number,
+    /**
      * What the turn spent that no result prices: the request it was cut off in (#991,
      * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
      */
@@ -1765,20 +1963,7 @@ export class SessionManager {
     let status: SessionStatus
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
-    // `total_cost_usd` of a RESUMED query already includes the earlier
-    // turns: measured on SDK 0.3.283 and 0.3.287 (0.000105 after turn 1, 0.00021 after
-    // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
-    // SDK restores it from the transcript's `cost-state` entry, which holds
-    // only what Claude Code priced: not the session's unpriced spend (#991),
-    // which is added back. If the restore ever fails the total comes back
-    // smaller than what it should have carried, and it is added instead.
-    // `priced` is taken back out of a float sum, so it can come out an ulp or
-    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1):
-    // compared with fallback.ts's tolerance (`carries`), as fallback.ts does.
-    // The session's own row, not the lineage's pool (#823): only its own turns are in its transcript.
-    const priced = session.ownCostUsd - session.unpricedCostUsd
-    const fromTotal = (total: number) =>
-      carries(total, priced) ? total + session.unpricedCostUsd : session.ownCostUsd + total
+    // The session's own row, not the lineage's pool (#823): only its own turns ran on its process.
     let costUsd = session.ownCostUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when
@@ -1808,7 +1993,7 @@ export class SessionManager {
       // `error_during_execution` (harness/run.ts stopFirst), or a result that
       // raced the stop. The turn reads interrupted either way (#1168); what it
       // spent before it stopped is still counted, the cut-off request too.
-      costUsd = fromTotal(result.total_cost_usd) + cutUsd
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
@@ -1816,7 +2001,7 @@ export class SessionManager {
       outcome = { kind: 'interrupted' }
     } else if (result) {
       // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
-      costUsd = fromTotal(result.total_cost_usd) + cutUsd
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -2074,6 +2259,11 @@ export class SessionManager {
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
+    // Its warm process was spawned for the previous owner (the owner is in the
+    // fingerprint, and its question gate is the browser user's): gone here and
+    // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
+    void this.warm.evict(id, 'handed off')
+    await notifyWarmEvict(this.deps.sql, id)
     return this.get(id, to)
   }
 
@@ -2358,9 +2548,13 @@ export class SessionManager {
     const within = (ms: number, work: Promise<unknown>) =>
       Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
     await within(graceMs, ended())
-    if (this.active.size === 0) return
-    this.abortAll()
-    await within(abortWaitMs, ended())
+    if (this.active.size > 0) {
+      this.abortAll()
+      await within(abortWaitMs, ended())
+    }
+    // The warm processes go with the pod (spec 2026-10-13 §5.3 "shutdown"): the
+    // idle ones, and a stopped turn's that is still winding down past its wait.
+    await this.warm.close()
   }
 
   /**

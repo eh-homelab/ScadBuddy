@@ -37,6 +37,16 @@ def test_blanks_joiners_and_variation_selectors_need_no_glyph() -> None:
     assert missing_glyphs("Lobster Two", "a b\tc\n\u200d\ufe0f\u00a0", LATIN) == []
 
 
+def test_skin_tones_and_emoji_tags_are_not_named_as_missing() -> None:
+    """A skin-tone modifier shades the emoji before it, and a tag sequence spells a
+    flag's region: neither is a character of its own to warn about."""
+    waving = "\U0001f44b\U0001f3fd"
+    scotland = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+    assert missing_glyphs("Lobster Two", waving + scotland, LATIN) == ["\U0001f44b", "\U0001f3f4"]
+    for point in range(0x1F3FB, 0x1F400):
+        assert missing_glyphs("Lobster Two", chr(point), LATIN) == []
+
+
 def test_nothing_is_said_for_the_default_font_another_family_or_no_fontconfig() -> None:
     assert missing_glyphs("", "😀", LATIN) == []
     assert missing_glyphs(":style=Bold", "😀", LATIN) == []
@@ -112,7 +122,7 @@ def test_a_render_warns_of_each_font_that_leaves_characters_out() -> None:
     )
     asked: list[str] = []
 
-    def coverage(font: str) -> tuple[str, list[tuple[int, int]]]:
+    def coverage(font: str, timeout: float) -> tuple[str, list[tuple[int, int]]]:
         asked.append(font)
         return LATIN
 
@@ -127,7 +137,37 @@ def test_a_render_warns_of_each_font_that_leaves_characters_out() -> None:
 
 def test_a_model_with_no_text_asks_nothing() -> None:
     schema = _schema(Parameter(name="font", type="font", initial="Lobster Two"))
-    assert missing_glyph_warnings(schema, {}, lambda font: pytest.fail("asked")) == []
+    assert missing_glyph_warnings(schema, {}, lambda font, timeout: pytest.fail("asked")) == []
+
+
+def test_every_font_shares_one_wait_on_fontconfig() -> None:
+    """A wedged fontconfig costs the render the advisory timeout once, not once per
+    font: each font gets what is left, and none is asked once it has run out."""
+    schema = _schema(
+        Parameter(name="word", type="string", initial="Zoë 😀"),
+        *(Parameter(name=f"font{n}", type="font", initial="Lobster Two") for n in range(4)),
+    )
+    now = [100.0]
+    given: list[float] = []
+
+    def wedged(font: str, timeout: float) -> None:
+        given.append(timeout)
+        now[0] += timeout  # it waited out all it was given
+
+    assert missing_glyph_warnings(schema, {}, wedged, budget=5.0, clock=lambda: now[0]) == []
+    assert given == [5.0]
+
+    now[0] = 100.0
+    given.clear()
+
+    def slow(font: str, timeout: float) -> tuple[str, list[tuple[int, int]]]:
+        given.append(timeout)
+        now[0] += 2.0
+        return LATIN
+
+    warnings = missing_glyph_warnings(schema, {}, slow, budget=5.0, clock=lambda: now[0])
+    assert given == [5.0, 3.0, 1.0]
+    assert len(warnings) == 3
 
 
 REAL_FC_MATCH = shutil.which("fc-match")

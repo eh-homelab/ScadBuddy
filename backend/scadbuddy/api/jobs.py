@@ -44,6 +44,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
@@ -633,6 +634,9 @@ async def get_job_preview(
             except NoSuchPlateError as error:
                 raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
             except UnreadableObjectsError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+            except ReadOutOfMemoryError as error:
+                # #2767: refused as an output's plate is (outputs.py), not a 500.
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
             _PLATE_GLBS.put(key, data)
         # A done job's result never changes, so the browser keeps the cut too (#2913).

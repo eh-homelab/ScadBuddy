@@ -1,5 +1,22 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
+import {
+  ChevronDownIcon,
+  CopyIcon,
+  FolderIcon,
+  FolderInputIcon,
+  FolderOpenIcon,
+  FolderPlusIcon,
+  FolderTreeIcon,
+  FolderUpIcon,
+  KanbanSquareIcon,
+  LayoutGridIcon,
+  PencilIcon,
+  PrinterIcon,
+  SearchIcon,
+  Trash2Icon,
+  XIcon,
+} from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type {
   LibraryCopyResult,
@@ -9,24 +26,44 @@ import type {
   LibraryListing,
   LibraryMoveResult,
   LibraryRenameResult,
+  LibrarySearch,
 } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
 import { DeleteLibraryFilesDialog } from '../components/library/DeleteLibraryFilesDialog'
+import {
+  DeleteFolderDialog,
+  FolderNameDialog,
+  MoveFolderDialog,
+  type FolderAction,
+} from '../components/library/LibraryFolderDialogs'
+import { MoreMenu, RowContextMenu, type MenuEntry } from '../components/library/LibraryMenus'
 import { LibraryTree } from '../components/library/LibraryTree'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
-import { Button } from '../components/ui/Button'
-import { Spinner } from '../components/ui/Spinner'
+import { Spinner } from '../components/ui/spinner'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { modelPath } from '../lib/deeplink'
 import { useAdvanced } from '../lib/advanced'
 import { formatBytes } from '../lib/format'
-import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
-import { folderLabel } from '../lib/libraryTransfer'
+import { LIBRARY_ROOT, folderIdOf, folderSegments, libraryPath, libraryPathOf } from '../lib/libraryPath'
+import { nameParts, shortName } from '../lib/libraryNames'
+import { folderAndDescendants, folderLabel } from '../lib/libraryTransfer'
 import { NARROW_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
@@ -44,6 +81,8 @@ type Wanted = { folderId: number | null; fileId?: undefined } | { folderId: null
 /** #2167 — what the last delete did, with Undo while it can still be undone. */
 interface Deleted {
   result: LibraryDeleteResult
+  /** #3650 — the folder deleted with them, by name. */
+  folder?: string
   restoring: boolean
   restored: number | null
   error: string | null
@@ -74,6 +113,10 @@ function plural(count: number, word: string): string {
  * confirmation; Undo restores them from it.
  * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
  * reorganise the library through Bambuddy; a move says which project loses a file.
+ * #3650 — a folder has the same kind of menu, on right-click (a long press on touch) and
+ * on its ⋯ button: open, its project, arrange its files, new folder, rename, move,
+ * delete. The library is browsed by folder or by project (`?by=project`,
+ * `?project=<id>`), each view linking to the other.
  */
 export function LibraryPage() {
   const location = useLocation()
@@ -82,26 +125,42 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  // #3630 — the search, kept in the URL so Back returns to its results.
+  const query = search.get('q') ?? ''
+  const searching = query.trim() !== ''
+  // #3650 — browsing by project: `?by=project` lists them, `?project=<id>` opens one.
+  const projectParam = idParam(search.get('project'))
+  const byProject = projectParam !== null || search.get('by') === 'project'
 
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
   // #2368 — below md the tree is a collapsed disclosure, so the files come first.
   const narrow = useMediaQuery(NARROW_QUERY)
   const [foldersOpen, setFoldersOpen] = useState(false)
+  // Named on the button folded too, which Radix leaves out: what it controls is there.
   const foldersId = useId()
   // Where focus goes back once a folder is chosen and the tree folds away (#3315).
   const foldersToggle = useRef<HTMLButtonElement>(null)
   const [listing, setListing] = useState<LibraryListing | null>(null)
+  // #3633 — each folder's last listing, shown at once when it is opened again while it
+  // is read afresh. Emptied by a reload, which follows a change made here.
+  const listed = useRef(new Map<string, LibraryListing>())
+  const listedReload = useRef(0)
+  const [results, setResults] = useState<LibrarySearch | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [slow, setSlow] = useState(false)
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
   // reopening the dialog on a fresh copy of the file, which then reads everything
   // twice (#2361). While a listing is read again (Advanced, a reload) there is none on
   // screen, so the last one's answer holds; else the file alone is read meanwhile (#2822).
   const [listedPrint, setListedPrint] = useState<number | null>(null)
+  // While searching, the files on screen are the results, which a print link may name.
+  const onScreen = searching ? results : listing
   const seenPrint =
-    listing === null
+    onScreen === null
       ? listedPrint
-      : printParam !== null && (listing.files ?? []).some((file) => file.id === printParam)
+      : printParam !== null && (onScreen.files ?? []).some((file) => file.id === printParam)
         ? printParam
         : null
   if (seenPrint !== listedPrint) setListedPrint(seenPrint)
@@ -110,7 +169,8 @@ export function LibraryPage() {
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
   const [picked, setPicked] = useState<LibraryEntry[]>([])
-  const [arranging, setArranging] = useState(false)
+  /** What Arrange opens on: the ticked files, or a folder's (#3650). */
+  const [arranging, setArranging] = useState<LibraryEntry[] | null>(null)
   const [arranged, setArranged] = useState<Arranged | null>(null)
   /** #2287 — the arranged result in the print dialog, and whether a print of it ran. */
   const [printArranged, setPrintArranged] = useState(false)
@@ -120,18 +180,30 @@ export function LibraryPage() {
   const [transfer, setTransfer] = useState<{ mode: TransferMode; files: LibraryEntry[] } | null>(null)
   const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
   const [done, setDone] = useState<Done | null>(null)
+  const [folderAction, setFolderAction] = useState<FolderAction | null>(null)
+  const [folderError, setFolderError] = useState<string | null>(null)
   const isPicked = (file: LibraryEntry) => picked.some((p) => p.id === file.id)
   const togglePicked = (file: LibraryEntry) =>
     setPicked((now) => (now.some((p) => p.id === file.id) ? now.filter((p) => p.id !== file.id) : [...now, file]))
 
-  // The folder the URL names: by its path, or (a bare `?file=`) the linked file's.
+  // #3650 — the projects the library's folders are linked to, each with its folders.
+  const projects = useMemo(() => projectsOf(tree ?? []), [tree])
+  const project = projectParam === null ? undefined : projects.find((row) => row.id === projectParam)
+
+  // The folder the URL names: by its path, a project's folder, or (a bare `?file=`) the
+  // linked file's.
   let wanted: Wanted | undefined
-  if (segments.length === 0) wanted = linked !== null ? { folderId: null, fileId: linked } : { folderId: null }
+  if (byProject) {
+    // The grid shows the project's first folder; the header says so when there are more.
+    const first = project?.folders[0]
+    if (first) wanted = { folderId: first.id }
+  } else if (segments.length === 0) wanted = linked !== null ? { folderId: null, fileId: linked } : { folderId: null }
   else if (tree !== null) {
     const id = folderIdOf(tree, segments)
     wanted = id === undefined ? undefined : { folderId: id }
   }
-  const missing = segments.length > 0 && tree !== null && wanted === undefined
+  const missing = !byProject && segments.length > 0 && tree !== null && wanted === undefined
+  const missingProject = projectParam !== null && tree !== null && project === undefined
   const wantedKey = wanted === undefined ? null : wanted.fileId !== undefined ? `file:${wanted.fileId}` : `folder:${wanted.folderId}`
   const loaded = useRef(new Set<string>())
 
@@ -141,9 +213,24 @@ export function LibraryPage() {
     const ask: Wanted | null = wantedKey === null ? (missing ? null : { folderId: null }) : (wanted ?? null)
     if (ask === null) return
     const key = `${wantedKey ?? 'tree'}|${advanced}|${reload}`
-    if (loaded.current.has(key)) return
+    if (loaded.current.has(key)) {
+      // Already read, but another folder's listing may be on screen: Back, then Forward
+      // before Back's answer landed, comes back here with the folder left behind shown.
+      const kept = wantedKey === null ? undefined : listed.current.get(`${wantedKey}|${advanced}`)
+      if (kept) setListing(kept)
+      return
+    }
+    if (listedReload.current !== reload) {
+      listedReload.current = reload
+      listed.current.clear()
+    }
     setError(null)
-    if (wantedKey !== null) setListing(null)
+    // Only folders are kept: a bare `?file=` link (`file:<id>`) never matches, on purpose.
+    // Its folder is what the answer says, and the link then moves to that folder's path,
+    // whose key is kept from then on.
+    if (wantedKey !== null) setListing(listed.current.get(`${wantedKey}|${advanced}`) ?? null)
+    setSlow(false)
+    const slowTimer = window.setTimeout(() => setSlow(true), SLOW_MS)
     api
       .listLibrary({ folderId: ask.folderId, fileId: ask.fileId, all: advanced })
       .then((next) => {
@@ -151,6 +238,7 @@ export function LibraryPage() {
         setTree(next.folders ?? [])
         if (wantedKey === null) return
         loaded.current = new Set([key, `folder:${next.folder_id ?? null}|${advanced}|${reload}`])
+        listed.current.set(`folder:${next.folder_id ?? null}|${advanced}`, next)
         setListing(next)
         if (ask.fileId !== undefined && (next.folder_id ?? null) !== null) {
           // The linked file's folder becomes the path, in place of the bare link.
@@ -162,19 +250,83 @@ export function LibraryPage() {
       })
       .catch((cause: unknown) => {
         if (!live) return
-        setListing(null)
+        // A folder's last listing, if one is on screen, stays: what is known (#3633).
+        if (wantedKey === null) setListing(null)
         setError(cause instanceof ApiError ? cause.detail : 'Could not read the Bambuddy library.')
       })
+      .finally(() => window.clearTimeout(slowTimer))
     return () => {
       live = false
+      window.clearTimeout(slowTimer)
     }
     // `wanted` and `location.search` are read through `wantedKey` and when the answer lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantedKey, missing, advanced, reload])
 
+  // #3630 — the search's results; the last ones stay on screen while the next are read.
+  // A search after a change made here reads the library afresh, not the copy kept: every
+  // search asks for it until one such answer has arrived, so typing on does not lose it.
+  const searchedReload = useRef(0)
+  useEffect(() => {
+    if (!searching) {
+      setResults(null)
+      setSearchError(null)
+      return
+    }
+    const controller = new AbortController()
+    const fresh = searchedReload.current !== reload
+    setSearchError(null)
+    api
+      .searchLibrary({ q: query, all: advanced, fresh }, controller.signal)
+      .then((found) => {
+        if (controller.signal.aborted) return
+        if (fresh) searchedReload.current = reload
+        setResults(found)
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return
+        // The last results stay under the error: what is known (#3633).
+        setSearchError(cause instanceof ApiError ? cause.detail : 'Could not search the Bambuddy library.')
+      })
+    return () => controller.abort()
+  }, [searching, query, advanced, reload])
+
   function selectFolder(id: number | null) {
     const path = libraryPath(tree ?? [], id)
     if (path !== location.pathname || location.search !== '') navigate(path)
+  }
+
+  /** #3650 — a project's page in the project view; `null` lists every project. */
+  function selectProject(id: number | null) {
+    navigate(id === null ? `${LIBRARY_ROOT}?by=project` : `${LIBRARY_ROOT}?project=${id}`)
+  }
+
+  /** #3650 — the toggle between the folder tree and the project list. */
+  function browse(by: 'folder' | 'project') {
+    if (by === (byProject ? 'project' : 'folder')) return
+    if (by === 'folder') {
+      // A project's own folder is where its files are seen by folder.
+      const first = project?.folders[0]
+      navigate(first ? libraryPath(tree ?? [], first.id) : LIBRARY_ROOT)
+      return
+    }
+    const here = tree?.find((folder) => folder.id === folderId)
+    selectProject(here?.project_id ?? null)
+  }
+
+  /** The search as typed, into the URL: a first search is a step Back undoes, the rest replace it. */
+  function setQuery(text: string) {
+    setSearch(
+      (now) => {
+        const next = new URLSearchParams(now)
+        if (text.trim() === '') next.delete('q')
+        else next.set('q', text)
+        next.delete('file')
+        next.delete('print')
+        return next
+      },
+      { replace: searching },
+    )
   }
 
   /** Opens or closes a file's print dialog, as a URL Back returns from. */
@@ -240,6 +392,71 @@ export function LibraryPage() {
     setReload((n) => n + 1)
   }
 
+  /**
+   * #3650 — a folder renamed or moved. Its id stays, but its path changes: the page on
+   * it, or on a folder inside it, follows it to the new one.
+   */
+  async function updateFolder(folder: LibraryFolderView, update: { name?: string; parentId?: number | null }) {
+    const answer = await traceAction('library_folder_update', {}, () =>
+      api.updateLibraryFolder(folder.id, {
+        ...(update.name !== undefined && { name: update.name }),
+        ...(update.parentId !== undefined && { parent_id: update.parentId ?? 0 }),
+      }),
+    )
+    const next = (tree ?? []).map((row) =>
+      row.id === folder.id ? { ...row, name: answer.name, parent_id: answer.parent_id ?? null } : row,
+    )
+    setFolderAction(null)
+    setTree(next)
+    if (!byProject && folderId !== null && folderAndDescendants(tree ?? [], folder.id).has(folderId)) {
+      navigate({ pathname: libraryPath(next, folderId), search: location.search }, { replace: true })
+    }
+    setReload((n) => n + 1)
+  }
+
+  async function createFolder(parent: LibraryFolderView | null, name: string) {
+    const made = await traceAction('library_folder_create', {}, () =>
+      api.createLibraryFolder({ name, ...(parent && { parent_id: parent.id }) }),
+    )
+    setFolderAction(null)
+    const depth = parent ? (parent.depth ?? 0) + 1 : 0
+    const next = [...(tree ?? []), { id: made.id, name: made.name, parent_id: made.parent_id ?? null, depth, file_count: 0 }]
+    setTree(next)
+    navigate(libraryPath(next, made.id))
+    setReload((n) => n + 1)
+  }
+
+  async function deleteFolder(folder: LibraryFolderView) {
+    const inside = folderAndDescendants(tree ?? [], folder.id)
+    const result = await traceAction('library_folder_delete', {}, () => api.deleteLibraryFolder(folder.id))
+    const gone = new Set(result.deleted.map((file) => file.id))
+    setFolderAction(null)
+    setPicked((now) => now.filter((file) => !gone.has(file.id)))
+    setDone(null)
+    setDeleted({ result, folder: folder.name, restoring: false, restored: null, error: null })
+    if (!byProject && folderId !== null && inside.has(folderId) && result.folders.includes(folderId)) {
+      navigate(libraryPath(tree ?? [], folder.parent_id ?? null), { replace: true })
+    }
+    setReload((n) => n + 1)
+  }
+
+  /** #3650 — Arrange on a folder's printable files, read afresh. */
+  async function arrangeFolder(folder: LibraryFolderView) {
+    setFolderError(null)
+    try {
+      const read = await api.listLibrary({ folderId: folder.id, all: true })
+      const files = (read.files ?? []).filter((file) => file.printable && !file.sliced)
+      if (files.length === 0) {
+        setFolderError(`${folder.name} has no unsliced 3MF or STL files to arrange.`)
+        return
+      }
+      setArranged(null)
+      setArranging(files)
+    } catch (cause) {
+      setFolderError(cause instanceof ApiError ? cause.detail : `Could not read ${folder.name}.`)
+    }
+  }
+
   async function undo() {
     if (!deleted) return
     const ids = deleted.result.deleted.filter((file) => file.trashed).map((file) => file.id)
@@ -262,9 +479,25 @@ export function LibraryPage() {
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
   // #2671 — a sliced file prints, but has no objects to arrange.
+  // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
+  // a change to this filter, or to what the server calls `printable`, changes that too.
   const printable = picked.filter((file) => file.printable && !file.sliced)
-  const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
+  const printing =
+    printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
+  const folder = folderId === null ? undefined : tree?.find((row) => row.id === folderId)
+  // #3631 — the folder's own subfolders, shown beside its files: a folder of folders is
+  // not empty. The top level's are the tree itself, and listed here only when it holds no
+  // files, so its files stay first on a phone.
+  const subfolders =
+    tree === null ||
+    listing === null ||
+    (byProject && !project) ||
+    (listing.folder_id ?? null) !== folderId ||
+    (folderId === null && (listing.files ?? []).length > 0)
+      ? []
+      : tree.filter((row) => (row.parent_id ?? null) === folderId)
+  const showFiles = !byProject || project !== undefined
 
   // A linked file is scrolled to once it is listed.
   const scrolled = useRef<string | null>(null)
@@ -279,134 +512,277 @@ export function LibraryPage() {
   }, [fileParam, listing])
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
 
+  /** #3650 — what a folder's menus offer: on right-click, and on its ⋯ button. */
+  const folderEntries = (target: LibraryFolderView, opening = true): MenuEntry[] => [
+    ...(opening ? [{ label: 'Open', icon: FolderOpenIcon, onSelect: () => selectFolder(target.id) }] : []),
+    ...(target.project_id != null
+      ? [
+          {
+            label: `Open the project ${target.project_name ?? `#${target.project_id}`}`,
+            icon: KanbanSquareIcon,
+            onSelect: () => selectProject(target.project_id ?? null),
+            testId: `library-folder-project-${target.id}`,
+          },
+        ]
+      : []),
+    {
+      label: 'Arrange its files…',
+      icon: LayoutGridIcon,
+      onSelect: () => void arrangeFolder(target),
+      separator: true,
+      testId: `library-folder-arrange-${target.id}`,
+    },
+    {
+      label: 'New folder inside…',
+      icon: FolderPlusIcon,
+      onSelect: () => setFolderAction({ kind: 'create', folder: target }),
+      separator: true,
+    },
+    {
+      label: 'Rename…',
+      icon: PencilIcon,
+      onSelect: () => setFolderAction({ kind: 'rename', folder: target }),
+      testId: `library-folder-rename-${target.id}`,
+    },
+    {
+      label: 'Move to…',
+      icon: FolderInputIcon,
+      onSelect: () => setFolderAction({ kind: 'move', folder: target }),
+      testId: `library-folder-move-${target.id}`,
+    },
+    {
+      label: 'Delete…',
+      icon: Trash2Icon,
+      destructive: true,
+      separator: true,
+      onSelect: () => setFolderAction({ kind: 'delete', folder: target }),
+      testId: `library-folder-delete-${target.id}`,
+    },
+  ]
+  const folderMenu = (target: LibraryFolderView, row: ReactNode) => (
+    <RowContextMenu label={target.name} entries={folderEntries(target)}>
+      {row}
+    </RowContextMenu>
+  )
+
+  /** What every card does: the same on a folder's files and on search results. */
+  const cardActions = (file: LibraryEntry) => ({
+    highlighted: file.id === fileParam,
+    picked: isPicked(file),
+    actionsDisabled: tree === null,
+    onPick: () => togglePicked(file),
+    onPrint: () => openPrint(file),
+    onRename: () => setRenaming(file),
+    onTransfer: (mode: TransferMode) => setTransfer({ mode, files: [file] }),
+    onDelete: () => setConfirming([file]),
+  })
+
+  const sidebar = byProject ? (
+    <LibraryTree
+      folders={projects.map((row) => ({ id: row.id, name: row.name, parent_id: null, depth: 0, file_count: row.files }))}
+      selected={projectParam}
+      onSelect={selectProject}
+      label="Library projects"
+      testIdPrefix="library-project"
+      rootLabel="All projects"
+    />
+  ) : (
+    <LibraryTree folders={tree ?? []} selected={folderId} onSelect={selectFolder} wrapRow={folderMenu} />
+  )
+
   return (
     <div className="h-full overflow-y-auto">
-      <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted || done ? 'pb-44' : ''}`}>
-        <nav aria-label="Library" className="w-full md:w-60 md:shrink-0">
+      <div className={cn('mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6', (deleted || done) && 'pb-44')}>
+        <nav aria-label="Library" className="w-full space-y-3 md:w-60 md:shrink-0">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={0}
+            value={byProject ? 'project' : 'folder'}
+            onValueChange={(value) => value && browse(value as 'folder' | 'project')}
+            aria-label="Browse the library by"
+            className="w-full"
+          >
+            <ToggleGroupItem value="folder" data-testid="library-by-folder" className="flex-1">
+              <FolderTreeIcon /> Folders
+            </ToggleGroupItem>
+            <ToggleGroupItem value="project" data-testid="library-by-project" className="flex-1">
+              <KanbanSquareIcon /> Projects
+            </ToggleGroupItem>
+          </ToggleGroup>
           {tree && narrow ? (
-            <>
-              <button
-                type="button"
-                ref={foldersToggle}
-                aria-expanded={foldersOpen}
-                aria-controls={foldersId}
-                onClick={() => setFoldersOpen((open) => !open)}
-                className="flex w-full items-center justify-between gap-2 rounded-md border border-line px-3 py-2 text-left text-[13px] text-ink"
-              >
-                <span className="min-w-0 truncate">Folder: {folderLabel(tree, folderId)}</span>
-                <span aria-hidden="true">{foldersOpen ? '▴' : '▾'}</span>
-              </button>
+            <Collapsible open={foldersOpen} onOpenChange={setFoldersOpen}>
+              <CollapsibleTrigger asChild>
+                <Button ref={foldersToggle} variant="outline" className="w-full justify-between" aria-controls={foldersId}>
+                  <span className="min-w-0 truncate">
+                    {byProject
+                      ? `Project: ${project?.name ?? 'All projects'}`
+                      : `Folder: ${folderLabel(tree, folderId)}`}
+                  </span>
+                  <ChevronDownIcon className={cn('transition-transform', foldersOpen && 'rotate-180')} />
+                </Button>
+              </CollapsibleTrigger>
               {/* Always there, so `aria-controls` names an element when folded too. */}
-              <div id={foldersId} hidden={!foldersOpen} className="mt-2">
-                <LibraryTree
-                  folders={tree}
-                  selected={folderId}
-                  onSelect={(id) => {
-                    setFoldersOpen(false)
-                    selectFolder(id)
-                    foldersToggle.current?.focus()
-                  }}
-                />
-              </div>
-            </>
+              <CollapsibleContent id={foldersId} className="mt-2">
+                {byProject ? (
+                    <LibraryTree
+                      folders={projects.map((row) => ({ id: row.id, name: row.name, parent_id: null, depth: 0, file_count: row.files }))}
+                      selected={projectParam}
+                      onSelect={(id) => {
+                        setFoldersOpen(false)
+                        selectProject(id)
+                        foldersToggle.current?.focus()
+                      }}
+                      label="Library projects"
+                      testIdPrefix="library-project"
+                      rootLabel="All projects"
+                    />
+                  ) : (
+                    <LibraryTree
+                      folders={tree}
+                      selected={folderId}
+                      wrapRow={folderMenu}
+                      onSelect={(id) => {
+                        setFoldersOpen(false)
+                        selectFolder(id)
+                        foldersToggle.current?.focus()
+                      }}
+                    />
+                  )}
+              </CollapsibleContent>
+            </Collapsible>
           ) : tree ? (
-            <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
+            sidebar
           ) : (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Spinner /> Reading folders
-            </p>
+            <div role="status" aria-label="Reading folders" className="space-y-1.5">
+              {Array.from({ length: 6 }, (_, n) => (
+                <Skeleton key={n} className="h-7" style={{ width: `${88 - ((n * 13) % 40)}%` }} />
+              ))}
+            </div>
           )}
         </nav>
 
         <section className="min-w-0 flex-1 space-y-4">
-          <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <h1 className="text-[15px] text-ink">Library</h1>
+          <SearchBox query={query} onSearch={setQuery} />
+          <header className="flex flex-wrap items-center gap-x-2 gap-y-2">
+            <h1 className="mr-1 text-lg font-semibold tracking-tight">Library</h1>
             <Button
               size="sm"
+              variant="outline"
               disabled={printable.length === 0}
               onClick={() => {
                 setArranged(null)
-                setArranging(true)
+                setArranging(printable)
               }}
             >
-              Arrange selected ({printable.length})
+              <LayoutGridIcon /> Arrange selected ({printable.length})
             </Button>
             <Button
               size="sm"
+              variant="outline"
               data-testid="library-copy-selected"
               disabled={picked.length === 0 || tree === null}
               onClick={() => setTransfer({ mode: 'copy', files: picked })}
             >
-              Copy selected ({picked.length})
+              <CopyIcon /> Copy selected ({picked.length})
             </Button>
             <Button
               size="sm"
+              variant="outline"
               data-testid="library-move-selected"
               disabled={picked.length === 0 || tree === null}
               onClick={() => setTransfer({ mode: 'move', files: picked })}
             >
-              Move selected ({picked.length})
+              <FolderInputIcon /> Move selected ({picked.length})
             </Button>
             <Button
               size="sm"
-              variant="danger"
+              variant="destructive"
               data-testid="library-delete-selected"
               disabled={picked.length === 0}
               onClick={() => setConfirming(picked)}
             >
-              Delete selected ({picked.length})
+              <Trash2Icon /> Delete selected ({picked.length})
             </Button>
             {picked.length > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setPicked([])}>
-                Clear selection
+                <XIcon /> Clear selection
               </Button>
             )}
-            <span className="ml-auto flex items-center gap-2">
-              <span id="library-advanced" className="text-[13px] text-ink">
-                Advanced
+            {/* #2286 — a ticked file Arrange cannot take is said, not silently dropped. */}
+            {picked.length > printable.length && (
+              <span role="note" className="basis-full text-xs text-muted-foreground">
+                {`${picked.length - printable.length} selected ${
+                  picked.length - printable.length === 1 ? 'file' : 'files'
+                } can't be arranged: only unsliced 3MF and STL files can.`}
               </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={advanced}
+            )}
+            <span className="ml-auto flex items-center gap-2">
+              <Label id="library-advanced" htmlFor="library-advanced-switch">
+                Advanced
+              </Label>
+              <Switch
+                id="library-advanced-switch"
+                checked={advanced}
+                onCheckedChange={toggleAdvanced}
                 aria-labelledby="library-advanced"
                 aria-describedby="library-advanced-help"
                 data-testid="library-advanced"
-                onClick={toggleAdvanced}
-                className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
-                  advanced ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
-                }`}
-              >
-                <span
-                  className={`absolute top-[2px] size-3.5 rounded-full transition-[left] ${
-                    advanced ? 'left-[18px] bg-accent-ink' : 'left-[2px] bg-muted'
-                  }`}
-                />
-              </button>
+              />
             </span>
-            <span id="library-advanced-help" className="basis-full text-[12px] text-faint">
+            <span id="library-advanced-help" className="basis-full text-xs text-muted-foreground">
               Advanced lists every file, sliced files and STLs too.
             </span>
           </header>
 
+          {!searching && (
+            <WhereHeader
+              byProject={byProject}
+              project={project}
+              projectCount={projects.length}
+              folder={folder}
+              tree={tree}
+              entries={folder ? folderEntries(folder, false) : undefined}
+              onNewFolder={() => setFolderAction({ kind: 'create', folder: folder ?? null })}
+            />
+          )}
+
           {missing && (
-            <p role="alert" className="text-[13px] text-warn">
+            <p role="alert" className="text-sm text-destructive">
               There is no folder {segments.join(' / ')} in the library.{' '}
-              <Link to="/library" className="text-accent underline">
+              <Link to="/library" className="text-primary underline underline-offset-4">
                 Top level
               </Link>
             </p>
           )}
-          {error && (
-            <p role="alert" className="text-[13px] text-warn">
+          {missingProject && (
+            <p role="alert" className="text-sm text-destructive">
+              No library folder belongs to project #{projectParam}.{' '}
+              <Link to={`${LIBRARY_ROOT}?by=project`} className="text-primary underline underline-offset-4">
+                All projects
+              </Link>
+            </p>
+          )}
+          {folderError && (
+            <p role="alert" className="text-sm text-destructive">
+              {folderError}
+            </p>
+          )}
+          {error && !searching && (
+            <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
               {error}
+              {/* #3633 — a read that timed out can be tried again in place. */}
+              <Button size="sm" variant="outline" data-testid="library-retry" onClick={() => setReload((n) => n + 1)}>
+                Retry
+              </Button>
             </p>
           )}
           {arranged && (
-            <p role="status" aria-label="Arranged" className="text-[13px] text-ink">
+            <p role="status" aria-label="Arranged" className="text-sm">
               {/* #2284 — names where it went: the Library page is not the model's History. */}
               {[arrangedNote(arranged.plates), arranged.skipped, savedNote(arranged)].filter(Boolean).join(' ')}{' '}
-              <Link to={modelPath(arranged.output.slug, 'history')} className="text-accent underline">
+              <Link to={modelPath(arranged.output.slug, 'history')} className="text-primary underline underline-offset-4">
                 Open in History
               </Link>
             </p>
@@ -414,102 +790,79 @@ export function LibraryPage() {
           {arranged && (
             <ArrangedNext output={arranged.output} sent={arrangedSent} onPrint={() => setPrintArranged(true)} />
           )}
-          {!listing && !error && !missing && (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Spinner /> Reading the Bambuddy library
-            </p>
-          )}
-          {linkedMissing && (
-            <p className="text-[13px] text-muted">
-              File #{fileParam} is not listed here{advanced ? '' : '. It may be listed under Advanced'}.
-            </p>
-          )}
-          {listing && files.length === 0 && (
-            <p className="text-[13px] text-muted">No files here{hidden > 0 ? '' : ' yet'}.</p>
-          )}
-          {!advanced && hidden > 0 && (
-            <p className="sb-num text-[12px] text-faint">{hidden} more under Advanced.</p>
-          )}
 
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
-            {files.map((file) => {
-              const highlighted = file.id === fileParam
-              return (
-                <li
+          {searching ? (
+            <SearchResults
+              query={query}
+              results={results}
+              error={searchError}
+              advanced={advanced}
+              onRetry={() => setReload((n) => n + 1)}
+            >
+              {(results?.files ?? []).map((file) => (
+                <FileCard
                   key={file.id}
-                  data-testid={`library-file-${file.id}`}
-                  aria-current={highlighted ? 'true' : undefined}
-                  className={`flex min-w-0 flex-col gap-2 rounded-[8px] border bg-surface-2 p-2 ${
-                    highlighted ? 'border-accent ring-2 ring-accent/40' : 'border-line'
-                  }`}
-                >
-                  {file.has_thumbnail ? (
-                    <img
-                      src={api.libraryThumbnailUrl(file.id)}
-                      alt=""
-                      loading="lazy"
-                      className="aspect-square w-full rounded-[4px] object-contain"
-                    />
-                  ) : (
-                    <div className="aspect-square w-full rounded-[4px] bg-surface-3" aria-hidden />
-                  )}
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${file.filename}`}
-                      checked={isPicked(file)}
-                      onChange={() => togglePicked(file)}
-                    />
-                    <MiddleTruncated name={file.filename} />
-                  </div>
-                  <FileFacts file={file} />
-                  {file.printable ? (
-                    <Button
-                      variant="primary"
-                      data-testid={`library-print-${file.id}`}
-                      aria-label={`Print ${file.filename}`}
-                      onClick={() => openPrint(file)}
+                  file={file}
+                  where={
+                    <Link
+                      to={`${libraryPathOf(file.folder_path ?? [])}?file=${file.id}`}
+                      data-testid={`library-result-folder-${file.id}`}
+                      className="flex min-w-0 items-center gap-1 text-xs text-primary hover:underline"
                     >
-                      Print
-                    </Button>
-                  ) : (
-                    <p className="text-[12px] text-faint">ScadBuddy cannot print this file type.</p>
+                      <FolderIcon aria-hidden className="size-3 shrink-0" />
+                      <span className="truncate">In {folderPathText(file.folder_path ?? [])}</span>
+                    </Link>
+                  }
+                  {...cardActions(file)}
+                />
+              ))}
+            </SearchResults>
+          ) : byProject && !project ? (
+            tree && <ProjectList projects={projects} tree={tree} onSelect={selectProject} />
+          ) : (
+            <>
+              {!listing && !error && !missing && !missingProject && (
+                <div role="status" aria-label="Reading the Bambuddy library" className="space-y-3">
+                  <span className="sr-only">Reading the Bambuddy library</span>
+                  {slow && (
+                    <p className="text-xs text-muted-foreground">Bambuddy is slow to answer. You can search meanwhile.</p>
                   )}
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    {file.printable ? (
-                      // #1755 — the file's own print history, as a template has its Prints tab.
-                      <Link
-                        to={libraryPrintsPath(file.id)}
-                        aria-label={`Prints of ${file.filename}`}
-                        className="text-muted hover:text-ink"
-                      >
-                        Prints
-                      </Link>
-                    ) : (
-                      <span />
-                    )}
-                    <span className="flex items-center gap-1">
-                      <FileActions
-                        file={file}
-                        disabled={tree === null}
-                        onRename={() => setRenaming(file)}
-                        onTransfer={(mode) => setTransfer({ mode, files: [file] })}
-                      />
-                      <button
-                        type="button"
-                        data-testid={`library-delete-${file.id}`}
-                        aria-label={`Delete ${file.filename}`}
-                        onClick={() => setConfirming([file])}
-                        className="rounded px-1 text-muted hover:text-warn"
-                      >
-                        Delete
-                      </button>
-                    </span>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                  <CardGrid>
+                    {Array.from({ length: 4 }, (_, n) => (
+                      <li key={n}>
+                        <Card size="sm" className="gap-2 px-2 pt-0">
+                          <Skeleton className="aspect-square w-full rounded-b-none" />
+                          <Skeleton className="h-4 w-3/4" />
+                          <Skeleton className="h-3 w-1/2" />
+                          <Skeleton className="h-8 w-full" />
+                        </Card>
+                      </li>
+                    ))}
+                  </CardGrid>
+                </div>
+              )}
+              {linkedMissing && (
+                <p className="text-sm text-muted-foreground">
+                  File #{fileParam} is not listed here{advanced ? '' : '. It may be listed under Advanced'}.
+                </p>
+              )}
+              {subfolders.length > 0 && tree && (
+                <Subfolders folders={subfolders} tree={tree} onSelect={selectFolder} menu={folderEntries} />
+              )}
+              {listing && showFiles && files.length === 0 && subfolders.length === 0 && (
+                <p className="text-sm text-muted-foreground">No files here{hidden > 0 ? '' : ' yet'}.</p>
+              )}
+              {!advanced && hidden > 0 && (
+                <p className="sb-num text-xs text-muted-foreground">{hidden} more under Advanced.</p>
+              )}
+
+              <CardGrid label="Files">
+                {files.map((file) => (
+                  <FileCard key={file.id} file={file} {...cardActions(file)} />
+                ))}
+              </CardGrid>
+            </>
+          )}
         </section>
 
         <PrintPicker
@@ -525,13 +878,13 @@ export function LibraryPage() {
           onRan={() => (printing ? undefined : setArrangedSent(true))}
         />
         <ArrangeDialog
-          open={arranging}
-          sources={fromFiles(printable)}
-          onClose={() => setArranging(false)}
-          onArranged={(done) => {
-            setArranging(false)
+          open={arranging !== null}
+          sources={fromFiles(arranging ?? [])}
+          onClose={() => setArranging(null)}
+          onArranged={(result) => {
+            setArranging(null)
             setPicked([])
-            setArranged(done)
+            setArranged(result)
             setArrangedSent(false)
           }}
         />
@@ -545,8 +898,236 @@ export function LibraryPage() {
           onConfirm={transferFiles}
         />
         <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
+        <FolderNameDialog
+          action={folderAction}
+          folders={tree ?? []}
+          onClose={() => setFolderAction(null)}
+          onConfirm={(name) =>
+            folderAction?.kind === 'rename'
+              ? updateFolder(folderAction.folder, { name })
+              : createFolder(folderAction?.folder ?? null, name)
+          }
+        />
+        <MoveFolderDialog
+          action={folderAction}
+          folders={tree ?? []}
+          onClose={() => setFolderAction(null)}
+          onConfirm={(parentId) =>
+            folderAction?.kind === 'move' ? updateFolder(folderAction.folder, { parentId }) : Promise.resolve()
+          }
+        />
+        <DeleteFolderDialog
+          action={folderAction}
+          folders={tree ?? []}
+          onClose={() => setFolderAction(null)}
+          onConfirm={() => (folderAction?.kind === 'delete' ? deleteFolder(folderAction.folder) : Promise.resolve())}
+        />
         {done && <DoneToast done={done} onDismiss={() => setDone(null)} />}
       </div>
+    </div>
+  )
+}
+
+/** #3650 — a project, as the library's folders link to it. */
+interface LibraryProject {
+  id: number
+  name: string
+  folders: LibraryFolderView[]
+  /** The files in its folders. */
+  files: number
+}
+
+function projectsOf(tree: LibraryFolderView[]): LibraryProject[] {
+  const byId = new Map<number, LibraryProject>()
+  for (const folder of tree) {
+    if (folder.project_id == null) continue
+    const project = byId.get(folder.project_id) ?? {
+      id: folder.project_id,
+      name: folder.project_name ?? `Project ${folder.project_id}`,
+      folders: [],
+      files: 0,
+    }
+    project.folders.push(folder)
+    project.files += folder.file_count ?? 0
+    byId.set(folder.project_id, project)
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * #3650 — where the page is, with the other way to see it: a folder names its project,
+ * and a project its folders, each a link to the other view.
+ */
+function WhereHeader({
+  byProject,
+  project,
+  projectCount,
+  folder,
+  tree,
+  entries,
+  onNewFolder,
+}: {
+  byProject: boolean
+  project: LibraryProject | undefined
+  projectCount: number
+  folder: LibraryFolderView | undefined
+  tree: LibraryFolderView[] | null
+  entries: MenuEntry[] | undefined
+  onNewFolder: () => void
+}) {
+  if (tree === null) return null
+  if (byProject) {
+    return (
+      <div data-testid="library-where" className="flex flex-wrap items-center gap-2 border-b pb-3">
+        <KanbanSquareIcon aria-hidden className="size-4 text-muted-foreground" />
+        <h2 className="text-base font-medium">{project ? project.name : 'All projects'}</h2>
+        {project ? (
+          <span className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+            {project.folders.length === 1 ? 'Its files are in the folder' : 'Its files are in the folders'}
+            {project.folders.map((row) => (
+              <Badge key={row.id} variant="outline" asChild>
+                <Link to={libraryPath(tree, row.id)} data-testid={`library-project-folder-${row.id}`}>
+                  <FolderIcon /> {folderLabel(tree, row.id)}
+                </Link>
+              </Badge>
+            ))}
+            {project.folders.length > 1 && project.folders[0] && (
+              <span data-testid="library-project-shown">
+                Showing the files in {folderLabel(tree, project.folders[0].id)}.
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="text-sm text-muted-foreground">{plural(projectCount, 'project')} with library folders</span>
+        )}
+      </div>
+    )
+  }
+  return (
+    <div data-testid="library-where" className="flex flex-wrap items-center gap-2 border-b pb-3">
+      {folder ? <FolderOpenIcon aria-hidden className="size-4 text-muted-foreground" /> : <FolderUpIcon aria-hidden className="size-4 text-muted-foreground" />}
+      <h2 className="min-w-0 truncate text-base font-medium">{folder ? folderLabel(tree, folder.id) : 'Top level'}</h2>
+      {folder?.project_id != null && (
+        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          in the project
+          <Badge variant="outline" asChild>
+            <Link to={`${LIBRARY_ROOT}?project=${folder.project_id}`} data-testid="library-folder-project-link">
+              <KanbanSquareIcon /> {folder.project_name ?? `#${folder.project_id}`}
+            </Link>
+          </Badge>
+        </span>
+      )}
+      <span className="ml-auto flex items-center gap-1">
+        <Button size="sm" variant="ghost" onClick={onNewFolder} data-testid="library-new-folder">
+          <FolderPlusIcon /> New folder
+        </Button>
+        {folder && entries && (
+          <MoreMenu
+            label={`Actions for the folder ${folder.name}`}
+            heading={folder.name}
+            entries={entries}
+            testId="library-folder-actions"
+          />
+        )}
+      </span>
+    </div>
+  )
+}
+
+/** #3650 — every project with a library folder, each opening its files. */
+function ProjectList({
+  projects,
+  tree,
+  onSelect,
+}: {
+  projects: LibraryProject[]
+  tree: LibraryFolderView[]
+  onSelect: (id: number) => void
+}) {
+  if (projects.length === 0) {
+    return (
+      <Card className="items-center px-6 py-10 text-center text-sm text-muted-foreground">
+        No library folder is linked to a Bambuddy project yet. A project made from ScadBuddy gets one.
+      </Card>
+    )
+  }
+  return (
+    <ul aria-label="Projects" className="grid grid-cols-[repeat(auto-fill,minmax(min(220px,100%),1fr))] gap-3">
+      {projects.map((project) => (
+        <li key={project.id}>
+          <Card size="sm" className="h-full gap-2 px-3 transition-colors hover:bg-muted/40">
+            <button
+              type="button"
+              onClick={() => onSelect(project.id)}
+              data-testid={`library-project-card-${project.id}`}
+              className="flex min-w-0 items-center gap-2 text-left font-medium outline-none focus-visible:underline"
+            >
+              <KanbanSquareIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+              <span className="truncate">{project.name}</span>
+              <Badge variant="secondary" className="sb-num ml-auto">
+                {plural(project.files, 'file')}
+              </Badge>
+            </button>
+            <span className="flex flex-wrap gap-1">
+              {project.folders.map((folder) => (
+                <Badge key={folder.id} variant="outline" asChild>
+                  <Link to={libraryPath(tree, folder.id)}>
+                    <FolderIcon /> {folderLabel(tree, folder.id)}
+                  </Link>
+                </Badge>
+              ))}
+            </span>
+          </Card>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** The cards' grid. */
+function CardGrid({ label, children }: { label?: string; children: ReactNode }) {
+  return (
+    <ul aria-label={label} className="grid grid-cols-[repeat(auto-fill,minmax(min(170px,100%),1fr))] gap-3">
+      {children}
+    </ul>
+  )
+}
+
+/** The bottom panel a delete, copy, move or rename reports in, with its Dismiss. */
+function ResultPanel({ testId, onDismiss, children }: { testId: string; onDismiss: () => void; children: ReactNode }) {
+  return (
+    <Card
+      role="status"
+      data-testid={testId}
+      size="sm"
+      className="fixed inset-x-4 bottom-4 z-40 mx-auto max-w-xl gap-1.5 px-3 text-sm shadow-lg"
+    >
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Dismiss"
+        onClick={onDismiss}
+        className="absolute top-2 right-2 text-muted-foreground"
+      >
+        <XIcon />
+      </Button>
+      {children}
+    </Card>
+  )
+}
+
+/** Files Bambuddy left where they were, and why. */
+function SkippedList({ heading, files, testId }: { heading: string; files: { id: number; filename?: string | null; reason: string }[]; testId: string }) {
+  return (
+    <div data-testid={testId}>
+      <p className="text-destructive">{heading}</p>
+      <ul className="list-disc pl-5 text-xs break-words text-muted-foreground">
+        {files.map((file) => (
+          <li key={file.id}>
+            {file.filename ?? `#${file.id}`}: {file.reason}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -561,118 +1142,40 @@ function DeletedToast({
   onUndo: () => void
   onDismiss: () => void
 }) {
-  const { result, restoring, restored, error } = deleted
+  const { result, restoring, restored, error, folder } = deleted
   const undoable = result.deleted.filter((file) => file.trashed).length
   const gone = result.deleted.length - undoable
+  const what =
+    result.deleted.length > 0
+      ? `Moved ${plural(undoable, 'file')} to Bambuddy's trash.${gone > 0 ? ` Removed ${plural(gone, 'external file')} for good.` : ''}`
+      : folder === undefined
+        ? 'Nothing was deleted.'
+        : ''
   return (
-    <div
-      role="status"
-      data-testid="library-deleted"
-      className="fixed inset-x-4 bottom-4 z-40 mx-auto flex max-w-xl flex-col gap-1.5 rounded-[8px] border border-line-strong bg-surface-2 p-3 text-[13px] text-ink shadow-lg"
-    >
-      <div className="flex items-start gap-3">
+    <ResultPanel testId="library-deleted" onDismiss={onDismiss}>
+      <div className="flex items-start gap-3 pr-7">
         <p className="min-w-0 flex-1">
           {restored !== null
             ? `Restored ${plural(restored, 'file')}.`
-            : result.deleted.length > 0
-              ? `Moved ${plural(undoable, 'file')} to Bambuddy's trash.${gone > 0 ? ` Removed ${plural(gone, 'external file')} for good.` : ''}`
-              : 'Nothing was deleted.'}
+            : folder !== undefined
+              ? `Deleted the folder ${folder}. ${what}`.trim()
+              : what}
         </p>
         {restored === null && undoable > 0 && (
-          <Button size="sm" onClick={onUndo} disabled={restoring} data-testid="library-undo">
+          <Button size="sm" variant="outline" onClick={onUndo} disabled={restoring} data-testid="library-undo">
             {restoring ? <Spinner /> : 'Undo'}
           </Button>
         )}
-        <button type="button" aria-label="Dismiss" onClick={onDismiss} className="px-1 text-muted hover:text-ink">
-          ×
-        </button>
       </div>
       {restored === null && result.skipped.length > 0 && (
-        <div data-testid="library-skipped">
-          <p className="text-warn">Not deleted:</p>
-          <ul className="list-disc pl-5 text-[12px] break-words text-muted">
-            {result.skipped.map((file) => (
-              <li key={file.id}>
-                {file.filename ?? `#${file.id}`}: {file.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <SkippedList heading="Not deleted:" files={result.skipped} testId="library-skipped" />
       )}
       {error && (
-        <p role="alert" className="text-warn">
+        <p role="alert" className="text-destructive">
           {error}
         </p>
       )}
-    </div>
-  )
-}
-
-/** #2670 — a card's Rename, Copy to… and Move to…, behind one small menu button. */
-function FileActions({
-  file,
-  disabled,
-  onRename,
-  onTransfer,
-}: {
-  file: LibraryEntry
-  disabled: boolean
-  onRename: () => void
-  onTransfer: (mode: TransferMode) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const menu = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const away = (event: MouseEvent) => {
-      if (!menu.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', away)
-    return () => document.removeEventListener('mousedown', away)
-  }, [open])
-
-  function pick(action: () => void) {
-    setOpen(false)
-    action()
-  }
-
-  const item = 'block w-full rounded px-2 py-1 text-left text-ink hover:bg-surface-3 focus-visible:bg-surface-3 outline-none'
-  return (
-    <div ref={menu} className="relative">
-      <button
-        type="button"
-        data-testid={`library-actions-${file.id}`}
-        aria-label={`More actions for ${file.filename}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={() => setOpen((now) => !now)}
-        className="rounded px-1 text-muted hover:text-ink disabled:opacity-50"
-      >
-        ⋯
-      </button>
-      {open && (
-        <div
-          role="menu"
-          aria-label={`Actions for ${file.filename}`}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') setOpen(false)
-          }}
-          className="absolute right-0 bottom-full z-30 mb-1 w-36 rounded-[6px] border border-line-strong bg-surface-2 p-1 text-[13px] shadow-lg"
-        >
-          <button type="button" role="menuitem" className={item} onClick={() => pick(onRename)}>
-            Rename…
-          </button>
-          <button type="button" role="menuitem" className={item} onClick={() => pick(() => onTransfer('copy'))}>
-            Copy to…
-          </button>
-          <button type="button" role="menuitem" className={item} onClick={() => pick(() => onTransfer('move'))}>
-            Move to…
-          </button>
-        </div>
-      )}
-    </div>
+    </ResultPanel>
   )
 }
 
@@ -704,58 +1207,345 @@ function DoneToast({ done, onDismiss }: { done: Done; onDismiss: () => void }) {
     summary = copied.length > 0 ? `Copied ${plural(copied.length, 'file')} to ${done.where}.` : 'Nothing was copied.'
   }
   return (
-    <div
-      role="status"
-      data-testid="library-done"
-      className="fixed inset-x-4 bottom-4 z-40 mx-auto flex max-w-xl flex-col gap-1.5 rounded-[8px] border border-line-strong bg-surface-2 p-3 text-[13px] text-ink shadow-lg"
-    >
-      <div className="flex items-start gap-3">
-        <p className="min-w-0 flex-1">{summary}</p>
-        <button type="button" aria-label="Dismiss" onClick={onDismiss} className="px-1 text-muted hover:text-ink">
-          ×
-        </button>
-      </div>
+    <ResultPanel testId="library-done" onDismiss={onDismiss}>
+      <p className="min-w-0 pr-7">{summary}</p>
       {losses.map((line) => (
-        <p key={line} className="text-warn">
+        <p key={line} className="text-destructive">
           {line}
         </p>
       ))}
       {skipped.length > 0 && (
-        <div data-testid="library-done-skipped">
-          <p className="text-warn">{done.kind === 'copy' ? 'Not copied:' : 'Not moved:'}</p>
-          <ul className="list-disc pl-5 text-[12px] break-words text-muted">
-            {skipped.map((file) => (
-              <li key={file.id}>
-                {file.filename ?? `#${file.id}`}: {file.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <SkippedList
+          heading={done.kind === 'copy' ? 'Not copied:' : 'Not moved:'}
+          files={skipped}
+          testId="library-done-skipped"
+        />
       )}
+    </ResultPanel>
+  )
+}
+
+/** How long a listing is read before the page says Bambuddy is slow (#3633). */
+const SLOW_MS = 4000
+/** How long typing pauses before the search is run (#3630). */
+const SEARCH_DEBOUNCE_MS = 250
+/** The subfolders shown before "Show all" (#3631). */
+const FOLDERS_SHOWN = 12
+
+function folderPathText(names: string[]): string {
+  return names.length === 0 ? 'Top level' : names.join(' / ')
+}
+
+/** #3630 — one box that finds a file by name in every folder. */
+function SearchBox({ query, onSearch }: { query: string; onSearch: (text: string) => void }) {
+  const [typed, setTyped] = useState(query)
+  // Back or a link changes the query under the box: the box follows it.
+  const [shown, setShown] = useState(query)
+  if (shown !== query) {
+    setShown(query)
+    setTyped(query)
+  }
+  const search = useEffectEvent((text: string) => onSearch(text))
+  useEffect(() => {
+    if (typed === shown) return
+    const timer = window.setTimeout(() => search(typed), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [typed, shown])
+  return (
+    <form
+      role="search"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (typed !== shown) onSearch(typed)
+      }}
+      className="relative"
+    >
+      <SearchIcon aria-hidden className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        type="search"
+        aria-label="Search the library"
+        data-testid="library-search"
+        placeholder="Search every folder by file name"
+        value={typed}
+        onChange={(event) => setTyped(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && typed !== '') {
+            event.preventDefault()
+            setTyped('')
+            onSearch('')
+          }
+        }}
+        className="h-9 pl-9"
+      />
+    </form>
+  )
+}
+
+/** #3630 — what a search found, with the cards it is given. */
+function SearchResults({
+  query,
+  results,
+  error,
+  advanced,
+  onRetry,
+  children,
+}: {
+  query: string
+  results: LibrarySearch | null
+  error: string | null
+  advanced: boolean
+  onRetry: () => void
+  children: ReactNode
+}) {
+  const current = results !== null && results.query === query && results.all === advanced
+  return (
+    <div className="space-y-3" aria-busy={!current && !error}>
+      {error ? (
+        <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
+          {error}
+          <Button size="sm" variant="outline" data-testid="library-search-retry" onClick={onRetry}>
+            Retry
+          </Button>
+        </p>
+      ) : !current ? (
+        <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Spinner /> Searching every folder
+        </p>
+      ) : (
+        <p role="status" data-testid="library-search-summary" className="text-sm">
+          {!results.total
+            ? `No files match “${query}”.`
+            : results.total > (results.files ?? []).length
+              ? `The first ${(results.files ?? []).length} of ${results.total} files that match “${query}”.`
+              : `${plural(results.total, 'file')} ${results.total === 1 ? 'matches' : 'match'} “${query}”.`}
+          {!advanced && (results.hidden ?? 0) > 0 && (
+            <span className="sb-num ml-1 text-xs text-muted-foreground">{results.hidden} more under Advanced.</span>
+          )}
+        </p>
+      )}
+      {results !== null && <CardGrid label="Search results">{children}</CardGrid>}
     </div>
   )
 }
 
-/** The last characters of a name's stem that stay when it is cut, with its extension. */
-const KEPT_TAIL = 8
+/** #3631 — a folder's subfolders in the main pane: a folder of folders is not empty. */
+function Subfolders({
+  folders,
+  tree,
+  onSelect,
+  menu,
+}: {
+  folders: LibraryFolderView[]
+  tree: LibraryFolderView[]
+  onSelect: (id: number) => void
+  /** #3650 — a folder's actions, on right-click and on its ⋯ button. */
+  menu: (folder: LibraryFolderView) => MenuEntry[]
+}) {
+  const [all, setAll] = useState(false)
+  const shown = all ? folders : folders.slice(0, FOLDERS_SHOWN)
+  const inside = (id: number) => tree.filter((folder) => folder.parent_id === id).length
+  return (
+    <section aria-labelledby="library-subfolders" className="space-y-2">
+      <h2 id="library-subfolders" className="text-xs font-medium text-muted-foreground">
+        {plural(folders.length, 'folder')}
+      </h2>
+      <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(200px,100%),1fr))] gap-2">
+        {shown.map((folder) => {
+          const subfolders = inside(folder.id)
+          const facts = [
+            folder.file_count ? plural(folder.file_count, 'file') : null,
+            subfolders ? plural(subfolders, 'folder') : null,
+          ].filter(Boolean)
+          return (
+            <li key={folder.id}>
+              <RowContextMenu label={folder.name} entries={menu(folder)}>
+                <Card size="sm" className="flex-row items-center gap-1 py-0 pr-1 pl-0 transition-colors hover:bg-muted/50">
+                  <button
+                    type="button"
+                    data-testid={`library-subfolder-${folder.id}`}
+                    onClick={() => onSelect(folder.id)}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 rounded-l-xl py-2.5 pl-3 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    <FolderIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{folder.name}</span>
+                      <span className="sb-num block text-xs text-muted-foreground">{facts.join(', ') || 'Empty'}</span>
+                    </span>
+                  </button>
+                  <MoreMenu label={`Actions for the folder ${folder.name}`} heading={folder.name} entries={menu(folder)} />
+                </Card>
+              </RowContextMenu>
+            </li>
+          )
+        })}
+      </ul>
+      {folders.length > FOLDERS_SHOWN && (
+        <Button size="sm" variant="ghost" onClick={() => setAll((now) => !now)}>
+          {all ? 'Show fewer folders' : `Show all ${folders.length} folders`}
+        </Button>
+      )}
+    </section>
+  )
+}
+
+interface FileCardProps {
+  file: LibraryEntry
+  /** Where the file is, on a search result. */
+  where?: ReactNode
+  highlighted: boolean
+  picked: boolean
+  actionsDisabled: boolean
+  onPick: () => void
+  onPrint: () => void
+  onRename: () => void
+  onTransfer: (mode: TransferMode) => void
+  onDelete: () => void
+}
+
+function FileCard({
+  file,
+  where,
+  highlighted,
+  picked,
+  actionsDisabled,
+  onPick,
+  onPrint,
+  onRename,
+  onTransfer,
+  onDelete,
+}: FileCardProps) {
+  // #2670, #3650 — Rename, Copy to… and Move to… on the ⋯ button and on right-click.
+  const entries: MenuEntry[] = [
+    ...(file.printable ? [{ label: 'Print…', icon: PrinterIcon, onSelect: onPrint }] : []),
+    { label: 'Rename…', icon: PencilIcon, onSelect: onRename, disabled: actionsDisabled, separator: file.printable },
+    { label: 'Copy to…', icon: CopyIcon, onSelect: () => onTransfer('copy'), disabled: actionsDisabled },
+    { label: 'Move to…', icon: FolderInputIcon, onSelect: () => onTransfer('move'), disabled: actionsDisabled },
+    { label: 'Delete…', icon: Trash2Icon, onSelect: onDelete, destructive: true, separator: true },
+  ]
+  return (
+    <li data-testid={`library-file-${file.id}`} aria-current={highlighted ? 'true' : undefined} className="min-w-0">
+      <RowContextMenu label={file.filename} entries={entries}>
+        <Card
+          size="sm"
+          className={cn(
+            'h-full gap-2 px-2 pt-2 transition-shadow',
+            picked && 'ring-2 ring-primary/60',
+            highlighted && 'ring-2 ring-primary',
+          )}
+        >
+          <div className="relative">
+            {file.has_thumbnail ? (
+              <img
+                src={api.libraryThumbnailUrl(file.id)}
+                alt=""
+                loading="lazy"
+                className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
+              />
+            ) : (
+              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
+                <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                  {nameParts(file.filename).extension || 'file'}
+                </span>
+              </div>
+            )}
+            <Checkbox
+              aria-label={`Select ${file.filename}`}
+              checked={picked}
+              onCheckedChange={onPick}
+              className="absolute top-2 left-2 bg-background/90 shadow-sm"
+            />
+          </div>
+          <FileName file={file} />
+          {where}
+          <FileFacts file={file} />
+          {file.printable ? (
+            <Button data-testid={`library-print-${file.id}`} aria-label={`Print ${file.filename}`} onClick={onPrint}>
+              <PrinterIcon /> Print
+            </Button>
+          ) : (
+            <p className="text-xs text-muted-foreground">ScadBuddy cannot print this file type.</p>
+          )}
+          <div className="flex items-center justify-between gap-1 text-xs">
+            {file.printable ? (
+              // #1755 — the file's own print history, as a template has its Prints tab.
+              <Button variant="link" size="xs" className="px-0 text-muted-foreground" asChild>
+                <Link to={libraryPrintsPath(file.id)} aria-label={`Prints of ${file.filename}`}>
+                  Prints
+                </Link>
+              </Button>
+            ) : (
+              <span />
+            )}
+            <span className="flex items-center gap-0.5">
+              <MoreMenu
+                label={`More actions for ${file.filename}`}
+                heading={file.filename}
+                entries={entries}
+                disabled={actionsDisabled}
+                testId={`library-actions-${file.id}`}
+              />
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                data-testid={`library-delete-${file.id}`}
+                aria-label={`Delete ${file.filename}`}
+                onClick={onDelete}
+                className="text-muted-foreground hover:text-destructive"
+              >
+                <Trash2Icon />
+              </Button>
+            </span>
+          </div>
+        </Card>
+      </RowContextMenu>
+    </li>
+  )
+}
 
 /**
- * #935 — a long name cut in the middle, not at the end. Generated names share a long
- * prefix (`bag-clip-3155628dc2bb…`), so cutting the end hides the only part that differs.
- * CSS has no middle ellipsis: the head truncates and the tail never shrinks.
+ * #3634 — a card's name on up to two lines, cut in the middle only past that, at word
+ * breaks (#935: generated names share a long prefix, so the end must show). What
+ * ScadBuddy adds to a name, ` (ScadBuddy)` and ` (2)`, and a sliced file's
+ * `.gcode.3mf` are badges, so the part that tells two cards apart is never what is cut.
+ * The whole name is its tooltip.
  */
-function MiddleTruncated({ name }: { name: string }) {
-  // The extension is found from the end: a dot early in a name (`v1.2_shelf….3mf`) is
-  // part of the stem, and must not pull the whole name into the tail that never shrinks.
-  const sliced = name.toLowerCase().endsWith('.gcode.3mf') ? name.length - '.gcode.3mf'.length : -1
-  const last = name.lastIndexOf('.')
-  const dot = sliced > 0 ? sliced : last > 0 ? last : name.length
-  const split = Math.max(0, dot - KEPT_TAIL)
+function FileName({ file }: { file: LibraryEntry }) {
+  const parts = nameParts(file.filename)
+  const shown = shortName(parts.stem)
+  const badges = [
+    file.sliced ? 'Sliced' : null,
+    parts.scadbuddy ? 'ScadBuddy copy' : null,
+    parts.copy !== null ? `Copy ${parts.copy}` : null,
+    !file.sliced && parts.extension !== '' && parts.extension !== '3mf' ? parts.extension.toUpperCase() : null,
+  ].filter((badge) => badge !== null)
   return (
-    <p className="flex min-w-0 text-[13px] text-ink" title={name}>
-      <span className="truncate">{name.slice(0, split)}</span>
-      <span className="shrink-0 whitespace-pre">{name.slice(split)}</span>
-    </p>
+    <div className="min-w-0">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <p
+            data-testid={`library-name-${file.id}`}
+            data-filename={file.filename}
+            className={cn(
+              'line-clamp-2 text-sm leading-snug font-medium',
+              // A cut name fills both lines, so its tail is never what the clamp hides.
+              shown === parts.stem ? '[overflow-wrap:anywhere]' : 'break-all',
+            )}
+          >
+            {shown}
+          </p>
+        </TooltipTrigger>
+        <TooltipContent className="break-all">{file.filename}</TooltipContent>
+      </Tooltip>
+      {badges.length > 0 && (
+        <p className="mt-1 flex flex-wrap gap-1">
+          {badges.map((badge) => (
+            <Badge key={badge} variant={badge === 'Sliced' ? 'default' : 'outline'} className="h-4.5 px-1.5 text-[10px]">
+              {badge}
+            </Badge>
+          ))}
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -771,7 +1561,5 @@ function FileFacts({ file }: { file: LibraryEntry }) {
     file.file_size != null ? <span key="size">{formatBytes(file.file_size)}</span> : null,
   ].filter((fact) => fact !== null)
   if (facts.length === 0) return null
-  return (
-    <p className="sb-num -mt-1 flex flex-wrap gap-x-2 text-[11px] text-faint">{facts}</p>
-  )
+  return <p className="sb-num -mt-1 flex flex-wrap gap-x-2 text-[11px] text-muted-foreground">{facts}</p>
 }

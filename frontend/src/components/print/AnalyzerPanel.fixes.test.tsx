@@ -7,6 +7,7 @@ import * as fixtures from '../../mocks/fixtures'
 import { setMockAnalyzerDiagnostics } from '../../mocks/features/analyzers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { choose, optionsOf } from '../../test/select'
 import { AnalyzerPanel } from './AnalyzerPanel'
 
 const output = fixtures.outputs[0]!
@@ -73,7 +74,7 @@ describe('AnalyzerPanel · fixes', () => {
     await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
     const preview = await within(row).findByTestId('fix-preview-timelapse-on')
     expect(within(preview).getByTestId('change-timelapse')).toHaveTextContent('false')
-    await user.selectOptions(within(preview).getByLabelText('Accept for'), 'This template')
+    await choose(user, within(preview).getByLabelText('Accept for'), 'This template')
     await waitFor(() => expect(within(preview).getByRole('button', { name: 'Apply' })).toBeEnabled())
     await user.click(within(preview).getByRole('button', { name: 'Apply' }))
 
@@ -199,9 +200,7 @@ describe('AnalyzerPanel · fixes', () => {
       const row = await screen.findByTestId('diagnostic-SB9901')
       await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
       const preview = await within(row).findByTestId('fix-preview-timelapse-on')
-      const labels = within(within(preview).getByLabelText('Accept for'))
-        .getAllByRole('option')
-        .map((option) => option.textContent)
+      const labels = await optionsOf(user, within(preview).getByLabelText('Accept for'))
       unmount()
       return labels
     }
@@ -282,7 +281,7 @@ describe('AnalyzerPanel · fixes', () => {
       'until where its settings land is verified — Whether the queue item takes timelapse',
     )
 
-    await user.selectOptions(within(preview).getByLabelText('Accept for'), 'This template')
+    await choose(user, within(preview).getByLabelText('Accept for'), 'This template')
     expect(within(preview).queryByRole('alert')).toBeNull()
     await waitFor(() => expect(within(preview).getByRole('button', { name: 'Apply' })).toBeEnabled())
     expect(within(preview).queryByRole('alert')).toBeNull()

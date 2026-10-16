@@ -218,10 +218,12 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
   describe('a chat message that names attachments', () => {
     let m: SessionManager
     let runs: ReturnType<typeof scriptedRunner>['runs']
+    let prompts: ReturnType<typeof scriptedRunner>['prompts']
 
     beforeEach(async () => {
       const scripted = scriptedRunner(() => ({ reply: 'a pixel' }))
       runs = scripted.runs
+      prompts = scripted.prompts
       m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, pollMs: 20 })
     })
     afterEach(() => {
@@ -237,14 +239,11 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
       return { out, connection }
     }
 
-    async function images(): Promise<unknown[]> {
-      const prompt = runs.at(-1)?.prompt
-      if (typeof prompt === 'string' || prompt === undefined) return []
-      for await (const message of prompt) {
-        const content = message.message.content as { type: string }[]
-        return content.filter((b) => b.type === 'image')
-      }
-      return []
+    function images(): unknown[] {
+      const message = prompts.at(-1)
+      if (!message) return []
+      const content = message.message.content as { type: string }[]
+      return typeof content === 'string' ? [] : content.filter((b) => b.type === 'image')
     }
 
     it('gives the model the image, names it and its preview in the turn, and moves the bytes into the session', async () => {
@@ -260,7 +259,7 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
       const started = out.find((e) => e.type === 'session.started') as { sessionId: string } | undefined
       expect(started).toBeDefined()
       const sessionId = started!.sessionId
-      expect(await images()).toEqual([
+      expect(images()).toEqual([
         { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') } },
       ])
       const events = (await m.events.read(sessionId, 0)).map((r) => r.event)
@@ -333,7 +332,7 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
       })
       await settle()
       sent.connection.close()
-      expect(await images()).toHaveLength(1)
+      expect(images()).toHaveLength(1)
       expect(await db.sql`SELECT 1 FROM ai_attachments WHERE id = ${id}`).toHaveLength(0)
       expect(await m.blob(session.id, NAME, browser)).toMatchObject({ mediaType: 'image/png' })
     })

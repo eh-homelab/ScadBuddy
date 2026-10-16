@@ -13,12 +13,24 @@ export interface SpoolColour {
   translucent: boolean
 }
 
-export function spoolColour(spool: Pick<InventorySpool, 'rgba'>): SpoolColour | null {
+/**
+ * What a spool's recorded colour says, from the one parse (#3358): a colour; clear,
+ * for a spool Bambuddy recorded with a zero alpha; or unknown, when none is recorded or
+ * it cannot be read. A chip draws each differently, and never black.
+ */
+export type SpoolChip = ({ kind: 'colour' } & SpoolColour) | { kind: 'clear' } | { kind: 'unknown' }
+
+export function spoolChip(spool: Pick<InventorySpool, 'rgba'>): SpoolChip {
   const raw = (spool.rgba ?? '').trim().replace(/^#/, '')
-  if (!/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(raw)) return null
+  if (!/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(raw)) return { kind: 'unknown' }
   const alpha = raw.length === 8 ? Number.parseInt(raw.slice(6), 16) : 255
-  if (alpha === 0) return null
-  return { hex: normalizeHex(raw.slice(0, 6)), translucent: alpha < 255 }
+  if (alpha === 0) return { kind: 'clear' }
+  return { kind: 'colour', hex: normalizeHex(raw.slice(0, 6)), translucent: alpha < 255 }
+}
+
+export function spoolColour(spool: Pick<InventorySpool, 'rgba'>): SpoolColour | null {
+  const chip = spoolChip(spool)
+  return chip.kind === 'colour' ? { hex: chip.hex, translucent: chip.translucent } : null
 }
 
 /** "Bambu Lab PLA Basic — Hot Pink", as the print dialog names a spool. */

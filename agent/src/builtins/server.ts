@@ -15,8 +15,9 @@ import {
 } from './session.js'
 import SCHEMAS from './schemas.json' with { type: 'json' }
 import { type WebContext, webFetch, webSearch } from './web.js'
-import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop } from './background.js'
+import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
+import { CALL_ID_META } from './callId.js'
 
 // A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
 // names, as one MCP server the agent offers as turn tools (turnServers.ts), named
@@ -34,10 +35,12 @@ export type BuiltinContext = {
   web: WebContext
   /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
   background?: BackgroundContext | undefined
+  /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
+  callId?: string | undefined
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
-export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
+export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 
 const noTasks = (): BuiltinResult => ({ text: 'This session cannot keep background tasks.', isError: true })
 const withTasks =
@@ -128,7 +131,7 @@ export const BUILTINS: Record<string, Builtin> = {
       activeForm: z.string().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
     }),
-    run: (ctx, input: Parameters<typeof taskCreate>[1]) => taskCreate(ctx.files, input),
+    run: (ctx, input: Parameters<typeof taskCreate>[1]) => taskCreate(ctx.files, input, ctx.callId),
   },
   TaskGet: {
     description: "Claude Code's TaskGet: one task of the session's task list.",
@@ -223,8 +226,28 @@ export const BUILTINS: Record<string, Builtin> = {
     }),
     run: withTasks(monitor),
   },
+  Workflow: {
+    description:
+      "Claude Code's Workflow: runs a workflow script that orchestrates subagents in the background and returns at once with a " +
+      'task ID; its result arrives as a new message once the session is idle. The script is plain JavaScript beginning with ' +
+      '`export const meta = { name, description, phases? }` (a pure literal), then a body using agent(prompt, opts?), ' +
+      'parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args and workflow({scriptPath}). Each agent() ' +
+      'runs as a chat of its own under this session (at most 4 at once, 50 in all), spending from its budget, with ' +
+      "opts.schema returning a checked object. Date.now(), new Date() and Math.random() throw. Run it only when the user asked " +
+      'for a workflow or multi-agent orchestration in their own words.',
+    input: z.object({
+      script: z.string().max(524_288).optional(),
+      scriptPath: z.string().optional(),
+      name: z.string().optional(),
+      args: z.unknown().optional(),
+      resumeFromRunId: z.string().optional(),
+      description: z.string().optional(),
+      title: z.string().optional(),
+    }),
+    run: withTasks(workflow),
+  },
   TaskStop: {
-    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup or monitor) by its ID.",
+    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
     run: withTasks(taskStop),
   },
@@ -243,6 +266,13 @@ function toResult(result: BuiltinResult): CallToolResult {
   }
 }
 
+/** `context` whose web work also stops when the call's caller gives up on it (its request timed out or was cancelled, #3199). */
+function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext {
+  // A context with no web work (a test's of only the background built-ins) has nothing to stop.
+  if (!(context.web as WebContext | undefined)) return context
+  return { ...context, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
+}
+
 /** An MCP server offering `names` (those of BUILTINS), each run with `context()`. */
 export function builtinServer(names: readonly string[], context: () => BuiltinContext): Server {
   const offered = names.filter((n) => PROVIDED.has(n))
@@ -251,7 +281,7 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: offered.map((name) => ({ name, description: BUILTINS[name]!.description, inputSchema: schemas[name] as { type: 'object' } })),
   }))
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name
     const builtin = offered.includes(name) ? BUILTINS[name] : undefined
     if (!builtin) return toResult({ text: `No such tool: ${name}`, isError: true })
@@ -259,22 +289,19 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
     if (!parsed.success) {
       return toResult({ text: `<tool_use_error>InputValidationError: ${z.prettifyError(parsed.error)}</tool_use_error>`, isError: true })
     }
-    return toResult(await builtin.run(context(), parsed.data as never))
+    const callId = request.params._meta?.[CALL_ID_META]
+    return toResult(await builtin.run(stoppable({ ...context(), ...(typeof callId === 'string' ? { callId } : {}) }, extra.signal), parsed.data as never))
   })
   return server
 }
 
 /**
- * A classic turn's background built-ins (CronCreate and the rest) as an in-process
- * server, in place of Claude Code's own: those live in its process, which the turn ends
- * ("Session-only (not written to disk, dies when Claude exits)"), while these are kept by
- * the session (src/background/). Each call is outward, as every package built-in is.
- */
-/**
- * The built-ins a classic turn gets from the session instead of Claude Code: the
- * background ones, which Claude Code would lose with the turn's process, and WebFetch,
- * whose fetch connects only to the addresses its egress check passed (#2684; Claude Code's
- * resolves the name again as it connects).
+ * The built-ins a classic turn gets from the session instead of Claude Code, served
+ * in-process. The background ones (CronCreate and the rest) live in Claude Code's own
+ * process, which the turn ends ("Session-only (not written to disk, dies when Claude
+ * exits)"), while these are kept by the session (src/background/). WebFetch's fetch
+ * connects only to the addresses its egress check passed (#2684; Claude Code's resolves
+ * the name again as it connects). Each call is outward, as every package built-in is.
  */
 export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
 
@@ -300,7 +327,7 @@ export function classicBuiltinServer(
 export function classicBuiltinNote(names: readonly string[]): string {
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
-    ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+    ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
       'session as a new message when it is due and the session is idle.'
     : ''
   return (

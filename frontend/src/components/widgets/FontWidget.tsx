@@ -1,10 +1,172 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
+import { useCommandState } from 'cmdk'
+import { useFillable } from '../../agent/useFillable'
 import { ApiError, api } from '../../api/client'
 import type { FontFamily, InstalledFamily, Param } from '../../api/types'
 import { cssFontFamily, formatFontValue, parseFontValue, preferredStyle } from '../../lib/fonts'
 import { forgetGlyphAnswers, useMissingGlyphs } from '../../lib/useMissingGlyphs'
 import { Field } from './Field'
 import { FontPicker } from './FontPicker'
+import { paramLabel } from '../../lib/params'
+import { Button } from '@/components/ui/button'
+import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
+import { Input } from '@/components/ui/input'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Spinner } from '../ui/spinner'
+
+/** A style that is "" (none named): Radix refuses an empty item value. */
+const STYLE_DEFAULT = '\u0000default'
+
+/** The most completions shown at once: the rest are a few more letters away. */
+const MAX_SUGGESTIONS = 50
+
+/**
+ * The field itself, a combobox over the installed `Family:style=…` values (#3672, was a
+ * `<datalist>`). It stays free text: a model can name a font no catalogue lists, and
+ * Enter only takes a completion while the list is open.
+ */
+function FontField({
+  id,
+  value,
+  choices,
+  family,
+  invalid,
+  describedBy,
+  onChange,
+}: {
+  id: string
+  value: string
+  choices: string[]
+  family: string
+  invalid: boolean
+  describedBy: string | undefined
+  onChange: (next: string) => void
+}) {
+  const listId = useId()
+  const anchor = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const typed = value.trim().toLowerCase()
+  const matches = choices.filter((choice) => choice.toLowerCase().includes(typed)).slice(0, MAX_SUGGESTIONS)
+  // Nothing to complete once the value is the one match.
+  const shown = open && matches.length > 0 && !(matches.length === 1 && matches[0] === value)
+  return (
+    <Popover open={shown} onOpenChange={setOpen}>
+      <Command shouldFilter={false} loop className="h-auto flex-1 overflow-visible rounded-none! bg-transparent p-0">
+        <PopoverAnchor asChild>
+          <div ref={anchor} className="w-full">
+            <ActiveInput
+              id={id}
+              value={value}
+              listId={listId}
+              expanded={shown}
+              invalid={invalid}
+              describedBy={describedBy}
+              family={family}
+              onType={(next) => {
+                setOpen(true)
+                onChange(next)
+              }}
+              onOpenList={() => setOpen(true)}
+              onCloseList={() => setOpen(false)}
+            />
+          </div>
+        </PopoverAnchor>
+        <PopoverContent
+          // What the field's aria-controls names: cmdk keeps the list's own id to itself.
+          id={listId}
+          align="start"
+          className="w-(--radix-popover-trigger-width) min-w-64 p-1"
+          // The field keeps the focus: the list is completion, not a place to go.
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          // Nor does a press on the list take it: the field's blur would close the list
+          // before the click that picks the option lands (#3672 review).
+          onMouseDown={(event) => event.preventDefault()}
+          // A press in the field is no press outside. By the event's path, since in a
+          // template UI's shadow root the target the document sees is the host element.
+          onInteractOutside={(event) => {
+            if (anchor.current && event.detail.originalEvent.composedPath().includes(anchor.current)) event.preventDefault()
+          }}
+        >
+          <CommandList label="Installed fonts" className="max-h-64">
+            <CommandGroup>
+              {matches.map((choice) => (
+                <CommandItem
+                  key={choice}
+                  value={choice}
+                  onSelect={() => {
+                    onChange(choice)
+                    setOpen(false)
+                  }}
+                  style={{ fontFamily: cssFontFamily(parseFontValue(choice).family) }}
+                >
+                  {choice}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </PopoverContent>
+      </Command>
+    </Popover>
+  )
+}
+
+/** The input, inside the Command so its arrows and Enter drive the list. */
+function ActiveInput({
+  id,
+  value,
+  listId,
+  expanded,
+  invalid,
+  describedBy,
+  family,
+  onType,
+  onOpenList,
+  onCloseList,
+}: {
+  id: string
+  value: string
+  listId: string
+  expanded: boolean
+  invalid: boolean
+  describedBy: string | undefined
+  family: string
+  onType: (next: string) => void
+  onOpenList: () => void
+  onCloseList: () => void
+}) {
+  const active = useCommandState((state) => state.selectedItemId)
+  return (
+    <Input
+      id={id}
+      type="text"
+      role="combobox"
+      aria-autocomplete="list"
+      aria-expanded={expanded}
+      aria-controls={expanded ? listId : undefined}
+      aria-activedescendant={expanded ? active : undefined}
+      value={value}
+      spellCheck={false}
+      autoComplete="off"
+      placeholder="Family:style=Bold"
+      aria-invalid={invalid ? true : undefined}
+      aria-describedby={describedBy}
+      style={{ fontFamily: cssFontFamily(family) }}
+      onChange={(event) => onType(event.target.value)}
+      onBlur={onCloseList}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowDown' && !expanded) onOpenList()
+        // Enter with the list closed is the value as typed: not cmdk's to take.
+        if (event.key === 'Enter' && !expanded) event.stopPropagation()
+        if (event.key === 'Escape' && expanded) {
+          event.preventDefault()
+          event.stopPropagation()
+          onCloseList()
+        }
+      }}
+    />
+  )
+}
 
 /**
  * OpenSCAD font values look like `Liberation Sans:style=Bold`. Browse opens the Google
@@ -42,7 +204,6 @@ export function FontWidget({
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
-  const listId = useId()
   const [open, setOpen] = useState(false)
   const [justInstalled, setJustInstalled] = useState<Record<string, string[]>>({})
   const [installing, setInstalling] = useState<string | null>(null)
@@ -53,7 +214,7 @@ export function FontWidget({
     message: string
   } | null>(null)
 
-  const label = param.caption ?? param.name
+  const label = paramLabel(param)
   const { family, style } = parseFontValue(value)
   // #2358 — characters of the model's text this font has no glyph for: the render
   // leaves them out without a word. Not asked while the family is not installed, which
@@ -74,6 +235,17 @@ export function FontWidget({
     setJustInstalled((current) => ({ ...current, [installed.family]: names }))
     onChange(formatFontValue(installed.family, preferredStyle(names)))
   }
+
+  const styleTrigger = useRef<HTMLButtonElement>(null)
+  useFillable(styleTrigger, {
+    // As the list offers them: the current style first when the family does not list it.
+    options: () => [
+      ...(styles.includes(style) ? [] : [{ value: style, label: style || 'Default' }]),
+      ...styles.map((name) => ({ value: name, label: name })),
+    ],
+    value: () => style,
+    set: (next) => onChange(formatFontValue(family, next)),
+  })
 
   const missingKey = missing.join('\n')
   const shownInstallError =
@@ -110,51 +282,45 @@ export function FontWidget({
   return (
     <Field id={id} label={label} name={param.name} error={error}>
       <div className="flex items-center gap-2">
-        <input
+        <FontField
           id={id}
-          type="text"
-          list={listId}
           value={value}
-          spellCheck={false}
-          placeholder="Family:style=Bold"
-          aria-invalid={error ? true : undefined}
-          aria-describedby={error ? `${id}-error` : lacking.length > 0 ? `${id}-glyphs` : undefined}
-          style={{ fontFamily: cssFontFamily(family) }}
-          onChange={(event) => onChange(event.target.value)}
-          className="sb-field"
+          choices={choices}
+          family={family}
+          invalid={Boolean(error)}
+          describedBy={error ? `${id}-error` : lacking.length > 0 ? `${id}-glyphs` : undefined}
+          onChange={onChange}
         />
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="h-8 shrink-0 rounded-[6px] border border-line bg-surface-2 px-2.5 text-[12px] text-muted hover:border-line-strong hover:text-ink"
-        >
+        <Button type="button" variant="outline" onClick={() => setOpen(true)}>
           Browse
-        </button>
+        </Button>
       </div>
 
       {lacking.length > 0 && (
-        <p id={`${id}-glyphs`} role="status" data-testid="font-lacks" className="mt-1 text-[12px] text-warn">
+        <p id={`${id}-glyphs`} role="status" data-testid="font-lacks" className="text-xs text-destructive">
           {family} has no glyph for {lacking.join(' ')}; {lacking.length === 1 ? 'it is' : 'they are'} left out
           of the print.
         </p>
       )}
 
       {missing.length > 0 && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {missing.map((missingFamily) => (
-            <button
+            <Button
               key={missingFamily}
               type="button"
+              variant="secondary"
+              size="sm"
               disabled={installing !== null}
               aria-busy={installing === missingFamily}
               onClick={() => void install(missingFamily)}
-              className="h-7 rounded-[6px] border border-line bg-surface-2 px-2.5 text-[12px] text-ink hover:border-line-strong disabled:opacity-60"
             >
+              {installing === missingFamily && <Spinner />}
               {installing === missingFamily ? `Installing ${missingFamily}…` : `Install ${missingFamily}`}
-            </button>
+            </Button>
           ))}
           {shownInstallError && (
-            <p role="alert" className="text-[12px] text-warn">
+            <p role="alert" className="text-xs text-destructive">
               {shownInstallError}
             </p>
           )}
@@ -162,26 +328,20 @@ export function FontWidget({
       )}
 
       {styles.length > 1 && (
-        <select
-          value={style}
-          aria-label={`${label} style`}
-          onChange={(event) => onChange(formatFontValue(family, event.target.value))}
-          className="sb-field mt-2 cursor-pointer"
-        >
-          {!styles.includes(style) && <option value={style}>{style || 'Default'}</option>}
-          {styles.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+        <Select value={style || STYLE_DEFAULT} onValueChange={(next) => onChange(formatFontValue(family, next === STYLE_DEFAULT ? '' : next))}>
+          <SelectTrigger ref={styleTrigger} aria-label={`${label} style`} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {!styles.includes(style) && <SelectItem value={style || STYLE_DEFAULT}>{style || 'Default'}</SelectItem>}
+            {styles.map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
-
-      <datalist id={listId} data-testid="font-options">
-        {choices.map((choice) => (
-          <option key={choice} value={choice} />
-        ))}
-      </datalist>
 
       <FontPicker
         open={open}

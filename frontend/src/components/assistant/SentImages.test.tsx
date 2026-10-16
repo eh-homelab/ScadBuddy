@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState, type KeyboardEvent, type ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
@@ -67,7 +67,8 @@ describe('sent images (#1891)', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
     // Modal even though it opens from the assistant panel, which a dialog otherwise sits beside.
-    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    // Radix hides everything else from assistive tech, the panel included.
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).toBeNull()
     // While the full image loads, its preview stands in for it.
     expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, preview' })).toHaveAttribute('src', previewUrl('a'))
     const full = within(dialog).getByAltText('Image 1 of 1, as sent')
@@ -91,7 +92,7 @@ describe('sent images (#1891)', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeVisible()
-    expect(thumb).toHaveFocus()
+    await waitFor(() => expect(thumb).toHaveFocus())
   })
 
   it('falls back to the preview, saying so, when the stored image cannot be loaded', async () => {
@@ -134,6 +135,6 @@ describe('sent images (#1891)', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'View image 2 of 2 larger' })).toHaveFocus()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'View image 2 of 2 larger' })).toHaveFocus())
   })
 })

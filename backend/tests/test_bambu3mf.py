@@ -4,10 +4,11 @@ import io
 import json
 import math
 import os
-import time
+import re
 import tracemalloc
 import zipfile
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, BinaryIO
 from xml.etree import ElementTree as ET
@@ -1742,8 +1743,9 @@ def test_a_processing_instruction_is_left_to_the_parse() -> None:
 def test_a_paint_code_off_a_triangle_paints_nothing() -> None:
     """The parse reads ``paint_color`` only on a ``<triangle>``; the pattern agrees."""
     data = _object_bytes(_THREE, head=b"<metadata " + PAINT_ATTRIBUTE.encode() + b'="8"/>')
-    read = bambu3mf._written_extents(data)
-    assert read is None or read[1] == frozenset()
+    # The two paint counts differ, so the file is left to the parse (#3254 review): not
+    # read here as unpainted.
+    assert bambu3mf._written_extents(data) is None
 
 
 def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
@@ -1771,13 +1773,72 @@ def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
 )
 def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
     """Security review of #3254: an unbounded run inside the paint pattern rescanned to
-    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
-    the scan is linear, and a code it cannot find leaves the file to the parse."""
-    data = junk * 40_000
-    began = time.perf_counter()
-    for _ in bambu3mf._PAINT_CODE.finditer(data):
-        pass
-    assert time.perf_counter() - began < 2
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Every run
+    in it is bounded, so no match reads further than a tag's worth of bytes; checked on
+    the pattern itself, not by a clock a loaded shard can skew (#3476 review)."""
+    assert not re.search(rb"(?<!\\)[*+]", bambu3mf._PAINT_CODE.pattern)
+    # A crafted file is read, whatever it then answers, without hanging on it.
+    bambu3mf._written_extents(_object_bytes(_THREE, junk * 40_000))
+
+
+def test_reading_a_box_makes_no_copy_of_the_file() -> None:
+    """#3254 review: skipping the XML declaration by slicing copied the whole object
+    file (86 MB on #2942's) just to look past it."""
+    padding = b'<metadata name="note">' + b"x" * 4_000_000 + b"</metadata>"
+    data = _object_bytes(_THREE, head=padding)
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is not None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+@pytest.mark.parametrize(
+    "root",
+    [b'<model xmlns="urn:not-3mf">', b'<model xmlns="%s"><x xmlns="urn:other">' % CORE_NS.encode()],
+    ids=["another root namespace", "a default redeclared inside"],
+)
+def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) -> None:
+    """#3254 review: a bare ``<vertex>`` is the 3MF's only under the core namespace,
+    which the parse requires; the pattern now asks the same of the root."""
+    data = _object_bytes(_THREE).replace(b'<model xmlns="' + CORE_NS.encode() + b'">', root, 1)
+    assert data != _object_bytes(_THREE)
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security review of #3434's fix: a search for the root re-ran its bounded run
+    from every ``<model`` in a file made of them. The pattern is tried once, where the
+    root starts; checked by what it is asked, not by a clock (#3476 review)."""
+    declaration = b'<?xml version="1.0"?>'
+    data = declaration + b"\n" + b"<model " * 400_000
+    asked: list[int] = []
+    real = bambu3mf._CORE_ROOT
+
+    class Once:
+        def match(self, text: bytes, pos: int = 0) -> re.Match[bytes] | None:
+            asked.append(pos)
+            return real.match(text, pos)
+
+        def search(self, *_: object) -> None:
+            raise AssertionError("the root is matched where it starts, never searched for")
+
+    monkeypatch.setattr(bambu3mf, "_CORE_ROOT", Once())
+    assert bambu3mf._written_extents(data) is None
+    assert asked == [len(declaration) + 1]
+
+
+def test_a_core_model_inside_another_root_is_left_to_the_parse() -> None:
+    """#3476 review: the root is the first element, so a ``<model>`` nested in another
+    is not taken for the 3MF's."""
+    core = _object_bytes(_THREE)
+    head, body = core.split(b"?>", 1)
+    assert bambu3mf._written_extents(head + b"?><foo>" + body + b"</foo>") is None
+    assert bambu3mf._written_extents(core) is not None
 
 
 def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
@@ -1794,15 +1855,156 @@ def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> Non
     )
 
 
-def test_written_extents_are_read_a_batch_at_a_time() -> None:
-    vertices = b"".join(
-        b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(bambu3mf._VERTEX_BATCH + 5)
-    )
+def test_written_extents_are_read_a_window_at_a_time() -> None:
+    """#3678: vertices are matched a window of the file at a time; a box over several
+    windows is the box over every vertex, and none is counted twice or missed."""
+    count = 3 * bambu3mf._WINDOW // len(b'<vertex x="0" y="0" z="1"/>')
+    vertices = b"".join(b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(count))
     data = _object_bytes(vertices)
+    assert len(list(bambu3mf._windows(data, 0))) > 2
     box, painted = bambu3mf._written_extents(data) or (None, None)
     assert box is not None
-    assert box.tolist() == [
-        [0, -(bambu3mf._VERTEX_BATCH + 4), 1],
-        [bambu3mf._VERTEX_BATCH + 4, 0, 1],
-    ]
+    assert box.tolist() == [[0, -(count - 1), 1], [count - 1, 0, 1]]
     assert painted == frozenset()
+
+
+def test_a_run_of_paint_attributes_is_counted_without_being_held() -> None:
+    """Security review of #3711: the bare attribute needs no ``<``, so a window can hold
+    any number of them; collecting them cost four times the file, which at the archive's
+    cap is gigabytes."""
+    junk = b' paint_color="' * 400_000
+    data = _object_bytes(_THREE, tail=b'<metadata name="' + junk + b'"/>')
+    tracemalloc.start()
+    try:
+        bambu3mf._written_extents(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+def test_windows_cover_the_file_and_end_before_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3678: the windows run end to end from where they start, and each but the last
+    ends just before a ``<``, so no tag starts in one window and ends in the next."""
+    data = _object_bytes(b'<vertex x="1" y="2" z="3"/>' * 50)
+    monkeypatch.setattr(bambu3mf, "_WINDOW", 100)
+    windows = list(bambu3mf._windows(data, 7))
+    assert len(windows) > 5
+    assert windows[0][0] == 7 and windows[-1][1] == len(data)
+    assert all(end == start for (_, end), (start, _) in pairwise(windows))
+    assert all(data[end : end + 1] == b"<" for _, end in windows[:-1])
+
+
+def _object_files(payload: bytes) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return [
+            (name, archive.read(name))
+            for name in archive.namelist()
+            if name.startswith("3D/Objects/")
+        ]
+
+
+def _parsed(name: str, data: bytes, **limits: int) -> bambu3mf.ParsedModel:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, data)
+    return parse_model(zipfile.ZipFile(io.BytesIO(out.getvalue())), name, **limits)
+
+
+def _assert_read_alike(fast: bambu3mf.ParsedModel, slow: bambu3mf.ParsedModel) -> None:
+    """The same arrays and the same tree, but for the space between the vertices and
+    triangles the parse keeps as their parent's text (#3679)."""
+    (got,), (want,) = fast.meshes.values(), slow.meshes.values()
+    for field in ("vertices", "faces", "pid", "p1"):
+        a, b = getattr(got, field), getattr(want, field)
+        assert a.dtype == b.dtype and a.shape == b.shape and np.array_equal(a, b), field
+    assert (got.pids, got.paint, got.prusa_painted) == (want.pids, want.paint, want.prusa_painted)
+    blocks = {f"{{{CORE_NS}}}vertices", f"{{{CORE_NS}}}triangles"}
+    for x, y in zip(fast.root.iter(), slow.root.iter(), strict=True):
+        assert (x.tag, x.attrib, x.tail) == (y.tag, y.attrib, y.tail)
+        assert x.text == y.text or (x.tag in blocks and not x.text and not (y.text or "").strip())
+
+
+def _parsed_by_xml(monkeypatch: pytest.MonkeyPatch, name: str, data: bytes) -> bambu3mf.ParsedModel:
+    with monkeypatch.context() as patch:
+        patch.setattr(bambu3mf, "_written_mesh", lambda *_: None)
+        return _parsed(name, data)
+
+
+@pytest.mark.parametrize("window", [None, 64], ids=["one window", "many windows"])
+def test_a_written_object_file_is_read_by_pattern_as_the_parse_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, window: int | None
+) -> None:
+    """#3679: an object file in the writer's own shape has its vertices and triangles
+    read by pattern, painted ones included, and comes out as the parse reads it."""
+    if window is not None:
+        monkeypatch.setattr(bambu3mf, "_WINDOW", window)
+    files = _object_files(_painted_two_objects(tmp_path))
+    assert any(b"paint_color" in data for _, data in files)
+    for name, data in files:
+        assert bambu3mf._written_mesh(data, None, None) is not None
+        _assert_read_alike(_parsed(name, data), _parsed_by_xml(monkeypatch, name, data))
+
+
+def test_the_rest_of_a_written_object_file_is_still_parsed_as_xml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3679: only the two blocks are read by pattern; an entity outside them is the
+    XML parser's to expand, and a file that is not XML is refused as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    named = data.replace(b'name="', b'name="&#60;', 1)
+    fast = bambu3mf._written_mesh(named, None, None)
+    assert fast is not None
+    _assert_read_alike(fast, _parsed_by_xml(monkeypatch, name, named))
+    with pytest.raises(ET.ParseError):
+        _parsed(name, data.replace(b"</object>", b"</objekt>"))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: data.replace(b"<mesh>", b"<!-- a note --><mesh>"),
+        lambda data: data.replace(b"<mesh>", b"<?note hi?><mesh>"),
+        lambda data: data.replace(b'<vertex x="', b'<vertex id="1" x="', 1),
+        lambda data: re.sub(rb'x="[^"]*"', b'x="1e2"', data, count=1),
+        lambda data: data.replace(b'"/>\n    </triangles>', b'" pid="1"/>\n    </triangles>'),
+    ],
+    ids=["comment", "instruction", "attribute", "exponent", "pid"],
+)
+def test_an_object_file_written_otherwise_is_left_to_the_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Callable[[bytes], bytes]
+) -> None:
+    """#3679: anything the pattern does not read exactly as the parse would, or that
+    could hide a block's tags, is parsed as it always was."""
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    other = change(data)
+    assert other != data
+    assert bambu3mf._written_mesh(other, None, None) is None
+    _assert_read_alike(_parsed(name, other), _parsed_by_xml(monkeypatch, name, other))
+
+
+def test_a_written_object_file_past_its_limits_is_refused_as_the_parse_refuses_it(
+    tmp_path: Path,
+) -> None:
+    from scadbuddy.render.bambu3mf import TooManyTrianglesError
+
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    with pytest.raises(TooManyTrianglesError) as triangles:
+        _parsed(name, data, max_triangles=1)
+    with pytest.raises(TooManyTrianglesError) as vertices:
+        _parsed(name, data, max_vertices=1)
+    assert (triangles.value.kind, vertices.value.kind) == ("triangles", "vertices")
+
+
+def test_an_entry_too_large_to_hold_is_parsed_as_it_inflates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name, data = _object_files(_painted_two_objects(tmp_path))[0]
+    expected = _parsed_by_xml(monkeypatch, name, data)
+    monkeypatch.setattr(bambu3mf, "_HELD_ENTRY", len(data) // 3)
+
+    def unused(*_: object) -> None:
+        raise AssertionError("an entry past what is held was held")
+
+    monkeypatch.setattr(bambu3mf, "_written_mesh", unused)
+    _assert_read_alike(_parsed(name, data), expected)

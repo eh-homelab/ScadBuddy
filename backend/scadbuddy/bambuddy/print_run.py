@@ -12,9 +12,9 @@ import asyncio
 import logging
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator
@@ -47,15 +47,18 @@ from scadbuddy.bambuddy.extruders import (
 )
 from scadbuddy.bambuddy.filament_profiles import profile_overrides, unknown_profiles
 from scadbuddy.bambuddy.filaments import (
+    MAX_PLATES,
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
     QueueFilaments,
     SpoolOption,
     across_plates,
+    asked_plates,
     check,
     every_plate,
     gather_plate_options,
+    plates_named,
     queue_filaments,
     read_inventory,
 )
@@ -78,6 +81,13 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.prime_tower import (
+    PrimeTowerChoice,
+    not_resliced,
+    prime_tower_overrides,
+    prime_tower_warnings,
+    template_keys_dropped,
+)
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
     LibrarySource,
@@ -164,6 +174,11 @@ class PrintRunRequest(BaseModel):
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
+    #: Several plates of the output (#3652), each sliced and queued as an item of its own,
+    #: in plate order, in place of ``plate_id`` alone. ``all_plates`` wins over it.
+    plate_ids: list[Annotated[int, Field(ge=1)]] | None = Field(
+        default=None, min_length=1, max_length=MAX_PLATES
+    )
     #: The Bambuddy project this print belongs to (#79). Omitted means the remembered
     #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
     #: because the picker's PUT that remembers the choice may not have landed yet.
@@ -193,6 +208,10 @@ class PrintRunRequest(BaseModel):
     #: Support structures for this print (#1899), over the template's
     #: ``print_settings``. Omitted means whatever those and the process say.
     supports: SupportsChoice | None = None
+    #: The prime tower for this print (#3628), over the template's ``print_settings``.
+    #: Omitted means whatever those and the process say (on, unless the plate prints
+    #: one filament).
+    prime_tower: PrimeTowerChoice | None = None
 
     @field_validator("filament_profiles")
     @classmethod
@@ -201,6 +220,16 @@ class PrintRunRequest(BaseModel):
         if unknown:
             raise ValueError(f"no filament profile {', '.join(map(repr, unknown))}")
         return list(dict.fromkeys(ids))
+
+    @field_validator("plate_ids")
+    @classmethod
+    def _plates_in_order(cls, ids: list[int] | None) -> list[int] | None:
+        # Each once and in plate order, so the same plates are the same run's key.
+        return None if ids is None else sorted(set(ids))
+
+    def asked_plates(self) -> list[int] | None:
+        """The plates asked for, in plate order; ``None`` for every plate."""
+        return asked_plates(self.plate_id, self.all_plates, self.plate_ids)
 
 
 class RackOption(BaseModel):
@@ -297,13 +326,14 @@ async def filament_options(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    plate_ids: Sequence[int] | None = None,
     status: asyncio.Future[PrinterStatus | None] | None = None,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
 
     ``all_plates`` answers for every plate of the output at once — one row per slot any
     plate uses, in place of ``plate_id``'s own — which is what an all-plates print
-    needs a spool for.
+    needs a spool for. ``plate_ids`` answers the same way for just those plates (#3652).
 
     Uploads the 3MF only if Bambuddy has no copy of it at all: the plate's slots are
     read out of a *library file*, and any copy of this output has the same slots, so a
@@ -335,12 +365,12 @@ async def filament_options(
             source.file_to_read(client), read_inventory(client), return_exceptions=True
         )
         file = settled(read_file)
-        plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
+        asked = asked_plates(plate_id, all_plates, plate_ids)
         read = await gather_plate_options(
             client,
             library_file_id=file.id,
             printer_id=printer_id,
-            plate_ids=plate_ids,
+            plate_ids=((await source.plate_ids(client)) or [1]) if asked is None else asked,
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
@@ -379,6 +409,7 @@ async def filament_options_for_output(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    plate_ids: Sequence[int] | None = None,
 ) -> FilamentOptions:
     """:func:`filament_options` for an output ScadBuddy rendered."""
     return await filament_options(
@@ -387,6 +418,7 @@ async def filament_options_for_output(
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,
+        plate_ids=plate_ids,
     )
 
 
@@ -678,7 +710,7 @@ async def check_print(
     if source.is_sliced:
         # Queued as it is, never refused (#2671): what to set right first is a warning,
         # and there is no nozzle plan, slots or rack side to judge before it.
-        return PrintCheck(warnings=prepared.warnings)
+        return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(client)
     nozzle_plan = (
         await plan_for(
@@ -756,6 +788,8 @@ async def check_print(
                     read=read,
                 )
             )[1],
+            # #3628: and of a prime tower setting the preset has no value for.
+            *(await prime_tower_warnings(client, process, request.prime_tower, read=read)),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -1016,7 +1050,8 @@ async def prepare_run(
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
     laid_out = await source.plate_ids(client)
-    plate_ids = laid_out if request.all_plates else [request.plate_id]
+    asked = request.asked_plates()
+    plate_ids = laid_out if asked is None else asked
     if not plate_ids:
         # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
         # to queue, and every route below reads the first plate's outcome. Read
@@ -1025,31 +1060,29 @@ async def prepare_run(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
     plate_warnings: list[FilamentWarning] = []
-    if (
-        source.is_sliced
-        and laid_out
-        and request.plate_id not in laid_out
-        and not request.all_plates
-    ):
+    missing = [plate for plate in plate_ids if laid_out and plate not in laid_out]
+    if source.is_sliced and missing:
         # A sliced file is never refused (#2671): the dialog offers only its plates, so
-        # a request for another one prints the file's first instead, and says so.
-        plate_ids = laid_out[:1]
+        # a request for another one prints the rest, or the file's first, and says so.
+        kept = [plate for plate in plate_ids if plate not in missing]
+        if kept:
+            instead = "so it is left out" if len(missing) == 1 else "so they are left out"
+        else:
+            instead = f"so plate {laid_out[0]} is queued instead"
+        plate_ids = kept or laid_out[:1]
         plate_warnings.append(
             FilamentWarning(
                 kind="sliced-plate-missing",
-                message=(
-                    f"This file holds no plate {request.plate_id}, so plate {laid_out[0]}"
-                    " is queued instead."
-                ),
+                message=f"This file holds no {plates_named(missing)}, {instead}.",
             )
         )
-    elif laid_out and request.plate_id not in laid_out and not request.all_plates:
+    elif missing:
         # Bambuddy does not check it either: the run would upload, then fail in the
         # slicer with no reason given (#1320).
         count = f"{len(laid_out)} plate{'s' if len(laid_out) != 1 else ''}"
         raise RunRefusalError(
             f"The 3MF has {count} ({', '.join(map(str, laid_out))}); "
-            f"there is no plate {request.plate_id}.",
+            f"there is no {plates_named(missing)}.",
         )
     printer_id = request.printer_id or settings.printer_id
     if printer_id is None:
@@ -1294,6 +1327,10 @@ async def plan_run(
     supports, support_warnings = await support_overrides(
         client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
+    # Nor a prime tower setting (#3628): it is sent, with a warning when the preset lacks it.
+    # No second round trip: `read` (read_once) answers again what supports just read.
+    tower_warnings = await prime_tower_warnings(client, process, request.prime_tower, read=read)
+    tower_dropped = template_keys_dropped(request.prime_tower)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1360,8 +1397,13 @@ async def plan_run(
             bed_type=resolved.bed_type,
             process_overrides={
                 **from_profiles,
-                **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
+                **{
+                    k: v
+                    for k, v in source.print_settings.items()
+                    if k not in SUPPORT_KEYS and k not in tower_dropped
+                },
                 **supports,
+                **prime_tower_overrides(request.prime_tower),
                 **(
                     {}
                     if request.print_sequence is None
@@ -1427,7 +1469,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware + support_warnings + _reused_notes(planned),
+        warnings=warnings + hardware + support_warnings + tower_warnings + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no
@@ -1535,7 +1577,8 @@ async def _plan_sliced(
         warnings=prepared.warnings
         + _filament_warnings(
             [(options, []) for options in per_plate], request.filament_plan, copies
-        ),
+        )
+        + not_resliced(request.prime_tower),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
     )
@@ -1754,6 +1797,7 @@ async def filament_options_for_library(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    plate_ids: Sequence[int] | None = None,
     filaments: FilamentReader | None = None,
 ) -> FilamentOptions:
     """:func:`filament_options` for a file already in Bambuddy's library (#313); with
@@ -1766,4 +1810,5 @@ async def filament_options_for_library(
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,
+        plate_ids=plate_ids,
     )

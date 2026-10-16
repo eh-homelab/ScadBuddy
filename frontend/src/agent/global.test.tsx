@@ -2,8 +2,8 @@ import { screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
-import { Dialog } from '../components/ui/Dialog'
-import { Button } from '../components/ui/Button'
+import { Button } from '../components/ui/button'
+import { Dialog, DialogContent, DialogTitle } from '../components/ui/dialog'
 import { renderPage } from '../test/utils'
 import { bridge } from './bridge'
 import { USER_ONLY } from './dom'
@@ -44,12 +44,15 @@ function Form({ onSend }: { onSend: () => void }) {
       <input id="key" type="password" defaultValue="" />
       <Button onClick={() => setOpen(true)}>Send to Bambuddy</Button>
       <p role="alert">Name is too long</p>
-      <Dialog open={open} title="Send to Bambuddy" onClose={() => setOpen(false)}>
-        <label htmlFor="copies">Copies</label>
-        <input id="copies" type="number" defaultValue={1} />
-        <Button onClick={onSend} {...USER_ONLY}>
-          Send
-        </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogTitle>Send to Bambuddy</DialogTitle>
+          <label htmlFor="copies">Copies</label>
+          <input id="copies" type="number" defaultValue={1} />
+          <Button onClick={onSend} {...USER_ONLY}>
+            Send
+          </Button>
+        </DialogContent>
       </Dialog>
     </>
   )

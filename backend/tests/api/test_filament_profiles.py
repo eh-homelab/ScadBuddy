@@ -251,10 +251,13 @@ def test_a_bambuddy_error_reading_the_values_skips_the_profile_and_the_print_goe
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
     (warning,) = [w for w in check.json()["warnings"] if w["kind"] == "profile-not-applied"]
-    assert warning["message"].startswith(
-        "Silk PLA profile not applied: couldn't read the preset's outer wall speed ("
+    # The fixed phrase supports.py uses, not the error's detail, which repeats the
+    # operation the sentence already names (#2804 review).
+    assert warning["message"] == (
+        "Silk PLA profile not applied: couldn't read the preset's outer wall speed (the "
+        "read failed (Bambuddy unreachable or answering with an error)). The print uses "
+        "the preset as it is."
     )
-    assert warning["message"].endswith("). The print uses the preset as it is.")
     assert response.status_code == 200, response.text
     assert warning in response.json()["warnings"]
     assert "process_overrides" not in json.loads(sliced.calls.last.request.content)

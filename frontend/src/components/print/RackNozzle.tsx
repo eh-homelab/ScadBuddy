@@ -1,3 +1,7 @@
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import type { RackAlgorithm, RackOption, RackPickView } from '../../api/types'
 import { ALGORITHM_LABELS, flowLabel } from './rackLabels'
 import { Swatch } from './Swatch'
@@ -18,10 +22,10 @@ export function RackNozzleLine({ rack, algorithm }: { rack: RackPickView | null 
   } else if (algorithm === 'bambuddy') text = 'Right nozzle from the rack: Bambuddy picks at dispatch'
   if (text === null) return null
   return (
-    <div className="text-[12.5px] text-ink">
+    <div className="text-[13px]">
       <p data-testid="rack-nozzle-line">{text}</p>
       {rack.glow_unchecked && (
-        <p className="text-[12px] text-muted">A spool is not in the inventory, so Glow could not be checked.</p>
+        <p className="text-xs text-muted-foreground">A spool is not in the inventory, so Glow could not be checked.</p>
       )}
     </div>
   )
@@ -52,72 +56,65 @@ interface StepProps {
  */
 export function RackNozzleStep({ rack, algorithm, position, onAlgorithm, onPosition, algorithmUnsaved }: StepProps) {
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2" data-testid="rack-step">
-      <legend className="px-1 text-[13px] text-ink">Right nozzle, from the rack</legend>
-      <div role="radiogroup" aria-label="Rack nozzle position" className="mt-1.5 flex flex-col gap-1">
-        <label className="flex cursor-pointer items-center gap-2 text-[12px] text-ink">
-          <input
-            type="radio"
-            name="rack-position"
-            checked={position === null}
-            onChange={() => onPosition(null)}
-            className="accent-[var(--sb-accent)]"
-            data-testid="rack-position-auto"
-          />
-          Automatic
-        </label>
-        {(rack?.options ?? []).map((option) => {
-          const ran = lastRan(option)
-          return (
-            <label
-              key={option.position}
-              className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-ink"
-            >
-              <input
-                type="radio"
-                name="rack-position"
-                checked={position === option.position}
-                onChange={() => onPosition(option.position)}
-                className="accent-[var(--sb-accent)]"
-                data-testid={`rack-position-${option.position}`}
-              />
-              {option.color ? <Swatch colour={option.color} size="sm" /> : null}
-              <span>
-                Position {option.position} · {option.nozzle_diameter} {flowLabel(option.flow)}
-                {ran ? ` · ${ran}` : ''}
-              </span>
-              <span className="text-faint">
-                {option.prints} {option.prints === 1 ? 'print' : 'prints'}
-                {option.pending ? ` · ${option.pending} queued` : ''}
-              </span>
-            </label>
-          )
-        })}
-      </div>
-      <div className="mt-2 flex flex-col gap-1">
-        <label htmlFor="rack-algorithm" className="text-[12px] text-muted">
-          Automatic picks by
-        </label>
-        <select
-          id="rack-algorithm"
-          aria-label="Rack algorithm"
-          value={algorithm}
-          onChange={(event) => onAlgorithm(event.target.value as RackAlgorithm)}
-          className="sb-field"
+    <Card size="sm" role="group" aria-labelledby="rack-step" data-testid="rack-step">
+      <CardHeader>
+        <CardTitle id="rack-step" className="text-sm">
+          Right nozzle, from the rack
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <RadioGroup
+          aria-label="Rack nozzle position"
+          value={position === null ? 'auto' : String(position)}
+          onValueChange={(next) => onPosition(next === 'auto' ? null : Number(next))}
+          className="gap-1.5"
         >
-          {(Object.keys(ALGORITHM_LABELS) as RackAlgorithm[]).map((value) => (
-            <option key={value} value={value}>
-              {ALGORITHM_LABELS[value]}
-            </option>
-          ))}
-        </select>
-        {algorithmUnsaved && (
-          <p role="alert" data-testid="rack-algorithm-unsaved" className="text-[12px] text-warn">
-            Not remembered for this printer; this print still uses it.
-          </p>
-        )}
-      </div>
-      <p className="mt-1.5 text-[12px] text-muted">The left nozzle prints with the hotend mounted on it.</p>
-    </fieldset>
+          <Label className="cursor-pointer font-normal">
+            <RadioGroupItem value="auto" data-testid="rack-position-auto" />
+            Automatic
+          </Label>
+          {(rack?.options ?? []).map((option) => {
+            const ran = lastRan(option)
+            return (
+              <Label key={option.position} className="cursor-pointer flex-wrap gap-x-2 gap-y-0.5 font-normal">
+                <RadioGroupItem value={String(option.position)} data-testid={`rack-position-${option.position}`} />
+                {option.color ? <Swatch colour={option.color} size="sm" /> : null}
+                <span>
+                  Position {option.position} · {option.nozzle_diameter} {flowLabel(option.flow)}
+                  {ran ? ` · ${ran}` : ''}
+                </span>
+                <span className="text-muted-foreground">
+                  {option.prints} {option.prints === 1 ? 'print' : 'prints'}
+                  {option.pending ? ` · ${option.pending} queued` : ''}
+                </span>
+              </Label>
+            )
+          })}
+        </RadioGroup>
+        <div className="grid gap-1.5">
+          <Label htmlFor="rack-algorithm" className="text-xs font-normal text-muted-foreground">
+            Automatic picks by
+          </Label>
+          <Select value={algorithm} onValueChange={(next) => onAlgorithm(next as RackAlgorithm)}>
+            <SelectTrigger id="rack-algorithm" aria-label="Rack algorithm" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(ALGORITHM_LABELS) as RackAlgorithm[]).map((value) => (
+                <SelectItem key={value} value={value}>
+                  {ALGORITHM_LABELS[value]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {algorithmUnsaved && (
+            <p role="alert" data-testid="rack-algorithm-unsaved" className="text-xs text-destructive">
+              Not remembered for this printer; this print still uses it.
+            </p>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">The left nozzle prints with the hotend mounted on it.</p>
+      </CardContent>
+    </Card>
   )
 }

@@ -36,6 +36,15 @@ def test_all_plates_may_only_be_turned_off() -> None:
     assert narrowing_problem("queue_print", print_call(), original) is not None
 
 
+def test_chosen_plates_may_only_be_fewer() -> None:
+    """#3652: some of the call's plates, never others, none or a list it had not."""
+    original = print_call(plate_ids=[1, 3, 4])
+    assert narrowing_problem("queue_print", original, print_call(plate_ids=[3])) is None
+    assert narrowing_problem("queue_print", original, print_call(plate_ids=[2])) is not None
+    assert narrowing_problem("queue_print", original, print_call(plate_ids=[])) is not None
+    assert narrowing_problem("queue_print", print_call(), print_call(plate_ids=[1])) is not None
+
+
 @pytest.mark.parametrize(
     ("original", "proposed"),
     [

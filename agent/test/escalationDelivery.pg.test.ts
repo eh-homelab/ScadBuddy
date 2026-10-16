@@ -181,6 +181,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent).toEqual([])
   })
 
+  it("reads a token owner's tiers through the session manager's own lookup (#3349)", async () => {
+    // The lookup says read and write, though the token row says 'outward': it, not a query
+    // of the delivery's own, decides the turn's tiers.
+    const asked: Owner[] = []
+    const shared = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send,
+      currentTiers: async (owner) => (asked.push(owner), owner.id === TOKEN ? ['read', 'write'] : undefined),
+    })
+    await park()
+    expect(await shared.deliver()).toBe(1)
+    expect(asked.map((o) => o.id)).toEqual([TOKEN])
+    expect(sent[0]!.tiers).toEqual(['read', 'write'])
+  })
+
   // Spec §4.4: a script that asks the very session that started the run. That session
   // is in its own turn while the call waits, so it could only wait out the whole hop.
   it("a child that is the starter session is not asked: its call goes to the person at once", async () => {
@@ -256,10 +272,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const id = await park()
     let release!: (err: Error) => void
     const stuck = new Promise<never>((_, reject) => (release = reject))
-    const hanging = new Escalations({ sql: db.sql, durable: () => undefined, send: async () => stuck, claimHoldMs: 200 })
+    let sending!: () => void
+    const claimed = new Promise<void>((resolve) => (sending = resolve))
+    // The hold is long enough for the other replica's check below to run inside it on a
+    // loaded host: at 200 ms it could run after the hold had ended, and take the row.
+    const hanging = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send: async () => {
+        sending()
+        return stuck
+      },
+      claimHoldMs: 1000,
+    })
     // A slow start, not a crash: the tick ends without a failure to report.
     const running = hanging.deliver()
-    // Another replica skips the held row at first, and takes it once the hold ends.
+    // Another replica skips the held row at first, and takes it once the hold ends. The
+    // row is held once the send has started: `deliver` reads before it claims.
+    await claimed
     expect(await escalations.deliver()).toBe(0)
     await vi.waitFor(async () => expect(await escalations.deliver()).toBe(1), { timeout: 5000, interval: 100 })
     expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
@@ -305,6 +335,56 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const newer = await flowRun()
     expect(await escalations.deliver()).toBe(1)
     expect(sent[0]!.text).toContain(newer)
+  })
+
+  it("runs whose parent-hop calls timed out do not keep a newer run's call out of the batch (#3411)", async () => {
+    // Timed out but not moved on yet (moveDue runs on its own tick): they yield nothing.
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() - 60_000).toISOString(), hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    // One statement, not 200: keeps this test quick under CI load.
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      SELECT id, 'd1', 1, 'swap', 'waiting', 'flow-' || id, 'wr1',
+             ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour'
+      FROM (SELECT gen_random_uuid()::text AS id FROM generate_series(1, 200)) runs`
+    const newer = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(newer)
+  })
+
+  // #3494 review: a malformed hop_until skips that call, never the scan of every run.
+  it('skips a call whose hop_until is malformed and still delivers the others', async () => {
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    const bad = randomUUID()
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: 'not a time', hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      VALUES (${bad}, 'd1', 1, 'swap', 'waiting', ${`flow-${bad}`}, 'wr1',
+              ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+    const good = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(good)
+  })
+
+  it("judges a call's hop and its grace by Postgres's clock, not a skewed replica's (#3411)", async () => {
+    const ownCall = await flowRun()
+    const unlogged = await park(parent, child, TOKEN, `toolu_${randomUUID()}`, false)
+    // This replica's clock runs 15 minutes fast: past the own call's hop (10 minutes) and
+    // the unlogged call's grace, though neither has passed.
+    const now = Date.now()
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15 * 60_000)
+    try {
+      expect(await escalations.deliver()).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(sent[0]!.text).toContain(ownCall)
+    expect(sent[0]!.text).not.toContain(unlogged)
+    expect(await hop(unlogged)).toMatchObject({ hop: 'parent', delivered: false })
   })
 
   it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {

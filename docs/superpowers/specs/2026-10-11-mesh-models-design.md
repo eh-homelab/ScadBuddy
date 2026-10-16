@@ -1,6 +1,6 @@
 # Mesh models: open a 3MF/STL as an editable scene (#2146)
 
-Status: design, approved in conversation 2026-10-11; implementation plan to follow.
+Status: phases 1–2 merged (#2585); phase 3 built (plan docs/superpowers/plans/2026-10-13-mesh-models-phase-3.md).
 Related: #959 (mesh assets), #1252 (meshes into Bambuddy), #2330 (hand placement in
 Arrange, shares the gizmos of §8).
 
@@ -168,8 +168,8 @@ becomes that many scene objects sharing its meshes, and the objects start in a r
 along X with 5 mm gaps, their printed parts resting on Z=0 (a negative part may reach
 below the bed). Then compile `model.scad`, write `model.json` with `mesh_source`, the
 provenance (source kind, id, name, sha256, and the licence when the source states one),
-one git commit. A painted part's paint is kept beside its mesh but not carried into
-renders or prints until §7 (phase 3); its object's note says so. `meshes/` as a whole is held to the same
+one git commit. A painted part's paint is kept beside its mesh and carried into
+renders and prints (§7). `meshes/` as a whole is held to the same
 cap. Nothing is written to Bambuddy.
 
 `meshes/` is the only place binary files are written; `PUT …/files/{name}` stays
@@ -263,12 +263,13 @@ No new workflow type and no new queue.
 
 OpenSCAD drops painting: its output triangles carry only material indices. A painted
 part's paint is carried over after the render, by a step in the default pipeline that
-runs only when the model has a scene with a painted part:
+runs only when the model has a scene with a painted part (built as a stage of the piece's `render_solids` activity, below):
 
 1. Read the source part's mesh and `.paint.json` (codes per source face), and the
    object's ops and transform, from the revision.
-2. For each output triangle of that part's colour solid, transform its centroid back
-   into the source mesh's frame and find the nearest source face (trimesh proximity).
+2. For each output triangle of that part's colour solid, find the nearest source face in world
+   coordinates (the source part's mesh is placed there by its object's transform, as built in
+   `meshmodel/paint.py` `_source`; the output is not transformed back) (a numpy nearest-triangle search, `render/meshmatch.py`: trimesh's proximity queries need rtree, which is not installed).
    - The output triangle is the same triangle (all three vertices within 1e-4 mm of the
      source face's): it takes the source code verbatim, so painting finer than the
      triangle survives.
@@ -277,11 +278,34 @@ runs only when the model has a scene with a painted part:
      the part's own colour (code empty).
 3. The codes become the part's `Paint`, which the 3MF writer already writes.
 
-The step is an activity on the render queue (`pipeline_activities.py`), run between the
-pieces and `pack`. Its fidelity is measured in §10 (share of painted faces carried
-verbatim on an op-free and on a cut object). Where it cannot carry paint (a part mirrored
-by a negative scale) `get_scene` and the edit answer warn, and the part renders in its
-own colour.
+Measured 2026-10-13 (openscad/openscad:dev.2026-10-12, file 688 op-free): every output
+triangle matched its source within 1e-4 mm, but OpenSCAD's import holds coordinates as
+32-bit floats (only 87 % shared a 1e-4 mm grid cell, so the match is by distance), and
+about two thirds started at another vertex: a copied code also turns its triangle's
+vertices back to the source's order, since a code splits its triangle by vertex position.
+The step runs in the piece's `render_solids` activity (a `paint` stage, `render/jobs.py`
+`paint_layout`), not between the pieces and `pack`: `pack` sees only boxes, and every
+3MF (the piece's own, an output's, an arranged one's) is written from the piece's
+`layout.json`, which names each painted part's carried codes (`PartSource.paint`,
+`meshmodel/paint.py`). Its fidelity is measured in §10 (share of painted faces carried
+verbatim on an op-free and on a cut object). A mirrored part keeps the colour of each
+triangle that is one colour (rule 2); only finer painting is lost, and `get_scene` and the
+render's warnings say so. `get_scene`'s mirror note reads the scene's own transform values,
+not the render's parameters: an exposed negative scale could flip it at render.
+
+As built, beyond the above:
+
+- Paint is carried only into one-plate renders of the model's own `model.scad`; a
+  multi-plate render is not painted, silently.
+- A hand-edited `model.scad` (its sha256 no longer `generated_sha256`) or an unreadable
+  paint or scene file skips the transfer with a render warning (`PAINT_NOT_CARRIED`,
+  `render/jobs.py`; the hand-edit warning in `meshmodel/paint.py`); the render succeeds.
+- `nearest_triangles` has a 20 000 000 candidate-pair budget (`MAX_NEAR_PAIRS`) past which
+  non-verbatim faces take the part's own colour.
+- The preview GLB stays unpainted until phase 4.
+- Known limitation: a piece rendered and cached before this shipped, at the same revision
+  and parameters, is reused without paint until the next parameter or scene change
+  (`piece_key` carries no code version; unchanged by design).
 
 ## 8. UI (phase 4)
 
@@ -301,12 +325,28 @@ still shows exposed parameters.
 
 ## 9. Weak joints (`analyze_geometry`)
 
-`render/geometry.py` gains `weak_joints`: for each part, sections at every layer height
+`render/geometry.py` gains `weak_joints`: for each piece, sections at every layer height
 (0.2 mm default) along print Z; a section whose area is below 25 % of the larger of the
 sections 2 mm below and above, with at least 1 cm³ of the part's volume above it, is reported
 with its Z, area, and a suggested `split_at_plane` (the plane, and a joint sized to the
 section). The agent's carrot loop: `analyze_geometry` → `edit_scene` with the suggested
 split → `lay_flat` the tuft → render → `analyze_geometry` again.
+
+As built (plan 2026-10-13): sections are of each *piece* (a part's connected islands,
+joined across parts where they share a vertex), since a part is one colour across the
+whole plate; only sections whose centroid lies inside them are reported (on file 688 the
+rule also flagged a planter's walls over its floor and a hollow carrot body, both rings);
+the volume above is the layer areas above times the layer height; and the suggestion's
+`object` is filled by `GET /outputs/{id}/geometry` for a mesh model's unarranged output
+whose record names a commit (`meshmodel/locate.py`), null otherwise. The analysis examines
+at most 64 pieces (largest by volume, `MAX_WEAK_PIECES`), measures at most 80 sections
+(`MAX_WEAK_ATTEMPTS`) and reports at most 20 joints (`MAX_WEAK_JOINTS`), all in
+`render/geometry.py`. A piece taller than 400 mm is cut into at most 2000 layers
+(`MAX_WEAK_LAYERS`), so its layers are thicker than 0.2 mm (the window stays 2 mm). Only
+layers with a full window of the piece below them are candidates, so a ball's or a
+cone's rounded bottom is not a joint (near the top the 1 cm³ above rules a tip out). An
+exposed cut point's attribution (`locate.object_at`) uses the scene's own value, not the
+render's parameters, like the mirror note in §7.
 
 ## 10. Testing
 
@@ -330,7 +370,9 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
   made with OpenSCAD in the verify run (never a user's library file), split, jointed,
   laid flat, rendered.
 - Agent: tool tests for the four tools; an eval scenario "the leaves of this carrot
-  snap off; fix it" on the demo mesh, scored on the edits made and the render.
+  snap off; fix it" on the demo's unsplit carrot, seeded in the recorded backend
+  (`agent/evals/scenarios.ts` `mesh-carrot-weak-neck`), scored on the edits made and the
+  render that follows them.
 - Frontend (phase 4): vitest for the scene panel and edit dispatch; a Playwright e2e on
   msw for a drag that sends one `scene_edit`.
 
@@ -343,7 +385,7 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 2. Editing: `scene_edit` with every edit of §5, `scene_eject`, `edit_scene`,
    `eject_scene`, the demo template. Acceptance: the carrot split, jointed and laid flat
    by the agent, saved and printed.
-3. Paint transfer (§7) and `weak_joints` (§9).
+3. Paint transfer (§7) and `weak_joints` (§9), with the carrot eval (§10). Acceptance: file 688's painted leaves print green, anchored or not (`backend/tests/test_mesh_models_paint.py`).
 4. Scene editor UI (§8).
 
 Each phase is its own PR; the plan covers phases 1 and 2 first.

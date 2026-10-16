@@ -8,6 +8,7 @@ import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_UI_VERSIO
 import { setMockPresets } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { selectOption } from '../test/select'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
 import { renderPage } from '../test/utils'
@@ -255,13 +256,13 @@ describe('CustomizePage with a template UI', () => {
 
     // Saving remounts the picker, so the select is found again each time.
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('Another'), { timeout: 5000 })
     const select = preset()
     // Nothing on screen differs from it, so picking the other one loses nothing.
-    await user.selectOptions(select, 'From the UI')
+    await selectOption(user, select, 'From the UI')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(select).toHaveDisplayValue('From the UI')
+    expect(select).toHaveTextContent('From the UI')
   })
 
   it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
@@ -282,10 +283,10 @@ describe('CustomizePage with a template UI', () => {
 
     await host!.presets.load(one.id)
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('One'), { timeout: 5000 })
     const select = preset()
-    await user.selectOptions(select, 'Two')
+    await selectOption(user, select, 'Two')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
   })
@@ -307,15 +308,15 @@ describe('CustomizePage with a template UI', () => {
     await host!.presets.save('Two')
     await host!.presets.load(one.id)
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Two')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('One'), { timeout: 5000 })
+    await selectOption(user, preset(), 'Two')
 
     // The template UI fails: the picker moves into the generated form's toolbar.
     host!.openPrint('not-on-screen')
     await screen.findByRole('textbox', { name: 'Name on the tag' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    expect(preset()).not.toHaveDisplayValue('One')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    expect(preset()).not.toHaveTextContent('One')
     expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
   })
 
@@ -342,8 +343,8 @@ describe('CustomizePage with a template UI', () => {
     const { user } = open(UI_DEMO_SLUG)
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Plain')
     await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -378,8 +379,8 @@ describe('CustomizePage with a template UI', () => {
     const { user } = open(UI_DEMO_SLUG)
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Plain')
     await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -799,8 +800,8 @@ describe('the page slot', () => {
     )
     const { user } = open(UI_DEMO_SLUG)
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Old' })).toBeInTheDocument(), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Old')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Old')
 
     const workspace = screen.getByTestId('workspace')
     const saved = await within(workspace).findByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
@@ -816,11 +817,15 @@ describe('the page slot', () => {
     // container around the textarea, and no overflow-hidden to clip a long error.
     expect(alert).toHaveClass('max-h-[30vh]')
     expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
+    // And the textarea shrinks to fit too, scrolling inside itself, rather than spilling
+    // out of the 30vh box over the template where 30vh is under its 4 rows.
+    expect(saved).toHaveClass('min-h-0')
+    expect(saved).not.toHaveClass('shrink-0')
     for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
       expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
     }
 
-    await user.selectOptions(preset(), 'Current')
+    await selectOption(user, preset(), 'Current')
     await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
   })
 
