@@ -68,9 +68,9 @@ export class InMemoryTokenStore implements TokenStore {
     return !record.expiresAt || record.expiresAt.getTime() > now.getTime()
   }
 
-  async liveTier(id: string, now: Date = new Date()): Promise<Tier | null> {
+  async liveTier(id: string): Promise<Tier | null> {
     const record = this.#byId.get(id)?.record
     if (!record || record.revokedAt) return null
-    return !record.expiresAt || record.expiresAt.getTime() > now.getTime() ? record.tier : null
+    return !record.expiresAt || record.expiresAt.getTime() > Date.now() ? record.tier : null
   }
 }

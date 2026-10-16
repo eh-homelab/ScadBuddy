@@ -425,9 +425,9 @@ export class Escalations {
     try {
       rows = await this.#deps.sql`
         SELECT id, workflow_run_id, started_by, waiting_on, steps,
-               -- The calls whose hop is live (hopLive).
+               -- The parent-hop approvals whose hop is live (hopLive).
                (SELECT coalesce(jsonb_agg(w->>'call_id'), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w
-                 WHERE ${hopLive}) AS live
+                 WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval' AND ${hopLive}) AS live
         FROM workflow_runs r
         WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
           -- Before the limit: runs whose calls were all delivered already, still at hop
