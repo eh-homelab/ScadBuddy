@@ -198,6 +198,17 @@ describe('LibraryPage', () => {
     expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
   })
 
+  it('selects nothing a search hides: Select all and its hint wait for the folder (#2757 review)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Raegan' })
+    await screen.findByTestId('library-file-140')
+    expect(screen.getByTestId('library-select-all')).toBeEnabled()
+    await user.type(screen.getByRole('searchbox', { name: 'Search the library' }), 'bag clip')
+    await screen.findByTestId('library-search-summary')
+    expect(screen.getByTestId('library-select-all')).toBeDisabled()
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
+    expect(screen.queryByTestId('library-project')).toBeNull()
+  })
+
   it('adds each file once, however fast Select all in folder is pressed (#2757 review)', async () => {
     renderPage(<LibraryPage />, { route: '/library?project=1' })
     await screen.findByTestId('library-file-140')

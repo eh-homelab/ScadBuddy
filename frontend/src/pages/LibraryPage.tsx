@@ -564,10 +564,12 @@ export function LibraryPage() {
     scrolled.current = key
     card.scrollIntoView?.({ block: 'center' })
   }, [fileParam, listing])
-  const currentFolder = tree?.find((folder) => folder.id === folderId)
 
-  /** #2724 — every listed printable file of this folder, ticked at once. */
-  const listedPrintable = files.filter((file) => file.printable)
+  /** #2724 — every listed printable file of this folder, ticked at once: only while that
+   * folder's listing is what is on screen, never under a search's results or while
+   * another folder loads (#2757 review). */
+  const listingShown = !searching && showFiles && listing !== null && (listing.folder_id ?? null) === folderId
+  const listedPrintable = listingShown ? files.filter((file) => file.printable) : []
   const unpicked = listedPrintable.filter((file) => !isPicked(file))
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
 
@@ -777,7 +779,12 @@ export function LibraryPage() {
               variant="ghost"
               data-testid="library-select-all"
               disabled={unpicked.length === 0}
-              onClick={() => setPicked((now) => [...now, ...unpicked.filter((file) => !now.some((p) => p.id === file.id))])}
+              onClick={() =>
+                setPicked((now) => {
+                  const ids = new Set(now.map((p) => p.id))
+                  return [...now, ...unpicked.filter((file) => !ids.has(file.id))]
+                })
+              }
             >
               {/* What it adds: this folder's unticked files, whatever is ticked elsewhere. */}
               Select all in folder ({unpicked.length})
@@ -812,7 +819,7 @@ export function LibraryPage() {
               Advanced lists every file, sliced files and STLs too.
             </span>
           </header>
-          {currentFolder?.project_id != null && listedPrintable.length > 0 && (
+          {folder?.project_id != null && listedPrintable.length > 0 && (
             // Not in an empty folder, where Select all is disabled (#3112).
             <p className="text-[13px] text-subtle" data-testid="library-project">
               Select all in folder, then Print, to print this project's files in one batch.

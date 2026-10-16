@@ -197,6 +197,7 @@ export function LibraryTree({
     const open = expanded.has(folder.id)
     const branch = hasChildren(folder.id)
     const isSelected = selectedKey === folder.id
+    const countText = fileCountText(folder)
     const row = (
       <div
         data-row
@@ -239,9 +240,9 @@ export function LibraryTree({
             {folder.file_count}
           </Badge>
         ) : null}
-        {fileCountText(folder) && (
+        {countText && (
           <span id={`${testIdPrefix}-count-${folder.id}`} className="sr-only">
-            {fileCountText(folder)}
+            {countText}
           </span>
         )}
       </div>
@@ -255,7 +256,7 @@ export function LibraryTree({
           aria-selected={isSelected}
           aria-expanded={branch ? open : undefined}
           aria-label={folder.name}
-          aria-describedby={fileCountText(folder) ? `${testIdPrefix}-count-${folder.id}` : undefined}
+          aria-describedby={countText ? `${testIdPrefix}-count-${folder.id}` : undefined}
           tabIndex={tabStop === folder.id ? 0 : -1}
           data-testid={`${testIdPrefix}-${folder.id}`}
           onKeyDown={(event) => onKeyDown(event, folder.id)}
