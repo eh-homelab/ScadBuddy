@@ -8,7 +8,7 @@ function workspace(files: Record<string, string>): FileToolContext {
   const info = (path: string): WorkspaceFileInfo => ({
     path,
     mediaType: 'text/plain',
-    size: files[path]!.length,
+    size: Buffer.byteLength(files[path]!),
     sha256: '',
     source: null,
     createdAt: new Date(0),
