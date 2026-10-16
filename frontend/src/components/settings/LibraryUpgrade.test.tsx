@@ -471,16 +471,40 @@ describe('LibraryUpgrade', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('keeps the chosen library on screen while a removal re-lists the checkouts', async () => {
+  it('keeps the chosen library, its checks and its ticks on screen while a removal re-lists the checkouts', async () => {
     setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
-    const { user } = renderPage(<LibraryUpgrade />)
-    await choose(user, await screen.findByLabelText('Library'), 'BOSL2')
-    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    const { user } = await open()
+    // A checked, ticked row: the state the old reload threw away.
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    await within(row('Name Keychain')).findByTestId('library-check')
+    await user.click(screen.getByRole('checkbox', { name: 'Move Name Keychain' }))
+    const list = screen.getByRole('list', { name: 'Checkouts no model uses' })
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
     await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
     // No "Loading libraries" in between: the library, its checks and ticks stay.
     expect(screen.queryByText('Loading libraries')).toBeNull()
     expect(screen.getByLabelText('Library')).toHaveTextContent('BOSL2')
+    expect(within(row('Name Keychain')).getByTestId('library-check')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeChecked()
+  })
+
+  it('says so when a removal could not re-list the checkouts (#3548)', async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    let removed = false
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => {
+        removed = true
+        return undefined
+      }),
+      // Only the re-list after the removal fails.
+      http.get('/api/v1/libraries/installed', () =>
+        removed ? problem(503, 'Unavailable', 'the store is down') : undefined,
+      ),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not re-list the checkouts')
   })
 
   it("says why a removal was refused, and keeps the row", async () => {
