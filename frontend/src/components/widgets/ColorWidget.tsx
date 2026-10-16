@@ -85,6 +85,8 @@ export function ColorWidget({
                 // The picker takes only #rrggbb; while the text is no colour it shows black.
                 value={(colour ?? '#000000').toLowerCase()}
                 // Not the caption itself, which names the hex field: fill finds that one alone.
+                // That holds while the popover is non-modal; a modal one would narrow fill's
+                // search to itself (agent/dom activeDialog) and find no field by the caption.
                 aria-label={`${paramLabel(param)} picker`}
                 onChange={(event) => commit(event.target.value)}
                 className="h-8 w-14 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"

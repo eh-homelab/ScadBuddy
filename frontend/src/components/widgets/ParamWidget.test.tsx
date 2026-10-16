@@ -526,6 +526,10 @@ describe('color', () => {
     await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
     const picker = document.querySelector('input[type="color"]')
     expect(picker).toHaveValue('#1b6ca8')
+    // #3672 — the caption names the hex field alone, open popover or not, so the
+    // agent's fill by caption finds one field.
+    expect(screen.getByLabelText('Plate picker')).toBe(picker)
+    expect(screen.getAllByLabelText('Plate')).toEqual([screen.getByRole('textbox', { name: 'Plate' })])
     expect(screen.getAllByDisplayValue('#1B6CA8')).not.toHaveLength(0)
   })
 })
