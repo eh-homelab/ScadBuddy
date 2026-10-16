@@ -32,7 +32,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
 from tests.support.activities import demo_paths, piece_request, worker_deps
-from tests.support.store import overwrite_object
+from tests.support.store import local_content, overwrite_object
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
@@ -45,6 +45,12 @@ def worker(root: Path, content: ContentStore, **kw: float) -> CachedBlobStore:
         max_bytes=int(kw.get("max_bytes", 1 << 30)),
         min_age=kw.get("min_age", 0.0),
     )
+
+
+@pytest.fixture
+def local_store(tmp_path: Path, pool: Pool) -> ContentStore:
+    """For the tests of the worker's own cache, which never reach the backend's files."""
+    return local_content(tmp_path / "remote", pool)
 
 
 async def test_a_published_piece_is_fetched_once_on_another_worker(
@@ -138,9 +144,9 @@ def test_packing_is_deterministic_and_leaves_out_dotfiles(tmp_path: Path) -> Non
 
 
 async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
-    tmp_path: Path, content: ContentStore
+    tmp_path: Path, local_store: ContentStore
 ) -> None:
-    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    a = worker(tmp_path / "a", local_store, max_bytes=0, min_age=60.0)
     for key in ("old", "recent"):
         (a.dir_for(key) / "m").write_bytes(b"x" * 10)
         await a.publish(key, scope=SCOPE)
@@ -157,11 +163,11 @@ async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
 
 
 async def test_a_publish_or_a_download_over_the_cap_trims_the_cache(
-    tmp_path: Path, content: ContentStore
+    tmp_path: Path, local_store: ContentStore
 ) -> None:
     """#689: the cap holds between the periodic passes, keeping what is in flight."""
-    a = worker(tmp_path / "a", content, max_bytes=25, min_age=60.0)
-    b = worker(tmp_path / "b", content, max_bytes=1 << 30, min_age=60.0)
+    a = worker(tmp_path / "a", local_store, max_bytes=25, min_age=60.0)
+    b = worker(tmp_path / "b", local_store, max_bytes=1 << 30, min_age=60.0)
     (b.dir_for("k") / "m").write_bytes(b"x" * 10)
     await b.publish("k", scope=SCOPE)
     past = time.time() - 3600
@@ -182,12 +188,12 @@ async def test_a_publish_or_a_download_over_the_cap_trims_the_cache(
 
 
 async def test_only_one_eviction_pass_runs_at_a_time(
-    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, local_store: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A write's trim and the periodic pass never scan and remove side by side."""
     from scadbuddy.store import cache as cache_module
 
-    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    a = worker(tmp_path / "a", local_store, max_bytes=0, min_age=60.0)
     (a.dir_for("old") / "m").write_bytes(b"x" * 10)
     past = time.time() - 3600
     os.utime(a.local.root / "old", (past, past))
@@ -209,11 +215,11 @@ async def test_only_one_eviction_pass_runs_at_a_time(
 
 
 async def test_eviction_skips_a_directory_touched_after_the_scan(
-    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, local_store: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from scadbuddy.store import cache as cache_module
 
-    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    a = worker(tmp_path / "a", local_store, max_bytes=0, min_age=60.0)
     (a.dir_for("claimed") / "m").write_bytes(b"x" * 10)
     past = time.time() - 3600
     os.utime(a.local.root / "claimed", (past, past))
@@ -230,18 +236,18 @@ async def test_eviction_skips_a_directory_touched_after_the_scan(
 
 
 async def test_an_eviction_cut_short_leaves_no_hit_behind(
-    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, local_store: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#1271: a worker killed mid-removal leaves a directory whose marker no longer
     claims the published bytes, so the next fetch downloads it again."""
-    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    a = worker(tmp_path / "a", local_store, max_bytes=0, min_age=60.0)
     (a.dir_for("old") / "m").write_bytes(b"x" * 10)
     await a.publish("old", scope=SCOPE)
     past = time.time() - 3600
     os.utime(a.local.root / "old", (past, past))
 
     def killed_part_way(path: Path, *args: object, **kwargs: object) -> None:
-        (path / "m").unlink()  # the content goes first; the process dies before the rest
+        (path / "m").unlink()  # the local_store goes first; the process dies before the rest
         raise SystemExit
 
     monkeypatch.setattr(shutil, "rmtree", killed_part_way)

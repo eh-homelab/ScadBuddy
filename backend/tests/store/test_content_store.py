@@ -46,17 +46,18 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(
 ) -> None:
     store = content
     first = await store.put("asset", b"<svg/>", name="a.svg", scope=SCOPE)
-    uploads: list[str] = []
+    uploads = 0
     upload = store.backend.upload
 
     async def counting(*args: Any, **kwargs: Any) -> str:
-        uploads.append(args[0])
+        nonlocal uploads
+        uploads += 1
         return await upload(*args, **kwargs)
 
     monkeypatch.setattr(store.backend, "upload", counting)
     again = await store.put("asset", b"<svg/>", name="b.svg", scope=SCOPE)
     assert first == again
-    assert uploads == []  # not uploaded a second time
+    assert uploads == 0  # not uploaded a second time
     assert await store.read(first) == b"<svg/>"
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})

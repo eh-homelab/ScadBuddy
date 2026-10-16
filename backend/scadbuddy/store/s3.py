@@ -96,6 +96,10 @@ class S3ContentBackend:
                 )
             return client
 
+    async def client(self) -> S3Client:
+        """The backend's client, opened on first use."""
+        return await self._s3()
+
     async def aclose(self) -> None:
         await self._exits.aclose()
         self._client = None

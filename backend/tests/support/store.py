@@ -73,7 +73,7 @@ async def overwrite_object(store: ContentStore, backend_id: str, data: bytes) ->
     """Replace a stored object's bytes behind the store's back."""
     backend = store.backend
     if isinstance(backend, S3ContentBackend):
-        client = await backend._s3()
+        client = await backend.client()
         await client.put_object(Bucket=backend.settings.bucket, Key=backend_id, Body=data)
     else:
         assert isinstance(backend, LocalContentBackend)
