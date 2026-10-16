@@ -246,6 +246,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/meshmodel/` — mesh models (#2146, spec 2026-10-11): `scene.py`,
+  `compile.py`, `edits.py`, `shared.py` (what `edits` shares with the render and geometry
+  analysis, which must not import `edits`: `JointSpec`, `WALL`, `MeshOf`, `SceneEditError`,
+  `transform_matrix`), `operations.py` (the `library` kinds), `paint.py` (paint
+  transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
+  render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
+  codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
+  `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
+  matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
@@ -258,11 +267,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   update-with-start, the one way a route starts a command, spec 2026-10-01 §4.2). The
   `bambuddy` queue's worker runs inside the API process until #1060.
   Housekeeping (#1054): `housekeeping.py` (`Housekeeping`, `ensure_schedule`), the
-  periodic sweeps as Temporal Schedules (every sweep, and the render prune on its own
-  300 s one) on the `library` queue
-  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
-  process (it holds the data volume). A new periodic pass is an activity in its
-  `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
+  periodic sweeps as Temporal Schedules (every sweep, and `PRUNE_SWEEPS` on its own
+  300 s one: the render prune, claims, lost slice starts and activity) on the `library`
+  queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker also runs inside the API
+  process (it holds the data volume). Sweeps off (`asset_sweep_interval` 0) deletes the
+  first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
+  (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
+  activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
   requests stay in-process (`render/previews.py` `PreviewScheduler`).

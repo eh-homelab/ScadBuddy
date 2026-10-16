@@ -70,6 +70,10 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'profile-not-applied': 'text-warn',
   // #1899 — supports asked for and left out: the print differs from what was chosen.
   'supports-not-applied': 'text-warn',
+  // #3628 — a prime tower setting the process preset has no value for, sent anyway.
+  'prime-tower-unconfirmed': 'text-warn',
+  // #3628 — a prime tower chosen for an already-sliced file, which queues as it is.
+  'prime-tower-not-applied': 'text-warn',
   // #2671 — a sliced file queued as it is: what to set right before starting it.
   'sliced-other-model': 'text-warn',
   'sliced-nozzle-missing': 'text-warn',
@@ -319,7 +323,21 @@ export function FilamentPicker({
           return (
             // min-w-0: a fieldset defaults to min-inline-size: min-content, so without it
             // the slot grows to its widest row and runs off a phone's screen (#944).
-            <fieldset key={slot.slot_id} className="min-w-0" data-testid={`filament-slot-${slot.slot_id}`}>
+            <fieldset
+              key={slot.slot_id}
+              className="min-w-0"
+              data-testid={`filament-slot-${slot.slot_id}`}
+              onKeyDown={(event) => {
+                // #3636 — Escape in an opened list closes that list, not the print
+                // dialog around it: the dialog's Escape listener is on `document`,
+                // which a stopped event never reaches.
+                if (event.key !== 'Escape' || !opened.has(slot.slot_id) || chosen === null) return
+                event.stopPropagation()
+                event.preventDefault()
+                setOpen(slot.slot_id, false)
+                event.currentTarget.querySelector<HTMLElement>(`[data-testid="change-slot-${slot.slot_id}"]`)?.focus()
+              }}
+            >
               <legend className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-ink">
                 Slot {slot.slot_id}
                 {/* The file's own colour for this slot, labelled so it is not read as a

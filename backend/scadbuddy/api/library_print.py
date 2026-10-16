@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -49,10 +50,15 @@ from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plai
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
-from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
+from scadbuddy.bambuddy.library_listing import (
+    LibraryListing,
+    LibrarySearch,
+    list_library,
+    search_library,
+)
 from scadbuddy.bambuddy.library_view import (
     SPOOL_DIRNAME,
     NotViewableError,
@@ -101,6 +107,7 @@ from scadbuddy.library.library_write_operations import (
     LibraryFolderUpdate,
 )
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from scadbuddy.library_search.component import LibraryIndexDep
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -145,6 +152,98 @@ async def get_library(
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+#: The most file ids one names lookup reads, and how many it asks Bambuddy at once.
+NAMES_MAX = 100
+NAMES_AT_ONCE = 8
+
+
+class LibraryFileName(BaseModel):
+    """#2349 — one library file as a row that names it shows it."""
+
+    id: int
+    name: str | None = Field(description="Null when Bambuddy no longer has the file")
+    folder_id: int | None = None
+
+
+@router.get(
+    "/names",
+    response_model=list[LibraryFileName],
+    summary="Library files' names, by id",
+)
+async def get_library_names(
+    store: SettingsStoreDep,
+    ids: Annotated[list[Annotated[int, Field(ge=1)]], Query(min_length=1, max_length=NAMES_MAX)],
+) -> list[LibraryFileName]:
+    """Each file's name and folder, in the order asked (a repeated id once), read from
+    Bambuddy one file at a time, so a page that labels a few ids (Settings → Remembered
+    choices, #2349) need not list the whole library. A file Bambuddy no longer has is
+    ``name: null``; any other failure is the route's, and cancels the other reads before
+    the client closes. When several files are asked and Bambuddy has none of them, that
+    reads as a misrouted base URL rather than every file deleted, so it is a 502: a page
+    then shows the ids, never "deleted file" on every row, which invites a wrong Forget."""
+    gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    unique = list(dict.fromkeys(ids))
+    async with client_for(store.load()) as client:
+
+        async def one(file_id: int) -> LibraryFileName:
+            async with gate:
+                try:
+                    file = await client.library_file(file_id)
+                except ApiError as error:
+                    if error.status != status.HTTP_404_NOT_FOUND:
+                        raise
+                    return LibraryFileName(id=file_id, name=None)
+            return LibraryFileName(id=file_id, name=file.filename, folder_id=file.folder_id)
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(one(file_id)) for file_id in unique]
+        except BaseExceptionGroup as group_error:
+            # The read's own error (the 401 that is a 409, say), not an ExceptionGroup.
+            raise group_error.exceptions[0] from None
+    names = [task.result() for task in tasks]
+    if len(names) > 1 and all(file.name is None for file in names):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Bambuddy has none of these library files; is its URL right?",
+        )
+    return names
+
+
+@router.get(
+    "/search", response_model=LibrarySearch, summary="Find library files by name, in every folder"
+)
+async def get_library_search(
+    store: SettingsStoreDep,
+    index: LibraryIndexDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    q: Annotated[str, Query(max_length=200)],
+    show_all: Annotated[bool, Query(alias="all")] = False,
+    fresh: bool = False,
+) -> LibrarySearch:
+    """The files whose name, or the path of their folder, holds every word of ``q`` as a substring,
+    whatever the case or a separator ``_ - . ( ) [ ]`` (#3630); each names its
+    ``folder_path``. Without ``all`` only unsliced 3MFs, as the listing; ``hidden``
+    counts the matches only ``all`` lists. At most 100 files, ``total`` how many
+    matched.
+
+    Bambuddy has no search, so its whole library is read at once and kept in this
+    process: answered from it for 30 s, and for 10 minutes after while one read
+    replaces it in the background. ``fresh`` waits for a read that started after the
+    request did or at most 2 s before it (a kept read that started then counts too), as
+    the page asks after its own changes."""
+    config = BambuddyConfig.from_settings(store.load())
+    source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
+    # One config for the key and the client, so the two cannot drift apart.
+    snapshot = await index.snapshot(source, partial(BambuddyClient, config), fresh=fresh)
+    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all)
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
+    for entry in found.files:
+        entry.output_id = made.get(entry.id)
+    return found
 
 
 @router.post(

@@ -96,6 +96,10 @@ WarningKind = Literal[
     # #1899: a support setting left out because the preset's shape for it is unknown:
     # its values could not be read, or it has no value (or an empty one) for that key.
     "supports-not-applied",
+    # #3628: a prime tower setting the process preset has no value for, sent anyway.
+    "prime-tower-unconfirmed",
+    # #3628: a prime tower chosen for an already-sliced file, which queues as it is.
+    "prime-tower-not-applied",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",
     "sliced-nozzle-missing",
@@ -554,7 +558,12 @@ def _anchor_family(
 ) -> set[str]:
     """The family an all-undeclared plate is suggested in (#2850): the one whose
     spools match the most slots with a loaded spool, then the most slots at all, then
-    the best single match."""
+    the best single match.
+
+    It counts slots, not spools: one loaded spool whose colour fits three slots beats
+    two loaded spools that fit two, since an undeclared slot can share a loaded spool.
+    A spool with no material is the family ``""``; if that wins, only material-less
+    spools are suggested for the undeclared slots."""
     loaded: dict[str, set[int]] = {}
     matched: dict[str, set[int]] = {}
     best: dict[str, tuple[float, int]] = {}

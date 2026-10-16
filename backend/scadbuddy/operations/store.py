@@ -129,8 +129,8 @@ class OperationStore:
         """End a running operation; a retried end finds it ended and changes nothing."""
         return await asyncio.to_thread(self._finish, op_id, result, error)
 
-    async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
-        """``(operation id, workflow id, workflow run id)`` of each operation still
+    async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str, str]]:
+        """``(operation id, workflow id, workflow run id, kind)`` of each operation still
         ``running`` that was accepted more than ``older_than`` ago."""
         return await asyncio.to_thread(self._running_executions, older_than)
 
@@ -266,11 +266,13 @@ class OperationStore:
             raise LookupError(f"there is no operation {op_id}")
         return Operation.model_validate(current)
 
-    def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
+    def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str, str]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, workflow_id, workflow_run_id FROM operations"
+                "SELECT id, workflow_id, workflow_run_id, kind FROM operations"
                 " WHERE status = 'running' AND created_at <= now() - %s ORDER BY created_at",
                 (older_than,),
             ).fetchall()
-        return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
+        return [
+            (row["id"], row["workflow_id"], row["workflow_run_id"], row["kind"]) for row in rows
+        ]

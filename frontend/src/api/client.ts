@@ -7,6 +7,7 @@ import type {
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  MeshModelCreate,
   BackgroundTask,
   DecisionCreate,
   FixApply,
@@ -28,6 +29,7 @@ import type {
   FontFamily,
   GlyphCoverage,
   HttpRequestSetting,
+  BrowserOriginsSetting,
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
@@ -40,6 +42,7 @@ import type {
   AiSessionView,
   RenderLimits,
   SessionLimits,
+  SessionRuntime,
   BlankTemplate,
   SessionModeSetting,
   DurableSubagentsSetting,
@@ -52,7 +55,13 @@ import type {
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
+  LibraryFileName,
+  LibraryFolder,
+  LibraryFolderCreate,
+  LibraryFolderDeleteResult,
+  LibraryFolderUpdate,
   LibraryListing,
+  LibrarySearch,
   LibraryMoveResult,
   LibraryRenameResult,
   LibraryRestoreResult,
@@ -819,8 +828,15 @@ export const api = {
       signal,
     }),
 
-  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
-  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+  /** What the editor completes: the host functions the check uses, and the manifest's tools.
+   * With a flow's inputs schema, `inputs()` and its `FlowInputs` too (#2651). */
+  getFlowHostFunctions: (inputsSchema?: Record<string, unknown> | null) =>
+    inputsSchema
+      ? request<FlowHostInterface>('/workflow-script/host-functions', {
+          method: 'POST',
+          body: JSON.stringify({ inputs_schema: inputsSchema }),
+        })
+      : request<FlowHostInterface>('/workflow-script/host-functions'),
 
   getFlowVersionSource: (name: string, commit: string) =>
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
@@ -907,6 +923,10 @@ export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
+
+  /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
+  createMeshModel: (body: MeshModelCreate) =>
+    command<ModelSummary>('/models/from-mesh', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
    * `extras` are the other files of a bundled model's directory (#179). `filename`
@@ -1296,13 +1316,29 @@ export const api = {
       .map(seg)
       .join('/')}`,
 
-  /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
-  arrangeOutputs: (body: ArrangeRequest) =>
-    request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job.
+   * #2280 — sent again with one `Idempotency-Key` while the server is still accepting
+   * its start, as a render is, so a slow start is followed rather than failed. An
+   * aborted `signal` (a closed dialog) stops the re-sends.
+   */
+  arrangeOutputs: (body: ArrangeRequest, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(
+      () => request<Job>('/outputs/arrange', { method: 'POST', headers, body: JSON.stringify(body) }),
+      signal,
+    )
+  },
 
-  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
-  backfillOutput: (outputId: string) =>
-    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
+  /**
+   * #902 — re-render an output saved before Arrange; poll the job, then the output's
+   * `backfill`. #2280 — its render is started like any other, so it is sent again with
+   * the same key while the server is still accepting it, until `signal` aborts.
+   */
+  backfillOutput: (outputId: string, signal?: AbortSignal, requestId: string = newRequestId()) => {
+    const headers = { 'Idempotency-Key': requestId }
+    return reattach(() => request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST', headers }), signal)
+  },
 
   /**
    * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
@@ -1341,6 +1377,10 @@ export const api = {
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
+
+  /** #2288 — a name for the output, or `null` (or blank) for none. */
+  renameOutput: (id: string, name: string | null) =>
+    command<Output>(`/outputs/${seg(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
 
   /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
   deleteOutput: (id: string, deleteInboxCopies = false) =>
@@ -1733,6 +1773,14 @@ export const api = {
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /** #3630 — library files whose name or folder holds every word, from every folder. */
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+    const search = new URLSearchParams({ q: query.q })
+    if (query.all) search.set('all', 'true')
+    if (query.fresh) search.set('fresh', 'true')
+    return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
+  },
+
   /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
   deleteLibraryFiles: (fileIds: number[]) =>
     command<LibraryDeleteResult>('/print/library/delete', {
@@ -1768,6 +1816,21 @@ export const api = {
       body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
+  /** #3650 — a folder renamed, or moved under another (`parent_id` 0 is the top level). */
+  updateLibraryFolder: (folderId: number, update: LibraryFolderUpdate) =>
+    command<LibraryFolder>(`/print/library/folders/${folderId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    }),
+
+  /** #3650 — a new folder, at the top level without `parent_id`. */
+  createLibraryFolder: (body: LibraryFolderCreate) =>
+    command<LibraryFolder>('/print/library/folders', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #3650 — a folder and everything in it: its files to Bambuddy's trash, then its folders. */
+  deleteLibraryFolder: (folderId: number) =>
+    command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
+
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
@@ -1777,6 +1840,9 @@ export const api = {
   libraryPreviewGlbUrl: (fileId: number, plate: number) =>
     `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
+  /** #2349 — library files' names by id; `name: null` for one Bambuddy no longer has. */
+  libraryFileNames: (ids: readonly number[]) =>
+    request<LibraryFileName[]>(`/print/library/names?${ids.map((id) => `ids=${id}`).join('&')}`),
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */
@@ -2009,6 +2075,29 @@ export const api = {
     }),
 
   /**
+   * #982 — the headless browser's allow and deny lists, and the origins approved in each
+   * chat, served by the agent service. Fails (404 or 503) without the agent or its database.
+   */
+  getBrowserOrigins: () => request<BrowserOriginsSetting>('/ai/settings/browser-origins'),
+
+  putBrowserOrigins: (lists: { allow: string[]; deny: string[] }) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins', { method: 'PUT', body: JSON.stringify(lists) }),
+
+  /** #982 — "Always allow" on a browser approval card: one origin added to the allow list. */
+  allowBrowserOrigin: (rule: string) =>
+    request<BrowserOriginsSetting>('/ai/settings/browser-origins/allow', { method: 'POST', body: JSON.stringify({ rule }) }),
+
+  /** #982 — "Allow for this chat": the origin opens without asking for the rest of the session. */
+  approveBrowserOrigin: (sessionId: string, origin: string) =>
+    request<{ origin: string; scope: 'session' }>(`/ai/sessions/${seg(sessionId)}/browser-origins`, {
+      method: 'POST',
+      body: JSON.stringify({ origin }),
+    }),
+
+  revokeBrowserOrigin: (sessionId: string, origin: string) =>
+    request<void>(`/ai/sessions/${seg(sessionId)}/browser-origins?origin=${encodeURIComponent(origin)}`, { method: 'DELETE' }),
+
+  /**
    * #1941 — uploads an image the user attached in the assistant panel; its message then
    * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
    * typed, never base64 in JSON.
@@ -2133,6 +2222,15 @@ export const api = {
     request<SessionLimits>('/ai/settings/session-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
+    }),
+
+  /** The park hold, warm process cache and turn limit, served by the agent service. */
+  getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
+
+  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+    request<SessionRuntime>('/ai/settings/session-runtime', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
     }),
 
   /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */

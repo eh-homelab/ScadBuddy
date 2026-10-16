@@ -527,6 +527,12 @@ class HeldText:
     def drop(self) -> None:
         self._held = []
 
+    def mark_notice(self) -> None:
+        """Marks what is held as a refused credential's notice (#3703): still published,
+        as the panel's reason the turn failed, but ``notice``, so a retain never keeps it
+        as the assistant's (memoryActivities.ts ``transcriptOf``)."""
+        self._held = [{**event, "notice": True} for event in self._held]
+
 
 class ScadBuddyRunner:
     def __init__(
@@ -698,8 +704,10 @@ class ScadBuddyRunner:
             # session limit") before its ResultError, and the plugin publishes that text
             # (#2945): held until the attempt is known not to be refused, while another
             # credential could still take the segment over.
+            # The last credential's is held too: refused, its notice is published marked
+            # (#3703) rather than dropped, since nothing takes the segment over.
             publish = _EMIT.get()
-            held = HeldText(publish) if publish is not None and i + 1 < len(credentials) else None
+            held = HeldText(publish) if publish is not None else None
             token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
@@ -756,7 +764,12 @@ class ScadBuddyRunner:
                         "segment of %s continues on %s", workflow_id, credentials[i + 1].label
                     )
                     continue
-                if not final_failure(err):
+                if credentials_fault(err) and held is not None:
+                    held.mark_notice()
+                # Every credential refused it (#3705): no retry could change that, and each
+                # one ran the refused keys again and published the notice again. Final, as a
+                # request too large is; a transient failure (5xx, network) is still retried.
+                if not final_failure(err) and not credentials_fault(err):
                     raise bounded_failure(err) from None
                 # Ends the turn with the reason, as the plugin's own final errors do.
                 return SegmentOutput(
@@ -770,7 +783,8 @@ class ScadBuddyRunner:
                     _EMIT.reset(token)
                 if held is not None:
                     # Not a leak: a failure that is not the credential's ends the turn on
-                    # this credential, so what it said is the turn's and is published.
+                    # this credential, so what it said is the turn's and is published; the
+                    # last credential's refusal notice goes out marked (mark_notice).
                     held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 

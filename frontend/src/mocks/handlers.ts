@@ -224,9 +224,10 @@ function runJob(jobId: string): void {
         job.status = 'cancelled'
         job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
-        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
-        announce('job.superseded')
+        // Withdrawn with no replacement: `render/projection.py`'s `_settled_kind`
+        // announces `job.cancelled`, keeping `job.superseded` for a job a newer render
+        // replaced (#607).
+        announce('job.cancelled')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
@@ -438,6 +439,13 @@ export function mockModels(): readonly ModelSummary[] {
 /** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
 export function mockSource(slug: string): string | undefined {
   return state.sources[slug]
+}
+
+/** #3638 — a model made outside the core routes (a mesh model, `features/meshModels.ts`). */
+export function addMockModel(model: ModelSummary): void {
+  state.models = [model, ...state.models.filter((m) => m.slug !== model.slug)]
+  // A model renders like any other, as `POST /models` gives one a schema.
+  state.schemas[model.slug] ??= fixtures.keychainSchema
 }
 
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
@@ -2697,16 +2705,23 @@ export const handlers = [
       const source = state.outputs.find((o) => o.id === object.output_id)
       if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
       if (!slugs.includes(source.slug)) slugs.push(source.slug)
-      const entries =
+      let entries =
         object.part == null
           ? (source.manifest ?? [])
           : (source.manifest ?? []).filter((m) => m.part === object.part)
       if (entries.length === 0) {
         return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
       }
+      // #3637 — a part there twice is chosen by its colours, as the API chooses it.
+      if (object.part != null && object.recolour != null) {
+        const wanted = JSON.stringify(object.recolour)
+        const same = entries.filter((m) => JSON.stringify(m.recolour ?? {}) === wanted)
+        entries = (same.length > 0 ? same : entries).slice(0, 1)
+      }
       for (const entry of entries) {
         const count = object.count ?? entry.count
-        if (count > 0) manifest.push({ ...entry, count, source_output: entry.source_output ?? source.id })
+        const recolour = object.recolour ?? entry.recolour ?? {}
+        if (count > 0) manifest.push({ ...entry, count, recolour, source_output: entry.source_output ?? source.id })
       }
     }
     if (slugs.length === 0 && body.slug == null) {
@@ -2748,6 +2763,7 @@ export const handlers = [
             count,
             plates: 1,
             library_file_id: fileId,
+            recolour: object.recolour ?? {},
           })
         }
       }
@@ -2758,8 +2774,13 @@ export const handlers = [
     const first = state.outputs.find((o) => o.id === objects[0]?.output_id)
     const bbox = first ? first.bbox_mm : manifest[0]!.bbox
     if (!bbox) return problem(409, 'Conflict', 'the output has no dimensions')
-    const fromFiles = manifest.filter((m) => m.library_file_id != null).flatMap((m) => m.colours)
-    const colors = body.colours ?? [...new Set([...(first?.colors ?? []), ...fromFiles])]
+    // #3637 — each copy in the colours it prints in: a swapped colour is a slot of its own.
+    const printed = (m: ManifestObject) => m.colours.map((c) => m.recolour?.[c.toUpperCase()] ?? c)
+    const fromFiles = manifest.filter((m) => m.library_file_id != null).flatMap(printed)
+    const swapped = manifest
+      .filter((m) => m.library_file_id == null && Object.keys(m.recolour ?? {}).length > 0)
+      .flatMap(printed)
+    const colors = body.colours ?? [...new Set([...(first?.colors ?? []), ...swapped, ...fromFiles])]
     const copies = manifest.reduce((sum, m) => sum + m.count, 0)
     const jobId = nextHexId()
     const job: Job = {
@@ -2927,6 +2948,14 @@ export const handlers = [
       source: 'record',
       arranged_from: output.arranged_from ?? [],
     })
+  }),
+
+  http.patch(`${base}/outputs/:id`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const { name } = (await request.json()) as { name?: string | null }
+    output.name = name?.trim() || null
+    return HttpResponse.json(output)
   }),
 
   http.delete(`${base}/outputs/:id`, ({ params }) => {

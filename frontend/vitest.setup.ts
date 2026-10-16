@@ -1,12 +1,12 @@
 import '@testing-library/jest-dom/vitest'
-import { configure, getConfig } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll } from 'vitest'
+import { cleanup, configure, getConfig } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, vi } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
-import { FakeIntersectionObserver } from './src/test/intersection'
+import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -35,14 +35,26 @@ configure({
 getComputedStyle(document.documentElement)
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
-afterEach(() => {
+afterEach(async () => {
+  // Unmounted here, before the tick below, rather than in Testing Library's own hook,
+  // which runs after this one: a page left dirty (Settings, useLeaveGuard) takes its
+  // history sentinel off with `history.back()` as it unmounts, and jsdom's popstate for
+  // it comes a task later. Waited for here, it cannot reach the next test's page as a
+  // Back pressed there (#3671). Under fake timers jsdom's traversal waits on them too,
+  // so there is nothing to wait for.
+  cleanup()
+  if (!vi.isFakeTimers()) await new Promise((resolve) => setTimeout(resolve, 0))
   server.resetHandlers()
   resetMockState()
   resetDisplayUnit()
   resetRealtime()
   resetAiAvailability()
+  resetIntersections()
   // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
   window.sessionStorage.clear()
+  // A Radix select or dialog still open when its test ends can leave the body
+  // `pointer-events: none`, and the next test could click nothing (#3671).
+  document.body.style.pointerEvents = ''
 })
 afterAll(() => server.close())
 
@@ -78,3 +90,12 @@ if (!globalThis.IntersectionObserver) {
   globalThis.IntersectionObserver =
     FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }
+
+// Radix's Select captures the pointer on open and scrolls its options into view (#3653),
+// and cmdk scrolls its active item; jsdom has neither.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.setPointerCapture = () => {}
+  Element.prototype.releasePointerCapture = () => {}
+}
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}

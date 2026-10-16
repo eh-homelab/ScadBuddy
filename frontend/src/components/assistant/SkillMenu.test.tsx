@@ -42,8 +42,8 @@ const optionNames = (list: HTMLElement) => within(list).getAllByRole('option').m
 
 /** The popup's line when there is no option: beside the listbox, which holds options only. */
 function notice(list: HTMLElement, text: string): HTMLElement {
-  expect(list.children).toHaveLength(0)
-  return within(list.parentElement!).getByText(text, { selector: '[data-testid="skill-menu-notice"]' })
+  expect(within(list).queryAllByRole('option')).toHaveLength(0)
+  return within(list.closest<HTMLElement>('[cmdk-root]')!).getByText(text, { selector: '[data-testid="skill-menu-notice"]' })
 }
 
 describe('the "/" skill menu (#1920)', () => {

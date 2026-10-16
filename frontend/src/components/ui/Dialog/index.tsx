@@ -8,8 +8,9 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react'
-import { ModalCompanionContext, focusInto, focusables } from '../../lib/modal'
-import { Button } from './Button'
+import { createPortal } from 'react-dom'
+import { ModalCompanionContext, focusInto, focusables, roomFor } from '../../../lib/modal'
+import { Button } from '../Button'
 
 interface Props {
   open: boolean
@@ -28,20 +29,6 @@ interface Props {
 function topmost(panel: HTMLElement | null): boolean {
   const dialogs = document.querySelectorAll('[role="dialog"]')
   return dialogs[dialogs.length - 1] === panel
-}
-
-/** The narrowest a dialog's overlay gets beside a companion; narrower, the dialog covers it. */
-const MIN_BESIDE = 360
-
-/**
- * The room to keep for `companion` at the right edge, in CSS pixels: 0 when there is
- * none to spare (a phone), so the dialog covers it; null when it is not laid out
- * (jsdom), where it counts as beside.
- */
-function roomFor(companion: HTMLElement): number | null {
-  const { left, width } = companion.getBoundingClientRect()
-  if (width === 0) return null
-  return left >= MIN_BESIDE ? window.innerWidth - left : 0
 }
 
 /** Whether `companion` is usable beside the dialog, measured now. */
@@ -146,7 +133,9 @@ export function Dialog({ open, title, description, onClose, children, footer, si
 
   if (!open) return null
 
-  return (
+  // #3653 — on <body>, as a Radix dialog is: rendered where it was opened, inside a card
+  // whose footer is `relative z-10`, a later card's carousel painted over it.
+  return createPortal(
     <div
       className={`fixed inset-0 z-50 flex bg-black/55 ${placement === 'right' ? 'justify-end' : 'items-center justify-center p-4'}`}
       style={companion && reserve ? { right: reserve } : undefined}
@@ -193,6 +182,7 @@ export function Dialog({ open, title, description, onClose, children, footer, si
           )}
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

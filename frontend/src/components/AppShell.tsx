@@ -8,7 +8,17 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router'
+import { NavLink, Outlet, matchPath, useLocation } from 'react-router'
+import {
+  ActivityIcon,
+  BoxIcon,
+  BoxesIcon,
+  LibraryBigIcon,
+  PrinterIcon,
+  SettingsIcon,
+  SparklesIcon,
+  WorkflowIcon,
+} from 'lucide-react'
 import {
   attentionCount,
   attentionDetail,
@@ -35,7 +45,24 @@ import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/pa
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { Toasts } from './ui/Toasts'
-import { Button } from './ui/Button'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+  useSidebar,
+} from '@/components/ui/sidebar'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { Spinner } from './ui/Spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
@@ -51,13 +78,12 @@ const AssistantPanel = lazy(async () => ({
 }))
 
 const NAV = [
-  { to: '/', label: 'Models', end: true },
-  { to: '/prints', label: 'Prints', end: false },
-  { to: '/library', label: 'Library', end: false },
-  { to: '/workflows', label: 'Workflows', end: false },
-  // Not on a phone, where the row would overflow: the bell's popover links to it there.
-  { to: '/activity', label: 'Activity', end: false, wide: true },
-  { to: '/settings', label: 'Settings', end: false },
+  { to: '/', label: 'Models', end: true, icon: BoxesIcon },
+  { to: '/prints', label: 'Prints', end: false, icon: PrinterIcon },
+  { to: '/library', label: 'Library', end: false, icon: LibraryBigIcon },
+  { to: '/workflows', label: 'Workflows', end: false, icon: WorkflowIcon },
+  { to: '/activity', label: 'Activity', end: false, icon: ActivityIcon },
+  { to: '/settings', label: 'Settings', end: false, icon: SettingsIcon },
 ]
 
 // #254 — this tab's socket to the agent, and the pairing prompt, while the assistant is
@@ -79,6 +105,16 @@ const PANEL_OVERLAYS_QUERY = '(max-width: 767.98px)'
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   const location = useLocation()
+  // #3653 — read once; kept per browser in localStorage, which a cookie inside Bambuddy's
+  // cross-origin frame would not be, and which no API request carries.
+  const [sidebarOpen, setSidebarOpen] = useState(() => sidebarOpenAtStart(embedded))
+  const changeSidebar = useCallback(
+    (value: boolean) => {
+      setSidebarOpen(value)
+      rememberSidebar(embedded, value)
+    },
+    [embedded],
+  )
   useLoadDisplayUnit()
   useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
@@ -234,184 +270,270 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     <AssistantOpenerContext.Provider value={opener}>
       <RunsWaitingContext.Provider value={attention.counts?.runs ?? null}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
-        <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
+      <TooltipProvider>
+        {/* #3653 — shadcn's sidebar: beside the page from `md` up, collapsing to its icons;
+            below `md` a sheet the header's trigger opens. */}
+        <SidebarProvider open={sidebarOpen} onOpenChange={changeSidebar} className="h-full min-h-0 bg-background text-foreground">
           {/* #2454 — past the logo and the whole nav to the page, as the first Tab stop.
-              Kept when embedded in Bambuddy's frame too: the header is shorter there, but a
-              keyboard user still tabs through its nav and the assistant's opener first. */}
+              Kept when embedded in Bambuddy's frame too: a keyboard user still tabs through
+              the nav and the assistant's opener first. */}
           <a
             href="#main"
             onClick={(event) => {
               event.preventDefault()
               mainElement.current?.focus()
             }}
-            className="sr-only z-50 rounded bg-surface px-3 py-2 text-sm text-ink focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:ring-2 focus:ring-accent"
+            className="sr-only z-50 rounded-md bg-popover px-3 py-2 text-sm text-popover-foreground focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:ring-2 focus:ring-ring"
           >
             Skip to main content
           </a>
-          <header
-            className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-surface px-4 py-1.5 sm:gap-x-5 ${
-              embedded ? 'min-h-10' : 'min-h-14'
-            }`}
-            data-embedded={embedded ? 'true' : 'false'}
-          >
-            <NavLink to="/" className="flex items-baseline gap-1.5 shrink-0">
-              <span className={`font-semibold tracking-tight ${embedded ? 'text-[13px]' : 'text-base'}`}>
-                Scad<span className="text-accent">Buddy</span>
-              </span>
-              {/* #2454 — named by its own text, which a flex gap alone would run together. */}
-              {!embedded && ' '}
-              {!embedded && (
-                <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
-              )}
-            </NavLink>
+          <AppSidebar embedded={embedded} />
 
-            <nav className="flex items-center gap-0.5" aria-label="Main">
-              {NAV.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    `${'wide' in item ? 'hidden sm:block ' : ''}rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
-                      isActive
-                        ? 'bg-surface-3 text-ink'
-                        : 'text-muted hover:bg-surface-2 hover:text-ink'
-                    }`
-                  }
-                >
-                  {item.label}
-                </NavLink>
-              ))}
-            </nav>
-
-            <div className="ml-auto flex items-center gap-2">
-              <LiveUpdatesIndicator />
-              <ActivityBell />
-              {shown && (
-                // Announces the badge (#815): it appears while focus is elsewhere, so the
-                // button's own name changing is not enough. A bare live region, not
-                // role=status, so it is not mistaken for a page's status message.
-                <span data-testid="assistant-attention-live" aria-live="polite" className="sr-only">
-                  {waitingLabel}
-                </span>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header
+              className={cn(
+                'flex shrink-0 items-center gap-2 border-b bg-background px-2 sm:px-3',
+                embedded ? 'min-h-10' : 'min-h-12',
               )}
-              {shown && (
-                // #1125 — its own region, so starting or finishing a turn does not
-                // announce the waiting count again.
-                <span data-testid="assistant-working-live" aria-live="polite" className="sr-only">
-                  {working && 'The assistant is working'}
-                </span>
-              )}
-              {shown && (
-                <button
-                  ref={toggleButton}
-                  type="button"
-                  onClick={toggle}
-                  aria-expanded={open}
-                  aria-controls={mounted ? PANEL_ID : undefined}
-                  aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
-                  aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
-                  title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                  // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
-                  // opens beside a dialog that is already open, as the shortcut does. Only
-                  // where the panel can sit beside one (#2013): on a phone the dialog covers
-                  // the panel anyway, and a raised button would paint over the dialog.
-                  className={`${panelOverlays ? '' : 'relative z-[60] '}inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
-                    open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
-                  }`}
-                >
-                  {working && (
-                    <span
-                      data-testid="assistant-working"
-                      aria-hidden="true"
-                      className="size-2 rounded-full bg-accent motion-safe:animate-pulse"
-                    />
-                  )}
-                  Assistant
-                  {attention.waiting !== null && attention.waiting > 0 && (
-                    <span
-                      data-testid="assistant-attention"
-                      aria-hidden="true"
-                      className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-warn/50 bg-warn/10 px-1 text-[10.5px] leading-none font-semibold text-warn"
-                    >
-                      {attentionCount(attention.waiting)}
-                    </span>
-                  )}
-                  {summaries && (
-                    <span data-testid="assistant-summaries" aria-hidden="true" className="text-[11px] text-muted">
-                      {summaries}
-                    </span>
-                  )}
-                </button>
-              )}
-            </div>
-          </header>
-
-          {ai.available && (
-            // #1002 — a link whose chunk failed costs only the browser bridge; the
-            // boundary logs it to the console.
-            <ErrorBoundary fallback={() => null}>
-              <Suspense fallback={null}>
-                <AgentLink factory={tabLink} />
-              </Suspense>
-            </ErrorBoundary>
-          )}
-          <div className="relative flex min-h-0 flex-1">
-            <main
-              id="main"
-              ref={mainElement}
-              tabIndex={-1}
-              className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
+              data-embedded={embedded ? 'true' : 'false'}
             >
-              {/* #361 — the last resort: one page that throws never blanks the app, and
-                  leaving it clears the error. Reload, not an in-place retry: what lands
-                  here is mostly a lazy chunk that failed, which React caches as failed. */}
-              <ErrorBoundary
-                resetKey={location.pathname}
-                fallback={() => <PageFailed />}
-              >
-                {/* #2356 — a page's own chunk loading. */}
-                <Suspense fallback={<PageLoading />}>
-                  <Outlet />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <SidebarTrigger aria-label="Toggle navigation" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Show or hide the navigation</TooltipContent>
+              </Tooltip>
+              <Separator orientation="vertical" className="my-auto data-[orientation=vertical]:h-4" />
+
+              <div className="ml-auto flex items-center gap-1.5">
+                <LiveUpdatesIndicator />
+                <ActivityBell />
+                {shown && (
+                  // Announces the badge (#815): it appears while focus is elsewhere, so the
+                  // button's own name changing is not enough. A bare live region, not
+                  // role=status, so it is not mistaken for a page's status message.
+                  <span data-testid="assistant-attention-live" aria-live="polite" className="sr-only">
+                    {waitingLabel}
+                  </span>
+                )}
+                {shown && (
+                  // #1125 — its own region, so starting or finishing a turn does not
+                  // announce the waiting count again.
+                  <span data-testid="assistant-working-live" aria-live="polite" className="sr-only">
+                    {working && 'The assistant is working'}
+                  </span>
+                )}
+                {shown && (
+                  <Button
+                    ref={toggleButton}
+                    variant="ghost"
+                    size="sm"
+                    onClick={toggle}
+                    aria-expanded={open}
+                    aria-controls={mounted ? PANEL_ID : undefined}
+                    aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
+                    aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
+                    title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
+                    // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                    // opens beside a dialog that is already open, as the shortcut does. Only
+                    // where the panel can sit beside one (#2013): on a phone the dialog covers
+                    // the panel anyway, and a raised button would paint over the dialog.
+                    // Clickable over a Radix modal too, which turns pointer events off outside it;
+                    // the dialog leaves a press here alone (`data-modal-companion-toggle`).
+                    data-modal-companion-toggle=""
+                    className={cn(!panelOverlays && 'pointer-events-auto relative z-[60]', open && 'bg-secondary text-secondary-foreground')}
+                  >
+                    {working ? (
+                      <span
+                        data-testid="assistant-working"
+                        aria-hidden="true"
+                        className="size-2 rounded-full bg-primary motion-safe:animate-pulse"
+                      />
+                    ) : (
+                      <SparklesIcon aria-hidden="true" />
+                    )}
+                    Assistant
+                    {attention.waiting !== null && attention.waiting > 0 && (
+                      <Badge
+                        data-testid="assistant-attention"
+                        aria-hidden="true"
+                        variant="destructive"
+                        className="h-[18px] min-w-[18px] px-1 tabular-nums"
+                      >
+                        {attentionCount(attention.waiting)}
+                      </Badge>
+                    )}
+                    {summaries && (
+                      <span data-testid="assistant-summaries" aria-hidden="true" className="text-xs text-muted-foreground">
+                        {summaries}
+                      </span>
+                    )}
+                  </Button>
+                )}
+              </div>
+            </header>
+
+            {ai.available && (
+              // #1002 — a link whose chunk failed costs only the browser bridge; the
+              // boundary logs it to the console.
+              <ErrorBoundary fallback={() => null}>
+                <Suspense fallback={null}>
+                  <AgentLink factory={tabLink} />
                 </Suspense>
               </ErrorBoundary>
-            </main>
-            <Toasts />
-            {shown && mounted && (
-              <aside
-                ref={setPanelElement}
-                id={PANEL_ID}
-                aria-label="Assistant"
-                hidden={!open}
-                onKeyDown={onPanelKey}
-                className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-line bg-surface shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
+            )}
+            <div className="relative flex min-h-0 flex-1">
+              <main
+                id="main"
+                ref={mainElement}
+                tabIndex={-1}
+                className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
               >
-                {/* #1002 — a panel that fails (mostly its chunk) stays in the panel. */}
-                <ErrorBoundary fallback={() => <PanelFailed />}>
-                  <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
-                    <AssistantPanel
-                      onClose={closePanel}
-                      focusKey={focusKey}
-                      factory={assistantTransport}
-                      embedded={embedded}
-                      openRequest={openRequest}
-                      onOpenHandled={openHandled}
-                    />
+                {/* #361 — the last resort: one page that throws never blanks the app, and
+                    leaving it clears the error. Reload, not an in-place retry: what lands
+                    here is mostly a lazy chunk that failed, which React caches as failed. */}
+                <ErrorBoundary
+                  resetKey={location.pathname}
+                  fallback={() => <PageFailed />}
+                >
+                  {/* #2356 — a page's own chunk loading. */}
+                  <Suspense fallback={<PageLoading />}>
+                    <Outlet />
                   </Suspense>
                 </ErrorBoundary>
-              </aside>
-            )}
+              </main>
+              <Toasts />
+              {shown && mounted && (
+                <aside
+                  ref={setPanelElement}
+                  id={PANEL_ID}
+                  aria-label="Assistant"
+                  hidden={!open}
+                  onKeyDown={onPanelKey}
+                  className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l bg-card text-card-foreground shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
+                >
+                  {/* #1002 — a panel that fails (mostly its chunk) stays in the panel. */}
+                  <ErrorBoundary fallback={() => <PanelFailed />}>
+                    <Suspense fallback={<p className="p-3 text-sm text-muted-foreground">Loading the assistant…</p>}>
+                      <AssistantPanel
+                        onClose={closePanel}
+                        focusKey={focusKey}
+                        factory={assistantTransport}
+                        embedded={embedded}
+                        openRequest={openRequest}
+                        onOpenHandled={openHandled}
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
+                </aside>
+              )}
+            </div>
           </div>
-        </div>
+        </SidebarProvider>
+      </TooltipProvider>
       </ModalCompanionContext.Provider>
       </RunsWaitingContext.Provider>
     </AssistantOpenerContext.Provider>
   )
 }
 
+/**
+ * Where the sidebar's state is kept. One key inside Bambuddy's frame and another outside
+ * it: they share the origin's storage, and the frame sits beside Bambuddy's own navigation.
+ */
+const sidebarKey = (embedded: boolean) => (embedded ? 'scadbuddy.sidebar.open.embedded' : 'scadbuddy.sidebar.open')
+
+/**
+ * Whether the sidebar starts expanded: as the user last left it in this browser, else
+ * expanded on a wide window. Inside Bambuddy's frame it starts as icons, beside
+ * Bambuddy's own navigation. Storage that throws (blocked site data) remembers nothing.
+ */
+function sidebarOpenAtStart(embedded: boolean): boolean {
+  let saved: string | null = null
+  try {
+    saved = window.localStorage.getItem(sidebarKey(embedded))
+  } catch {
+    // Nothing remembered.
+  }
+  if (saved === 'true' || saved === 'false') return saved === 'true'
+  return !embedded && window.innerWidth >= WIDE_WINDOW
+}
+
+function rememberSidebar(embedded: boolean, open: boolean): void {
+  try {
+    window.localStorage.setItem(sidebarKey(embedded), String(open))
+  } catch {
+    // Nothing is remembered; the sidebar still works for this page.
+  }
+}
+
+/** From here up the sidebar starts expanded; a page keeps 1024 px beside it. */
+const WIDE_WINDOW = 1280
+
+function AppSidebar({ embedded }: { embedded: boolean }) {
+  const { pathname } = useLocation()
+  const { isMobile, setOpenMobile } = useSidebar()
+  // In the sheet a link's page replaces the sheet, as it does a dialog.
+  const followed = () => {
+    if (isMobile) setOpenMobile(false)
+  }
+  return (
+    <Sidebar collapsible="icon">
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton asChild size="lg" tooltip="ScadBuddy">
+              <NavLink to="/" onClick={followed}>
+                <span
+                  aria-hidden="true"
+                  className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground"
+                >
+                  <BoxIcon className="size-4" />
+                </span>
+                <span className="grid min-w-0 flex-1 text-left leading-tight">
+                  <span className="truncate font-semibold tracking-tight">
+                    Scad<span className="text-sidebar-primary">Buddy</span>
+                  </span>
+                  {/* #2454 — named by its own text, which the grid alone would run together. */}
+                  {!embedded && ' '}
+                  {!embedded && <span className="truncate text-xs text-muted-foreground">OpenSCAD customizer</span>}
+                </span>
+              </NavLink>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupContent>
+            <nav aria-label="Main">
+              <SidebarMenu>
+                {NAV.map((item) => (
+                  <SidebarMenuItem key={item.to}>
+                    <SidebarMenuButton
+                      asChild
+                      tooltip={item.label}
+                      isActive={matchPath({ path: item.to, end: item.end }, pathname) !== null}
+                    >
+                      <NavLink to={item.to} end={item.end} onClick={followed}>
+                        <item.icon aria-hidden="true" />
+                        <span>{item.label}</span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </nav>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+    </Sidebar>
+  )
+}
+
 function PageLoading() {
   return (
-    <p role="status" className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
+    <p role="status" className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
       <Spinner /> Loading
     </p>
   )
@@ -419,9 +541,9 @@ function PageLoading() {
 
 function PageFailed() {
   return (
-    <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]">
-      <p className="text-ink">This page stopped working. The details are in the browser console.</p>
-      <Button size="sm" onClick={() => window.location.reload()}>
+    <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm">
+      <p>This page stopped working. The details are in the browser console.</p>
+      <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
         Reload page
       </Button>
     </div>
@@ -430,9 +552,9 @@ function PageFailed() {
 
 function PanelFailed() {
   return (
-    <div role="alert" className="flex flex-col items-start gap-3 p-3 text-[12.5px]">
-      <p className="text-ink">The assistant failed to load. The details are in the browser console.</p>
-      <Button size="sm" onClick={() => window.location.reload()}>
+    <div role="alert" className="flex flex-col items-start gap-3 p-3 text-sm">
+      <p>The assistant failed to load. The details are in the browser console.</p>
+      <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
         Reload page
       </Button>
     </div>

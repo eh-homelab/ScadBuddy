@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef, useState } from 'react'
+import { useLatest } from './useLatest'
 import { createPath, UNSAFE_NavigationContext, useLocation, useNavigate, type Navigator, type To } from 'react-router'
 
 /** Marks the history entry pushed on top of the page while it is dirty. */
@@ -87,10 +88,20 @@ export function useLeaveGuard(dirty: boolean) {
     })
   }, [dirty, navigator, location.pathname])
 
+  // Saved or discarded: the sentinel comes off with a `history.back()` of our own, whose
+  // popstate comes a task later. Typing again in between makes the page dirty before it
+  // lands (#3671), so it must not be taken for the user's Back: the listener stays for
+  // the page's life and knows that pop by `ownBack`.
+  const dirtyNow = useLatest(dirty)
+  const ownBack = useRef(false)
   useEffect(() => {
-    if (!dirty) return
-    if (!onSentinel()) pushSentinel()
     const onPop = () => {
+      if (ownBack.current) {
+        ownBack.current = false
+        if (dirtyNow.current && !onSentinel()) pushSentinel()
+        return
+      }
+      if (!dirtyNow.current) return
       if (leavingBack.current) {
         leavingBack.current = false
         return
@@ -102,10 +113,18 @@ export function useLeaveGuard(dirty: boolean) {
       setPending(BACK)
     }
     window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [dirtyNow])
+
+  useEffect(() => {
+    if (!dirty) return
+    if (!onSentinel()) pushSentinel()
     return () => {
-      window.removeEventListener('popstate', onPop)
       // Saved or discarded: take the sentinel off, so one Back leaves again.
-      if (onSentinel()) window.history.back()
+      if (onSentinel()) {
+        ownBack.current = true
+        window.history.back()
+      }
     }
   }, [dirty])
 

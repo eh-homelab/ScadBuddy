@@ -154,6 +154,8 @@ export async function testPlugin(
   } finally {
     clearTimeout(timer)
     controller.abort()
+    // A test opens one MCP session; this ends it (the route is not recorded, so nothing else would).
+    await transport.terminateSession().catch(() => {})
     await client.close().catch(() => {})
     registration.release()
   }

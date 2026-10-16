@@ -1,7 +1,9 @@
 import type { Activity, ActivityFacets } from '../../api/types'
 import { formatDuration, timeAgo } from '../../lib/format'
-import { statusLabel } from '../prints/status'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
 import { principalLabel } from './labels'
+import { StatusBadge } from './StatusBadge'
 
 interface Props {
   items: Activity[]
@@ -27,39 +29,54 @@ function duration(item: Activity): string {
   return formatDuration((Date.parse(item.finished_at) - Date.parse(item.created_at)) / 1000)
 }
 
+const HEAD = 'h-9 px-3 font-medium whitespace-nowrap'
+const CELL = 'px-3 py-2'
+
 export function ActivityTable({ items, facets, onOpen }: Props) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-[13px]" aria-label="Activity">
-        <thead className="text-[12px] text-muted">
-          <tr>
-            <th className="py-1 pr-3 font-normal">Status</th>
-            <th className="py-1 pr-3 font-normal">What</th>
-            <th className="py-1 pr-3 font-normal">Started by</th>
-            <th className="py-1 pr-3 font-normal">Started</th>
-            <th className="py-1 font-normal">Took</th>
-          </tr>
-        </thead>
-        <tbody>
-          {nested(items).map(({ item, child }) => (
-            <tr
-              key={item.id}
-              data-testid={`activity-row-${item.id}`}
-              className="border-t border-line align-top"
-            >
-              <td className="py-1.5 pr-3">{statusLabel(item.status)}</td>
-              <td className={`py-1.5 pr-3 break-words ${child ? 'pl-5' : ''}`}>
-                <button type="button" className="text-left hover:underline" onClick={() => onOpen?.(item.id)}>
-                  {item.title}
-                </button>
-              </td>
-              <td className="max-w-40 break-all py-1.5 pr-3 text-muted">{principalLabel(item.principal, facets)}</td>
-              <td className="py-1.5 pr-3 text-muted">{item.created_at ? timeAgo(item.created_at) : ''}</td>
-              <td className="sb-num py-1.5 text-muted">{duration(item)}</td>
+    <Card className="gap-0 py-0">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-[13px]" aria-label="Activity">
+          <thead className="bg-ui-muted/50 text-xs text-muted-foreground">
+            <tr>
+              <th className={HEAD}>Status</th>
+              <th className={HEAD}>What</th>
+              <th className={HEAD}>Started by</th>
+              <th className={HEAD}>Started</th>
+              <th className={HEAD}>Took</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {nested(items).map(({ item, child }) => (
+              <tr
+                key={item.id}
+                data-testid={`activity-row-${item.id}`}
+                className="border-t border-border align-top transition-colors hover:bg-ui-muted/40"
+              >
+                <td className={CELL}>
+                  <StatusBadge status={item.status} />
+                </td>
+                <td className={`${CELL} break-words ${child ? 'pl-8' : ''}`}>
+                  <Button
+                    variant="link"
+                    className="h-auto p-0 text-left font-medium whitespace-normal text-foreground"
+                    onClick={() => onOpen?.(item.id)}
+                  >
+                    {item.title}
+                  </Button>
+                </td>
+                <td className={`${CELL} max-w-40 break-all text-muted-foreground`}>
+                  {principalLabel(item.principal, facets)}
+                </td>
+                <td className={`${CELL} whitespace-nowrap text-muted-foreground`}>
+                  {item.created_at ? timeAgo(item.created_at) : ''}
+                </td>
+                <td className={`${CELL} sb-num text-muted-foreground`}>{duration(item)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   )
 }

@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { DEFAULT_ACTIVITY_QUERY, isActivityFiltered, splitList, type ActivityQuery } from '../../lib/activityQuery'
+import { DEFAULT_ACTIVITY_QUERY, isActivityFiltered, joinList, splitList, type ActivityQuery } from '../../lib/activityQuery'
 import type { ActivityFacets } from '../../api/types'
 import { statusLabel } from '../prints/status'
-import { chipClass, principalLabel, SINCE_OPTIONS, toggleValue } from './labels'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SearchIcon, XIcon } from 'lucide-react'
+import { principalLabel, SINCE_OPTIONS } from './labels'
 
 interface Props {
   query: ActivityQuery
@@ -13,14 +20,22 @@ interface Props {
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div role="group" aria-label={label} className="flex flex-wrap items-center gap-1.5">
-      <span className="text-[12px] text-muted">{label}</span>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span aria-hidden="true" className="text-xs text-muted-foreground">
+        {label}
+      </span>
       {children}
     </div>
   )
 }
 
-const CHIP_WRAP = 'max-w-full break-all text-left'
+/** A chip: a toggle in a group, wrapping a long value rather than widening the page. */
+const CHIP =
+  'h-auto min-h-7 max-w-full rounded-full px-2.5 py-0.5 text-left text-xs font-normal break-all whitespace-normal data-[state=on]:border-primary/60 data-[state=on]:bg-primary/15 data-[state=on]:text-foreground'
+
+function Count({ count }: { count: number | null }) {
+  return count === null ? null : <span className="sb-num text-muted-foreground">{count}</span>
+}
 
 /** A text input that reports after a pause, and follows the URL when it changes elsewhere. */
 function DebouncedInput({
@@ -51,8 +66,11 @@ function DebouncedInput({
     }, 250)
     return () => clearTimeout(timer)
   }, [text])
-  return <input {...rest} value={text} onChange={(e) => setText(e.target.value)} />
+  return <Input {...rest} value={text} onChange={(e) => setText(e.target.value)} />
 }
+
+/** Radix Select takes no empty value: this stands for "no `since`". */
+const ANY_TIME = 'any'
 
 /** The values of one facet as chips, plus any selected value the facets do not list. */
 function valueChips(
@@ -105,149 +123,180 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
   const sinceKnown = SINCE_OPTIONS.some((o) => o.value === query.since)
 
   return (
-    <div className="flex flex-col gap-2" aria-label="Activity filters" role="search">
+    <div className="flex flex-col gap-2.5" aria-label="Activity filters" role="search">
       <div className="flex flex-wrap items-center gap-2">
-        <DebouncedInput
-          type="search"
-          className="sb-field max-w-xs"
-          placeholder="Search activity"
-          aria-label="Search activity"
-          value={query.q}
-          onCommit={(q) => onChange({ ...latest.current, q }, { typing: true })}
-        />
-        <select
-          className="sb-field w-auto"
-          aria-label="Since"
-          value={sinceKnown ? query.since : ''}
-          onChange={(e) => onChange({ ...query, since: e.target.value })}
+        <div className="relative w-full max-w-xs">
+          <SearchIcon aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <DebouncedInput
+            type="search"
+            className="pl-8"
+            placeholder="Search activity"
+            aria-label="Search activity"
+            value={query.q}
+            onCommit={(q) => onChange({ ...latest.current, q }, { typing: true })}
+          />
+        </div>
+        <Select
+          value={sinceKnown ? query.since : ANY_TIME}
+          onValueChange={(since) => onChange({ ...query, since: since === ANY_TIME ? '' : since })}
         >
-          <option value="">Any time</option>
-          {SINCE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="Since">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" align="start">
+            <SelectItem value={ANY_TIME}>Any time</SelectItem>
+            {SINCE_OPTIONS.map((o) => (
+              <SelectItem key={o.value} value={o.value}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {isActivityFiltered(query) && (
-          <button
-            type="button"
-            className="text-[12px] text-muted hover:text-ink"
-            onClick={() => onChange(DEFAULT_ACTIVITY_QUERY)}
-          >
+          <Button variant="ghost" size="sm" onClick={() => onChange(DEFAULT_ACTIVITY_QUERY)}>
             Clear filters
-          </button>
+          </Button>
         )}
       </div>
       {kinds.length > 0 && (
         <Group label="Kind">
-          {kinds.map((k) => (
-            <button
-              key={k.key}
-              type="button"
-              className={`${chipClass(selectedKinds.includes(k.key))} ${CHIP_WRAP}`}
-              aria-pressed={selectedKinds.includes(k.key)}
-              onClick={() => setKind(toggleValue(query.kind, k.key))}
-            >
-              {k.label}
-            </button>
-          ))}
+          <ToggleGroup
+            type="multiple"
+            variant="outline"
+            size="sm"
+            spacing={1.5}
+            aria-label="Kind"
+            className="flex-wrap"
+            value={selectedKinds}
+            onValueChange={(next) => setKind(joinList(next))}
+          >
+            {kinds.map((k) => (
+              <ToggleGroupItem key={k.key} value={k.key} className={CHIP}>
+                {k.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Group>
       )}
       {statuses.length > 0 && (
         <Group label="Status">
-          {statuses.map((s) => {
-            const on = selectedStatuses.includes(s)
-            return (
-              <button
-                key={s}
-                type="button"
-                className={chipClass(on)}
-                aria-pressed={on}
-                onClick={() => onChange({ ...query, status: toggleValue(query.status, s) })}
-              >
+          <ToggleGroup
+            type="multiple"
+            variant="outline"
+            size="sm"
+            spacing={1.5}
+            aria-label="Status"
+            className="flex-wrap"
+            value={selectedStatuses}
+            onValueChange={(next) => onChange({ ...query, status: joinList(next) })}
+          >
+            {statuses.map((s) => (
+              <ToggleGroupItem key={s} value={s} className={CHIP}>
                 {statusLabel(s)}
-              </button>
-            )
-          })}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Group>
       )}
       {principals.length > 0 && (
         <Group label="Started by">
-          {principals.map((p) => (
-            <button
-              key={p.value}
-              type="button"
-              className={`${chipClass(query.principal === p.value)} ${CHIP_WRAP}`}
-              aria-pressed={query.principal === p.value}
-              onClick={() => onChange({ ...query, principal: query.principal === p.value ? '' : p.value })}
-            >
-              {principalLabel(p.value, facets)}
-              {p.count !== null && <> <span className="sb-num text-muted">{p.count}</span></>}
-            </button>
-          ))}
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={1.5}
+            aria-label="Started by"
+            className="flex-wrap"
+            value={query.principal}
+            onValueChange={(principal) => onChange({ ...query, principal })}
+          >
+            {principals.map((p) => (
+              <ToggleGroupItem key={p.value} value={p.value} className={CHIP}>
+                {principalLabel(p.value, facets)}
+                <Count count={p.count} />
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Group>
       )}
       {tools.length > 0 && (
         <Group label="Tool">
-          {tools.map((t) => (
-            <button
-              key={t.value}
-              type="button"
-              className={`${chipClass(query.tool === t.value)} ${CHIP_WRAP}`}
-              aria-pressed={query.tool === t.value}
-              onClick={() => onChange({ ...query, tool: query.tool === t.value ? '' : t.value })}
-            >
-              {t.value}
-              {t.count !== null && <> <span className="sb-num text-muted">{t.count}</span></>}
-            </button>
-          ))}
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={1.5}
+            aria-label="Tool"
+            className="flex-wrap"
+            value={query.tool}
+            onValueChange={(tool) => onChange({ ...query, tool })}
+          >
+            {tools.map((t) => (
+              <ToggleGroupItem key={t.value} value={t.value} className={CHIP}>
+                {t.value}
+                <Count count={t.count} />
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Group>
       )}
       {subjects.length > 0 && (
         <Group label="Subject">
-          {subjects.map((s) => (
-            <button
-              key={s.value}
-              type="button"
-              className={`${chipClass(query.subject === s.value)} ${CHIP_WRAP}`}
-              aria-pressed={query.subject === s.value}
-              onClick={() => onChange({ ...query, subject: query.subject === s.value ? '' : s.value })}
-            >
-              {s.value}
-              {s.count !== null && <> <span className="sb-num text-muted">{s.count}</span></>}
-            </button>
-          ))}
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={1.5}
+            aria-label="Subject"
+            className="flex-wrap"
+            value={query.subject}
+            onValueChange={(subject) => onChange({ ...query, subject })}
+          >
+            {subjects.map((s) => (
+              <ToggleGroupItem key={s.value} value={s.value} className={CHIP}>
+                {s.value}
+                <Count count={s.count} />
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Group>
       )}
       {filterable.length > 0 && (
         <div className="flex flex-wrap items-end gap-2">
           {filterable.map((f) => (
-            <label key={f.name} className="flex flex-col gap-0.5 text-[12px] text-muted">
-              {f.label}
+            <div key={f.name} className="flex w-40 max-w-full flex-col gap-1.5">
+              <Label htmlFor={`activity-facet-${f.name}`} className="text-xs font-normal text-muted-foreground">
+                {f.label}
+              </Label>
               <DebouncedInput
-                className="sb-field w-40 max-w-full"
+                id={`activity-facet-${f.name}`}
                 value={query.facets[f.name] ?? ''}
                 onCommit={(v) => setFacet(f.name, v, true)}
               />
-            </label>
+            </div>
           ))}
         </div>
       )}
       {strayFacets.length > 0 && (
-        <Group label="Applied facets">
+        <div role="group" aria-label="Applied facets" className="flex flex-wrap items-center gap-1.5">
+          <span aria-hidden="true" className="text-xs text-muted-foreground">
+            Applied facets
+          </span>
           {strayFacets.map(([name, value]) => (
-            <button
-              key={name}
-              type="button"
-              className={`${chipClass(true)} ${CHIP_WRAP}`}
-              aria-pressed
-              aria-label={`Remove ${name} ${value}`}
-              onClick={() => setFacet(name, '', false)}
-            >
+            <Badge key={name} variant="secondary" className="h-auto max-w-full gap-0.5 py-0.5 pr-0.5 break-all whitespace-normal">
               {name}: {value}
-            </button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="size-4 rounded-full"
+                aria-label={`Remove ${name} ${value}`}
+                onClick={() => setFacet(name, '', false)}
+              >
+                <XIcon />
+              </Button>
+            </Badge>
           ))}
-        </Group>
+        </div>
       )}
     </div>
   )

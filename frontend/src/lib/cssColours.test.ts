@@ -13,6 +13,10 @@ describe('CSS_COLOURS', () => {
     const backend = Object.fromEntries(
       [...source.matchAll(/^\s+"([a-z]+)": "(#[0-9A-F]{6})",$/gm)].map((m) => [m[1], m[2]]),
     )
+    // Every entry line of the dict is one the pattern read: a line written otherwise (a
+    // trailing comment, say) would otherwise drop out of the comparison unseen.
+    const dict = /^CSS_COLOURS: dict\[str, str\] = \{\n([\s\S]*?)^\}/m.exec(source)?.[1] ?? ''
+    expect(dict.split('\n').filter((line) => line.trim().startsWith('"')).length).toBe(Object.keys(backend).length)
     expect(Object.keys(backend).length).toBeGreaterThan(140)
     expect(CSS_COLOURS).toEqual(backend)
   })

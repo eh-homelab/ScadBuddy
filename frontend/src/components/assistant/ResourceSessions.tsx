@@ -1,9 +1,14 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useState } from 'react'
+import { ChevronDownIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { statusLabel } from '../../agent/chat/labels'
 import { useAssistantOpener } from '../../agent/chat/opener'
 import { api } from '../../api/client'
 import type { ResourceRef } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
+import { Tip } from './Tip'
 
 /** The most sessions listed; one more is asked for, so the count can say there are more. */
 export const RESOURCE_SESSIONS_SHOWN = 100
@@ -32,79 +37,54 @@ export function ResourceSessions({ resource, label = 'Changed by assistant', mod
     enabled && model ? [`model:${model}`] : undefined,
   )
   const [open, setOpen] = useState(false)
-  const root = useRef<HTMLDivElement>(null)
-  const toggle = useRef<HTMLButtonElement>(null)
-  const listId = useId()
-
-  // A disclosure, not a menu: Tab moves through the sessions, and a click or focus
-  // outside, or Escape (focus back on the toggle), closes it.
-  useEffect(() => {
-    if (!open) return
-    const outside = (event: Event) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setOpen(false)
-      toggle.current?.focus()
-    }
-    document.addEventListener('mousedown', outside)
-    document.addEventListener('focusin', outside)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', outside)
-      document.removeEventListener('focusin', outside)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
 
   if (!opener || !listed.data || listed.data.length === 0) return null
   const more = listed.data.length > RESOURCE_SESSIONS_SHOWN
   const sessions = more ? listed.data.slice(0, RESOURCE_SESSIONS_SHOWN) : listed.data
 
+  // #3673 — a popover with a command list: type to find a session, arrows to move, Enter
+  // to open it; Escape or a click outside closes it, focus back on the toggle.
   return (
-    <div ref={root} className="relative">
-      <button
-        ref={toggle}
-        type="button"
-        onClick={() => setOpen((was) => !was)}
-        aria-expanded={open}
-        aria-controls={open ? listId : undefined}
-        className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-      >
-        {label} ({sessions.length}{more ? '+' : ''})
-      </button>
-      {open && (
-        <ul
-          id={listId}
-          aria-label="Assistant sessions that changed this"
-          className="absolute right-0 top-full z-30 mt-1 max-h-72 w-72 overflow-y-auto rounded-[6px] border border-line bg-surface py-1 shadow-xl"
-        >
-          {sessions.map((s) => (
-            <li key={s.id}>
-              <button
-                type="button"
-                title={s.id}
-                className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
-                onClick={() => {
-                  setOpen(false)
-                  opener.openSession(s.id)
-                }}
-              >
-                <span className="block truncate">{s.title || 'Untitled session'}</span>
-                <span className="block text-[11px] text-faint">
-                  {statusLabel(s.status)} · {new Date(s.updated_at).toLocaleString()}
-                </span>
-              </button>
-            </li>
-          ))}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" className="text-xs text-muted-foreground">
+          {label} ({sessions.length}
+          {more ? '+' : ''})
+          <ChevronDownIcon data-icon="inline-end" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-0">
+        <Command label="Find a session">
+          {/* It takes the focus and the keys: type to filter, arrows to move, Enter to open. */}
+          <CommandInput placeholder="Find a session…" aria-label="Find a session" />
+          <CommandList label="Assistant sessions that changed this">
+            <CommandEmpty>No session matches.</CommandEmpty>
+            {sessions.map((s) => (
+              <Tip key={s.id} content={s.id} side="left">
+                <CommandItem
+                  value={s.id}
+                  keywords={[s.title || 'Untitled session']}
+                  onSelect={() => {
+                    setOpen(false)
+                    opener.openSession(s.id)
+                  }}
+                  className="flex-col items-start gap-0 [&>svg:last-child]:hidden"
+                >
+                  <span className="block w-full truncate text-[13px]">{s.title || 'Untitled session'}</span>
+                  <span className="block text-[11px] text-muted-foreground">
+                    {statusLabel(s.status)} · {new Date(s.updated_at).toLocaleString()}
+                  </span>
+                </CommandItem>
+              </Tip>
+            ))}
+          </CommandList>
           {more && (
-            <li className="px-3 py-1.5 text-[11px] text-faint">
+            <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
               Showing the {RESOURCE_SESSIONS_SHOWN} most recent.
-            </li>
+            </p>
           )}
-        </ul>
-      )}
-    </div>
+        </Command>
+      </PopoverContent>
+    </Popover>
   )
 }

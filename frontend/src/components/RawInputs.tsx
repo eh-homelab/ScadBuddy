@@ -6,8 +6,10 @@ type Props = {
   /** 12 by default; fewer where a capped row holds it (the page slot, #1811), so the textarea scrolls, not its row too. */
   rows?: number
   /**
-   * Held to 30vh (the page slot's row, #3074): only the error scrolls, beside the
-   * textarea's own scroll, so no scrollbar sits inside another and no error is clipped.
+   * Held to 30vh (the page slot's row, #3074): the error and the textarea share it,
+   * each scrolling inside itself, so no scrollbar sits inside another, no error is
+   * clipped, and on a short frame the textarea shrinks rather than spill over the
+   * template below.
    */
   capped?: boolean
 }
@@ -24,7 +26,7 @@ export function RawInputs({ inputs, error, rows = 12, capped = false }: Props) {
         rows={rows}
         value={JSON.stringify(inputs, null, 2)}
         aria-label="Saved inputs"
-        className={capped ? 'shrink-0' : undefined}
+        className={capped ? 'min-h-0' : undefined}
       />
     </div>
   )

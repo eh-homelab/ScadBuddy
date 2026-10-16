@@ -13,10 +13,12 @@ import { AiCredentialSection } from '../components/assistant/AiCredentialSection
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
+import { BrowserOriginsSetting } from '../components/BrowserOriginsSetting'
 import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { SessionRuntimeSetting } from '../components/SessionRuntimeSetting'
 import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
 import { DurableSubagentsSetting } from '../components/DurableSubagentsSetting'
@@ -28,8 +30,24 @@ import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
-import { Button } from '../components/ui/Button'
-import { Dialog } from '../components/ui/Dialog'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
+import { ChevronRightIcon } from 'lucide-react'
+import { ChoiceSelect, SwitchField, TipProvider } from '../components/settings/form'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { NEW_TAB } from '../lib/embed'
@@ -129,7 +147,9 @@ const RETENTIONS: FieldName[] = ['print_run_retention_seconds', 'operation_reten
  * the default, shown as the placeholder. The bounds are the backend's
  * (`settings_store.py`), checked here so a bad value is not a 422.
  */
-const ACTIVITY_TTL = { min: 86400, default: 2_592_000 }
+/** The longest retention the API takes, ten years (`settings_store.RETENTION_MAX_SECONDS`). */
+const RETENTION_MAX_DAYS = 3650
+const ACTIVITY_TTL = { min: 86400, max: RETENTION_MAX_DAYS * 86400, default: 2_592_000 }
 const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
 /** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
 const FOLLOW_NOBODY = 'none'
@@ -160,7 +180,9 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null
     const days = Number(raw)
-    if (!Number.isFinite(days) || days < 1) return { problem: 'Enter at least 1 day, or leave it empty to keep every one.' } satisfies Problem
+    if (!Number.isFinite(days) || days < 1 || days > RETENTION_MAX_DAYS) {
+      return { problem: `Enter 1 to ${RETENTION_MAX_DAYS} days, or leave it empty to keep every one.` } satisfies Problem
+    }
     return days * DAY_SECONDS
   }
   if (name === 'activity_follow') {
@@ -172,12 +194,10 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
   if (name === 'activity_ttl_seconds' || name === 'activity_repair_window_seconds') {
     if (raw.trim() === '') return null
     const seconds = Number(raw)
-    const { min, max } = name === 'activity_ttl_seconds' ? { ...ACTIVITY_TTL, max: Infinity } : ACTIVITY_REPAIR
+    const { min, max } = name === 'activity_ttl_seconds' ? ACTIVITY_TTL : ACTIVITY_REPAIR
     if (!Number.isFinite(seconds)) return { problem: 'Enter a number of seconds, or leave it empty for the default.' } satisfies Problem
     if (seconds < min || seconds > max) {
-      return {
-        problem: max === Infinity ? `Enter at least ${min} seconds.` : `Enter ${min} to ${max} seconds.`,
-      } satisfies Problem
+      return { problem: `Enter ${min} to ${max} seconds.` } satisfies Problem
     }
     return seconds
   }
@@ -204,7 +224,9 @@ function isProblem(value: unknown): value is Problem {
 export function SettingsPage() {
   return (
     <SettingsCollapseProvider>
-      <SettingsSections />
+      <TipProvider>
+        <SettingsSections />
+      </TipProvider>
     </SettingsCollapseProvider>
   )
 }
@@ -213,7 +235,7 @@ export function SettingsPage() {
 const ASSISTANT_GROUPS = [
   { id: 'assistant-credentials', title: 'Status & credentials' },
   { id: 'assistant-browser', title: 'This browser' },
-  { id: 'assistant-tools', title: 'HTTP & camera tools' },
+  { id: 'assistant-tools', title: 'HTTP, browser & camera tools' },
   { id: 'assistant-model', title: 'Model & limits' },
   { id: 'assistant-sessions', title: 'Session mode' },
   { id: 'assistant-mcp', title: 'MCP access' },
@@ -600,21 +622,34 @@ function SettingsSections() {
   if (settingsState.error && !settings) {
     return (
       <div role="alert" className="mx-auto max-w-lg px-4 py-16">
-        <div className="rounded-[6px] border border-warn/40 bg-warn/8 p-4">
-          <p className="text-[13px] text-warn">Could not load settings: {settingsState.error.message}</p>
-          <Button size="sm" className="mt-3" onClick={settingsState.reload}>
-            Try again
-          </Button>
-        </div>
+        <Card className="bg-warn/8 ring-warn/40">
+          <CardContent>
+            <p className="text-sm text-warn">Could not load settings: {settingsState.error.message}</p>
+            <Button size="sm" variant="outline" className="mt-3" onClick={settingsState.reload}>
+              Try again
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     )
   }
 
   if (settingsState.loading || !settings) {
     return (
-      <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading settings
-      </p>
+      <div role="status" aria-busy="true" className="mx-auto max-w-2xl space-y-4 px-4 py-6">
+        <span className="sr-only">Loading settings</span>
+        <Skeleton className="h-6 w-32" />
+        <Skeleton className="h-4 w-full" />
+        {[0, 1, 2, 3].map((card) => (
+          <Card key={card} className="gap-3">
+            <CardContent className="space-y-3">
+              <Skeleton className="h-4 w-1/3" />
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-2/3" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
     )
   }
 
@@ -659,10 +694,9 @@ function SettingsSections() {
       <>
         {specs.filter((spec) => !spec.advanced).map(runtimeRow)}
         {advanced.length > 0 && (
-          <details className="rounded-[6px] border border-line px-3 py-2">
-            <summary className="cursor-pointer text-[13px] text-muted">Advanced</summary>
-            <div className="mt-3 space-y-4">{advanced.map(runtimeRow)}</div>
-          </details>
+          <Advanced label="Advanced" invalid={advanced.some((spec) => Boolean(errors[spec.name]))}>
+            {advanced.map(runtimeRow)}
+          </Advanced>
         )}
       </>
     )
@@ -681,7 +715,7 @@ function SettingsSections() {
     >
       {children}
       {sectionError[id] && (
-        <p role="alert" className="text-[13px] text-warn">
+        <p role="alert" className="text-sm text-warn">
           {sectionError[id]}
         </p>
       )}
@@ -700,11 +734,11 @@ function SettingsSections() {
       <nav
         ref={sectionNav}
         aria-label="Settings sections"
-        className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur"
+        className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur"
       >
         {/* #969: wraps from sm up so every section shows at a glance; on a phone it
             scrolls sideways, with a fade on the right edge to say there is more. */}
-        <ul className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 py-2 text-[12px] [mask-image:linear-gradient(to_right,black_85%,transparent)] sm:flex-wrap sm:justify-center sm:overflow-visible sm:[mask-image:none]">
+        <ul className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 py-2 [mask-image:linear-gradient(to_right,black_85%,transparent)] sm:flex-wrap sm:justify-center sm:overflow-visible sm:[mask-image:none]">
           {SECTIONS.map((section) => (
             <li key={section.id} className="shrink-0">
               <a
@@ -716,11 +750,13 @@ function SettingsSections() {
                   goToSection(section.id, { inPlace: dirty })
 
                 }}
-                className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink aria-[current=location]:bg-surface-2 aria-[current=location]:text-ink"
+                // shadcn's tabs look (#3671): the section in view is the active tab. Links,
+                // not tabs: each moves to its section in this one page.
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-transparent px-2.5 text-xs font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none aria-[current=location]:border-border aria-[current=location]:bg-background aria-[current=location]:text-foreground aria-[current=location]:shadow-sm dark:aria-[current=location]:bg-input/30"
               >
                 {section.title}
                 {sectionDirty(section.id) && (
-                  <span aria-label="unsaved" className="size-1.5 rounded-full bg-accent" />
+                  <Badge aria-label="unsaved" className="size-1.5 min-w-0 rounded-full p-0" />
                 )}
               </a>
             </li>
@@ -729,8 +765,8 @@ function SettingsSections() {
       </nav>
 
       <div className="mx-auto max-w-2xl px-4 py-6">
-        <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
-        <p className="mt-0.5 text-[13px] text-muted">
+        <h1 className="font-heading text-xl font-semibold tracking-tight">Settings</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
           Each setting says where its value comes from. A value saved here beats the deployment&rsquo;s{' '}
           <span className="sb-num">SCADBUDDY_*</span> variable until it is reset. The API keys are stored on
           the server and never sent back to the browser.
@@ -740,22 +776,23 @@ function SettingsSections() {
         {ai.available && <McpAuthBanner className="mt-4" />}
 
         {changedElsewhere && (
-          <div
-            role="status"
-            className="mt-4 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
-          >
-            <span>Settings were changed elsewhere. Your unsaved changes here are kept until you load them.</span>
-            <Button size="sm" onClick={loadLatest}>
-              Load the latest
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setChangedElsewhere(false)}>
-              Keep mine
-            </Button>
-          </div>
+          <Card role="status" size="sm" className="mt-4 bg-primary/8 ring-primary/40">
+            <CardContent className="flex flex-wrap items-center gap-3 text-xs">
+              <span className="min-w-0 flex-1 basis-60">
+                Settings were changed elsewhere. Your unsaved changes here are kept until you load them.
+              </span>
+              <Button size="sm" onClick={loadLatest}>
+                Load the latest
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setChangedElsewhere(false)}>
+                Keep mine
+              </Button>
+            </CardContent>
+          </Card>
         )}
 
         {error && (
-          <p role="alert" className="mt-4 text-[13px] text-warn">
+          <p role="alert" className="mt-4 text-sm text-warn">
             {error}
           </p>
         )}
@@ -765,13 +802,13 @@ function SettingsSections() {
             'connection',
             <>
               <FieldRow id="bambuddy-url" label="Bambuddy URL" badge={badge('bambuddy_url')} error={errors.bambuddy_url}>
-                <input
+                <Input
                   id="bambuddy-url"
                   type="url"
                   value={value('bambuddy_url')}
                   onChange={(event) => setField('bambuddy_url', event.target.value)}
                   placeholder="https://bambuddy.internal.example"
-                  className="sb-field sb-num"
+                  className="sb-num"
                 />
               </FieldRow>
 
@@ -782,13 +819,13 @@ function SettingsSections() {
                 error={errors.bambuddy_web_urls}
                 help="Where browsers reach Bambuddy, when the URL above is one only ScadBuddy's server can. Comma-separated: links use the first, or whichever of them ScadBuddy is opened inside."
               >
-                <input
+                <Input
                   id="bambuddy-web-urls"
                   type="text"
                   value={value('bambuddy_web_urls')}
                   onChange={(event) => setField('bambuddy_web_urls', event.target.value)}
                   placeholder="https://bambuddy.example, https://bambuddy.lan"
-                  className="sb-field sb-num"
+                  className="sb-num"
                 />
               </FieldRow>
 
@@ -800,7 +837,7 @@ function SettingsSections() {
                 help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects, Manage Archives for print photos and Manage Inventory to record a tray's spool."
               >
                 <div className="flex gap-2">
-                  <input
+                  <Input
                     id="bambuddy-key"
                     type="password"
                     value={value('bambuddy_api_key')}
@@ -813,12 +850,11 @@ function SettingsSections() {
                           ? 'A key is stored. Paste a new one to replace it.'
                           : 'Paste the key'
                     }
-                    className="sb-field sb-num"
+                    className="sb-num"
                   />
                   {settings.has_api_key && (
                     <Button
-                      size="sm"
-                      variant="ghost"
+                      variant="outline"
                       disabled={clearing.includes('bambuddy_api_key')}
                       onClick={() => clearSecret('bambuddy_api_key')}
                       {...USER_ONLY}
@@ -837,7 +873,7 @@ function SettingsSections() {
                 help="A second key with Manage Library only. Render workers run template code and hold this key alone."
               >
                 <div className="flex gap-2">
-                  <input
+                  <Input
                     id="bambuddy-render-key"
                     type="password"
                     value={value('bambuddy_render_api_key')}
@@ -850,12 +886,11 @@ function SettingsSections() {
                           ? 'A key is stored. Paste a new one to replace it.'
                           : 'Paste the key'
                     }
-                    className="sb-field sb-num"
+                    className="sb-num"
                   />
                   {settings.has_render_api_key && (
                     <Button
-                      size="sm"
-                      variant="ghost"
+                      variant="outline"
                       disabled={clearing.includes('bambuddy_render_api_key')}
                       onClick={() => clearSecret('bambuddy_render_api_key')}
                       {...USER_ONLY}
@@ -868,7 +903,7 @@ function SettingsSections() {
                   <p
                     role="status"
                     data-testid="render-key-fallback"
-                    className="mt-1.5 rounded-[6px] border border-warn px-2 py-1.5 text-[12px]"
+                    className="mt-1.5 rounded-lg bg-warn/10 px-2.5 py-2 text-xs ring-1 ring-warn/50"
                   >
                     Render workers hold the full Bambuddy key; template code can print. Create a key with only
                     Manage Library in Bambuddy and paste it above as the render key.
@@ -883,19 +918,20 @@ function SettingsSections() {
                 error={errors.public_url}
                 help="What Bambuddy links to. ScadBuddy cannot infer it — it sits behind a proxy."
               >
-                <input
+                <Input
                   id="public-url"
                   type="url"
                   value={value('public_url')}
                   onChange={(event) => setField('public_url', event.target.value)}
                   placeholder="https://scadbuddy.internal.example"
-                  className="sb-field sb-num"
+                  className="sb-num"
                 />
               </FieldRow>
 
               <div className="space-y-2">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
+                    variant="outline"
                     onClick={() => void runTest()}
                     disabled={testing}
                     aria-busy={testing}
@@ -906,14 +942,18 @@ function SettingsSections() {
                     Test connection
                   </Button>
                   {test && (
-                    <p role="status" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
+                    <Badge
+                      role="status"
+                      variant="outline"
+                      className={cn('h-auto whitespace-normal', test.ok ? 'border-ok/40 text-ok' : 'border-warn/40 text-warn')}
+                    >
                       {test.detail}
-                    </p>
+                    </Badge>
                   )}
                 </div>
                 {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
                 {test && (test.scopes?.length ?? 0) > 0 && (
-                  <ul aria-label="Scopes" className="space-y-1 text-[12px]">
+                  <ul aria-label="Scopes" className="space-y-1 rounded-lg p-3 text-xs ring-1 ring-foreground/10">
                     {test.scopes?.map((check) => (
                       <li key={check.scope} className="flex gap-2">
                         <span
@@ -923,16 +963,16 @@ function SettingsSections() {
                               ? 'text-ok'
                               : check.required && check.status !== 'unknown'
                                 ? 'text-warn'
-                                : 'text-muted'
+                                : 'text-muted-foreground'
                           }
                         >
                           {check.status === 'ok' ? '✓' : check.status === 'missing' ? '✗' : '?'}
                         </span>
                         <span>
                           <span className="font-medium">{check.scope}</span>
-                          {!check.required && <span className="text-muted"> (optional)</span>}
+                          {!check.required && <span className="text-muted-foreground"> (optional)</span>}
                           {': '}
-                          <span className="text-muted">
+                          <span className="text-muted-foreground">
                             {check.status === 'ok'
                               ? 'granted. '
                               : check.status === 'missing'
@@ -950,13 +990,16 @@ function SettingsSections() {
               </div>
 
               {connected && (
-                <div className="rounded-[6px] border border-line px-3 py-2 text-[12px]" data-testid="bambuddy-status">
+                <Card size="sm" className="text-xs" data-testid="bambuddy-status">
+                  <CardContent>
                   {bambuddyState.loading ? (
-                    <span className="flex items-center gap-2 text-muted">
-                      <Spinner /> Reading Bambuddy
-                    </span>
+                    <div role="status" aria-busy="true" className="space-y-2">
+                      <span className="sr-only">Reading Bambuddy</span>
+                      <Skeleton className="h-3.5 w-1/2" />
+                      <Skeleton className="h-3.5 w-5/6" />
+                    </div>
                   ) : bambuddyState.error ? (
-                    <span className="text-muted">
+                    <span className="text-muted-foreground">
                       Could not read Bambuddy:{' '}
                       {bambuddyState.error instanceof ApiError ? bambuddyState.error.detail : 'no answer'}
                     </span>
@@ -978,35 +1021,36 @@ function SettingsSections() {
                               href={bambuddy.settings_url}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-accent underline-offset-2 hover:underline"
+                              className="text-primary underline-offset-2 hover:underline"
                             >
                               Turn it on in Bambuddy
                             </a>
                           </>
                         )}
                       </p>
-                      <p className="text-muted">
+                      <p className="text-muted-foreground">
                         Bambuddy photographs a print when it finishes, and print history shows the photo.
                         ScadBuddy only reads this setting.{bambuddy?.detail ? ` ${bambuddy.detail}` : ''}
                       </p>
                     </div>
                   )}
-                </div>
+                  </CardContent>
+                </Card>
               )}
 
-              <div className="border-t border-line pt-4">
-                <p className="text-[13px] text-muted">
+              <div className="border-t pt-4">
+                <p className="text-sm text-muted-foreground">
                   Adds ScadBuddy to Bambuddy&rsquo;s sidebar as an External Link called &ldquo;ScadBuddy&rdquo;,
                   opening inside Bambuddy rather than a new tab, at ScadBuddy&rsquo;s own URL. Running it again
                   updates the existing entry.
                 </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <Button onClick={() => void addSidebar()} disabled={registering} aria-busy={registering} {...USER_ONLY}>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button variant="outline" onClick={() => void addSidebar()} disabled={registering} aria-busy={registering} {...USER_ONLY}>
                     {registering && <Spinner />}
                     Add to Bambuddy sidebar
                   </Button>
                   {sidebar && (
-                    <p role="status" className="text-[12px] text-ok">
+                    <p role="status" className="text-xs text-ok">
                       {sidebar.created ? 'Added to the sidebar' : 'Updated the sidebar entry'} at{' '}
                       <span className="sb-num">{sidebar.embed_path}</span>.
                     </p>
@@ -1021,20 +1065,18 @@ function SettingsSections() {
             'printing',
             <>
               <FieldRow id="printer" label="Printer">
-                <select
+                <ChoiceSelect
                   id="printer"
                   value={value('printer_id')}
-                  onChange={(event) => setField('printer_id', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="">None</option>
-                  {(targetsState.data?.printers ?? []).map((printer) => (
-                    <option key={printer.id} value={printer.id}>
-                      {printer.name}
-                      {printer.model ? ` (${printer.model})` : ''}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={(next) => setField('printer_id', next)}
+                  choices={[
+                    { value: '', label: 'None' },
+                    ...(targetsState.data?.printers ?? []).map((printer) => ({
+                      value: String(printer.id),
+                      label: `${printer.name}${printer.model ? ` (${printer.model})` : ''}`,
+                    })),
+                  ]}
+                />
               </FieldRow>
               <FieldRow
                 id="print-run-retention"
@@ -1042,16 +1084,16 @@ function SettingsSections() {
                 help="Empty keeps every run, the start of print history. A number deletes runs that finished longer ago."
                 error={errors.print_run_retention_seconds}
               >
-                <input
+                <Input
                   id="print-run-retention"
                   type="number"
                   min="1"
+                  max={RETENTION_MAX_DAYS}
                   step="any"
                   inputMode="decimal"
                   placeholder="Forever"
                   value={value('print_run_retention_seconds')}
                   onChange={(event) => setField('print_run_retention_seconds', event.target.value)}
-                  className="sb-field"
                 />
               </FieldRow>
               {/* The operations record (#1053). */}
@@ -1061,16 +1103,16 @@ function SettingsSections() {
                 help="Sends, reprints, project filing and the like. Empty keeps every record; a number deletes those that finished longer ago. Keep it at least as long as Temporal's namespace retention, or a retried request whose record is gone is told it may have been done instead of its outcome."
                 error={errors.operation_retention_seconds}
               >
-                <input
+                <Input
                   id="operation-retention"
                   type="number"
                   min="1"
+                  max={RETENTION_MAX_DAYS}
                   step="any"
                   inputMode="decimal"
                   placeholder="Forever"
                   value={value('operation_retention_seconds')}
                   onChange={(event) => setField('operation_retention_seconds', event.target.value)}
-                  className="sb-field"
                 />
               </FieldRow>
             </>,
@@ -1092,19 +1134,15 @@ function SettingsSections() {
                 label="Inbox folder, for sends without a project"
                 help="Where a 3MF goes when it is sent without a project. A send to a project uses the project's own folder."
               >
-                <select
+                <ChoiceSelect
                   id="library-folder"
                   value={value('library_folder_id')}
-                  onChange={(event) => setField('library_folder_id', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="">Library root</option>
-                  {(targetsState.data?.folders ?? []).map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {folder.name}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={(next) => setField('library_folder_id', next)}
+                  choices={[
+                    { value: '', label: 'Library root' },
+                    ...(targetsState.data?.folders ?? []).map((folder) => ({ value: String(folder.id), label: folder.name })),
+                  ]}
+                />
               </FieldRow>
 
               <FieldRow
@@ -1116,22 +1154,18 @@ function SettingsSections() {
                     : "Where a library file's print opens its project picker, and the project a send without one is filed under. A model opens on the project it was last filed in."
                 }
               >
-                <select
+                <ChoiceSelect
                   id="default-project"
                   value={project}
-                  onChange={(event) => setField('last_project_id', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="">No project</option>
-                  {project && !projects.some((entry) => String(entry.id) === project) && (
-                    <option value={project}>Project {project}</option>
-                  )}
-                  {projects.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.name}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={(next) => setField('last_project_id', next)}
+                  choices={[
+                    { value: '', label: 'No project' },
+                    ...(project && !projects.some((entry) => String(entry.id) === project)
+                      ? [{ value: project, label: `Project ${project}` }]
+                      : []),
+                    ...projects.map((entry) => ({ value: String(entry.id), label: entry.name })),
+                  ]}
+                />
               </FieldRow>
 
               <FieldRow
@@ -1141,19 +1175,21 @@ function SettingsSections() {
                 error={errors.store_backend}
                 help="Takes effect when ScadBuddy and its render workers restart."
               >
-                <select
+                <ChoiceSelect
                   id="store-backend"
                   value={chosenBackend}
-                  onChange={(event) => setField('store_backend', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="local">This server&rsquo;s volume (one render worker)</option>
-                  <option value="bambuddy" disabled={!bambuddyStoreReady}>
-                    Bambuddy library (any number of render workers)
-                  </option>
-                </select>
+                  onValueChange={(next) => setField('store_backend', next)}
+                  choices={[
+                    { value: 'local', label: 'This server’s volume (one render worker)' },
+                    {
+                      value: 'bambuddy',
+                      label: 'Bambuddy library (any number of render workers)',
+                      disabled: !bambuddyStoreReady,
+                    },
+                  ]}
+                />
                 {!bambuddyStoreReady && (
-                  <p className="mt-1.5 text-[12px] text-muted" data-testid="store-backend-hint">
+                  <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-backend-hint">
                     {!savedBambuddyUrl && value('bambuddy_url') !== ''
                       ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
                       : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
@@ -1162,28 +1198,30 @@ function SettingsSections() {
               </FieldRow>
 
               {storeUsage && (
-                <div>
-                  <p className="text-[13px]">Blob store usage</p>
-                  <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="store-usage">
-                    <dt className="text-muted">Where</dt>
+                <Card size="sm">
+                  <CardContent>
+                  <p className="text-sm font-medium">Blob store usage</p>
+                  <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" data-testid="store-usage">
+                    <dt className="text-muted-foreground">Where</dt>
                     <dd>{storeUsage.backend === 'bambuddy' ? 'Bambuddy library' : 'This server’s volume'}</dd>
-                    <dt className="text-muted">Files</dt>
+                    <dt className="text-muted-foreground">Files</dt>
                     <dd className="sb-num">{ofLimit(String(storeUsage.count), storeUsage.max_count, String)}</dd>
-                    <dt className="text-muted">Size</dt>
+                    <dt className="text-muted-foreground">Size</dt>
                     <dd className="sb-num">
                       {ofLimit(formatBytes(storeUsage.bytes), storeUsage.max_total_bytes, formatBytes)}
                     </dd>
                   </dl>
-                  <p className="mt-1.5 text-[12px] text-muted">
+                  <p className="mt-2 text-xs text-muted-foreground">
                     The Where row is the store this process uses; it moves to the Blob store choice above at its
                     next restart, so the two can differ until then.
                   </p>
-                  <p className="mt-1.5 text-[12px] text-muted">
+                  <p className="mt-1.5 text-xs text-muted-foreground">
                     Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded fonts. What no job,
                     output or preset uses is removed once unused for the sweep&rsquo;s grace period (a week by
                     default). Past either limit, new files are refused.
                   </p>
-                </div>
+                  </CardContent>
+                </Card>
               )}
               {runtimeRows('projects')}
             </>,
@@ -1194,18 +1232,20 @@ function SettingsSections() {
             <>
               {runtimeRows('uploads')}
               {usage && (
-                <div>
-                  <p className="text-[13px]">Uploaded files</p>
-                  <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="asset-usage">
-                    <dt className="text-muted">Files</dt>
+                <Card size="sm">
+                  <CardContent>
+                  <p className="text-sm font-medium">Uploaded files</p>
+                  <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm" data-testid="asset-usage">
+                    <dt className="text-muted-foreground">Files</dt>
                     <dd className="sb-num">{ofLimit(String(usage.count), usage.max_count, String)}</dd>
-                    <dt className="text-muted">Size</dt>
+                    <dt className="text-muted-foreground">Size</dt>
                     <dd className="sb-num">{ofLimit(formatBytes(usage.bytes), usage.max_total_bytes, formatBytes)}</dd>
                   </dl>
-                  <p className="mt-1.5 text-[12px] text-muted">
+                  <p className="mt-2 text-xs text-muted-foreground">
                     The SVGs and PNGs attached to file parameters. Past either limit, a new upload is refused.
                   </p>
-                </div>
+                  </CardContent>
+                </Card>
               )}
             </>,
           )}
@@ -1230,15 +1270,15 @@ function SettingsSections() {
                 label="Show dimensions in"
                 help="For every model: the bounding box, plate sizes and fit warnings. Models, parameters and the files sent to Bambuddy stay in millimetres."
               >
-                <select
+                <ChoiceSelect
                   id="display-unit"
                   value={value('display_unit')}
-                  onChange={(event) => setField('display_unit', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="mm">Millimetres (mm)</option>
-                  <option value="in">Inches (in)</option>
-                </select>
+                  onValueChange={(next) => setField('display_unit', next)}
+                  choices={[
+                    { value: 'mm', label: 'Millimetres (mm)' },
+                    { value: 'in', label: 'Inches (in)' },
+                  ]}
+                />
               </FieldRow>
 
               <FieldRow
@@ -1248,21 +1288,20 @@ function SettingsSections() {
                 error={errors.default_plate}
                 help="The plate the customizer draws and checks the model against until a printer is chosen in the print picker."
               >
-                <select
+                <ChoiceSelect
                   id="default-plate"
                   value={plate}
-                  onChange={(event) => setField('default_plate', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="">{plateSize([256, 256], unit)}</option>
-                  {/* A value set through SCADBUDDY_DEFAULT_PLATE may be a code ("A1M"). */}
-                  {plate && !plateNames.includes(plate) && <option value={plate}>{plate}</option>}
-                  {(platesState.data?.plates ?? []).map((entry) => (
-                    <option key={entry.name} value={entry.name}>
-                      {entry.name} ({plateSize(entry.size, unit)})
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={(next) => setField('default_plate', next)}
+                  choices={[
+                    { value: '', label: plateSize([256, 256], unit) },
+                    // A value set through SCADBUDDY_DEFAULT_PLATE may be a code ("A1M").
+                    ...(plate && !plateNames.includes(plate) ? [{ value: plate, label: plate }] : []),
+                    ...(platesState.data?.plates ?? []).map((entry) => ({
+                      value: entry.name,
+                      label: `${entry.name} (${plateSize(entry.size, unit)})`,
+                    })),
+                  ]}
+                />
               </FieldRow>
             </>,
           )}
@@ -1286,18 +1325,15 @@ function SettingsSections() {
             <SubSection id="assistant-browser" title={groupTitle('assistant-browser')}>
               {/* Per browser and applied at once. Only the user may flip it: an agent must
                   not grant itself access (#254). */}
-              <div>
-                <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-                  <input
-                    type="checkbox"
-                    checked={webMcp}
-                    onChange={(event) => setWebMcpEnabled(event.target.checked)}
-                    className="mt-0.5"
-                    aria-describedby="webmcp-help"
-                  />
-                  Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
-                </label>
-                <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
+              <div className="space-y-1.5">
+                <SwitchField
+                  id="webmcp-enabled"
+                  label={<>Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)</>}
+                  checked={webMcp}
+                  onCheckedChange={setWebMcpEnabled}
+                  describedBy="webmcp-help"
+                />
+                <p id="webmcp-help" className="text-xs text-muted-foreground">
                   Off by default, as AI design spec §8.5 has an outside agent pair before it drives a tab. Even
                   when on, the print and send tool can only open the dialog; you confirm it.
                 </p>
@@ -1305,6 +1341,8 @@ function SettingsSections() {
             </SubSection>
             <SubSection id="assistant-tools" title={groupTitle('assistant-tools')}>
               <HttpRequestSetting />
+              {/* #982 — where the assistant's headless browser may go; hidden without the agent's database. */}
+              <BrowserOriginsSetting />
               {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
               <PrinterCameraSetting />
             </SubSection>
@@ -1313,6 +1351,8 @@ function SettingsSections() {
               <ModelSetting />
               {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
               <SessionLimitsSetting />
+              {/* Saves on its own; the warm cache applies it live, hidden without the agent's database. */}
+              <SessionRuntimeSetting />
               {/* Saves on its own; read live by the agent, hidden without its database. */}
               <RenderLimitsSetting />
               {/* Saves on its own; hidden without the agent's database, like the limits above. */}
@@ -1342,7 +1382,7 @@ function SettingsSections() {
               )}
               {ai.available && (
                 <div>
-                  <p className="text-[13px]">MCP sign-in (OIDC)</p>
+                  <p className="mb-3 text-sm font-medium">MCP sign-in (OIDC)</p>
                   {/* Saved on its own: the agent service owns it, not the backend's settings. */}
                   <McpOidcSettings />
                 </div>
@@ -1352,8 +1392,8 @@ function SettingsSections() {
               {/* Each action is its own request, applied at once. */}
               {ai.available && (
                 <div>
-                  <p className="text-[13px]">Assistant plugins</p>
-                  <p className="mt-0.5 text-[12px] text-muted">
+                  <p className="text-sm font-medium">Assistant plugins</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
                     What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
                   </p>
                   <PluginPackagesPanel />
@@ -1380,34 +1420,35 @@ function SettingsSections() {
                 help={`Principals whose finished activity rings the bell and shows a toast, comma-separated, as stored: "browser" is this browser; others look like "token:…" or an agent session's id. Empty is the default, "browser"; "${FOLLOW_NOBODY}" follows nobody.`}
                 error={errors.activity_follow}
               >
-                <input
+                <Input
                   id="activity-follow"
                   type="text"
                   placeholder="browser"
                   value={value('activity_follow')}
                   onChange={(event) => setField('activity_follow', event.target.value)}
-                  className="sb-field"
                 />
               </FieldRow>
-              <details className="rounded-[6px] border border-line px-3 py-2">
-                <summary className="cursor-pointer text-[13px] text-muted">Advanced: activity retention</summary>
-                <div className="mt-3 space-y-4">
-                  <FieldRow
+              <Advanced
+                label="Advanced: activity retention"
+                invalid={Boolean(errors.activity_ttl_seconds || errors.activity_repair_window_seconds)}
+              >
+                <FieldRow
                     id="activity-ttl"
                     label="Keep activity for (seconds)"
-                    help="At least 86400 (a day). Empty is the default, 30 days."
+                    help="86400 (a day) to 315360000 (ten years). Empty is the default, 30 days."
                     error={errors.activity_ttl_seconds}
                   >
-                    <input
+                    <Input
                       id="activity-ttl"
                       type="number"
                       min={ACTIVITY_TTL.min}
+                      max={ACTIVITY_TTL.max}
                       step={1}
                       inputMode="numeric"
                       placeholder={String(ACTIVITY_TTL.default)}
                       value={value('activity_ttl_seconds')}
                       onChange={(event) => setField('activity_ttl_seconds', event.target.value)}
-                      className="sb-field sb-num"
+                      className="sb-num"
                     />
                   </FieldRow>
                   <FieldRow
@@ -1416,7 +1457,7 @@ function SettingsSections() {
                     help="600 to 604800. Empty is the default, one day."
                     error={errors.activity_repair_window_seconds}
                   >
-                    <input
+                    <Input
                       id="activity-repair"
                       type="number"
                       min={ACTIVITY_REPAIR.min}
@@ -1426,116 +1467,150 @@ function SettingsSections() {
                       placeholder={String(ACTIVITY_REPAIR.default)}
                       value={value('activity_repair_window_seconds')}
                       onChange={(event) => setField('activity_repair_window_seconds', event.target.value)}
-                      className="sb-field sb-num"
+                      className="sb-num"
                     />
                   </FieldRow>
-                </div>
-              </details>
+              </Advanced>
               {runtimeRows('administration')}
               {temporalUi && (
                 // Not ScadBuddy's page: a new tab, which also escapes Bambuddy's sandbox.
-                <a href={temporalUi} {...NEW_TAB} className="text-[13px] text-accent underline">
-                  Temporal UI ↗
-                </a>
+                <Button asChild variant="link" className="h-auto px-0">
+                  <a href={temporalUi} {...NEW_TAB}>
+                    Temporal UI ↗
+                  </a>
+                </Button>
               )}
             </>,
           )}
 
           <Section id="about" title={sectionTitle('about')}>
-            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[13px]" data-testid="about">
-              <dt className="text-muted">ScadBuddy</dt>
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm" data-testid="about">
+              <dt className="text-muted-foreground">ScadBuddy</dt>
               <dd className="sb-num">
                 {settings.about?.version ?? 'unknown'} ({settings.about?.revision ?? 'unknown'})
               </dd>
-              <dt className="text-muted">OpenSCAD</dt>
+              <dt className="text-muted-foreground">OpenSCAD</dt>
               <dd className="sb-num">{settings.about?.openscad_version ?? 'not found'}</dd>
-              <dt className="text-muted">Bambuddy</dt>
+              <dt className="text-muted-foreground">Bambuddy</dt>
               <dd className="sb-num">{connected ? (bambuddy?.version ?? 'unknown') : 'not connected'}</dd>
             </dl>
             <div>
-              <p className="text-[13px]">Set by the deployment only</p>
-              <p className="mt-0.5 text-[12px] text-muted">
+              <p className="text-sm font-medium">Set by the deployment only</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
                 These cannot be changed here. Each is its <span className="sb-num">SCADBUDDY_*</span> variable or
                 the image&rsquo;s default.
               </p>
               {/* #1035 — `overflow-wrap: anywhere` on the variable names and values: they are
                   single unbroken tokens (a comma-joined origin list runs ~570 px), and without
                   a break point the table ran past the card at every width. */}
-              <table className="mt-2 w-full text-left text-[12px]" aria-label="Deployment values">
-                <tbody>
-                  {(settings.bootstrap ?? []).map((entry) => (
-                    <tr key={entry.name} className="border-t border-line align-top">
-                      <th scope="row" className="sb-num py-1.5 pr-3 font-normal [overflow-wrap:anywhere]">
-                        {entry.env_var}
-                      </th>
-                      <td className="py-1.5">
-                        <span className="sb-num [overflow-wrap:anywhere]">{entry.value ?? 'unset'}</span>{' '}
-                        <span className="text-muted">({entry.source === 'env' ? 'set' : 'default'})</span>
-                        <p className="mt-0.5 text-muted">{entry.reason}</p>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <Card size="sm" className="mt-2 py-0">
+                <table className="w-full text-left text-xs" aria-label="Deployment values">
+                  <tbody className="divide-y">
+                    {(settings.bootstrap ?? []).map((entry) => (
+                      <tr key={entry.name} className="align-top transition-colors hover:bg-ui-muted/50">
+                        <th scope="row" className="sb-num w-2/5 px-3 py-2 font-medium [overflow-wrap:anywhere]">
+                          {entry.env_var}
+                        </th>
+                        <td className="px-3 py-2">
+                          <span className="sb-num [overflow-wrap:anywhere]">{entry.value ?? 'unset'}</span>{' '}
+                          <Badge variant="outline" className="ml-1 text-muted-foreground">
+                            {entry.source === 'env' ? 'set' : 'default'}
+                          </Badge>
+                          <p className="mt-1 text-muted-foreground">{entry.reason}</p>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Card>
             </div>
           </Section>
         </div>
       </div>
 
-      <Dialog
-        open={guard.pending !== null}
-        title="Leave without saving?"
-        description={`Unsaved changes in ${dirtySections.map(sectionTitle).join(', ')} will be lost.`}
-        onClose={guard.stay}
-        footer={
-          <>
-            <Button variant="ghost" onClick={guard.stay}>
-              Stay
-            </Button>
-            <Button variant="danger" onClick={guard.leave}>
+      <AlertDialog open={guard.pending !== null} onOpenChange={(open) => !open && guard.stay()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {`Unsaved changes in ${dirtySections.map(sectionTitle).join(', ')} will be lost.`} Save each section
+              first to keep its changes.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            {/* A plain button: an AlertDialogAction would also close the dialog, which is Stay. */}
+            <Button variant="destructive" onClick={guard.leave}>
               Leave without saving
             </Button>
-          </>
-        }
-      >
-        <p className="text-[13px] text-muted">Save each section first to keep its changes.</p>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  )
+}
+
+/**
+ * A fold inside a section: its fields stay mounted while folded, so their edits are kept.
+ * A save that refuses a field in it opens it, so the field and its error are on screen.
+ */
+function Advanced({ label, invalid, children }: { label: string; invalid: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const [wasInvalid, setWasInvalid] = useState(invalid)
+  if (invalid !== wasInvalid) {
+    setWasInvalid(invalid)
+    if (invalid) setOpen(true)
+  }
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg ring-1 ring-foreground/10">
+      <CollapsibleTrigger className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+        <ChevronRightIcon aria-hidden="true" className={cn('size-4 shrink-0 transition-transform', open && 'rotate-90')} />
+        {label}
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount hidden={!open} className="space-y-4 border-t p-3">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
 /** #1542 — what Bambuddy itself answered a failed connection test, as it said it. */
 function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest['upstream']> }) {
+  const [open, setOpen] = useState(false)
   return (
-    <details className="rounded-[6px] border border-line px-3 py-2 text-[12px]">
-      <summary className="cursor-pointer text-muted">What Bambuddy answered</summary>
-      <dl className="mt-2 space-y-1">
-        {answer.status != null && (
-          <div className="flex gap-2">
-            <dt className="text-muted">Status</dt>
-            <dd>{answer.status}</dd>
-          </div>
-        )}
-        {answer.retry_after != null && (
-          <div className="flex gap-2">
-            <dt className="text-muted">Retry-After</dt>
-            <dd>{answer.retry_after}</dd>
-          </div>
-        )}
-        {answer.detail != null && (
-          <div className="flex gap-2">
-            <dt className="text-muted">Its message</dt>
-            <dd className="break-all">{answer.detail}</dd>
-          </div>
-        )}
-        {answer.error != null && (
-          <div className="flex gap-2">
-            <dt className="text-muted">Error</dt>
-            <dd className="break-all">{answer.error}</dd>
-          </div>
-        )}
-      </dl>
-    </details>
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg text-xs ring-1 ring-foreground/10">
+      <CollapsibleTrigger className="flex min-h-8 w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-muted-foreground hover:bg-ui-muted/50 hover:text-foreground">
+        <ChevronRightIcon aria-hidden="true" className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
+        What Bambuddy answered
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount hidden={!open} className="border-t px-3 py-2">
+        <dl className="space-y-1">
+          {answer.status != null && (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">Status</dt>
+              <dd>{answer.status}</dd>
+            </div>
+          )}
+          {answer.retry_after != null && (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">Retry-After</dt>
+              <dd>{answer.retry_after}</dd>
+            </div>
+          )}
+          {answer.detail != null && (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">Its message</dt>
+              <dd className="break-all">{answer.detail}</dd>
+            </div>
+          )}
+          {answer.error != null && (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">Error</dt>
+              <dd className="break-all">{answer.error}</dd>
+            </div>
+          )}
+        </dl>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
-

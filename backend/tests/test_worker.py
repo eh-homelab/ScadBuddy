@@ -196,6 +196,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert samples['scadbuddy_render_jobs_finished_total{kind="render",outcome="done"}'] == 1
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
+    # A model with no scene.json (not a mesh model) never runs the paint stage.
+    assert samples.get('scadbuddy_render_stage_seconds_count{stage="paint"}', 0) == 0
     assert f'revision="{build_id}"' in metrics
     # Refreshed per scrape from this process's store (the local one: no cache to size).
     assert samples["scadbuddy_store_render_key_fallback"] == 0

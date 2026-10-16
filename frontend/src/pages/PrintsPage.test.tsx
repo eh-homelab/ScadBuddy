@@ -856,7 +856,7 @@ describe('now printing (#977)', () => {
   it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
     render()
     const strip = await screen.findByRole('region', { name: 'Now printing' })
-    expect(within(strip).getByTestId('printer-now-1')).toHaveTextContent('Bracket')
+    expect(await within(strip).findByTestId('printer-now-1')).toHaveTextContent('Bracket')
     expect(await list()).toBeInTheDocument()
   })
 })

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tarfile
 import zipfile
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -83,9 +84,11 @@ from scadbuddy.bambuddy.project_file import (
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.tracing import span
-from scadbuddy.library.history import COMMIT_ID_PATTERN
+from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
@@ -97,6 +100,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     require_output,
 )
+from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
@@ -106,6 +110,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.jobs import SnapshotUnavailableError, source_directory
 from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
@@ -312,6 +317,12 @@ MAX_ARRANGE_COPIES = 2000
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 
+#: A colour as a manifest states one.
+HexColour = Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
+#: Swaps one object may ask for: far past the colours one object prints in.
+MAX_RECOLOURS = 64
+
+
 class ArrangeObject(BaseModel):
     """One source's object, or every object of it (#1864). The source is an output, or
     a Bambuddy library file: one ScadBuddy uploaded is read through the output it is a
@@ -330,11 +341,25 @@ class ArrangeObject(BaseModel):
     count: int | None = Field(default=None, ge=0, le=500)
     #: With `goal = keep_together`: objects sharing a group share a plate.
     group: str | None = Field(default=None, max_length=100)
+    #: These copies print in other colours (#3637): each of the object's own colours
+    #: named here (its manifest entry's `colours`) prints in the colour it maps to, and
+    #: a new colour is a filament slot of its own. `{}` is the object's own colours;
+    #: omitted is as its source has it (an arranged output's entry may be recoloured).
+    #: The same object twice, once recoloured, is the same model in two colourings.
+    #: A part an arranged output holds in two colourings is picked by these colours;
+    #: when they match neither entry, the first is taken (its count when `count` is
+    #: omitted) and recoloured as asked.
+    recolour: dict[HexColour, HexColour] | None = Field(default=None, max_length=MAX_RECOLOURS)
 
     @model_validator(mode="after")
     def _one_source(self) -> ArrangeObject:
         if (self.output_id is None) == (self.library_file_id is None):
             raise ValueError("an object names one source: output_id or library_file_id")
+        if self.recolour is not None:
+            # Upper case, and a colour "swapped" for itself is no swap.
+            self.recolour = {
+                k.upper(): v.upper() for k, v in self.recolour.items() if k.upper() != v.upper()
+            }
         return self
 
 
@@ -346,7 +371,8 @@ class ArrangeRequest(BaseModel):
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     #: The filament order the plan's slots refer to; omitted means the first object's
-    #: output's colours, then any colour the others add.
+    #: output's colours, then any colour the others add. Omitted, a source colour every
+    #: copy swaps away (`recolour`) is left out; given, every slot named keeps its place.
     colours: list[str] | None = None
     name: str | None = Field(default=None, max_length=200)
     #: The template the result is filed under (#1864): one of the outputs', omitted the
@@ -458,7 +484,9 @@ def arrange_inputs(
     than on a worker (spec §10). Every library file ScadBuddy uploaded names its output
     by now (`resolve_library_files`)."""
     library = library or {}
-    manifests: dict[str, dict[str, ManifestObject]] = {}
+    # Each source's entries; an arranged output may hold one part twice, in two
+    # colourings (#3637).
+    manifests: dict[str, list[ManifestObject]] = {}
     items: list[PackItem] = []
     provenance: dict[str, ManifestObject] = {}
     # A colour list is slot order (slot N = colours[N-1]), and an arranged output's can
@@ -490,7 +518,7 @@ def arrange_inputs(
             if meta.slug not in slugs:
                 slugs.append(meta.slug)
             if source not in manifests:
-                manifests[source] = {m.part: m for m in outputs.manifest(source)}
+                manifests[source] = outputs.manifest(source)
                 if body.colours is None:
                     colours += [c for c in meta.colors if c not in colours]
         else:
@@ -499,21 +527,13 @@ def arrange_inputs(
                 raise ValueError(f"library file {file_id} reaches arrange_inputs unread")
             source = f"library:{file_id}"
             what = f"library file {file_id}"
-            manifests.setdefault(source, {m.part: m for m in library[file_id].objects})
-        if obj.part is None:
-            entries = list(manifests[source].values())
-        else:
-            entry = manifests[source].get(obj.part)
-            if entry is None:
-                raise ApiError(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"{what} has no object {obj.part}",
-                )
-            entries = [entry]
+            manifests.setdefault(source, list(library[file_id].objects))
+        entries = _chosen_entries(manifests[source], obj, what)
         for entry in entries:
             count = entry.count if obj.count is None else obj.count
             if count == 0:
                 continue
+            recolour = entry.recolour if obj.recolour is None else obj.recolour
             if entry.plates > 1:
                 # The packer places objects on shared plates; one that lays out its own
                 # plates cannot be one of them, even alone.
@@ -523,7 +543,8 @@ def arrange_inputs(
                     f" own {entry.plates} plates, so it cannot be arranged; print that"
                     " output as it is",
                 )
-            items.append(PackItem(part=part_of(entry), count=count, group=obj.group))
+            item = PackItem(part=part_of(entry), count=count, group=obj.group, recolour=recolour)
+            items.append(item)
             if obj.output_id is None and source not in files:
                 # Only a file that placed something is a source (#2540).
                 files.append(source)
@@ -534,11 +555,18 @@ def arrange_inputs(
                 else entry.model_copy(update={"source_output": entry.source_output or source}),
             )
             if body.colours is None:
-                colours += [c for c in entry.colours if c not in colours]
+                printed = item.colours() if recolour else entry.colours
+                colours += [c for c in printed if c not in colours]
     if not items:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
         )
+    if body.colours is None:
+        # A source's colour every copy swapped away prints nowhere: no slot for it
+        # (#3637). A slot no part used before keeps its place, as it always has.
+        drawn = {c.upper() for item in items for c in item.colours()}
+        gone = {c for item in items for c in item.recolour} - drawn
+        colours = [c for c in colours if c.upper() not in gone]
     try:
         _check_copies(sum(item.count for item in items))
     except ValueError as too_many:
@@ -571,6 +599,38 @@ def arrange_inputs(
         # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
         sources=[*chosen, *files],
     )
+
+
+def _chosen_entries(
+    manifest: list[ManifestObject], obj: ArrangeObject, what: str
+) -> list[ManifestObject]:
+    """The entries of ``manifest`` that ``obj`` names: every one, or its part's. A part an
+    arranged output holds in two colourings is both, unless ``obj`` says which colours
+    it wants: then the one in them, else the first, recoloured as it asks (#3637). Every
+    colour it swaps must be one the chosen entries print with."""
+    if obj.part is None:
+        entries = list(manifest)
+    else:
+        entries = [m for m in manifest if m.part == obj.part]
+        if not entries:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{what} has no object {obj.part}"
+            )
+        if obj.recolour is not None:
+            same = [m for m in entries if m.recolour == obj.recolour]
+            entries = (same or entries)[:1]
+    if obj.recolour:
+        own = {c.upper() for m in entries for c in m.colours}
+        missing = sorted(c for c in obj.recolour if c not in own)
+        if missing:
+            which = ", ".join(missing)
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"object {obj.part} of {what} does not print in {which}, so it cannot be swapped"
+                if obj.part is not None
+                else f"no object of {what} prints in {which}, so it cannot be swapped",
+            )
+    return entries
 
 
 @router.post(
@@ -608,6 +668,7 @@ async def arrange_outputs(
     catalogue: CatalogueDep,
     state: StateDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
@@ -630,7 +691,9 @@ async def arrange_outputs(
         # Filed under any template (#2284), so it must be one.
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
-        job = await render.arrange(slug, inputs)
+        # #2280: a re-send while the start is still accepting keeps its key, so it is the
+        # same request, answered with the first outcome.
+        job = await render.arrange(slug, inputs, request_id=idempotency_key)
     await attribute_request(activity.index, f"render:{job.id}")
     return _job_status(job, None)
 
@@ -658,6 +721,7 @@ async def backfill_output(
     fetcher: FetcherDep,
     fonts: FontsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if await asyncio.to_thread(outputs.manifest, output_id):
@@ -716,6 +780,8 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # #2280: as the render route's, so a re-send still accepting is one claim.
+            idempotency_key,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).
@@ -1027,21 +1093,25 @@ def get_output_plate_thumbnail(
     response_model=GeometryAnalysis,
     summary="Mesh geometry analysis",
 )
-def get_output_geometry(
+async def get_output_geometry(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    paths: PathsDep,
+    history: HistoryDep,
     plate: Annotated[int, Query(ge=1, description="The plate to measure (1-based)")] = 1,
 ) -> GeometryAnalysis:
     """Printability measurements of the closed per-colour solids on one plate of the
     output (#284): open and non-manifold edges with their locations, bounding box,
-    bed contact, height-to-base ratio, overhang area by angle, and estimates of the
-    thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
-    as in the preview. A 3MF with more than one plate (#289) is measured a plate at
-    a time; ``plates`` in the result says how many there are. Computed on first ask
-    and cached beside the output."""
+    bed contact, height-to-base ratio, overhang area by angle, estimates of the
+    thinnest wall and smallest feature, and weak joints (#2146): level sections narrow
+    enough to snap, each with a `split_at_plane` edit whose `object` names the scene
+    object for a mesh model's output. Coordinates are the model's own (mm, Z up), as in
+    the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
+    ``plates`` in the result says how many there are. Computed on first ask and cached
+    beside the output."""
     require_output(outputs, output_id)
     try:
-        return outputs.geometry(output_id, plate)
+        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:
@@ -1051,6 +1121,62 @@ def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
+    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
+
+
+async def _attributed(
+    analysis: GeometryAnalysis,
+    outputs: OutputStore,
+    output_id: str,
+    plate: int,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+) -> GeometryAnalysis:
+    """``analysis`` with its weak joints naming their scene objects, when the output is
+    a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
+    arranged output's objects were moved off the scene's frame, so it is left as it is,
+    as is one whose revision is not a commit or cannot be read. A named analysis is
+    cached beside the output's geometry (a revision's scene never changes, and
+    `ANALYSIS_VERSION` moves with the analysis); one left as it is never, since the
+    cause may be a git or disk error that passes."""
+    if not analysis.weak_joints:
+        return analysis
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
+        return analysis
+    meta = await asyncio.to_thread(outputs.get, output_id)
+    version = meta.model_version
+    if version is None or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        # No revision to read the scene at: the live scene may have been edited since
+        # the render, and would name the wrong object.
+        logger.info("weak joints of %s left unattributed: no commit recorded", output_id)
+        return analysis
+    cached = await asyncio.to_thread(outputs.attributed, output_id, plate, version)
+    if cached is not None:
+        return cached
+    try:
+        directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
+    except (
+        # What `source_directory` raises: `last_commit` and `export` (GitError, its
+        # timeout and unavailable kinds), a revision or model path absent at the commit
+        # (RevisionNotFoundError, as a deleted model's older one can be), no history to
+        # export from (SnapshotUnavailableError), and the extraction or the move into
+        # place (a damaged tar, OSError).
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
+        logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
+        return analysis
+    if not directory.is_dir():
+        logger.warning("weak joints of %s left unattributed: %s is gone", output_id, meta.slug)
+        return analysis
+    named = await asyncio.to_thread(attribute, analysis, directory)
+    if named is not analysis:
+        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+    return named
 
 
 @router.put(
@@ -1083,6 +1209,38 @@ async def put_output_thumbnail(
         claimed=Claimed(claims, [held]),
     )
     return _no_content(result)
+
+
+class RenameOutputRequest(BaseModel):
+    #: The output's new name; empty or null clears it, and History shows its short id.
+    name: str | None = Field(default=None, max_length=200)
+
+
+@router.patch(
+    "/outputs/{output_id}",
+    response_model=OutputDetail,
+    summary="Rename an output",
+    responses=OPERATION_RESPONSES,
+)
+async def rename_output(
+    output_id: OutputIdPath,
+    body: RenameOutputRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_rename`` operation (#2288): its check makes the 404, its run writes
+    the name and answers the output as it now reads."""
+    name = (body.name or "").strip() or None
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_rename"],
+        subject=output_id,
+        request={"output_id": output_id, "name": name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
 
 
 @router.post(

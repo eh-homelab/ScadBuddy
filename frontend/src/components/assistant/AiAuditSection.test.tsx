@@ -29,6 +29,19 @@ beforeEach(() => {
   resetMockState()
 })
 
+/** #3673 — a filter's options: its Select, opened (Escape closes it again). */
+async function filterOptions(name: 'Kind' | 'Outcome') {
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('combobox', { name }))
+  return { user, list: await screen.findByRole('listbox') }
+}
+
+/** Picks a filter's option by its label. */
+async function pick(name: 'Kind' | 'Outcome', label: string) {
+  const { user, list } = await filterOptions(name)
+  await user.click(within(list).getByRole('option', { name: label }))
+}
+
 const rows = () => within(screen.getByRole('list', { name: 'AI activity entries' })).getAllByTestId('audit-entry')
 
 describe('AiAuditSection', () => {
@@ -75,7 +88,7 @@ describe('AiAuditSection', () => {
     expect(recall).not.toHaveTextContent('{')
     expect(failed).toHaveTextContent('Error')
     expect(failed).toHaveTextContent('bank scadbuddy · timed out after 3000 ms')
-    expect(screen.getByRole('option', { name: 'Memory' })).toBeInTheDocument()
+    expect(within((await filterOptions('Kind')).list).getByRole('option', { name: 'Memory' })).toBeInTheDocument()
   })
 
   it('shows http rows as method, host, status and size (#827)', async () => {
@@ -117,7 +130,7 @@ describe('AiAuditSection', () => {
     expect(get).not.toHaveTextContent('{')
     expect(refused).toHaveTextContent('Refused')
     expect(refused).toHaveTextContent("example.com · the Authorization header contains the agent's own credential")
-    expect(screen.getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
+    expect(within((await filterOptions('Kind')).list).getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
   })
 
   it('links an http row to the body its request saved, and only that row (#1292)', async () => {
@@ -237,7 +250,7 @@ describe('AiAuditSection', () => {
     expect(failed).toHaveTextContent('not priced by Claude Code')
     expect(failed).not.toHaveTextContent('$0.0000')
     expect(failed).toHaveTextContent('exited with code 1')
-    expect(screen.getByRole('option', { name: 'Turns' })).toBeInTheDocument()
+    expect(within((await filterOptions('Kind')).list).getByRole('option', { name: 'Turns' })).toBeInTheDocument()
   })
 
   it('#2373 — says a panel action came from the app, and a fork is a session action', async () => {
@@ -261,8 +274,9 @@ describe('AiAuditSection', () => {
     expect(fork).toHaveTextContent('via the app')
     expect(approval).toHaveTextContent('via the app')
     expect(approval).not.toHaveTextContent('Settings')
-    expect(screen.getByRole('option', { name: 'Sessions & resources' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'MCP resources' })).toBeNull()
+    const { list } = await filterOptions('Kind')
+    expect(within(list).getByRole('option', { name: 'Sessions & resources' })).toBeInTheDocument()
+    expect(within(list).queryByRole('option', { name: 'MCP resources' })).toBeNull()
   })
 
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
@@ -291,17 +305,17 @@ describe('AiAuditSection', () => {
     server.events.on('request:start', ({ request }) => {
       if (request.url.includes('/api/v1/ai/audit')) seen.push(new URL(request.url).search)
     })
-    const { user } = renderPage(<AiAuditSection />)
+    renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))
 
-    await user.selectOptions(screen.getByLabelText('Outcome'), 'denied')
+    await pick('Outcome', 'Denied')
     await waitFor(() => expect(rows()).toHaveLength(2))
-    await user.selectOptions(screen.getByLabelText('Kind'), 'approval')
+    await pick('Kind', 'Approvals')
     await waitFor(() => expect(rows()).toHaveLength(1))
     expect(rows()[0]).toHaveTextContent('Approval denied')
     expect(seen.at(-1)).toBe('?kind=approval&outcome=denied&limit=25')
 
-    await user.selectOptions(screen.getByLabelText('Outcome'), 'error')
+    await pick('Outcome', 'Error')
     expect(await screen.findByText('Nothing recorded for these filters.')).toBeInTheDocument()
     server.events.removeAllListeners()
   })

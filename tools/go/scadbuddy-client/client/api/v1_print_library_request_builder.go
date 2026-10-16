@@ -123,6 +123,12 @@ func (m *V1PrintLibraryRequestBuilder) Move() *V1PrintLibraryMoveRequestBuilder 
 	return NewV1PrintLibraryMoveRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
+// Names the names property
+// returns a *V1PrintLibraryNamesRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Names() *V1PrintLibraryNamesRequestBuilder {
+	return NewV1PrintLibraryNamesRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // Rename the rename property
 // returns a *V1PrintLibraryRenameRequestBuilder when successful
 func (m *V1PrintLibraryRequestBuilder) Rename() *V1PrintLibraryRenameRequestBuilder {
@@ -133,6 +139,12 @@ func (m *V1PrintLibraryRequestBuilder) Rename() *V1PrintLibraryRenameRequestBuil
 // returns a *V1PrintLibraryRestoreRequestBuilder when successful
 func (m *V1PrintLibraryRequestBuilder) Restore() *V1PrintLibraryRestoreRequestBuilder {
 	return NewV1PrintLibraryRestoreRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
+// Search the search property
+// returns a *V1PrintLibrarySearchRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Search() *V1PrintLibrarySearchRequestBuilder {
+	return NewV1PrintLibrarySearchRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
 // ToGetRequestInformation the folder tree and one folder's files (the root's without “folder_id“).Without “all“ only unsliced 3MFs; with it every file, each flagged “printable“.A file ScadBuddy uploaded names its “output_id“ (#1864), while that output stillexists: the upload row outlives a deleted output, and a file whose output is gone isany other library file (#2138). “file_id“ in place of “folder_id“ lists thefolder that file is in, which a deep link to a file opens (#2165); a file Bambuddyno longer has is its 404.

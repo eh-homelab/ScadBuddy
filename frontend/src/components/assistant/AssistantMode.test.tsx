@@ -51,7 +51,8 @@ beforeEach(() => {
 describe('session mode', () => {
   it('sends no mode by default, and shows the Durable badge on the durable session the default gave', async () => {
     const { user, box } = await openComposer()
-    expect(screen.getByRole('combobox', { name: 'Session mode' })).toHaveValue('')
+    await user.click(await screen.findByRole('button', { name: 'Session mode: Default (Durable)' }))
+    expect(screen.getByRole('combobox', { name: 'Session mode' })).toHaveTextContent('Default (Durable)')
     await user.type(box, 'hello{Enter}')
     await waitFor(() => expect(sentMessages()).toHaveLength(1))
     expect(sentMessages()[0]).not.toHaveProperty('mode')
@@ -60,7 +61,8 @@ describe('session mode', () => {
     // Forked like a classic one (#2688), from the header and from a reply.
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent(/idle|approval/i))
     await waitFor(() => expect(within(header).getByRole('button', { name: 'Fork' })).toBeEnabled())
-    expect(within(header).getByRole('button', { name: 'Fork' })).toHaveAttribute('title', expect.stringMatching(/^Copy this chat/))
+    await user.hover(within(header).getByRole('button', { name: 'Fork' }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/^Copy this chat/)
     expect(screen.getAllByRole('button', { name: /Fork from here/ }).length).toBeGreaterThan(0)
     // The fork is durable too.
     await user.click(within(header).getByRole('button', { name: 'Fork' }))
@@ -72,10 +74,11 @@ describe('session mode', () => {
 
   it('sends the picked mode, remembers it, and shows no badge on a classic session', async () => {
     const { user, box } = await openComposer()
-    await user.click(await screen.findByText('Session mode: Default (Durable)', { selector: 'summary' }))
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Session mode' }), 'classic')
+    await user.click(await screen.findByRole('button', { name: 'Session mode: Default (Durable)' }))
+    await user.click(screen.getByRole('combobox', { name: 'Session mode' }))
+    await user.click(await screen.findByRole('option', { name: 'Classic' }))
     expect(window.localStorage.getItem(SESSION_MODE_KEY)).toBe('classic')
-    expect(screen.getByText('Session mode: Classic', { selector: 'summary' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Session mode: Classic' })).toBeInTheDocument()
     await user.type(box, 'hello{Enter}')
     await waitFor(() => expect(sentMessages()[0]).toMatchObject({ mode: 'classic' }))
     const header = await screen.findByTestId('active-session-header')
@@ -85,9 +88,11 @@ describe('session mode', () => {
   it('starts from the remembered choice, and Default forgets it', async () => {
     window.localStorage.setItem(SESSION_MODE_KEY, 'durable')
     const { user } = await openComposer()
+    await user.click(screen.getByRole('button', { name: /^Session mode: Durable/ }))
     const select = screen.getByRole('combobox', { name: 'Session mode' })
-    expect(select).toHaveValue('durable')
-    await user.selectOptions(select, '')
+    expect(select).toHaveTextContent('Durable')
+    await user.click(select)
+    await user.click(await screen.findByRole('option', { name: /^Default/ }))
     expect(window.localStorage.getItem(SESSION_MODE_KEY)).toBeNull()
   })
 
@@ -106,9 +111,12 @@ describe('session mode', () => {
     setDurableAvailable(false)
     window.localStorage.setItem(SESSION_MODE_KEY, 'durable')
     const { user, box } = await openComposer()
-    expect(screen.getByText('Session mode: Durable', { selector: 'summary' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Session mode: Durable' })).toBeInTheDocument()
     expect(await screen.findByTestId('session-mode-picker-unavailable')).toHaveTextContent(/no durable session worker/)
-    expect(screen.getByRole('option', { name: 'Default (Durable, Classic for now)' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Session mode: Durable' }))
+    await user.click(screen.getByRole('combobox', { name: 'Session mode' }))
+    expect(await screen.findByRole('option', { name: 'Default (Durable, Classic for now)' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
     await user.type(box, 'hello{Enter}')
     expect(await screen.findByRole('alert')).toHaveTextContent(/durable/i)
   })

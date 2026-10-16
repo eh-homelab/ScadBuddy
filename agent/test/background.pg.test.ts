@@ -1,24 +1,29 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSdkServerConfigWithInstance, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
-import { type BuiltinContext, builtinServer } from '../src/builtins/server.js'
+import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
+import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -193,9 +198,39 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
   })
 
+  it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
+    // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
+    const scripted = scriptedRunner((_run, prompt) => (prompt.includes('first') ? { hang: true } : { reply: 'done again' }))
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const acts = backgroundActivities({ store, tz: 'UTC', paths: await tempPaths(), send: async () => ({ result: 'sent' }), agents: managerAgents(mm) })
+    const t = (await store.create({
+      sessionId: parent,
+      kind: 'workflow',
+      description: 'retry',
+      spec: { name: 'retry', description: 'retry', body: `return await agent('first')`, scriptPath: '/workspace/_claude/workflows/retry-wf_x.js' },
+      createdBy: browser,
+    }))!
+    const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${parent}-${t.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
+    const first = new MockActivityEnvironment({ ...info, attempt: 1 })
+    const abandoned = first.run(acts.wf_run!, { taskId: t.id }).catch(() => undefined)
+    await expect.poll(() => scripted.prompts.length).toBe(1)
+    const [orphan] = await db.sql<{ id: string }[]>`SELECT id FROM ai_sessions WHERE parent_id = ${parent}`
+    await expect.poll(async () => (await mm.get(orphan!.id, browser)).status).toBe('running')
+
+    // The retry: its script differs only so its own agent can answer.
+    await db.sql`UPDATE ai_background_tasks SET spec = spec || ${db.sql.json({ body: `return await agent('second')` } as never)} WHERE id = ${t.id}`
+    const out = await new MockActivityEnvironment({ ...info, attempt: 2 }).run(acts.wf_run!, { taskId: t.id })
+    expect(out).toMatchObject({ status: 'completed', result: 'done again' })
+    expect((await mm.get(orphan!.id, browser)).status).toBe('done')
+    first.cancel()
+    await abandoned
+    mm.abortAll()
+  }, 60_000)
+
   it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
-    const scripted = scriptedRunner((run) => {
-      const prompt = String(run.prompt)
+    // The turn's message, as the warm process was sent it.
+    const scripted = scriptedRunner((_run, prompt) => {
       if (prompt.includes('give n')) return { reply: 'not json' }
       if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
       return { reply: 'hello from the agent' }
@@ -211,11 +246,11 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const [row] = await db.sql<{ root: string }[]>`SELECT budget_root_id AS root FROM ai_sessions WHERE id = ${child.id}`
     expect(row!.root).toBe(parent)
     // Claude Code's frame and instructions reach the child's turn.
-    expect(scripted.runs[0]!.prompt).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
+    expect(promptText(scripted.prompts[0]!)).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
     const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
     const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
     expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
-    expect(scripted.runs.at(-1)!.prompt).toMatch(/^Your reply did not match the schema:/)
+    expect(promptText(scripted.prompts.at(-1)!)).toMatch(/^Your reply did not match the schema:/)
 
     // Its options act as Claude Code's: the chat's own model, effort and subagent definition.
     const typed = managerAgents(mm, { agentTypes: async () => ['model-author', 'print-analyst'] })
@@ -372,6 +407,93 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     classic.abortAll()
   })
 
+  it("serves a classic turn's WebFetch through the pinned fetch, refusing loopback unless allowed (#2974)", async () => {
+    const page = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html><body><h1>Pinned</h1></body></html>')
+    })
+    await new Promise<void>((r) => page.listen(0, '127.0.0.1', r))
+    const port = (page.address() as AddressInfo).port
+    const asked: string[] = []
+    const web = (allowLoopback: boolean): WebContext => ({
+      nested: { ask: async (prompt) => (asked.push(prompt), 'the answer'), search: () => Promise.reject(new Error('unused')) },
+      secrets: () => [],
+      actor: browser,
+      signal: new AbortController().signal,
+      resolve: async () => ['127.0.0.1'],
+      allowLoopback,
+    })
+    const fetchVia = async (allowLoopback: boolean, page: string) => {
+      const client = await connectInProcess(() => classicBuiltinServer(['WebFetch'], { web: web(allowLoopback) }).instance)
+      try {
+        const result = (await client.callTool({ name: 'WebFetch', arguments: { url: `http://pages.test:${port}/${page}`, prompt: 'title?' } })) as {
+          content: { text: string }[]
+          isError?: boolean
+        }
+        return { text: result.content[0]?.text ?? '', isError: result.isError === true }
+      } finally {
+        await client.close()
+      }
+    }
+    try {
+      const served = await fetchVia(true, 'a')
+      expect(served.isError).toBe(false)
+      expect(unwrapUntrusted(served.text)).toBe('the answer')
+      expect(asked[0]).toContain('# Pinned')
+      // The name resolves to loopback, which the pinned fetch refuses without the test switch
+      // (another page: WebFetch caches the first).
+      expect(await fetchVia(false, 'b')).toMatchObject({ isError: true })
+      expect(asked).toHaveLength(1)
+    } finally {
+      await new Promise((r) => page.close(r))
+    }
+  })
+
+  it("sends WebFetch's model call on the credential a turn has failed over to (#2973)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    const pooled = (id: string, secret: string) => ({ id, epoch: 0, label: `credential ${id}`, credential: { kind: 'anthropic_api_key' as const, secret } })
+    let credential: (() => Promise<{ secret: string }>) | undefined
+    const used: string[] = []
+    let attempts = 0
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // The first credential is refused after its init; the second attempt's WebFetch asks.
+      run: (run) =>
+        (async function* () {
+          attempts += 1
+          const session_id = run.sessionId ?? run.resume ?? 'unknown'
+          yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+          // Each attempt asks on the credential it is on, not only the last (#3508 review).
+          used.push((await credential!()).secret)
+          if (attempts === 1) {
+            yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+            return
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
+        })(),
+      nestedQueries: (deps) => {
+        credential = deps.credential
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', 'sk-ant-key-aaaa'), pooled('b', 'sk-ant-key-bbbb')]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    const turn = await classic.send(session.id, browser, 'fetch it')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(attempts).toBe(2)
+    expect(used).toEqual(['sk-ant-key-aaaa', 'sk-ant-key-bbbb'])
+    classic.abortAll()
+  })
+
   it("counts WebFetch's own model calls in the cost of a turn that ends on its own (#2684)", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))
@@ -401,6 +523,38 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
       SELECT cost_usd, unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
     expect(Number(row!.cost_usd)).toBeCloseTo(0.06)
     expect(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
+    classic.abortAll()
+  })
+
+  it("recycles the next turn's warm process for its budget after WebFetch spend, and logs why (#3597)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let spend: ((cost: number) => Promise<void>) | undefined
+    let fetches = 1
+    const logs: string[] = []
+    const scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.01 }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // Only the first turn's WebFetch makes a nested query; the warm process's cap never saw it.
+      run: (run) =>
+        (async function* () {
+          if (fetches-- > 0) await spend!(0.05)
+          yield* scripted.runner(run)
+        })(),
+      nestedQueries: (deps) => {
+        spend = deps.spent
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      warm: { log: (m) => logs.push(m) },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    expect(await (await classic.send(session.id, browser, 'fetch it')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await (await classic.send(session.id, browser, 'again')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(logs).toContainEqual(expect.stringMatching(/closed session .*'s process: recycled: budget/))
     classic.abortAll()
   })
 

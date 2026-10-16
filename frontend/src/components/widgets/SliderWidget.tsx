@@ -1,5 +1,5 @@
 import type { Param } from '../../api/types'
-import { rangeProblem } from '../../lib/params'
+import { paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { NumberInput } from './NumberInput'
 
@@ -31,7 +31,7 @@ export function SliderWidget({
   return (
     <Field
       id={id}
-      label={param.caption ?? param.name}
+      label={paramLabel(param)}
       name={param.name}
       readout={<span className="text-ink">{value}</span>}
       error={error}
@@ -44,7 +44,7 @@ export function SliderWidget({
           max={max}
           step={step}
           value={value}
-          aria-label={param.caption ?? param.name}
+          aria-label={paramLabel(param)}
           onChange={(event) => onChange(Number(event.target.value))}
           className="h-1.5 w-full flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-[var(--sb-accent)]"
         />
@@ -53,7 +53,7 @@ export function SliderWidget({
           max={max}
           step={step}
           value={value}
-          aria-label={`${param.caption ?? param.name} value`}
+          aria-label={`${paramLabel(param)} value`}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${id}-error` : undefined}
           onCommit={onChange}

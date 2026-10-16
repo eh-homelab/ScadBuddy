@@ -569,6 +569,20 @@ class OutputStore:
             raise OutputNotFoundError(name)
         return path
 
+    def rename(self, output_id: str, name: str | None) -> OutputMeta:
+        """Give the output ``name``, or none (#2288). Only ``meta.json`` changes: the
+        3MF's provenance names the output by id, and a download is named at download.
+
+        A read-modify-write with no lock: nothing else rewrites ``meta.json`` once the
+        output is saved. A second writer of it needs a lock here, or one rename loses."""
+        directory = self._find_dir(output_id)
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        renamed = meta.model_copy(update={"name": name or None})
+        _replace(
+            directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        )
+        return self.get(output_id)
+
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
         shutil.rmtree(directory, ignore_errors=True)
@@ -713,6 +727,34 @@ class OutputStore:
         partial.write_text(analysis.model_dump_json(indent=2) + "\n", encoding="utf-8")
         partial.replace(cache)
         return analysis
+
+    def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
+        """The cached analysis whose weak joints name their scene objects at
+        ``model_version`` (see :meth:`geometry`), or None when there is none, or it was
+        made by another :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION`."""
+        try:
+            stored = json.loads(self._attributed_path(output_id, plate).read_text("utf-8"))
+            cached = GeometryAnalysis.model_validate(stored["analysis"])
+            if stored["model_version"] != model_version or cached.version != ANALYSIS_VERSION:
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return cached
+
+    def write_attributed(
+        self, output_id: str, plate: int, model_version: str, analysis: GeometryAnalysis
+    ) -> None:
+        path = self._attributed_path(output_id, plate)
+        body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
+        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        partial.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+        partial.replace(path)
+
+    def _attributed_path(self, output_id: str, plate: int) -> Path:
+        name = (
+            "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
+        )
+        return self._find_dir(output_id) / name
 
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME

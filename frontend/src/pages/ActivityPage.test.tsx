@@ -106,7 +106,8 @@ describe("ActivityPage", () => {
     expect(
       await screen.findByRole("button", { name: "Install a font" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^You/ })).toBeInTheDocument();
+    // Started by takes one value: its chips are radios.
+    expect(screen.getByRole("radio", { name: /^You/ })).toBeInTheDocument();
   });
 
   it("filters by status and keeps it in the URL", async () => {
@@ -195,7 +196,7 @@ describe("ActivityPage", () => {
   it("shows an applied value the facets do not list, and clears it", async () => {
     const { user } = render("/activity?principal=ghost");
     expect(
-      await screen.findByRole("button", { name: "ghost", pressed: true }),
+      await screen.findByRole("radio", { name: "ghost", checked: true }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
     await waitFor(() =>
@@ -225,7 +226,7 @@ describe("ActivityPage", () => {
       within(screen.getByTestId("activity-row-child"))
         .getByText("Row child")
         .closest("td"),
-    ).toHaveClass("pl-5");
+    ).toHaveClass("pl-8");
   });
 
   it("keeps the loaded rows when a Load more fails, and says to try again", async () => {
