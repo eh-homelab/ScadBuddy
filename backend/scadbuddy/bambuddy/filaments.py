@@ -104,6 +104,10 @@ WarningKind = Literal[
     "sliced-other-model",
     "sliced-nozzle-missing",
     "sliced-plate-missing",
+    # A sliced file whose settings could not be read, so nothing was checked (#3436).
+    "sliced-unchecked",
+    # Sliced for another model of the same G-code family, which prints it (#2956).
+    "sliced-same-family",
     # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
     "slice-reused",
 ]
