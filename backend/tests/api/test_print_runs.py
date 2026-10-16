@@ -918,12 +918,21 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
                 "supports",
                 "prime_tower",
                 "plate_ids",
+                "folder_id",
             },
         ),
         sort_keys=True,
         separators=(",", ":"),
     )
     assert run_key("a" * 32, plain) == hashlib.sha256(f"{'a' * 32}\n{before}".encode()).hexdigest()
+
+
+def test_a_folder_is_part_of_the_key_only_when_chosen() -> None:
+    """#3651: a print into a library folder is not the same run as one into the inbox."""
+    plain = PrintRunRequest.model_validate(body())
+    into = PrintRunRequest.model_validate({**body(), "folder_id": 30})
+    other = PrintRunRequest.model_validate({**body(), "folder_id": 31})
+    assert len({run_key("a" * 32, r) for r in (plain, into, other)}) == 3
 
 
 def test_the_print_sequence_is_part_of_the_key_only_when_chosen() -> None:
