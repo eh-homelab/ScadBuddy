@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
 from typing import Annotated, BinaryIO
 
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -51,7 +51,7 @@ from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
-from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
     LibraryListing,
@@ -152,6 +152,64 @@ async def get_library(
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+#: The most file ids one names lookup reads, and how many it asks Bambuddy at once.
+NAMES_MAX = 100
+NAMES_AT_ONCE = 8
+
+
+class LibraryFileName(BaseModel):
+    """#2349 — one library file as a row that names it shows it."""
+
+    id: int
+    name: str | None = Field(description="Null when Bambuddy no longer has the file")
+    folder_id: int | None = None
+
+
+@router.get(
+    "/names",
+    response_model=list[LibraryFileName],
+    summary="Library files' names, by id",
+)
+async def get_library_names(
+    store: SettingsStoreDep,
+    ids: Annotated[list[Annotated[int, Field(ge=1)]], Query(min_length=1, max_length=NAMES_MAX)],
+) -> list[LibraryFileName]:
+    """Each file's name and folder, in the order asked (a repeated id once), read from
+    Bambuddy one file at a time, so a page that labels a few ids (Settings → Remembered
+    choices, #2349) need not list the whole library. A file Bambuddy no longer has is
+    ``name: null``; any other failure is the route's, and cancels the other reads before
+    the client closes. When several files are asked and Bambuddy has none of them, that
+    reads as a misrouted base URL rather than every file deleted, so it is a 502: a page
+    then shows the ids, never "deleted file" on every row, which invites a wrong Forget."""
+    gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    unique = list(dict.fromkeys(ids))
+    async with client_for(store.load()) as client:
+
+        async def one(file_id: int) -> LibraryFileName:
+            async with gate:
+                try:
+                    file = await client.library_file(file_id)
+                except ApiError as error:
+                    if error.status != status.HTTP_404_NOT_FOUND:
+                        raise
+                    return LibraryFileName(id=file_id, name=None)
+            return LibraryFileName(id=file_id, name=file.filename, folder_id=file.folder_id)
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(one(file_id)) for file_id in unique]
+        except BaseExceptionGroup as group_error:
+            # The read's own error (the 401 that is a 409, say), not an ExceptionGroup.
+            raise group_error.exceptions[0] from None
+    names = [task.result() for task in tasks]
+    if len(names) > 1 and all(file.name is None for file in names):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Bambuddy has none of these library files; is its URL right?",
+        )
+    return names
 
 
 @router.get(
@@ -884,6 +942,9 @@ async def get_library_filaments(
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
+    plate_ids: Annotated[
+        list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
+    ] = None,
 ) -> FilamentOptions:
     settings = store.load()
     async with client_for(settings) as client:
@@ -895,6 +956,7 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            plate_ids=plate_ids,
             filaments=partial(
                 library_filaments, client, paths.cache, budget=budget, downloads=downloads
             ),

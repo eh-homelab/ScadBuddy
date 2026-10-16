@@ -110,6 +110,29 @@ def test_values_that_do_not_fit_are_refused_before_anything_starts(
     assert client.get("/api/v1/workflow-runs").json() == []
 
 
+def test_the_inputs_are_checked_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3417: the patterns may take PATTERNS_BUDGET_S; every other request must not wait."""
+    from scadbuddy.api import flows as flows_api
+    from scadbuddy.flows.inputs import resolve_inputs as resolve
+
+    on_loop: list[bool] = []
+
+    def recorded(schema: Any, values: Any) -> dict[str, Any]:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return resolve(schema, values)
+
+    monkeypatch.setattr(flows_api, "resolve_inputs", recorded)
+    definition = register(client, READS, inputs_schema=SCHEMA)
+    assert start(client, definition["id"], "k", inputs={"slug": 1}).status_code == 422
+    assert on_loop == [False]
+
+
 def test_a_flow_without_a_schema_takes_no_inputs(client: TestClient) -> None:
     definition = register(client, script("return 1"))
     refused = start(client, definition["id"], "k1", inputs={"slug": "box"})

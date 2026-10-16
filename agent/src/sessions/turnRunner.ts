@@ -10,8 +10,8 @@
 
 import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
-import { ROOT_CONTEXT } from '@opentelemetry/api'
-import type { PooledCredential } from '../harness/fallback.js'
+import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
+import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
 import {
   HTTP_SERVER,
   httpRequestEnabled,
@@ -30,6 +30,7 @@ import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
+import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { SessionFiles } from '../workspace/store.js'
 import type { EventLog } from './eventLog.js'
@@ -241,9 +242,18 @@ export class TurnRunner {
     this.deps = deps
   }
 
-  async assemble(session: ClaimedSession, principal: TurnPrincipal, options: { includeCooling?: boolean } = {}): Promise<AssembledTurn> {
+  /** `options.parent` is the turn's span: each step before Claude Code starts is a span under it (#2375). */
+  async assemble(
+    session: ClaimedSession,
+    principal: TurnPrincipal,
+    options: { includeCooling?: boolean; parent?: Context } = {},
+  ): Promise<AssembledTurn> {
     const id = session.id
     const slot = createTurnSlot()
+    const parent = options.parent
+    // A turn that sat for half a minute before its first one showed nothing of where it went.
+    const phase = <T,>(name: string, run: () => Promise<T>) =>
+      withSpan(`agent.turn.${name}`, parent ? { parent } : {}, run)
     const registryTierOf = this.deps.tierOf ?? (() => undefined)
     // The http tools' tier depends on the method in their input (#827).
     const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
@@ -272,22 +282,30 @@ export class TurnRunner {
       // The credentials first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log. Every
       // candidate's, since the turn may fall back to any of them.
-      const candidates = await this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined)
+      const candidates = await phase('credentials', () =>
+        this.deps.credentials.candidates(options.includeCooling ? { includeCooling: true } : undefined),
+      )
       secrets = candidates.map((c) => c.credential.secret)
-      builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
-      forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+      const builtInTools = this.deps.builtInTools
+      builtIn = builtInTools ? await phase('built_in_tools', () => builtInTools()) : undefined
+      const remote = this.deps.remotePlugins
+      forwarded = remote ? await phase('remote_plugins', () => remote()) : undefined
       const remotePlugins = [...(forwarded?.plugins ?? [])]
       // Plugin header values (and their bare tokens) are redacted from the
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, session) : undefined
+      const hindsight = forwarded?.hindsight
+      // Sets the memory hooks up only: the recall and retain they run later are
+      // inside the run, not under this span.
+      const memory = hindsight ? await phase('memory', () => this.memoryHooks(hindsight, secrets, session)) : undefined
       // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
       const ownPlugin =
         this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
           ? this.deps.ownPlugin
           : undefined
-      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+      const packagePlugins = this.deps.packagePlugins
+      packages = packagePlugins ? await phase('packages', () => packagePlugins()) : undefined
       // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
       const packageNames = new Map<string, string>()
       if (packages) {
@@ -386,12 +404,14 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpSetting] = await Promise.all([
-        ensureSessionDir(this.deps.paths, id),
-        this.deps.store.exists(id),
-        this.deps.settings?.get<string>(SETTING_MODEL),
-        this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-      ])
+      const [cwd, resume, settingModel, httpSetting] = await phase('session', () =>
+        Promise.all([
+          ensureSessionDir(this.deps.paths, id),
+          this.deps.store.exists(id),
+          this.deps.settings?.get<string>(SETTING_MODEL),
+          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+        ]),
+      )
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
@@ -500,10 +520,15 @@ export class TurnRunner {
                           : {}),
                         web: slotWebContext(
                           {
-                            // The answer's model call, on the turn's first credential; its cost is the turn's.
+                            // The answer's model call, on the credential the turn is on now (#2973);
+                            // its cost is the turn's. None (an empty pool, or no turn) fails closed.
                             nested: (this.deps.nestedQueries ?? nestedQueries)({
                               paths: this.deps.paths,
-                              credential: async () => candidates[0]!.credential,
+                              credential: async () => {
+                                const on = slot.current?.credential?.current
+                                if (!on) throw new NoUsableCredentialError('no Claude credential is usable', undefined)
+                                return on.credential
+                              },
                               spent: async (cost) => {
                                 if (slot.current?.nested) slot.current.nested.usd += cost
                               },

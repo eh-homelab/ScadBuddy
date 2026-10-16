@@ -3,9 +3,20 @@ import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { McpAuthSetting, McpAuthUpdate, McpTokenTier } from '../api/mcpTokens'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './settings/form'
+import { Spinner } from './ui/spinner'
 
 // #251 — Settings → "MCP authentication": whether an outside MCP client needs a token
 // at /mcp, and how far an anonymous caller may go when it does not (AI design spec
@@ -135,15 +146,9 @@ export function McpAuthSection({ onSaved }: Props) {
   }
 
   return (
-    <section
-      className="mt-4 rounded-[6px] border border-line bg-surface"
-      aria-labelledby="mcp-auth-heading"
-    >
-      <h2 id="mcp-auth-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        MCP authentication
-      </h2>
-      <div className="space-y-4 p-4">
-        <p className="text-[13px] text-muted">
+    <SettingCard title="MCP authentication" headingId="mcp-auth-heading">
+      <SettingBody>
+        <p className="text-sm text-muted-foreground">
           Whether an outside MCP client needs one of the access tokens below to call{' '}
           <code className="sb-num">/mcp</code>. Calls are HTTPS only either way, and an action
           that sends, prints, deletes or changes settings always waits for a person to approve it
@@ -151,11 +156,9 @@ export function McpAuthSection({ onSaved }: Props) {
         </p>
 
         {state.loading && !current ? (
-          <p className="flex items-center gap-2 text-[13px] text-muted">
-            <Spinner /> Loading
-          </p>
+          <LoadingLines label="Loading" lines={['w-2/3', 'w-1/2', 'h-8 w-64']} />
         ) : state.error ? (
-          <p role="alert" className="text-[13px] text-warn">
+          <p role="alert" className="text-sm text-warn">
             The MCP authentication setting could not be loaded:{' '}
             {describeError(state.error, state.error.message)}
           </p>
@@ -164,7 +167,7 @@ export function McpAuthSection({ onSaved }: Props) {
             <>
               {current.mode === 'disabled' && (
                 <p
-                  className="rounded-[6px] border border-warn/50 bg-warn/10 px-3 py-2 text-[12px] text-warn"
+                  className="rounded-lg bg-warn/10 px-3 py-2 text-xs text-warn ring-1 ring-warn/50"
                   data-testid="mcp-auth-disabled-warning"
                 >
                   Authentication is off. Anyone who can reach <code>/mcp</code> over HTTPS can call
@@ -174,7 +177,7 @@ export function McpAuthSection({ onSaved }: Props) {
               )}
               {oidcActive && (
                 <p
-                  className="rounded-[6px] border border-line px-3 py-2 text-[12px] text-muted"
+                  className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground ring-1 ring-foreground/10"
                   data-testid="mcp-auth-oidc-note"
                 >
                   OIDC sign-in is on, so it overrides the choice below: every call needs an OIDC
@@ -191,69 +194,54 @@ export function McpAuthSection({ onSaved }: Props) {
               )}
 
               <fieldset>
-                <legend className="text-[13px]">When an MCP client calls</legend>
-                <div className="mt-1.5 space-y-1.5">
-                  <label className="flex items-start gap-2 text-[13px]">
-                    <input
-                      type="radio"
-                      name="mcp-auth-mode"
-                      value="bearer"
-                      checked={chosenMode === 'bearer'}
-                      onChange={() => setMode('bearer')}
-                      className="mt-0.5"
-                    />
-                    <span>
+                <legend className="text-sm">When an MCP client calls</legend>
+                <RadioGroup
+                  name="mcp-auth-mode"
+                  value={chosenMode ?? ''}
+                  onValueChange={(next) => setMode(next as Mode)}
+                  className="mt-2 gap-3"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <RadioGroupItem id="mcp-auth-mode-bearer" value="bearer" className="mt-0.5" />
+                    <Label htmlFor="mcp-auth-mode-bearer" className="block leading-snug font-normal">
                       Require an access token
-                      <span className="block text-[12px] text-muted">
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
                         The default. A call without a valid token is refused.
                       </span>
-                    </span>
-                  </label>
-                  <label className="flex items-start gap-2 text-[13px]">
-                    <input
-                      type="radio"
-                      name="mcp-auth-mode"
-                      value="disabled"
-                      checked={chosenMode === 'disabled'}
-                      onChange={() => setMode('disabled')}
-                      className="mt-0.5"
-                    />
-                    <span>
+                    </Label>
+                  </div>
+                  <div className="flex items-start gap-2.5">
+                    <RadioGroupItem id="mcp-auth-mode-disabled" value="disabled" className="mt-0.5" />
+                    <Label htmlFor="mcp-auth-mode-disabled" className="block leading-snug font-normal">
                       Allow calls without a token
-                      <span className="block text-[12px] text-muted">
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
                         Only for a network you trust: every caller is anonymous and gets the access
                         chosen below.
                       </span>
-                    </span>
-                  </label>
-                </div>
+                    </Label>
+                  </div>
+                </RadioGroup>
               </fieldset>
 
-              <div>
-                <label htmlFor="mcp-anonymous-cap" className="block text-[13px]">
+              <div className="grid gap-1.5">
+                <Label htmlFor="mcp-anonymous-cap" className="font-normal">
                   Access without a token
-                </label>
-                <select
+                </Label>
+                <ChoiceSelect
                   id="mcp-anonymous-cap"
                   value={chosenCap}
-                  onChange={(event) => setCap(event.target.value as McpTokenTier)}
-                  className="sb-field mt-1.5 cursor-pointer sm:max-w-[16rem]"
+                  onValueChange={(next) => setCap(next as McpTokenTier)}
+                  choices={(Object.keys(CAP_LABEL) as McpTokenTier[]).map((value) => ({ value, label: CAP_LABEL[value] }))}
+                  className="sm:max-w-[16rem]"
                   aria-describedby="mcp-anonymous-cap-help"
-                >
-                  {(Object.keys(CAP_LABEL) as McpTokenTier[]).map((value) => (
-                    <option key={value} value={value}>
-                      {CAP_LABEL[value]}
-                    </option>
-                  ))}
-                </select>
-                <p id="mcp-anonymous-cap-help" className="mt-1.5 text-[12px] text-muted">
+                />
+                <p id="mcp-anonymous-cap-help" className="text-xs text-muted-foreground">
                   {CAP_HELP[chosenCap]} Applies only while calls without a token are allowed.
                 </p>
               </div>
 
               <div className="flex items-center gap-3">
                 <Button
-                  variant="primary"
                   onClick={submit}
                   disabled={!changed || saving}
                   aria-busy={saving && !confirming}
@@ -263,7 +251,7 @@ export function McpAuthSection({ onSaved }: Props) {
                   Save
                 </Button>
                 {saved && !changed && (
-                  <span role="status" className="text-[12px] text-ok">
+                  <span role="status" className="text-xs text-ok">
                     {oidcActive
                       ? 'Saved. OIDC sign-in still applies until it is turned off.'
                       : 'Saved. It applies from the next MCP call.'}
@@ -271,27 +259,51 @@ export function McpAuthSection({ onSaved }: Props) {
                 )}
               </div>
               {error && !confirming && (
-                <p role="alert" className="text-[13px] text-warn">
+                <p role="alert" className="text-sm text-warn">
                   {error}
                 </p>
               )}
             </>
           )
         )}
-      </div>
+      </SettingBody>
 
-      <Dialog
-        open={confirming}
-        title={
-          raisingCap ? 'Give MCP calls without a token more access?' : 'Allow MCP calls without a token?'
-        }
-        onClose={closeConfirm}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeConfirm} disabled={saving}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void save()} disabled={saving} {...USER_ONLY}>
+      <AlertDialog open={confirming} onOpenChange={(open) => !open && closeConfirm()}>
+        <AlertDialogContent className="sm:max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {raisingCap ? 'Give MCP calls without a token more access?' : 'Allow MCP calls without a token?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                {oidcActive && (
+                  <p data-testid="mcp-auth-confirm-oidc">
+                    OIDC sign-in is on and still applies after this save: calls keep needing an OIDC
+                    sign-in or an access token until OIDC is turned off. From then on:
+                  </p>
+                )}
+                <p>
+                  Anyone who can reach ScadBuddy&rsquo;s <code>/mcp</code> over HTTPS will be able to call
+                  its tools without a token, as an anonymous caller with{' '}
+                  <span className="font-medium text-foreground">{CAP_LABEL[chosenCap].toLowerCase()}</span>.
+                </p>
+                <p>
+                  Sending, printing, deleting and changing settings still wait for a person to approve
+                  them here. Your access tokens are kept, and are checked again once you turn
+                  authentication back on.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {error && (
+            <p role="alert" className="text-sm text-warn">
+              {error}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
+            {/* Not an AlertDialogAction: the dialog stays open until the save answers. */}
+            <Button variant="destructive" onClick={() => void save()} disabled={saving} {...USER_ONLY}>
               {saving ? (
                 <Spinner />
               ) : raisingCap ? (
@@ -302,31 +314,9 @@ export function McpAuthSection({ onSaved }: Props) {
                 'Turn authentication off'
               )}
             </Button>
-          </>
-        }
-      >
-        {oidcActive && (
-          <p className="mb-2 text-[13px] text-muted" data-testid="mcp-auth-confirm-oidc">
-            OIDC sign-in is on and still applies after this save: calls keep needing an OIDC
-            sign-in or an access token until OIDC is turned off. From then on:
-          </p>
-        )}
-        <p className="text-[13px] text-muted">
-          Anyone who can reach ScadBuddy&rsquo;s <code>/mcp</code> over HTTPS will be able to call
-          its tools without a token, as an anonymous caller with{' '}
-          <span className="font-medium text-ink">{CAP_LABEL[chosenCap].toLowerCase()}</span>.
-        </p>
-        <p className="mt-2 text-[13px] text-muted">
-          Sending, printing, deleting and changing settings still wait for a person to approve
-          them here. Your access tokens are kept, and are checked again once you turn
-          authentication back on.
-        </p>
-        {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {error}
-          </p>
-        )}
-      </Dialog>
-    </section>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SettingCard>
   )
 }

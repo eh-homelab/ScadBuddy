@@ -1,5 +1,6 @@
 import { ApplicationFailure, Context } from '@temporalio/activity'
 import type { Sql } from 'postgres'
+import { userTurnRows } from '../sessions/eventLog.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { sameOwner, type Owner } from '../sessions/protocol.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
@@ -36,18 +37,24 @@ function refused(message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, SESSION_REFUSED)
 }
 
+/**
+ * A session id as Postgres prints a uuid. Checked before any query, so the queries can
+ * compare `id = $1::uuid` and use the primary key: `id::text = $1` scanned every row.
+ */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown): Promise<string> {
   const { workflowExecution } = Context.current().info
   const flow = flowOf(workflowExecution?.workflowId)
   if (flow === undefined) throw ApplicationFailure.nonRetryable(`${what} serves only flow runs`, NOT_FOR_FLOWS)
-  if (typeof sessionId !== 'string' || !/^[0-9a-f-]{36}$/.test(sessionId)) throw refused(`${what}: no session ${String(sessionId)}`)
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw refused(`${what}: no session ${String(sessionId)}`)
   // #2258: as flowCaller and turnCaller refuse it, a call without its execution's run id.
   const runId = workflowExecution?.runId
   if (!runId) throw ApplicationFailure.nonRetryable(`${what}: flow run ${flow}'s call carries no workflow execution run id`, UNKNOWN_FLOW)
   // A lookup that throws (the database is away) is left to the activity's retries.
   const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
-  const [row] = await deps.sql<Row[]>`SELECT mode, owner_kind, owner_id FROM ai_sessions WHERE id::text = ${sessionId}`
+  const [row] = await deps.sql<Row[]>`SELECT mode, owner_kind, owner_id FROM ai_sessions WHERE id = ${sessionId}::uuid`
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
   }
@@ -70,16 +77,15 @@ function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<
   return async () => {
     if (after === undefined) {
       const [start] = await sql<{ here: boolean; seq: string | null }[]>`
-        SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}) AS here, e.seq
+        SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq
           FROM (SELECT 1) AS one
-          LEFT JOIN ai_session_events e
-            ON e.session_id = ${sessionId} AND e.event::jsonb->>'type' = 'user.turn' AND e.event::jsonb->>'turnId' = ${turnId}`
+          LEFT JOIN ai_session_events e ON ${userTurnRows(sql, sessionId, turnId)}`
       if (!start?.here) throw gone()
       if (start.seq === null) return undefined
       after = start.seq
     }
     const rows = await sql<{ here: boolean; seq: string | null; event: string | null }[]>`
-      SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}) AS here, e.seq, e.event
+      SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid) AS here, e.seq, e.event
         FROM (SELECT 1) AS one
         LEFT JOIN LATERAL (
           SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq

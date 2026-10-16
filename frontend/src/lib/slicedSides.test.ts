@@ -41,7 +41,7 @@ describe('asSliced (#2703)', () => {
     expect(sliced?.summary).toBe('')
   })
 
-  it("keeps the planned side of a slot this plate's slice does not use (#2737 review)", () => {
+  it("leaves off a slot this plate's slice does not use, whose side is only planned (#2737 review)", () => {
     // A multi-plate file: this plate's slice uses slots 1 and 2 only, and moves slot 1.
     const sliced = asSliced(plan, {
       job_id: 38,
@@ -54,7 +54,6 @@ describe('asSliced (#2703)', () => {
     expect(sliced?.slots?.map((slot) => [slot.slot_id, slot.side])).toEqual([
       [1, 'R'],
       [2, 'R'],
-      [3, 'L'],
     ])
   })
 

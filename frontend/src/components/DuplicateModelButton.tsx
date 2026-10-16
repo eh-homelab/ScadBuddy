@@ -3,9 +3,20 @@ import { Link, useNavigate } from 'react-router'
 import { ApiError, api } from '../api/client'
 import type { Upstream } from '../api/types'
 import { modelPath } from '../lib/deeplink'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
-import { Spinner } from './ui/Spinner'
+import { Spinner } from './ui/spinner'
+import { CopyPlusIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
 
 interface Props {
   slug: string
@@ -68,54 +79,39 @@ export function DuplicateModelButton({
   return (
     <>
       {primary ? (
-        <Button size="sm" variant="primary" onClick={show}>
-          {label}
+        <Button size="sm" onClick={show}>
+          <CopyPlusIcon /> {label}
         </Button>
       ) : (
-        <button
-          type="button"
-          onClick={show}
-          className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-        >
+        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={show}>
           {label}
-        </button>
+        </Button>
       )}
-      <Dialog
-        open={open}
-        title={`Duplicate ${name}`}
-        description="The copy is a template of yours to edit. It remembers the one it came from."
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={busy}>
+      <Dialog open={open} onOpenChange={(next) => !next && close()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{`Duplicate ${name}`}</DialogTitle>
+            <DialogDescription>The copy is a template of yours to edit. It remembers the one it came from.</DialogDescription>
+          </DialogHeader>
+          <form id={`duplicate-${slug}`} className="grid gap-2" onSubmit={(event) => void duplicate(event)}>
+            <Label htmlFor={`duplicate-${slug}-name`}>Name</Label>
+            <Input id={`duplicate-${slug}-name`} value={copyName} onChange={(event) => setCopyName(event.target.value)} />
+          </form>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={close} disabled={busy}>
               Cancel
             </Button>
-            <Button
-              variant="primary"
-              onClick={() => void duplicate()}
-              disabled={busy || !copyName.trim()}
-            >
+            <Button type="submit" form={`duplicate-${slug}`} disabled={busy || !copyName.trim()}>
               {busy && <Spinner />}
               Duplicate
             </Button>
-          </>
-        }
-      >
-        <form onSubmit={(event) => void duplicate(event)}>
-          <label className="flex flex-col gap-1 text-[13px] text-muted">
-            Name
-            <input
-              value={copyName}
-              onChange={(event) => setCopyName(event.target.value)}
-              className="h-8 w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong"
-            />
-          </label>
-        </form>
-        {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {error}
-          </p>
-        )}
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )
@@ -134,12 +130,9 @@ export function DuplicatedFrom({
 }) {
   if (!upstream) return null
   return (
-    <span data-testid="duplicated-from" className={`text-[12px] text-faint ${className}`}>
+    <span data-testid="duplicated-from" className={cn('text-xs text-muted-foreground', className)}>
       Duplicated from{' '}
-      <Link
-        to={modelPath(upstream.id)}
-        className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
-      >
+      <Link to={modelPath(upstream.id)} className="text-foreground/80 underline underline-offset-2 hover:text-foreground">
         {name ?? upstream.id}
       </Link>
     </span>

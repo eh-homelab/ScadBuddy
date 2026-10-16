@@ -60,7 +60,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
-from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
@@ -1039,6 +1039,9 @@ async def get_filaments(
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
+    plate_ids: Annotated[
+        list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
+    ] = None,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
 
@@ -1054,6 +1057,7 @@ async def get_filaments(
 
     ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
     place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
+    ``plate_ids`` answers the same way for just those plates (#3652).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -1067,6 +1071,7 @@ async def get_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            plate_ids=plate_ids,
         )
 
 

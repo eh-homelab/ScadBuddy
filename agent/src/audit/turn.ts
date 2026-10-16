@@ -3,7 +3,7 @@ import type { TurnOutcome } from '../sessions/manager.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
 import { withoutWorkspaceSize } from '../workspace/store.js'
-import { type AuditActor, type AuditEntry, type AuditLog, type AuditOutcome, safeDetail } from './log.js'
+import { type AuditActor, type AuditDeps, type AuditEntry, type AuditOutcome, safeDetail } from './log.js'
 
 // The harness half of the audit log (#258): one `tool_call` row per tool call
 // a session turn makes. It watches the turn's panel events (sessions/
@@ -37,7 +37,7 @@ export class TurnAuditor {
   private readonly verdicts = new Map<string, ApprovalVerdict>()
   /** Gates entered and not yet settled, by tool_use id. */
   private readonly gating = new Map<string, Promise<void>>()
-  private readonly audit: AuditLog
+  private readonly audit: AuditDeps
   private readonly context: {
     sessionId: string
     turnId: string
@@ -49,7 +49,7 @@ export class TurnAuditor {
   private readonly settleMs: number
 
   constructor(
-    audit: AuditLog,
+    audit: AuditDeps,
     context: { sessionId: string; turnId: string; actor: AuditActor; tierOf: TierResolver; secrets: () => readonly string[] },
     options: { settleMs?: number } = {},
   ) {

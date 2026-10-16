@@ -1,3 +1,6 @@
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import type { InstalledNozzle, NozzleChoice } from '../../api/types'
 
 type Props = {
@@ -37,61 +40,57 @@ export function NozzleStep({ sizes, installed, value, onChange }: Props) {
   const shown = installed.length > 0 ? sizes.filter((size) => has(size) || value[0]?.size === size) : sizes
 
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Nozzles</legend>
+    <Card size="sm" role="group" aria-labelledby="print-nozzles">
+      <CardHeader>
+        <CardTitle id="print-nozzles" className="text-sm">
+          Nozzles
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <RadioGroup
+          aria-label="Nozzle size"
+          value={value[0]?.size ?? ''}
+          onValueChange={setBothSizes}
+          className="flex flex-wrap gap-4"
+        >
+          {shown.map((size) => (
+            <Label key={size} className="cursor-pointer font-normal">
+              <RadioGroupItem value={size} />
+              {size} mm
+            </Label>
+          ))}
+        </RadioGroup>
 
-      <div role="radiogroup" aria-label="Nozzle size" className="mt-1.5 flex flex-wrap gap-3">
-        {shown.map((size) => (
-          <label
-            key={size}
-            className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink"
-          >
-            <input
-              type="radio"
-              name="nozzle-size"
-              checked={value[0]?.size === size}
-              onChange={() => setBothSizes(size)}
-              className="accent-[var(--sb-accent)]"
-            />
-            {size} mm
-          </label>
-        ))}
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-4">
-        {SIDES.map((side, index) => (
-          <div
-            key={side}
-            role="radiogroup"
-            aria-label={`${side} nozzle flow`}
-            className="flex items-center gap-2"
-          >
-            <span className="text-[12px] text-muted">{side}</span>
-            {(['standard', 'high_flow'] as const).map((flow) => (
-              <label
-                key={flow}
-                className="flex cursor-pointer items-center gap-1.5 text-[12px] text-ink"
+        <div className="flex flex-wrap gap-x-6 gap-y-2">
+          {SIDES.map((side, index) => (
+            <div key={side} className="flex items-center gap-3">
+              <span className="text-xs text-muted-foreground">{side}</span>
+              <RadioGroup
+                aria-label={`${side} nozzle flow`}
+                value={value[index]?.flow ?? ''}
+                onValueChange={(flow) => setFlow(index, flow as NozzleChoice['flow'])}
+                className="flex gap-3"
               >
-                <input
-                  type="radio"
-                  name={`flow-${side}`}
-                  checked={value[index]?.flow === flow}
-                  aria-label={`${side} ${flow === 'standard' ? 'Standard' : 'High Flow'}`}
-                  onChange={() => setFlow(index, flow)}
-                  className="accent-[var(--sb-accent)]"
-                />
-                {flow === 'standard' ? 'Standard' : 'High Flow'}
-              </label>
-            ))}
-          </div>
-        ))}
-      </div>
+                {(['standard', 'high_flow'] as const).map((flow) => {
+                  const word = flow === 'standard' ? 'Standard' : 'High Flow'
+                  return (
+                    <Label key={flow} className="cursor-pointer font-normal">
+                      <RadioGroupItem value={flow} aria-label={`${side} ${word}`} />
+                      {word}
+                    </Label>
+                  )
+                })}
+              </RadioGroup>
+            </div>
+          ))}
+        </div>
 
-      {missing.map((size) => (
-        <p key={size} role="status" className="mt-1.5 text-[12px] text-warn">
-          No {size} mm nozzle is installed. Install one before this prints.
-        </p>
-      ))}
-    </fieldset>
+        {missing.map((size) => (
+          <p key={size} role="status" className="text-xs text-destructive">
+            No {size} mm nozzle is installed. Install one before this prints.
+          </p>
+        ))}
+      </CardContent>
+    </Card>
   )
 }

@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { HookCallback, HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
+import { SpanStatusCode } from '@opentelemetry/api'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   actionLine,
@@ -14,6 +15,7 @@ import {
   type MemoryActivity,
   type MemoryHooksOptions,
   hindsightTarget,
+  RECALL_SPAN,
   retryQueryLength,
 } from '../src/memory/hindsight.js'
 import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
@@ -21,6 +23,7 @@ import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
 import { type FakeHindsight, RECALL_PATH, RETAIN_PATH, startFakeHindsight } from './support/fakeHindsight.js'
+import { resetTracing, testTracing, waitForSpan } from './support/tracing.js'
 
 // The automatic-memory hooks (memory/hindsight.ts) against a local fake
 // Hindsight. The plugin URL names a host that does not resolve
@@ -155,6 +158,18 @@ describe('memory hooks against a fake Hindsight', () => {
     { type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [{ type: 'text', text: 'subagent' }] } },
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The box is now 40 mm wide.' }] } },
   ]
+
+  it('a recall is its own span, an error when the bank did not answer (#2981 review)', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    fake.memories = ['The user prints in PETG.']
+    await call(hooks().hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    expect((await waitForSpan(spans, (s) => s.name === RECALL_SPAN)).status.code).toBe(SpanStatusCode.UNSET)
+    await resetTracing()
+    fake.respond = () => ({ status: 500, json: { detail: 'down' } })
+    await call(hooks().hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    expect((await waitForSpan(spans, (s) => s.name === RECALL_SPAN)).status.code).toBe(SpanStatusCode.ERROR)
+  })
 
   it('recalls against the prompt and injects the memories as untrusted data', async () => {
     fake.memories = ['The user prints in PETG.', 'Boxes get 2 mm walls.', 'x3', 'x4', 'x5', 'x6']

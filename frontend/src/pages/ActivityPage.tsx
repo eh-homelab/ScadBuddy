@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
+import { Loader2Icon } from "lucide-react";
 import { api } from "../api/client";
 import type {
   Activity,
@@ -10,7 +11,8 @@ import { ActivityDrawer } from "../components/activity/ActivityDrawer";
 import { ActivityFilters } from "../components/activity/ActivityFilters";
 import { ActivityTable } from "../components/activity/ActivityTable";
 import { sinceTime } from "../components/activity/labels";
-import { Button } from "../components/ui/Button";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   parseActivityQuery,
   toActivityParams,
@@ -219,16 +221,26 @@ export function ActivityPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="text-lg font-semibold tracking-tight">Activity</h1>
+      <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
       <ActivityFilters query={query} facets={facets.data} onChange={onChange} />
       {list.error ? (
         <p role="alert" className="text-[13px] text-warn">
           Could not load activity: {list.error.message}
         </p>
       ) : list.loading ? (
-        <p className="text-[13px] text-muted">Loading…</p>
+        <div
+          role="status"
+          aria-label="Loading activity"
+          className="flex flex-col gap-2"
+        >
+          {Array.from({ length: 5 }, (_, i) => (
+            <Skeleton key={i} className="h-9 w-full" />
+          ))}
+        </div>
       ) : items.length === 0 ? (
-        <p className="text-[13px] text-muted">No activity matches.</p>
+        <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+          No activity matches.
+        </p>
       ) : (
         <ActivityTable items={items} facets={facets.data} onOpen={setOpen} />
       )}
@@ -238,21 +250,23 @@ export function ActivityPage() {
         </p>
       )}
       {held && (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           Live updates paused, showing older activity.
-          <Button size="sm" variant="ghost" onClick={showLatest}>
+          <Button size="sm" variant="outline" onClick={showLatest}>
             Show latest
           </Button>
         </p>
       )}
       {hasMore && (
-        <div>
-          <Button variant="ghost" onClick={loadMore} disabled={loadingMore}>
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore && <Loader2Icon className="animate-spin" />}
             Load more
           </Button>
         </div>
       )}
-      {open && <ActivityDrawer id={open} onClose={() => setOpen(null)} />}
+      {/* Keyed: each row's drawer captures its own opener for focus return. */}
+      {open && <ActivityDrawer key={open} id={open} onClose={() => setOpen(null)} />}
     </div>
   );
 }

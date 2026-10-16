@@ -50,3 +50,19 @@ export function splitExtension(name: string): { stem: string; extension: string 
   const dot = name.lastIndexOf('.')
   return dot > 0 ? { stem: name.slice(0, dot), extension: name.slice(dot) } : { stem: name, extension: '' }
 }
+
+/** #3650 — the folders under `id`, and `id` itself: where a folder cannot move to. */
+export function folderAndDescendants(folders: LibraryFolderView[], id: number): Set<number> {
+  const found = new Set([id])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const folder of folders) {
+      if (folder.parent_id != null && found.has(folder.parent_id) && !found.has(folder.id)) {
+        found.add(folder.id)
+        grew = true
+      }
+    }
+  }
+  return found
+}

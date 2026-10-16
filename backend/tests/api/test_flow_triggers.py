@@ -550,7 +550,7 @@ def test_a_stale_schedule_never_fires_an_event_trigger(
     assert (fired["outcome"], fired["reason"]) == ("skipped", "not a schedule trigger")
     # The worker's reconcile removes the Schedule of every non-schedule trigger.
     workflow_reaper.run(ensure_trigger_schedules(temporal, queue, store))
-    assert schedule_id(trigger["id"]) not in workflow_reaper.run(_schedule_ids(temporal))
+    assert not workflow_reaper.run(_schedule_exists(temporal, schedule_id(trigger["id"])))
 
 
 @pytest.mark.usefixtures("triggers")
@@ -705,12 +705,20 @@ def test_a_deleted_trigger_loses_its_schedule_and_its_grants(
     assert client.get(f"/api/v1/flow-triggers/{trigger['id']}").status_code == 404
     temporal = workflow_reaper.client
     assert isinstance(temporal, Client)
-    schedules = workflow_reaper.run(_schedule_ids(temporal))
-    assert schedule_id(trigger["id"]) not in schedules
+    assert not workflow_reaper.run(_schedule_exists(temporal, schedule_id(trigger["id"])))
 
 
-async def _schedule_ids(client: Client) -> set[str]:
-    return {entry.id async for entry in await client.list_schedules()}
+async def _schedule_exists(client: Client, schedule: str) -> bool:
+    """Whether Temporal holds `schedule`, read from the Schedule itself. Not
+    `list_schedules`: that reads the visibility store, which lags a delete, so a Schedule
+    removed a moment ago can still be listed."""
+    try:
+        await client.get_schedule_handle(schedule).describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return False
+        raise
+    return True
 
 
 @pytest.mark.usefixtures("triggers")

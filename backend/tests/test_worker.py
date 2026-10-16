@@ -196,6 +196,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert samples['scadbuddy_render_jobs_finished_total{kind="render",outcome="done"}'] == 1
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
+    # A model with no scene.json (not a mesh model) never runs the paint stage.
+    assert samples.get('scadbuddy_render_stage_seconds_count{stage="paint"}', 0) == 0
     assert f'revision="{build_id}"' in metrics
     # Refreshed per scrape from this process's store (the local one: no cache to size).
     assert samples["scadbuddy_store_render_key_fallback"] == 0
@@ -1542,8 +1544,24 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
         lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
     )
 
+    def past_the_guard(*args: object, **__: object) -> None:
+        for arg in args:
+            if asyncio.iscoroutine(arg):
+                arg.close()  # never awaited, so no warning beside the failure (#3491 review)
+        raise AssertionError("main() went past the service-name check")
+
+    # A backstop, not the first point of failure: should the check regress, building
+    # tracing's arguments likely fails on the missing name first. Either way the test
+    # fails rather than starting a worker (#3354, #3491 review).
+    monkeypatch.setattr(worker_module, "configure_tracing", past_the_guard)
+    monkeypatch.setattr(asyncio, "run", past_the_guard)
+
     with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
-        worker_module.main()
+        try:
+            worker_module.main()
+        except KeyError as error:
+            # The likelier failure of a regressed check: said as what it means (#3491 review).
+            raise AssertionError("main() went past the service-name check") from error
 
 
 def _transient() -> RPCError:

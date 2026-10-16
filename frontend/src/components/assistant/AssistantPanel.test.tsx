@@ -15,7 +15,7 @@ import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
-import { Dialog } from '../ui/Dialog'
+import { Dialog, DialogContent, DialogFooter, DialogTitle } from '../ui/dialog'
 import { ResourceSessions } from './ResourceSessions'
 
 /** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
@@ -101,7 +101,8 @@ describe('assistant panel', () => {
   it('keeps an open panel through an outage, and drops it only when the agent says AI is off', async () => {
     const { user } = renderShell()
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
-    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    // The panel is a lazy chunk: the first test waits for it past the default.
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' }, { timeout: 10_000 })
     await user.type(box, 'Make the name bigger{Enter}')
     const transcript = (await screen.findAllByText('Make the name bigger')).length
 
@@ -112,6 +113,8 @@ describe('assistant panel', () => {
     expect(screen.getByRole('button', { name: 'Assistant' })).toBeInTheDocument()
     act(() => availability.set({ available: false, state: 'unavailable' }))
     expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    // #2962 review: an outage is not a close, so a reload during it still reopens the panel.
+    expect(window.sessionStorage.getItem('scadbuddy.assistant.open')).toBe('1')
 
     // Its chat gate refuses this address: off for this page.
     act(() => availability.set({ available: false, state: 'unavailable', chat: 'refused' }))
@@ -220,6 +223,7 @@ describe('assistant panel', () => {
     expect(within(write!).getByText('Set text_size → 14 mm')).toBeInTheDocument()
     expect(within(write!).getByText('write')).toBeInTheDocument()
     expect(within(write!).getByText('Why? 2 sources')).toBeInTheDocument()
+    await user.click(within(write!).getByRole('button', { name: 'Why? 2 sources' }))
     expect(within(write!).getByRole('link', { name: 'OpenSCAD customizer parameters' })).toHaveAttribute(
       'href',
       'https://en.wikibooks.org/wiki/OpenSCAD_User_Manual/Customizer',
@@ -502,7 +506,7 @@ describe('assistant panel', () => {
     expect(panel()).not.toBeInTheDocument()
 
     await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
-    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
     await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
     expect(panel()).toBeVisible()
     expect(sentOf('session.attach')).toEqual([{ v: 1, type: 'session.attach', sessionId: EXTERNAL_SESSION_ID }])
@@ -511,7 +515,7 @@ describe('assistant panel', () => {
     await user.click(screen.getByRole('button', { name: 'New chat' }))
     await waitFor(() => expect(screen.queryByText('Done: the bin is now 3 units (21 mm) tall.')).not.toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Changed by assistant (1)' }))
-    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
     await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
     expect(sentOf('session.attach')).toHaveLength(2)
   })
@@ -519,7 +523,7 @@ describe('assistant panel', () => {
   it('selects a requested session once: a remounted panel does not open it again (#931)', async () => {
     const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
     await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
-    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ }))
+    await user.click(await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ }))
     await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
 
     // The assistant goes off (the panel unmounts) and comes back: a fresh panel, on nothing.
@@ -536,7 +540,7 @@ describe('assistant panel', () => {
   it('drops a requested session the panel never got to when the assistant goes off (#931)', async () => {
     const { user } = renderShell('/m/gridfinity-bin', <ResourceSessions resource={{ type: 'model', id: 'gridfinity-bin' }} />)
     await user.click(await screen.findByRole('button', { name: 'Changed by assistant (1)' }))
-    const item = screen.getByRole('button', { name: /Tune the gridfinity bin.*·/ })
+    const item = await screen.findByRole('option', { name: /Tune the gridfinity bin.*·/ })
     // Picked, and the assistant goes off before the panel has loaded.
     act(() => {
       fireEvent.click(item)
@@ -856,8 +860,14 @@ function DialogPage({ startOpen = false }: { startOpen?: boolean }) {
       <button type="button" onClick={() => setOpen(true)}>
         Print…
       </button>
-      <Dialog open={open} title="Print" onClose={() => setOpen(false)} footer={<button type="button">Print it</button>}>
-        <input aria-label="Copies" />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogTitle>Print</DialogTitle>
+          <input aria-label="Copies" />
+          <DialogFooter>
+            <button type="button">Print it</button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </>
   )

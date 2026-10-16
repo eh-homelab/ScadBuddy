@@ -21,7 +21,7 @@ const SEARCH_BUDGET_USD = 1
 
 export type NestedDeps = {
   paths: HarnessPaths
-  /** The credential a query runs on (the first usable one, as a turn starts on). */
+  /** The credential a query runs on: the one the turn is on when it asks (#2973). */
   credential?: () => Promise<Credential>
   /** Or the credentials it runs on: the usable ones, in order, falling back as a turn does (#3200). */
   credentials?: CredentialSource

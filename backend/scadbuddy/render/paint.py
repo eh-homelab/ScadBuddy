@@ -53,8 +53,8 @@ def _bits(code: str) -> list[int]:
 
 
 def _walk(code: str, mapping: Mapping[int, int] | None) -> tuple[set[int], list[int]]:
-    """Every leaf state ``code`` holds but 0, and its bits with each leaf's state
-    renumbered by ``mapping`` (unrenumbered when None)."""
+    """Every leaf state ``code`` holds, 0 (the part's own) included, and its bits with
+    each painted leaf's state renumbered by ``mapping`` (unrenumbered when None)."""
     bits = _bits(code)
     out: list[int] = []
     found: set[int] = set()
@@ -88,10 +88,9 @@ def _walk(code: str, mapping: Mapping[int, int] | None) -> tuple[set[int], list[
                 if state > MAX_STATE:
                     raise PaintCodeError(f"paint code {code!r} names an extruder past {MAX_STATE}")
             state += group
-        if state:
-            found.add(state)
-            if mapping is not None:
-                state = mapping.get(state, state)
+        found.add(state)
+        if state and mapping is not None:
+            state = mapping.get(state, state)
         if not 0 <= state <= MAX_STATE:
             raise PaintCodeError(f"extruder {state} is past what a paint code can name")
         if state >= 3:
@@ -111,7 +110,44 @@ def _walk(code: str, mapping: Mapping[int, int] | None) -> tuple[set[int], list[
 
 def states(code: str) -> set[int]:
     """The extruders ``code`` paints with, 0 (the part's own) left out."""
-    return _walk(code, None)[0]
+    return _walk(code, None)[0] - {0}
+
+
+def uniform_state(code: str) -> int | None:
+    """The one extruder every piece of ``code``'s triangle prints with (0: the part's
+    own, which ``""`` is), or None when its painting splits it between two (#2146,
+    spec 2026-10-11 §7: a face that is not its source's verbatim takes only a whole
+    colour)."""
+    if not code:
+        return 0
+    found = _walk(code, None)[0]
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def single_code(state: int) -> str:
+    """The code of a triangle painted whole with extruder ``state``, unsplit: ``""`` for
+    0, as Bambu Studio leaves an unpainted triangle. The bits are `_walk`'s for one
+    leaf: two of no split, then the state's."""
+    if not 0 <= state <= MAX_STATE:
+        raise PaintCodeError(f"extruder {state} is past what a paint code can name")
+    if state == 0:
+        return ""
+    bits = [0, 0]
+    if state >= 3:
+        bits += [1, 1]
+        rest = state - 3
+        while rest >= 15:
+            bits += [1, 1, 1, 1]
+            rest -= 15
+        bits += [(rest >> bit) & 1 for bit in range(4)]
+    else:
+        bits += [(state >> bit) & 1 for bit in range(2)]
+    bits += [0] * (-len(bits) % 4)
+    digits = [
+        "0123456789ABCDEF"[sum(bits[at + bit] << bit for bit in range(4))]
+        for at in range(0, len(bits), 4)
+    ]
+    return "".join(reversed(digits))
 
 
 def remap(code: str, mapping: Mapping[int, int]) -> str:
