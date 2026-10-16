@@ -919,3 +919,226 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 		})
 	}
 }
+
+func TestARenameThatChangesTheTypeSendsTheFileAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.file(11, "x.3mf", 4, []byte("old"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if !lib.deleted[10] || !lib.deleted[11] {
+			t.Fatalf("deleted %v", lib.deleted)
+		}
+		var sent []api.File
+		for _, f := range lib.files {
+			sent = append(sent, f)
+		}
+		if len(sent) != 1 || sent[0].ID == 10 || sent[0].Name != "x.3mf" || sent[0].FolderID != 4 || string(lib.data[sent[0].ID]) != "model" {
+			t.Fatalf("%+v", sent)
+		}
+	})
+	if got := names(t, top); !slices.Equal(got, []string{"x.3mf"}) {
+		t.Fatalf("%v", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+// A write still open on a file a type-changing rename sent again follows it to its new
+// ID, so it replaces that file instead of landing beside it as a conflict copy, sent
+// at once or queued.
+func TestAWriteOpenOverATypeChangingRenameReplacesTheRenamedFile(t *testing.T) {
+	for _, down := range []bool{false, true} {
+		lib := newFakeLibrary()
+		lib.file(10, "x.3mf.tmp", 0, []byte("old"))
+		state := t.TempDir()
+		dir, released := retrying(t, lib, Options{StateDir: state, All: true})
+		logs(t)
+		f, err := os.OpenFile(filepath.Join(dir, "x.3mf.tmp"), os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte("new")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(dir, "x.3mf.tmp"), filepath.Join(dir, "x.3mf")); err != nil {
+			t.Fatal(err)
+		}
+		lib.setDown(down)
+		if err := f.Close(); err != nil {
+			t.Fatalf("down %v: close: %v", down, err)
+		}
+		waitRelease(t, released)
+		if down {
+			q := queued(t, state)
+			if len(q) != 1 || q[0].Name != "x.3mf" {
+				t.Fatalf("queue: %+v", q)
+			}
+			lib.setDown(false)
+		}
+		eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"0/x.3mf": "new"}) })
+		eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+		lib.locked(func() {
+			if !lib.deleted[10] {
+				t.Fatalf("down %v: the old file was kept: %+v", down, lib.files)
+			}
+		})
+	}
+}
+
+func TestFileTypes(t *testing.T) {
+	for name, want := range map[string]string{"a.3mf": "3mf", "A.3MF.tmp": "tmp", "b.gcode.3mf": "gcode.3mf", "c.STL": "stl", "noext": ""} {
+		if got := fileType(name); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// A rename between two model types (x.stl to x.3mf) keeps the file: sending STL bytes
+// again as a .3mf would not make them a 3MF, and the file would lose its ID.
+func TestARenameBetweenModelTypesKeepsTheFile(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.stl", 4, []byte("solid"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.stl"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.deleted[10] || lib.uploads != 0 || lib.files[10].Name != "x.3mf" {
+			t.Fatalf("deleted %v uploads %d files %+v", lib.deleted, lib.uploads, lib.files)
+		}
+	})
+}
+
+// Renaming to a type Bambuddy does nothing special with keeps the file's ID, so its
+// print history and queue entries still point at it.
+func TestARenameToAnOrdinaryTypeKeepsTheFile(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "model.3mf", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "model.3mf"), filepath.Join(top, "model.3mf.bak")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.deleted[10] || lib.uploads != 0 || lib.files[10].Name != "model.3mf.bak" {
+			t.Fatalf("deleted %v uploads %d files %+v", lib.deleted, lib.uploads, lib.files)
+		}
+	})
+}
+
+// A retype whose answer is lost is retried with the same Idempotency-Key, so it does
+// not leave a second copy under the new name.
+func TestARetypeSentAgainUsesTheSameKey(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.loseAnswers = 1
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err == nil {
+		t.Fatal("the first rename should fail: its answer is lost")
+	}
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if len(lib.keys) != 2 || lib.keys[0] != lib.keys[1] || len(lib.files) != 1 {
+			t.Fatalf("keys %v files %+v", lib.keys, lib.files)
+		}
+	})
+}
+
+// A retype whose old file cannot be deleted rolls back: the copy under the new name is
+// deleted and the file keeps its old name and ID.
+func TestARetypeThatCannotDeleteTheOldFileRollsBack(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.busy[10] = true
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err == nil {
+		t.Fatal("the rename should fail: the old file is busy")
+	}
+	lib.locked(func() {
+		if len(lib.files) != 1 || lib.files[10].Name != "x.3mf.tmp" {
+			t.Fatalf("%+v", lib.files)
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf.tmp")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+	// Retried once the file is free, the rename must not take the rolled-back copy the
+	// first try's key recorded (deleted now) for the result and lose the file.
+	lib.locked(func() { delete(lib.busy, 10) })
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if len(lib.files) != 1 {
+			t.Fatalf("%+v", lib.files)
+		}
+		for id, f := range lib.files {
+			if f.Name != "x.3mf" || string(lib.data[id]) != "model" {
+				t.Fatalf("%+v %q", f, lib.data[id])
+			}
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+// A retype of a file never read through the mount downloads it first.
+func TestARetypeOfAnUncachedFileDownloadsIt(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.downloads != 1 || len(lib.files) != 1 {
+			t.Fatalf("downloads %d files %+v", lib.downloads, lib.files)
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestARetypeIntoAnotherFolder(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.folder(5, "Other", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	if err := os.Rename(filepath.Join(dir, "Top", "x.3mf.tmp"), filepath.Join(dir, "Other", "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		var sent []api.File
+		for _, f := range lib.files {
+			sent = append(sent, f)
+		}
+		if len(sent) != 1 || sent[0].Name != "x.3mf" || sent[0].FolderID != 5 || string(lib.data[sent[0].ID]) != "model" {
+			t.Fatalf("%+v", sent)
+		}
+	})
+	if got := names(t, filepath.Join(dir, "Other")); !slices.Equal(got, []string{"x.3mf"}) {
+		t.Fatalf("%v", got)
+	}
+}

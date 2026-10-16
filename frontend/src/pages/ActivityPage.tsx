@@ -220,53 +220,57 @@ export function ActivityPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
-      <ActivityFilters query={query} facets={facets.data} onChange={onChange} />
-      {list.error ? (
-        <p role="alert" className="text-[13px] text-warn">
-          Could not load activity: {list.error.message}
-        </p>
-      ) : list.loading ? (
-        <div
-          role="status"
-          aria-label="Loading activity"
-          className="flex flex-col gap-2"
-        >
-          {Array.from({ length: 5 }, (_, i) => (
-            <Skeleton key={i} className="h-9 w-full" />
-          ))}
-        </div>
-      ) : items.length === 0 ? (
-        <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
-          No activity matches.
-        </p>
-      ) : (
-        <ActivityTable items={items} facets={facets.data} onOpen={setOpen} />
-      )}
-      {moreFailed === key && (
-        <p role="alert" className="text-[13px] text-warn">
-          Could not load more. Try again.
-        </p>
-      )}
-      {held && (
-        <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-          Live updates paused, showing older activity.
-          <Button size="sm" variant="outline" onClick={showLatest}>
-            Show latest
-          </Button>
-        </p>
-      )}
-      {hasMore && (
-        <div className="flex justify-center">
-          <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore && <Loader2Icon className="animate-spin" />}
-            Load more
-          </Button>
-        </div>
-      )}
-      {/* Keyed: each row's drawer captures its own opener for focus return. */}
-      {open && <ActivityDrawer key={open} id={open} onClose={() => setOpen(null)} />}
+    // #3747 — the page is its own scroll container, as every page is: the shell's
+    // <main> clips, so a page that does not scroll cannot reach what is below the fold.
+    <div className="h-full overflow-y-auto" data-testid="activity-page">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
+        <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
+        <ActivityFilters query={query} facets={facets.data} onChange={onChange} />
+        {list.error ? (
+          <p role="alert" className="text-[13px] text-warn">
+            Could not load activity: {list.error.message}
+          </p>
+        ) : list.loading ? (
+          <div
+            role="status"
+            aria-label="Loading activity"
+            className="flex flex-col gap-2"
+          >
+            {Array.from({ length: 5 }, (_, i) => (
+              <Skeleton key={i} className="h-9 w-full" />
+            ))}
+          </div>
+        ) : items.length === 0 ? (
+          <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+            No activity matches.
+          </p>
+        ) : (
+          <ActivityTable items={items} facets={facets.data} onOpen={setOpen} />
+        )}
+        {moreFailed === key && (
+          <p role="alert" className="text-[13px] text-warn">
+            Could not load more. Try again.
+          </p>
+        )}
+        {held && (
+          <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            Live updates paused, showing older activity.
+            <Button size="sm" variant="outline" onClick={showLatest}>
+              Show latest
+            </Button>
+          </p>
+        )}
+        {hasMore && (
+          <div className="flex justify-center">
+            <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore && <Loader2Icon className="animate-spin" />}
+              Load more
+            </Button>
+          </div>
+        )}
+        {/* Keyed: each row's drawer captures its own opener for focus return. */}
+        {open && <ActivityDrawer key={open} id={open} onClose={() => setOpen(null)} />}
+      </div>
     </div>
   );
 }

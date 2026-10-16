@@ -15,6 +15,7 @@ the one every DurableSession declares.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -34,6 +35,8 @@ RISK_TIERS = ("read", "write", "outward")
 # agent/src/plugins/builtInTools.ts builtInToolsSetting(OWN_PLUGIN_NAME): the overrides
 # of the tools a durable session calls.
 OVERRIDES_SETTING = "builtin_tools.scadbuddy"
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,12 +59,19 @@ def parse_manifest(data: Any) -> tuple[ManifestEntry, ...]:
         hitl = e.get("hitl")
         if hitl not in (None, "approval", "answer"):
             raise ValueError(f"tool {e.get('name')!r} has an unknown hitl {hitl!r}")
+        name, tier = str(e["name"]), str(e["tier"])
+        if tier not in RISK_TIERS:
+            # Said once, as the manifest is the worker's for its life, and the worker
+            # still starts: such a tool is labelled outward, as an unlisted one is
+            # (#3245, #3581). The tool, never the value.
+            log.warning("tool %s has no known tier in the manifest: labelled outward", name)
+            tier = "outward"
         out.append(
             ManifestEntry(
-                name=str(e["name"]),
+                name=name,
                 description=str(e["description"]),
                 input_schema=dict(e["input_schema"]),
-                tier=str(e["tier"]),
+                tier=tier,
                 hitl=hitl,
             )
         )

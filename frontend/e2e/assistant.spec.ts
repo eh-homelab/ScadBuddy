@@ -533,11 +533,16 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
 
     const edge = (await panel.boundingBox())!
     const actions = panel.getByTestId('composer-actions')
+    let measured = 0
     for (const child of await actions.locator(':scope > *').all()) {
       // A child with nothing rendered (an empty slot) has no box.
       const b = await child.boundingBox()
-      if (b) expect(b.x + b.width).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
+      if (!b) continue
+      measured += 1
+      expect(b.x + b.width).toBeLessThanOrEqual(edge.x + edge.width + 0.5)
     }
+    // Not vacuous: the actions rendered something to measure.
+    expect(measured).toBeGreaterThan(0)
     const speak = panel.getByText('Read replies aloud')
     await expect(speak).toBeVisible()
     expect(await speak.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)

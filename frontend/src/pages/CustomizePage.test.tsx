@@ -2128,7 +2128,7 @@ describe('CustomizePage, project file (#317)', () => {
     ).toHaveTextContent('Name Keychain was last filed in Reagan Keychain. File this in Gridfinity Bins?')
   })
 
-  it("names the print's project in Simple mode, and (change) opens its picker", async () => {
+  it("names the print's project in Simple mode, and (change) opens its picker there (#3771)", async () => {
     withLastProject(1)
     const { user } = render()
     await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
@@ -2142,11 +2142,15 @@ describe('CustomizePage, project file (#317)', () => {
     await user.click(within(dialog).getByTestId('print-filed-under-change'))
     const dialogPicker = await within(dialog).findByTestId('project-select')
     await waitFor(() => expect(dialogPicker).toHaveFocus())
-    expect(within(dialog).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+    // Only the switch changes the mode.
+    expect(within(dialog).getByRole('switch', { name: 'Advanced' })).not.toBeChecked()
     expect(within(dialog).queryByTestId('print-filed-under')).not.toBeInTheDocument()
+    await chooseProject(user, dialogPicker, null)
+    expect(within(dialog).getByRole('switch', { name: 'Advanced' })).not.toBeChecked()
 
     // "No project" is named too, so a print filed nowhere is not a surprise either.
-    await chooseProject(user, dialogPicker, null)
+    await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
+    expect(await within(dialog).findByTestId('project-select')).toBeInTheDocument()
     await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
     expect(within(dialog).getByTestId('print-filed-under')).toHaveTextContent('Filed under: No project')
   })

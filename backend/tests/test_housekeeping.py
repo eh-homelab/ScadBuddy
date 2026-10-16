@@ -24,6 +24,8 @@ from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ACTIVITY_TIMEOUT,
+    ATTACHMENTS_SWEEP,
+    ATTACHMENTS_TIMEOUT,
     CLAIMS_TIMEOUT,
     GIT_SWEEP,
     GIT_TIMEOUT,
@@ -113,6 +115,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         LOST_SLICES_SWEEP: PREVIEWS_TIMEOUT,
         GIT_SWEEP: GIT_TIMEOUT,
         ACTIVITY_SWEEP: ACTIVITY_TIMEOUT,
+        ATTACHMENTS_SWEEP: ATTACHMENTS_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)

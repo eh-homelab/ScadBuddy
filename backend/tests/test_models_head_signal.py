@@ -264,7 +264,14 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(
         failing.set()
         raise OSError("stale NFS file handle")
 
+    forgotten: list[list[str] | None] = []
+
+    class _Catalogue:
+        def forget(self, model_ids: list[str] | None) -> None:
+            forgotten.append(model_ids)
+
     follower.revalidate = revalidate  # type: ignore[method-assign]
+    follower.catalogue = cast(Catalogue, _Catalogue())
     loop = asyncio.get_running_loop()
     reported: list[dict[str, Any]] = []
     loop.set_exception_handler(lambda _loop, context: reported.append(context))
@@ -287,6 +294,8 @@ async def test_a_cancelled_refresh_retrieves_its_walks_failure(
     finally:
         loop.set_exception_handler(None)
     assert [c["message"] for c in reported] == []
+    # #3496: cancelled mid-walk, nothing is forgotten while the walk still runs.
+    assert forgotten == []
     [settled] = [r for r in caplog.records if r.getMessage().startswith("a cancelled models")]
     assert settled.exc_info is not None and isinstance(settled.exc_info[1], OSError)
 

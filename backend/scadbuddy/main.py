@@ -54,6 +54,8 @@ from scadbuddy.api.limits import (
 )
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
@@ -114,6 +116,7 @@ from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
+    ATTACHMENTS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
@@ -538,6 +541,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
 
+    @activity.defn(name=ATTACHMENTS_SWEEP)
+    async def sweep_print_attachments() -> None:
+        await _heartbeating(_sweep_print_attachments_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -551,7 +558,24 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
+        sweep_print_attachments,
     ]
+
+
+async def _sweep_print_attachments_logged(state: AppState) -> None:
+    """#3047: the attachments of archives deleted in Bambuddy."""
+    store = state.components.get(PRINT_ATTACHMENTS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            gone = await sweep_gone_archives(client, store)
+        except Exception:
+            logger.exception("could not sweep the attachments of deleted archives")
+            raise
+        if gone:
+            logger.info("forgot the attachments of deleted archives", extra={"count": gone})
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _sweep_activity_logged(state: AppState) -> None:

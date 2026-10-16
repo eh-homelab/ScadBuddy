@@ -224,6 +224,31 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     }
   })
 
+  it('unfolds a deep-linked group inside a folded section, and scrolls to it once laid out (#3414)', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['assistant', 'assistant-mcp']))
+    const tops: Record<string, number> = {}
+    const { scrolls, restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#assistant-mcp' })
+      await seeded()
+      const group = await screen.findByRole('group', { name: 'MCP access' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'MCP access' })).toHaveAttribute('aria-expanded', 'true'))
+      expect(group.closest('section')!.querySelector('h2 button')).toHaveAttribute('aria-expanded', 'true')
+      // Measured while its section was folded, the group had no box; laid out, it has one,
+      // and the section nav's resize follow-up scrolls the pane there.
+      tops['assistant-mcp'] = 7000
+      act(() => {
+        for (const observer of observers) if (!observer.disconnected) observer.fire()
+      })
+      expect(scrolls.at(-1)).toBe(6992)
+    } finally {
+      restore()
+      vi.unstubAllGlobals()
+      localStorage.clear()
+    }
+  })
+
   it('still opens, unscrolled, at a hash with a malformed escape (#2113)', async () => {
     const { scrolls, restore } = stubLayout({})
     try {

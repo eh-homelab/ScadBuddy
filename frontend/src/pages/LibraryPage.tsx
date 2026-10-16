@@ -168,6 +168,9 @@ export function LibraryPage() {
         ? printParam
         : null
   if (seenPrint !== listedPrint) setListedPrint(seenPrint)
+  // `listedPrint` outlives the link: it stays set once the dialog closes, and across a
+  // folder change until that listing arrives. Comparing with `printParam` here is what
+  // makes the held value safe; it never stands in for a link that is not there (#3458).
   const printListed = printParam !== null && seenPrint === printParam
   const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)

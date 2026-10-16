@@ -512,15 +512,23 @@ export function PrintPicker({
   const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
   const filedUnderLabel =
     projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
-  /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
+  /**
+   * #3771 — "(change)" shows the project picker where the line was, in Simple mode
+   * still: only the Advanced switch changes the mode. The focus goes to the picker.
+   */
+  const [changingProject, setChangingProject] = useState(false)
+  // Advanced shows the picker in its own step; back in Simple, the line names the choice.
+  useEffect(() => {
+    if (!open || picker.advanced) setChangingProject(false)
+  }, [open, picker.advanced])
   const focusProject = useRef(false)
   useEffect(() => {
-    if (!picker.advanced || !focusProject.current) return
+    if (!changingProject || !focusProject.current) return
     focusProject.current = false
     const select = document.getElementById('print-project')
     select?.scrollIntoView?.({ block: 'nearest' })
     select?.focus()
-  }, [picker.advanced])
+  }, [changingProject])
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -534,6 +542,24 @@ export function PrintPicker({
     setProjectCreating(creating)
     project?.onCreating?.(creating)
   }
+  /** #79 — a send to a project uploads into that project's folder. */
+  const projectPicker = project ? (
+    <ProjectPicker
+      value={project.value}
+      onChange={project.onChange}
+      list={project.list}
+      disabled={project.disabled || projectCreating}
+      onCreating={reportProjectCreating}
+    />
+  ) : (
+    <ProjectPicker
+      value={ownProjectId}
+      onChange={setOwnProjectId}
+      list={ownProjects}
+      disabled={projectCreating}
+      onCreating={reportProjectCreating}
+    />
+  )
 
   // #717 — profiles the chosen spools match, each on unless switched off.
   const filamentProfiles = useFilamentProfiles({
@@ -1387,7 +1413,8 @@ export function PrintPicker({
               {choices && (
                 <>
                   {/* #1660 — Simple hides the project step, but not where the print is filed. */}
-                  {!picker.advanced && filedUnderLabel !== null && (
+                  {!picker.advanced && changingProject && projectPicker}
+                  {!picker.advanced && !changingProject && filedUnderLabel !== null && (
                     <p className="text-sm text-muted-foreground" data-testid="print-filed-under">
                       Filed under: <span className="text-foreground">{filedUnderLabel}</span>{' '}
                       <Button
@@ -1397,7 +1424,7 @@ export function PrintPicker({
                         className="h-auto px-0"
                         onClick={() => {
                           focusProject.current = true
-                          picker.toggleAdvanced()
+                          setChangingProject(true)
                         }}
                         disabled={projectCreating}
                         data-testid="print-filed-under-change"
@@ -1512,24 +1539,7 @@ export function PrintPicker({
                         }}
                       />
 
-                      {/* #79 — a send to a project uploads into that project's folder. */}
-                      {project ? (
-                        <ProjectPicker
-                          value={project.value}
-                          onChange={project.onChange}
-                          list={project.list}
-                          disabled={project.disabled || projectCreating}
-                          onCreating={reportProjectCreating}
-                        />
-                      ) : (
-                        <ProjectPicker
-                          value={ownProjectId}
-                          onChange={setOwnProjectId}
-                          list={ownProjects}
-                          disabled={projectCreating}
-                          onCreating={reportProjectCreating}
-                        />
-                      )}
+                      {projectPicker}
 
                       <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
                     </>

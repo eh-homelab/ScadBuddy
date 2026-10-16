@@ -133,3 +133,15 @@ describe('spoolColour', () => {
     expect(spoolColour({ rgba })).toEqual(colour)
   })
 })
+
+// #3656: picking the swatch of the colour already set, however it was spelt, sends
+// nothing, as the hex box does not.
+describe('a filament of the colour already set', () => {
+  it('is not sent again', async () => {
+    const { onChange, user } = setup('#f5547c')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const list = await screen.findByRole('listbox', { name: 'Filaments for Plate' })
+    await user.click(within(list).getByRole('option', { name: /Hot Pink/ }))
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})

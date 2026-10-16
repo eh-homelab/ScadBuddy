@@ -282,6 +282,9 @@ def sanitise_svg(data: bytes) -> bytes:
 #: ValueError: a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK`` once
 #: decompressed (``_safe_zlib_decompress``), and text chunks over ``MAX_TEXT_MEMORY`` in
 #: all (``check_text_memory``). The upload keeps none of that metadata either way.
+#: Pillow names no exception type for them, so this matches its message text: a Pillow
+#: bump that rewords one is caught by test_assets.py's real-decode tests (iCCP, zTXt,
+#: MAX_TEXT_MEMORY), which fail rather than let those uploads read as unreadable PNGs.
 PNG_METADATA_LIMITS = ("MAX_TEXT_CHUNK", "MAX_TEXT_MEMORY")
 
 
