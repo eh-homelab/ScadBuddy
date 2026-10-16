@@ -1,4 +1,4 @@
-import { render, screen, type RenderOptions } from '@testing-library/react'
+import { render, type RenderOptions } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactElement } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -38,10 +38,4 @@ export function renderPage(
   )
   const view = render(tree(ui), options)
   return { user, ...view, rerender: (next: ReactElement) => view.rerender(tree(next)) }
-}
-
-/** #3653 — picks `name` in a shadcn (Radix) select: opens it at `trigger`, then clicks the option. */
-export async function selectOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, name: string | RegExp) {
-  await user.click(trigger)
-  await user.click(await screen.findByRole('option', { name }))
 }

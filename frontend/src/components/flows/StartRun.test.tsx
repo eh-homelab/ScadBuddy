@@ -2,7 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { flowRequests } from '../../mocks/features/flows'
-import { renderPage, selectOption } from '../../test/utils'
+import { renderPage } from '../../test/utils'
+import { choose } from '../../test/select'
 import { StartRun } from './StartRun'
 
 // #2483 — Start run: a flow with an inputs schema asks for them in a form drawn from it
@@ -39,7 +40,7 @@ describe('StartRun (#2483)', () => {
     expect(starts()).toEqual([])
 
     await user.type(within(dialog).getByRole('textbox', { name: /Template/ }), 'coaster')
-    await selectOption(user, within(dialog).getByRole('combobox', { name: /Colour/ }), 'blue')
+    await choose(user, within(dialog).getByRole('combobox', { name: /Colour/ }), 'blue')
     await user.click(within(dialog).getByRole('checkbox', { name: /Dry run/ }))
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     expect(await screen.findByText('Run page')).toBeInTheDocument()
@@ -68,7 +69,7 @@ describe('StartRun (#2483)', () => {
     expect(colour).toHaveAttribute('data-placeholder')
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     expect(within(dialog).getByText('Required')).toBeInTheDocument()
-    await selectOption(user, colour, 'red')
+    await choose(user, colour, 'red')
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     await waitFor(() => expect(starts().map((r) => r.body)).toEqual([{ inputs: { colour: 'red' } }]))
   })

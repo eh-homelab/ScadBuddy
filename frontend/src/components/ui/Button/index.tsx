@@ -13,6 +13,7 @@ const VARIANT = {
   danger: 'destructive',
 } as const
 
+/** By height: the legacy sm and md were h-7 and h-9, shadcn's sm and lg. */
 const SIZE = { sm: 'sm', md: 'lg' } as const
 
 /** A ghost toggle that is on (#1488): without it a pressed ghost button looks unpressed. */

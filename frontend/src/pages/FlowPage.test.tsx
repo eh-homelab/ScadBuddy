@@ -6,7 +6,8 @@ import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
 import { COASTER_INPUTS, flowRequests, setFlowState } from '../mocks/features/flows'
-import { renderPage, selectOption } from '../test/utils'
+import { renderPage } from '../test/utils'
+import { choose } from '../test/select'
 import { FlowPage } from './FlowPage'
 
 // #2350 — one flow version over the msw flows (src/mocks/features/flows.ts): its
@@ -154,8 +155,8 @@ describe('FlowPage', () => {
     expect(screen.getByTestId('modified')).toHaveTextContent('await queue_print')
     expect(screen.getByRole('heading', { name: 'v1 → v2' })).toBeInTheDocument()
 
-    await selectOption(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
-    await selectOption(user, within(compare).getByRole('combobox', { name: 'To' }), 'v1')
+    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
+    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), 'v1')
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByRole('heading', { name: 'v2 → v1' })).toBeInTheDocument()
     expect(screen.getByTestId('original')).toHaveTextContent('await queue_print')
@@ -241,7 +242,7 @@ describe('FlowPage', () => {
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
     const compare = screen.getByRole('region', { name: 'Compare versions' })
-    await selectOption(user, within(compare).getByRole('combobox', { name: 'To' }), 'v2')
+    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), 'v2')
     await user.click(within(compare).getByRole('button', { name: 'Compare' }))
     expect(await screen.findByTestId('source-diff')).toHaveAttribute('data-side-by-side', 'false')
     expect(screen.getByRole('button', { name: 'Start run' })).toBeInTheDocument()

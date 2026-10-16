@@ -174,9 +174,14 @@ function DialogLayer({
         data-modal=""
         className={cn(
           "relative grid w-full gap-4 bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none",
-          placement === "right"
-            ? "h-full max-w-[480px] rounded-none data-open:animate-in data-open:slide-in-from-right-10"
-            : "max-h-full rounded-xl sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
+          placement === "right" ? "h-full max-w-[480px] rounded-none" : "max-h-full rounded-xl sm:max-w-sm",
+          // Beside the companion it only fades in: a slide or zoom would draw it, for a
+          // frame, wider or further right than where it lands, over the panel (#798).
+          companion
+            ? "data-open:animate-in data-open:fade-in-0"
+            : placement === "right"
+              ? "data-open:animate-in data-open:slide-in-from-right-10"
+              : "data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
           className
         )}
         onOpenAutoFocus={(event) => {

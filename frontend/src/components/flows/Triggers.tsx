@@ -126,7 +126,11 @@ function TriggerRow({ trigger, onChanged, compact }: { trigger: FlowTrigger; onC
     }
   }
 
-  const confirm = (kind: 'delete' | 'revoke') => (next: boolean) => setOpen(next ? kind : null)
+  const confirm = (kind: 'delete' | 'revoke') => (next: boolean) => {
+    setOpen(next ? kind : null)
+    // A refusal shown in the confirmation goes with it.
+    if (!next) setError(undefined)
+  }
 
   return (
     <li data-trigger={trigger.id} aria-label={`Trigger ${triggerText(trigger)}`}>

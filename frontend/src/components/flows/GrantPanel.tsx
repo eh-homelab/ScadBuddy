@@ -200,7 +200,11 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
                 </Button>
               }
               open={revoking}
-              onOpenChange={setRevoking}
+              onOpenChange={(open) => {
+                setRevoking(open)
+                // A refusal shown in the confirmation goes with it.
+                if (!open) setError(undefined)
+              }}
               title="Revoke this grant?"
               action="Revoke grant"
               busy={busy}

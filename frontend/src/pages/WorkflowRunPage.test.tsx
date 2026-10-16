@@ -16,7 +16,8 @@ import {
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
-import { renderPage, selectOption } from '../test/utils'
+import { renderPage } from '../test/utils'
+import { choose } from '../test/select'
 import { WorkflowRunPage } from './WorkflowRunPage'
 import { ATTENTION_POLL_MS } from '../agent/attention'
 import { STALE_ENTRY_MESSAGE } from '../lib/flows'
@@ -431,8 +432,8 @@ describe('WorkflowRunPage, #2350', () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
     const point = await screen.findByRole('combobox', { name: 'Reset point' })
-    await selectOption(user, point, 'Event 11: before step 1 (render)')
-    await selectOption(user, point, 'Event 31: before step 3 (sleep)')
+    await choose(user, point, 'Event 11: before step 1 (render)')
+    await choose(user, point, 'Event 31: before step 3 (sleep)')
     await screen.findByRole('list', { name: 'Calls that run again' })
     release()
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -457,7 +458,7 @@ describe('WorkflowRunPage, #2350', () => {
   it('a point past every step runs nothing again', async () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
-    await selectOption(user, await screen.findByRole('combobox', { name: 'Reset point' }), 'Event 37: after the last step')
+    await choose(user, await screen.findByRole('combobox', { name: 'Reset point' }), 'Event 37: after the last step')
     expect(await screen.findByText('No recorded call runs again.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Reset to this point…' }))
     expect(await screen.findByRole('alertdialog', { name: 'Reset this run?' })).toHaveTextContent(
@@ -468,7 +469,7 @@ describe('WorkflowRunPage, #2350', () => {
   it('shows the new preview when outward calls landed since the one seen', async () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))
-    await selectOption(
+    await choose(
       user,
       await screen.findByRole('combobox', { name: 'Reset point' }),
       'Event 21: before step 2 (queue_print)',
