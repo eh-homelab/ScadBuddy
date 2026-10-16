@@ -503,6 +503,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # No selection: "Count this shard's tests" failed and says why; a second
+          # error here, and the split job's "expected 3", would only hide it.
+          [ -f counts/selected.txt ] || exit 0
           ran=0
           # `|| true`: grep finds no testcase in an empty suite and exits 1, which
           # pipefail would turn into no count at all rather than "ran 0".
