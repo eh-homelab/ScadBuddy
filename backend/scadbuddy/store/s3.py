@@ -10,6 +10,7 @@ be at least 5 MiB (https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
@@ -31,6 +32,8 @@ from scadbuddy.store.content_models import (
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
     from types_aiobotocore_s3.type_defs import CompletedPartTypeDef
+
+logger = logging.getLogger(__name__)
 
 _CHUNK = 1 << 20
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
@@ -98,8 +101,8 @@ class S3ContentBackend:
             return key
         try:
             if size <= self.multipart_threshold:
-                body = await asyncio.to_thread(data.read)
-                await client.put_object(Bucket=bucket, Key=key, Body=body)
+                # The file itself: botocore and aiohttp read it a chunk at a time.
+                await client.put_object(Bucket=bucket, Key=key, Body=data, ContentLength=size)
             else:
                 await self._multipart(client, key, data)
         finally:
@@ -122,7 +125,10 @@ class S3ContentBackend:
                 Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts}
             )
         except BaseException:
-            await client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            try:
+                await client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+            except Exception:
+                logger.warning("aborting multipart upload %s failed", upload_id, exc_info=True)
             raise
 
     async def download(self, backend_id: str) -> AsyncGenerator[bytes]:

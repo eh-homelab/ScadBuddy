@@ -2,20 +2,39 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import os
 import socket
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from botocore.exceptions import EndpointConnectionError
 
 from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.s3 import S3ContentBackend, object_key
 
 SCOPE = BlobScope(slug="demo", title="Demo")
 MISSING = "t/asset/" + "0" * 64
+
+
+def _conforms(backend: S3ContentBackend) -> ContentBackend:
+    return backend
+
+
+class RecordedReads(io.BufferedReader):
+    """A file that remembers the size asked of every read."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(io.FileIO(path, "rb"))
+        self.asked: list[int | None] = []
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.asked.append(size)
+        return super().read(size)
 
 
 def test_object_key_is_prefix_kind_sha() -> None:
@@ -73,6 +92,71 @@ async def test_a_small_file_round_trips(s3: S3Settings, tmp_path: Path) -> None:
         assert b"".join([c async for c in backend.download(key)]) == b"small file"
     finally:
         await backend.aclose()
+
+
+async def test_a_file_under_the_threshold_is_never_read_whole(
+    s3: S3Settings, tmp_path: Path
+) -> None:
+    backend = S3ContentBackend(s3, multipart_threshold=8 << 20)
+    data = os.urandom((8 << 20) - 1)
+    f = tmp_path / "under"
+    f.write_bytes(data)
+    try:
+        with RecordedReads(f) as fh:
+            key = await backend.upload("piece", fh, name="piece.zip", scope=SCOPE)
+            assert fh.tell() == 0
+        assert fh.asked
+        assert all(size is not None and 0 < size <= 1 << 20 for size in fh.asked), fh.asked
+        assert b"".join([c async for c in backend.download(key)]) == data
+    finally:
+        await backend.aclose()
+
+
+async def _failing_multipart(
+    s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, abort_fails: bool
+) -> S3ContentBackend:
+    backend = S3ContentBackend(s3, multipart_threshold=5 << 20, part_size=5 << 20)
+    client = await backend._s3()
+    upload_part = client.upload_part
+    calls = 0
+
+    async def second_part_fails(**kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("part lost")
+        return await upload_part(**kwargs)
+
+    async def abort_refused(**kwargs: Any) -> Any:
+        raise RuntimeError("abort refused")
+
+    monkeypatch.setattr(client, "upload_part", second_part_fails)
+    if abort_fails:
+        monkeypatch.setattr(client, "abort_multipart_upload", abort_refused)
+    f = tmp_path / "big"
+    f.write_bytes(os.urandom(11 << 20))
+    with f.open("rb") as fh, pytest.raises(RuntimeError, match="part lost"):
+        await backend.upload("piece", fh, name="piece.zip", scope=SCOPE)
+    assert calls == 2
+    return backend
+
+
+async def test_a_failed_multipart_upload_is_aborted(
+    s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = await _failing_multipart(s3, tmp_path, monkeypatch, abort_fails=False)
+    try:
+        client = await backend._s3()
+        assert "Uploads" not in await client.list_multipart_uploads(Bucket=s3.bucket)
+    finally:
+        await backend.aclose()
+
+
+async def test_a_failed_abort_keeps_the_original_error(
+    s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = await _failing_multipart(s3, tmp_path, monkeypatch, abort_fails=True)
+    await backend.aclose()
 
 
 async def test_remove_is_idempotent(s3: S3Settings) -> None:
