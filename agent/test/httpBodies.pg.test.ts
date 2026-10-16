@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { type HttpRequestContext, readSavedResponse, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
@@ -23,9 +23,10 @@ const META = { content_type: 'application/json', size_bytes: 7, complete: true, 
 
 describe.skipIf(skip !== undefined)(`saved http bodies${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let db: Database
-  let drop: () => Promise<void>
   let replica: SessionManager
   const servers: Server[] = []
+  /** Which test's setup is current: one that timed out must not land in the next (#3608). */
+  let setups = 0
 
   /** A replica: its own state directory, the shared database. */
   async function newReplica(): Promise<SessionManager> {
@@ -47,14 +48,21 @@ describe.skipIf(skip !== undefined)(`saved http bodies${skip ? ` (skipped: ${ski
     return createApp(deps)
   }
 
+  // The teardown is the setup's own: a setup that timed out registers none, so it
+  // fails once, rather than again in a teardown of what it never made (#3608). When
+  // it finishes late, it drops what it made instead of swapping the next test's.
   beforeEach(async () => {
-    ;({ db, drop } = await throwawayDatabase())
-    replica = await newReplica()
-  })
-  afterEach(async () => {
-    for (const server of servers.splice(0)) server.close()
-    replica.abortAll()
-    await drop()
+    const setup = ++setups
+    const own = await throwawayDatabase()
+    if (setup !== setups) return void (await own.drop())
+    db = own.db
+    const sessions = await newReplica()
+    replica = sessions
+    return async () => {
+      for (const server of servers.splice(0)) server.close()
+      sessions.abortAll()
+      await own.drop()
+    }
   })
 
   it('serves a body another replica saved, on a replica that never had it on disk', async () => {
