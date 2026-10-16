@@ -957,3 +957,120 @@ func TestFileTypes(t *testing.T) {
 		}
 	}
 }
+
+// #3713 review: a write still open on the file follows it through a type-changing
+// rename, so closing it replaces the new file instead of leaving a conflict copy.
+func TestAWriteOpenOnAFileFollowsItThroughARetype(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	fh, err := os.OpenFile(filepath.Join(top, "x.3mf.tmp"), os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fh.WriteString("new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		var sent []api.File
+		for _, f := range lib.files {
+			sent = append(sent, f)
+		}
+		if len(sent) != 1 || sent[0].Name != "x.3mf" || string(lib.data[sent[0].ID]) != "new" {
+			t.Fatalf("%+v", sent)
+		}
+	})
+}
+
+// Renaming to a type Bambuddy does nothing special with keeps the file's ID, so its
+// print history and queue entries still point at it.
+func TestARenameToAnOrdinaryTypeKeepsTheFile(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "model.3mf", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "model.3mf"), filepath.Join(top, "model.3mf.bak")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.deleted[10] || lib.uploads != 0 || lib.files[10].Name != "model.3mf.bak" {
+			t.Fatalf("deleted %v uploads %d files %+v", lib.deleted, lib.uploads, lib.files)
+		}
+	})
+}
+
+// A retype whose answer is lost is retried with the same Idempotency-Key, so it does
+// not leave a second copy under the new name.
+func TestARetypeSentAgainUsesTheSameKey(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.loseAnswers = 1
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err == nil {
+		t.Fatal("the first rename should fail: its answer is lost")
+	}
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if len(lib.keys) != 2 || lib.keys[0] != lib.keys[1] || len(lib.files) != 1 {
+			t.Fatalf("keys %v files %+v", lib.keys, lib.files)
+		}
+	})
+}
+
+// A retype whose old file cannot be deleted rolls back: the copy under the new name is
+// deleted and the file keeps its old name and ID.
+func TestARetypeThatCannotDeleteTheOldFileRollsBack(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	lib.busy[10] = true
+	dir := mount(t, lib, Options{All: true})
+	top := filepath.Join(dir, "Top")
+	if err := os.Rename(filepath.Join(top, "x.3mf.tmp"), filepath.Join(top, "x.3mf")); err == nil {
+		t.Fatal("the rename should fail: the old file is busy")
+	}
+	lib.locked(func() {
+		if len(lib.files) != 1 || lib.files[10].Name != "x.3mf.tmp" {
+			t.Fatalf("%+v", lib.files)
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "x.3mf.tmp")); err != nil || string(data) != "model" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestARetypeIntoAnotherFolder(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.folder(5, "Other", 0)
+	lib.file(10, "x.3mf.tmp", 4, []byte("model"))
+	dir := mount(t, lib, Options{All: true})
+	if err := os.Rename(filepath.Join(dir, "Top", "x.3mf.tmp"), filepath.Join(dir, "Other", "x.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		var sent []api.File
+		for _, f := range lib.files {
+			sent = append(sent, f)
+		}
+		if len(sent) != 1 || sent[0].Name != "x.3mf" || sent[0].FolderID != 5 || string(lib.data[sent[0].ID]) != "model" {
+			t.Fatalf("%+v", sent)
+		}
+	})
+	if got := names(t, filepath.Join(dir, "Other")); !slices.Equal(got, []string{"x.3mf"}) {
+		t.Fatalf("%v", got)
+	}
+}

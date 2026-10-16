@@ -219,12 +219,13 @@ func (t *tree) discardSent(ids ...int) {
 }
 
 // rebase follows a stored file renamed through the mount in every write that replaces
-// it, open or queued: a base is the file wherever it now lives.
+// it, open or queued: a base is the file wherever it now lives. to is the file now; a
+// retype gives it a new ID, whose created_at the base then leaves unknown.
 //
 // Open writes go first: one that queues meanwhile then records the moved base, or is
 // queued before the records are rebased.
-func (t *tree) rebase(id int, name string, folderID int) {
-	defer t.unsent.rebase(id, name, folderID)
+func (t *tree) rebase(id int, to api.File) {
+	defer t.unsent.rebase(id, to)
 	t.mu.Lock()
 	open := slices.Collect(maps.Keys(t.pendings))
 	t.mu.Unlock()
@@ -233,7 +234,7 @@ func (t *tree) rebase(id int, name string, folderID int) {
 		n.mu.Lock()
 		for i := range p.bases {
 			if p.bases[i].ID == id {
-				p.bases[i].Name, p.bases[i].FolderID = name, folderID
+				p.bases[i] = p.bases[i].movedTo(to)
 			}
 		}
 		n.mu.Unlock()

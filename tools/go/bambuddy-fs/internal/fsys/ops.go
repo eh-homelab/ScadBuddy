@@ -2,6 +2,9 @@ package fsys
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -254,11 +257,14 @@ const renameNoReplace = 0x1
 // t, or a queued save q and the stored files that save replaced.
 func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir, newName string, t api.File, isFile bool, q *entry) syscall.Errno {
 	var got api.File
-	if fileType(f.Name) != fileType(newName) {
+	if retypes(f.Name, newName) {
 		var errno syscall.Errno
 		if got, errno = d.retype(ctx, f, to.id, newName); errno != 0 {
 			return errno
 		}
+		// A retry after a lost answer is answered with the copy the first try made,
+		// which is now listed as the file this rename replaces: it is the result.
+		isFile = isFile && t.ID != got.ID
 	} else {
 		newN, folder := changes(f.Name, newName, d.id, to.id)
 		var err error
@@ -266,7 +272,7 @@ func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir
 			return failed("rename", err, "file", f.ID)
 		}
 		d.tree.moved(f.ID, got.Name, got.FolderID)
-		d.tree.rebase(f.ID, got.Name, got.FolderID)
+		d.tree.rebase(f.ID, got)
 	}
 	if child := d.GetChild(name); child != nil {
 		if n, ok := child.Operations().(*file); ok {
@@ -486,32 +492,62 @@ func fileType(name string) string {
 	return strings.TrimPrefix(filepath.Ext(lower), ".")
 }
 
+// typed are the file types Bambuddy treats as models (types the file and makes its
+// thumbnail from the name it is uploaded under).
+var typed = map[string]bool{"3mf": true, "gcode.3mf": true, "gcode": true, "stl": true}
+
+// retypes is whether renaming from to to must send the file again: it becomes a type
+// Bambuddy handles differently. Any other rename (model.3mf to model.3mf.bak) keeps the
+// file's ID, so its print history and queue entries still point at it.
+func retypes(from, to string) bool {
+	return fileType(from) != fileType(to) && typed[fileType(to)]
+}
+
 // retype renames f to name in folder by uploading its contents under the new name and
 // deleting f. Bambuddy types a file (and makes its thumbnail) from the name it is
 // uploaded under, and a rename keeps both, so an app that saves to "x.3mf.tmp" and
 // renames it to "x.3mf" would leave a file Bambuddy cannot print.
+//
+// The upload's Idempotency-Key comes from f and the new name, so a rename retried
+// after a lost answer is answered with the same file instead of a second copy. If f
+// cannot then be deleted the new copy is, and the rename fails with f as it was.
 func (d *dir) retype(ctx context.Context, f api.File, folder int, name string) (api.File, syscall.Errno) {
 	fh, err := d.tree.cache.open(ctx, d.tree.lib, f, "")
 	if err != nil {
 		return api.File{}, failed("rename: read", err, "file", f.ID)
 	}
-	got, err := d.tree.lib.Upload(ctx, folder, name, api.NewKey(), fh)
+	got, err := d.tree.lib.Upload(ctx, folder, name, retypeKey(f, folder, name), fh)
 	_ = fh.Close()
 	if err != nil {
 		return api.File{}, failed("rename: upload", err, "file", f.ID, "name", name)
+	}
+	if err := d.tree.lib.DeleteFiles(ctx, f.ID); err != nil {
+		slog.Error("rename: the old file could not be deleted, so the copy under the new name is", "file", f.ID, "new", got.ID, "err", err)
+		if err := d.tree.lib.DeleteFiles(ctx, got.ID); err != nil {
+			slog.Error("rename: the copy under the new name remains beside the old file", "file", f.ID, "new", got.ID, "err", err)
+		}
+		return api.File{}, syscall.EIO
 	}
 	got.Size, got.Created = f.Size, f.Created
 	if got.FolderID == 0 {
 		got.FolderID = folder
 	}
-	if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+	if err := d.tree.cache.claim(ctx, got.ID); err == nil {
+		if err := os.Rename(d.tree.cache.path(f.ID), d.tree.cache.path(got.ID)); err != nil {
+			d.tree.cache.drop(f.ID)
+		}
+		d.tree.cache.release(got.ID)
+	} else {
 		d.tree.cache.drop(f.ID)
 	}
 	d.tree.unremember(f.ID)
 	d.tree.remember(got)
-	if err := d.tree.lib.DeleteFiles(ctx, f.ID); err != nil {
-		slog.Error("rename: the file was sent again under its new name, but the old one remains beside it", "file", f.ID, "new", got.ID, "err", err)
-		return api.File{}, syscall.EIO
-	}
+	d.tree.rebase(f.ID, got)
 	return got, 0
+}
+
+// retypeKey is the Idempotency-Key of f's retype to name in folder.
+func retypeKey(f api.File, folder int, name string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("retype\x00%d\x00%d\x00%d\x00%d\x00%s", f.ID, f.Created.UnixNano(), f.Size, folder, name)))
+	return hex.EncodeToString(sum[:16])
 }
