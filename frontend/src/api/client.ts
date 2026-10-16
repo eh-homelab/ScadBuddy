@@ -1516,11 +1516,12 @@ export const api = {
    *
    * `plateId` is what the print dialog reads another plate of a multi-plate 3MF by;
    * plate 1 already arrives inside `getChoices`. `allPlates` reads every plate at once —
-   * one row per slot any plate uses — for an all-plates print.
+   * one row per slot any plate uses — for an all-plates print, and `plateIds` those
+   * plates' alone (#3652).
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1528,6 +1529,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
@@ -1857,7 +1859,7 @@ export const api = {
 
   getLibraryFilaments: (
     fileId: number,
-    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean; plateIds?: readonly number[] } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
@@ -1865,6 +1867,7 @@ export const api = {
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     if (query.allPlates) search.set('all_plates', 'true')
+    for (const plate of query.plateIds ?? []) search.append('plate_ids', String(plate))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
   },

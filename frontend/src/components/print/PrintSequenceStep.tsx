@@ -1,3 +1,6 @@
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { StepCard } from './StepCard'
 import type { PrintSequence } from '../../api/types'
 
 type Props = {
@@ -8,7 +11,8 @@ type Props = {
   objects?: number | null
 }
 
-const DEFAULT = ''
+/** The select's value for no override: Radix's select takes no empty value. */
+const DEFAULT = 'default'
 
 const CHOICES: { value: PrintSequence; label: string }[] = [
   { value: 'by layer', label: 'By layer' },
@@ -21,30 +25,30 @@ const CHOICES: { value: PrintSequence; label: string }[] = [
  */
 export function PrintSequenceStep({ value, onChange, objects = null }: Props) {
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-      <legend className="px-1 text-[13px] text-ink">Print sequence</legend>
-      <div className="mt-1.5 flex flex-col gap-1">
-        <label htmlFor="print-sequence-select" className="text-[12px] text-muted">
+    <StepCard title="Print sequence">
+      <div className="grid gap-1.5">
+        <Label htmlFor="print-sequence-select" className="text-xs font-normal text-muted-foreground">
           Print sequence
-        </label>
-        <select
-          id="print-sequence-select"
+        </Label>
+        <Select
           value={value ?? DEFAULT}
-          onChange={(event) =>
-            onChange(event.target.value === DEFAULT ? null : (event.target.value as PrintSequence))
-          }
-          className="sb-field"
+          onValueChange={(next) => onChange(next === DEFAULT ? null : (next as PrintSequence))}
         >
-          <option value={DEFAULT}>Default (template or process)</option>
-          {CHOICES.map((choice) => (
-            <option key={choice.value} value={choice.value}>
-              {choice.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id="print-sequence-select" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={DEFAULT}>Default (template or process)</SelectItem>
+            {CHOICES.map((choice) => (
+              <SelectItem key={choice.value} value={choice.value}>
+                {choice.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
       {value === 'by object' && (
-        <p className="mt-1.5 text-[12px] text-muted">
+        <p className="text-xs text-muted-foreground">
           {objects === 1
             ? 'This plate is one object, so by object prints it as by layer would.'
             : `Each object is finished before the next starts, so the toolhead has to clear the ones already printed: the objects need room between them.${
@@ -52,6 +56,6 @@ export function PrintSequenceStep({ value, onChange, objects = null }: Props) {
               }`}
         </p>
       )}
-    </fieldset>
+    </StepCard>
   )
 }

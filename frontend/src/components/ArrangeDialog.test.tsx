@@ -4,17 +4,20 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
-import { fromFiles, fromOutputs, objectNames } from '../lib/arrange'
+import { fromFiles, fromOutputs, GOAL_LABELS, objectNames } from '../lib/arrange'
 import { startTracing } from '../lib/tracing'
 import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
 import { addMockOutput, lastArrangeRequest, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { choose, optionNames } from '../test/select'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ArrangeDialog } from './ArrangeDialog'
 
 const first = fixtures.outputs[0] as Output
+/** A model's name, as the File under and Model lists show it. */
+const nameOf = (slug: string) => fixtures.models.find((m) => m.slug === slug)!.name ?? slug
 const second: Output = { ...first, id: 'o-2', name: 'second', manifest: [] }
 
 describe('ArrangeDialog: sources of any kind (#1864)', () => {
@@ -51,8 +54,8 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     await user.clear(star)
     await user.type(star, '5')
     const filing = screen.getByLabelText('File under')
-    expect(filing).toHaveValue('gridfinity-bin')
-    await user.selectOptions(filing, 'name-keychain')
+    expect(filing).toHaveTextContent(nameOf('gridfinity-bin'))
+    await choose(user, filing, nameOf('name-keychain'))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({
@@ -105,10 +108,11 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
     const filing = await screen.findByLabelText('File under')
-    expect(filing).toHaveValue('name-keychain')
-    await waitFor(() => expect(within(filing).getAllByRole('option')).toHaveLength(fixtures.models.length))
-    expect(within(filing).getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
-    await user.selectOptions(filing, 'gridfinity-bin')
+    expect(filing).toHaveTextContent(nameOf('name-keychain'))
+    await user.click(filing)
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(fixtures.models.length))
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' })
@@ -140,13 +144,17 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
       <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Add from a model' }))
-    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    const model = await screen.findByLabelText('Model')
+    await waitFor(() => expect(model).toBeEnabled())
+    await choose(user, model, nameOf('gridfinity-bin'))
     await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
 
     await user.click(screen.getByRole('button', { name: 'Add files' }))
-    await user.selectOptions(await screen.findByLabelText('Library folder'), '1')
+    // Folder 1, the top-level MakerWorld (another folder deeper down has its name too).
+    await user.click(await screen.findByLabelText('Library folder'))
+    await user.click((await screen.findAllByRole('option', { name: 'MakerWorld' }))[0]!)
     await user.click(await screen.findByRole('checkbox', { name: /Clara's Wand/ }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText("Copies of Wand — Clara's Wand.3mf")).toBeVisible()
@@ -169,13 +177,14 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
     const filing = await screen.findByLabelText('File under')
     // #2284 — by name, not slug; #3638 — the file's own new model first.
+    await user.click(filing)
     await waitFor(() =>
-      expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
         "A new model: Clara's Wand",
         ...fixtures.models.map((m) => m.name),
       ]),
     )
-    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({
@@ -202,7 +211,7 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
     )
     const { user, rerender } = renderPage(dialog(true))
     const filing = await screen.findByLabelText('File under')
-    await waitFor(() => expect(filing).toHaveDisplayValue("A new model: Clara's Wand"))
+    await waitFor(() => expect(filing).toHaveTextContent("A new model: Clara's Wand"))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(create).toHaveBeenCalledOnce()
@@ -214,7 +223,7 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
     // Again: the model made from the file is its home, and no second one is made.
     rerender(dialog(false))
     rerender(dialog(true))
-    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveDisplayValue("Clara's Wand"))
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent("Clara's Wand"))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledTimes(2))
     expect(create).toHaveBeenCalledOnce()
@@ -234,7 +243,7 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
     const taken = { ...wand, filename: 'Name Keychain.3mf' }
     const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={vi.fn()} />)
     const filing = await screen.findByLabelText('File under')
-    await waitFor(() => expect(filing).toHaveDisplayValue('A new model: Name Keychain'))
+    await waitFor(() => expect(filing).toHaveTextContent('A new model: Name Keychain'))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     // `name-keychain` is a model already, so the new one is "Name Keychain 2".
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Name Keychain 2' })))
@@ -244,8 +253,9 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
   it('still files under an existing model when one is picked', async () => {
     const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
     const filing = await screen.findByLabelText('File under')
-    await waitFor(() => expect(within(filing).getAllByRole('option').length).toBeGreaterThan(1))
-    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(filing)
+    await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(1))
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' }))
   })
@@ -328,7 +338,7 @@ describe('ArrangeDialog: a copy in other colours (#3637)', () => {
     )
     const onArranged = vi.fn()
     const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />)
-    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveDisplayValue("A new model: Clara's Wand"))
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent("A new model: Clara's Wand"))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(calls).toBe(2)
@@ -350,7 +360,7 @@ describe('ArrangeDialog: a copy in other colours (#3637)', () => {
     const onArranged = vi.fn()
     const taken = { ...wand, filename: 'Name Keychain.3mf' }
     const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={onArranged} />)
-    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveDisplayValue('A new model: Name Keychain'))
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent('A new model: Name Keychain'))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(names).toEqual(['Name Keychain 2', 'Name Keychain 3'])
@@ -393,7 +403,7 @@ describe('ArrangeDialog', () => {
     expect(count).toHaveValue(2)
     await user.clear(count)
     await user.type(count, '5')
-    await user.selectOptions(screen.getByLabelText('Goal'), 'by_colour')
+    await choose(user, screen.getByLabelText('Goal'), GOAL_LABELS.by_colour)
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(onArranged).toHaveBeenCalledWith({
@@ -875,17 +885,15 @@ describe('ArrangeDialog', () => {
       )
       await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
       const select = await screen.findByLabelText('Model')
-      await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(2))
-      const names = within(select)
-        .getAllByRole('option')
-        .slice(1)
-        .map((o) => o.textContent ?? '')
+      await waitFor(() => expect(select).toBeEnabled())
+      const names = await optionNames(user, select)
+      expect(names.length).toBeGreaterThan(1)
       expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))
       await user.type(screen.getByLabelText('Find a model'), 'keychain')
-      const found = within(select).getAllByRole('option').slice(1)
+      const found = await optionNames(user, select)
       expect(found.length).toBeGreaterThan(0)
-      expect(found.every((o) => /keychain/i.test(o.textContent ?? ''))).toBe(true)
-      await user.selectOptions(select, 'name-keychain')
+      expect(found.every((o) => /keychain/i.test(o))).toBe(true)
+      await choose(user, select, nameOf('name-keychain'))
       expect(await screen.findByRole('checkbox', { name: /^Nova · .* ago · .*mm · needs a re-render$/ })).toBeInTheDocument()
     })
 
@@ -895,11 +903,10 @@ describe('ArrangeDialog', () => {
       )
       await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
       const select = await screen.findByLabelText('Model')
-      await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(2))
+      await waitFor(() => expect(select).toBeEnabled())
       // "Name Keychain" holds no hyphen: only its slug matches.
       await user.type(screen.getByLabelText('Find a model'), 'name-keychain')
-      const found = within(select).getAllByRole('option').slice(1)
-      expect(found.map((o) => o.textContent)).toEqual(['Name Keychain'])
+      expect(await optionNames(user, select)).toEqual(['Name Keychain'])
     })
   })
 

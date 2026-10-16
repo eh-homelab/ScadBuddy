@@ -86,7 +86,7 @@ describe('a colour from a filament (#1026)', () => {
     await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
     const clear = await screen.findByRole('option', { name: /Clear/ })
     expect(within(clear).getByTestId('clear-swatch')).toBeInTheDocument()
-    expect(clear.querySelector('[title="#000000"]')).toBeNull()
+    expect(clear.querySelector('[data-colour="#000000"]')).toBeNull()
   })
 
   it('drops a read that answers after the list was closed (#2779 review)', async () => {

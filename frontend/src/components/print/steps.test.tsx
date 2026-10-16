@@ -1,5 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { choose, optionsOf } from '../../test/select'
 import { NozzleStep } from './NozzleStep'
 import { PlateStep } from './PlateStep'
 import { QualityStep } from './QualityStep'
@@ -64,13 +66,14 @@ describe('QualityStep', () => {
     { tier: 'draft' as const, process_name: '0.12mm Balanced Quality @BBL H2C 0.2 nozzle' },
   ]
 
-  it('lists every process, preselecting the tier', () => {
+  it('lists every process, preselecting the tier', async () => {
+    const user = userEvent.setup()
     const onChange = vi.fn()
     render(<QualityStep size="0.2" tiers={tiers} tier="fine" processName={null}
       processes={tiers.map((t) => t.process_name)} onChange={onChange} />)
-    const select = screen.getByLabelText(/process/i) as HTMLSelectElement
-    expect(select.value).toBe('0.08mm High Quality @BBL H2C 0.2 nozzle')
-    fireEvent.change(select, { target: { value: '0.10mm Standard @BBL H2C 0.2 nozzle' } })
+    const select = screen.getByRole('combobox', { name: /process/i })
+    expect(select).toHaveTextContent('0.08mm High Quality @BBL H2C 0.2 nozzle')
+    await choose(user, select, '0.10mm Standard @BBL H2C 0.2 nozzle')
     expect(onChange).toHaveBeenLastCalledWith({
       tier: null, processName: '0.10mm Standard @BBL H2C 0.2 nozzle',
     })
@@ -113,7 +116,9 @@ describe('PlateStep', () => {
     expect(screen.getByText(/The printer's last print used Textured PEI Plate\./)).toBeInTheDocument()
   })
 
-  it("names each plate by Bambu Studio's label, and a remembered one outside the list as it is (#2366)", () => {
+  it("names each plate by Bambu Studio's label, and a remembered one outside the list as it is (#2366)", async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
     render(
       <PlateStep
         bedTypes={['Cool Plate', 'Textured PEI Plate', 'Supertack Plate']}
@@ -121,19 +126,12 @@ describe('PlateStep', () => {
         value="Cool Plate"
         lastBedType={null}
         printerName="H2C"
-        onChange={vi.fn()}
+        onChange={onChange}
       />,
     )
-    const options = screen.getAllByRole('option')
-    expect(options.map((option) => option.textContent)).toEqual([
-      'Cool Plate',
-      'Textured PEI Plate',
-      'Bambu Cool Plate SuperTack',
-    ])
-    expect(options.map((option) => (option as HTMLOptionElement).value)).toEqual([
-      'Cool Plate',
-      'Textured PEI Plate',
-      'Supertack Plate',
-    ])
+    const select = screen.getByRole('combobox', { name: 'Plate' })
+    expect(await optionsOf(user, select)).toEqual(['Cool Plate', 'Textured PEI Plate', 'Bambu Cool Plate SuperTack'])
+    await choose(user, select, 'Bambu Cool Plate SuperTack')
+    expect(onChange).toHaveBeenLastCalledWith('Supertack Plate')
   })
 })

@@ -165,7 +165,7 @@ test.describe('library', () => {
     const dialog = page.getByRole('dialog', { name: 'Arrange' })
     const wand = "Wand — Clara's Wand.3mf"
     await expect(dialog.getByLabel(`Copies of ${wand}`)).toHaveValue('1')
-    await expect(dialog.getByLabel('File under').locator('option:checked')).toHaveText("A new model: Clara's Wand")
+    await expect(dialog.getByLabel('File under')).toHaveText("A new model: Clara's Wand")
 
     await dialog.getByRole('button', { name: `Add a copy of ${wand} in other colours` }).click()
     const copy = `${wand}, copy 1 in other colours`

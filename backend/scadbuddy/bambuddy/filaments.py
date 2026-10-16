@@ -841,6 +841,29 @@ async def read_inventory(client: BambuddyClient) -> Inventory:
     return settled(spools), settled(assignments)
 
 
+#: The most plates one request may name (#3652); a 3MF lays out far fewer.
+MAX_PLATES = 256
+
+
+def asked_plates(
+    plate_id: int, all_plates: bool, plate_ids: Sequence[int] | None
+) -> list[int] | None:
+    """The plates a request asks for, each once and in plate order; ``None`` for every
+    plate (#3652). ``all_plates`` wins over ``plate_ids``, which wins over ``plate_id``."""
+    if all_plates:
+        return None
+    if plate_ids:
+        return sorted(set(plate_ids))
+    return [plate_id]
+
+
+def plates_named(plates: Sequence[int]) -> str:
+    """``plate 4``, or ``plates 4 and 5``, or ``plates 4, 5 and 6``."""
+    if len(plates) == 1:
+        return f"plate {plates[0]}"
+    return f"plates {', '.join(map(str, plates[:-1]))} and {plates[-1]}"
+
+
 async def gather_plate_options(
     client: BambuddyClient,
     *,

@@ -1,5 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { choose } from '../../test/select'
 import type { NozzlePlan } from '../../api/types'
 import { NozzlePlanLine, NozzlePlanStep } from './NozzlePlan'
 
@@ -35,14 +37,16 @@ describe('NozzlePlanLine (#2166)', () => {
 })
 
 describe('NozzlePlanStep (#2166)', () => {
-  it('names the planned side as Automatic and takes a side by hand', () => {
+  it('names the planned side as Automatic and takes a side by hand', async () => {
+    const user = userEvent.setup()
     const onSide = vi.fn()
-    render(<NozzlePlanStep plan={plan} sides={{}} onSide={onSide} />)
-    const first = screen.getByLabelText(/Slot 1: Mistletoe Green/)
-    expect(first).toHaveDisplayValue('Automatic (right)')
-    fireEvent.change(first, { target: { value: 'L' } })
+    const { rerender } = render(<NozzlePlanStep plan={plan} sides={{}} onSide={onSide} />)
+    const first = screen.getByRole('combobox', { name: /Slot 1: Mistletoe Green/ })
+    expect(first).toHaveTextContent('Automatic (right)')
+    await choose(user, first, 'Left')
     expect(onSide).toHaveBeenCalledWith(1, 'L')
-    fireEvent.change(first, { target: { value: '' } })
+    rerender(<NozzlePlanStep plan={plan} sides={{ '1': 'L' }} onSide={onSide} />)
+    await choose(user, first, 'Automatic')
     expect(onSide).toHaveBeenLastCalledWith(1, null)
   })
 

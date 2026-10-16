@@ -7,7 +7,21 @@ import type { PrintOptions } from '../api/types'
 import { printOptions as printOptionsFixture } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import type { OptionsSubject } from '../lib/printSource'
+import { choose, optionDisabled, optionsOf } from '../test/select'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
+
+/** A select's option text for the value a native select took (#3669). */
+const OPTION_TEXT: Record<string, string | RegExp> = {
+  '': /^Bambuddy default/,
+  true: 'On',
+  false: 'Off',
+  off: 'Off',
+  model: 'This model',
+}
+
+async function pick(user: ReturnType<typeof userEvent.setup>, label: string, value: string) {
+  await choose(user, screen.getByRole('combobox', { name: label }), OPTION_TEXT[value] ?? value)
+}
 
 const MODEL: OptionsSubject = { key: 'name-keychain', noun: 'model' }
 
@@ -53,10 +67,9 @@ describe('PrintOptionsDisclosure', () => {
       within(row('Bed levelling')).getByText(/Auto · Bambuddy's default/),
     ).toBeInTheDocument()
     // The select offers Bambuddy's default as a real, named choice.
-    expect(screen.getByLabelText('Timelapse')).toHaveValue('')
-    expect(
-      within(row('Timelapse')).getByRole('option', { name: 'Bambuddy default (Off)' }),
-    ).toBeInTheDocument()
+    const timelapse = screen.getByRole('combobox', { name: 'Timelapse' })
+    expect(timelapse).toHaveTextContent('Bambuddy default (Off)')
+    expect(await optionsOf(user, timelapse)).toContain('Bambuddy default (Off)')
   })
 
   it('marks a value that differs from Bambuddy’s default and not one that matches it', async () => {
@@ -103,7 +116,7 @@ describe('PrintOptionsDisclosure', () => {
     render(<Harness />)
     await open(user)
 
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await pick(user, 'Timelapse', 'true')
 
     expect(screen.getByTestId('sent')).toHaveTextContent('{"timelapse":true}')
     expect(within(row('Timelapse')).getByText(/On · from this send/)).toBeInTheDocument()
@@ -113,9 +126,9 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await pick(user, 'Timelapse', 'true')
 
-    await user.selectOptions(screen.getByLabelText('Timelapse'), '')
+    await pick(user, 'Timelapse', '')
 
     expect(screen.getByTestId('sent')).toHaveTextContent('{}')
   })
@@ -124,7 +137,7 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'false')
+    await pick(user, 'Timelapse', 'false')
 
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
@@ -140,8 +153,8 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
-    await user.selectOptions(screen.getByLabelText('Remember for'), 'model')
+    await pick(user, 'Timelapse', 'true')
+    await pick(user, 'Remember for', 'model')
 
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
@@ -177,8 +190,8 @@ describe('PrintOptionsDisclosure', () => {
 
     expect(within(row('Quantity')).getByText(/2 · from this file/)).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'This model' })).not.toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
-    await user.selectOptions(screen.getByLabelText('Remember for'), 'This file')
+    await pick(user, 'Timelapse', 'true')
+    await pick(user, 'Remember for', 'This file')
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
     await waitFor(() => expect(screen.getByText('Remembered for this file.')).toBeInTheDocument())
@@ -207,7 +220,7 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Bed levelling'), 'off')
+    await pick(user, 'Bed levelling', 'off')
 
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
@@ -221,7 +234,7 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await pick(user, 'Timelapse', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
@@ -229,7 +242,7 @@ describe('PrintOptionsDisclosure', () => {
       expect(screen.getByText('Remembered for this printer.')).toBeInTheDocument(),
     )
     // Reading printer_id off the PUT response would have blanked both of these.
-    expect(screen.getByRole('option', { name: 'This printer' })).toBeEnabled()
+    expect(await optionDisabled(user, screen.getByRole('combobox', { name: 'Remember for' }), 'This printer')).toBe(false)
     expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
   })
 
@@ -307,7 +320,7 @@ describe('PrintOptionsDisclosure', () => {
     render(<Harness printerId={null} />)
     await open(user)
 
-    expect(screen.getByRole('option', { name: 'This printer' })).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByRole('combobox', { name: 'Remember for' }), 'This printer')).toBe(true)
     expect(screen.getByText(/No printer is picked yet/)).toBeInTheDocument()
   })
 
@@ -368,9 +381,9 @@ describe('PrintOptionsDisclosure', () => {
     const user = userEvent.setup()
     render(<Harness printerId={null} />)
     await open(user)
-    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+    await pick(user, 'Timelapse', 'true')
 
-    // "This printer" is disabled but still the select's value, so the click must not
+    // "This printer" is disabled but still the scope it opens on, so the click must not
     // silently do nothing.
     await user.click(screen.getByRole('button', { name: 'Remember' }))
 
@@ -401,7 +414,7 @@ describe('PrintOptionsDisclosure', () => {
         ),
       )
       await open(user)
-      await user.selectOptions(screen.getByLabelText('Bed levelling'), 'off')
+      await pick(user, 'Bed levelling', 'off')
       expect(screen.getByTestId('print-options-summary')).toHaveTextContent(
         'Bed levelling: Off, Timelapse (remembered), Wait for a manual start (remembered)',
       )
@@ -412,7 +425,8 @@ describe('PrintOptionsDisclosure', () => {
       const user = userEvent.setup()
       render(<Harness />)
       const held = await screen.findByTestId('holding-manual_start')
-      expect(screen.getByText('Options').closest('details')).not.toHaveAttribute('open')
+      // Collapsed: the options themselves are not shown.
+      expect(screen.queryByLabelText('Timelapse')).not.toBeInTheDocument()
       expect(held).toHaveTextContent('Waits for a manual start.')
       expect(held).toHaveTextContent('Remembered for every print.')
 

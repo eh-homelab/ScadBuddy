@@ -1,9 +1,14 @@
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import type { NozzlePlan, PlannedSlot } from '../../api/types'
 import type { Side } from '../../lib/usePrintChoices'
 import { Swatch } from './Swatch'
 
 const SIDE_WORD: Record<Side, string> = { L: 'left', R: 'right' }
 const FLOW_WORD = { standard: 'Standard', high_flow: 'High Flow' } as const
+/** The side select's value for "plan it": Radix's select takes no empty value. */
+const AUTOMATIC = 'auto'
 
 /** "0.4 High Flow", or each side's flow when they differ. */
 function flowWords(plan: NozzlePlan): string {
@@ -33,16 +38,16 @@ export function NozzlePlanLine({
   if (!plan || (plan.slots ?? []).length === 0) return null
   return (
     <p
-      className={`flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12.5px] text-ink ${stale ? 'opacity-60' : ''}`}
+      className={`flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] ${stale ? 'opacity-60' : ''}`}
       data-testid="nozzle-plan"
       aria-busy={stale}
     >
-      <span className="text-muted">{sliced ? 'Nozzles, as sliced:' : 'Nozzles:'}</span>
+      <span className="text-muted-foreground">{sliced ? 'Nozzles, as sliced:' : 'Nozzles:'}</span>
       {(plan.slots ?? []).map((slot) => (
         <span key={slot.slot_id} className="inline-flex items-center gap-1">
           <Swatch colour={slot.colour} size="sm" />
           {slot.name} → {SIDE_WORD[slot.side]}
-          <span aria-hidden="true" className="text-faint">
+          <span aria-hidden="true" className="text-muted-foreground">
             ·
           </span>
         </span>
@@ -67,47 +72,52 @@ export function NozzlePlanStep({ plan, sides, onSide }: StepProps) {
   const slots: PlannedSlot[] = plan?.slots ?? []
   if (slots.length === 0) return null
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2" data-testid="nozzle-plan-step">
-      <legend className="px-1 text-[13px] text-ink">Nozzle for each filament</legend>
-      <div className="mt-1.5 flex flex-col gap-2">
+    <Card size="sm" role="group" aria-labelledby="nozzle-plan-step" data-testid="nozzle-plan-step">
+      <CardHeader>
+        <CardTitle id="nozzle-plan-step" className="text-sm">
+          Nozzle for each filament
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
         {slots.map((slot) => {
           const id = `nozzle-side-${slot.slot_id}`
-          const chosen = sides[String(slot.slot_id)] ?? ''
+          const chosen = sides[String(slot.slot_id)]
           return (
             <div key={slot.slot_id} className="flex flex-wrap items-center gap-2">
-              <label htmlFor={id} className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] text-ink">
+              <Label htmlFor={id} className="min-w-0 flex-1 gap-1.5 font-normal">
                 <Swatch colour={slot.colour} size="sm" />
                 <span className="truncate">
                   Slot {slot.slot_id}: {slot.name}
                 </span>
-              </label>
-              <select
-                id={id}
-                value={chosen}
-                onChange={(event) => onSide(slot.slot_id, (event.target.value || null) as Side | null)}
-                className="sb-field w-auto py-1 text-[12px]"
+              </Label>
+              <Select
+                value={chosen ?? AUTOMATIC}
+                onValueChange={(next) => onSide(slot.slot_id, next === AUTOMATIC ? null : (next as Side))}
               >
-                <option value="">Automatic{chosen ? '' : ` (${SIDE_WORD[slot.side]})`}</option>
-                <option value="L">Left</option>
-                <option value="R">Right</option>
-              </select>
+                <SelectTrigger id={id} size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={AUTOMATIC}>Automatic{chosen ? '' : ` (${SIDE_WORD[slot.side]})`}</SelectItem>
+                  <SelectItem value="L">Left</SelectItem>
+                  <SelectItem value="R">Right</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           )
         })}
-      </div>
-      {plan?.track_switch && (
-        <p className="mt-1.5 text-[12px] text-muted">
-          The Filament Track Switch feeds any spool to either nozzle.
-        </p>
-      )}
-      {/* #2737 review: say it here, before a slice lands to show it; only for a plan on both
-          sides, as one held to a single side is never regrouped. */}
-      {new Set((plan?.slots ?? []).map((slot) => slot.side)).size > 1 && (
-        <p className="mt-1.5 text-[12px] text-muted" data-testid="nozzle-side-hint">
-          The slicer groups filaments itself to cut purging, so it may put one on the other side: once a single
-          plate is chosen and sliced, its preview shows where each went.
-        </p>
-      )}
-    </fieldset>
+        {plan?.track_switch && (
+          <p className="text-xs text-muted-foreground">The Filament Track Switch feeds any spool to either nozzle.</p>
+        )}
+        {/* #2737 review: say it here, before a slice lands to show it; only for a plan on both
+            sides, as one held to a single side is never regrouped. */}
+        {new Set((plan?.slots ?? []).map((slot) => slot.side)).size > 1 && (
+          <p className="text-xs text-muted-foreground" data-testid="nozzle-side-hint">
+            The slicer groups filaments itself to cut purging, so it may put one on the other side: once a single
+            plate is chosen and sliced, its preview shows where each went.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   )
 }

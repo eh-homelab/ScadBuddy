@@ -1,3 +1,5 @@
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { clampOption, PRINT_OPTIONS } from '../../lib/printOptions'
 
 /**
@@ -16,11 +18,9 @@ type Props = {
 
 export function CopiesField({ value, remembered, onChange }: Props) {
   return (
-    <div className="flex items-center gap-3">
-      <label htmlFor="print-copies" className="text-[13px] text-ink">
-        Copies
-      </label>
-      <input
+    <div className="flex flex-wrap items-center gap-3">
+      <Label htmlFor="print-copies">Copies</Label>
+      <Input
         id="print-copies"
         type="number"
         min={QUANTITY.min}
@@ -32,10 +32,10 @@ export function CopiesField({ value, remembered, onChange }: Props) {
         onChange={(event) =>
           onChange(event.target.value === '' ? null : clampOption(event.target.value, QUANTITY))
         }
-        className="sb-field sb-num w-20 text-right"
+        className="sb-num w-20 text-right"
       />
       {value === null && remembered !== null && (
-        <span className="text-[12px] text-muted" data-testid="remembered-copies">
+        <span className="text-xs text-muted-foreground" data-testid="remembered-copies">
           <span className="sb-num">{remembered}</span> remembered — leave blank to use it
         </span>
       )}

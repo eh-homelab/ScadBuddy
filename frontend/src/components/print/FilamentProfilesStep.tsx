@@ -1,3 +1,6 @@
+import { Checkbox } from '@/components/ui/checkbox'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { StepCard } from './StepCard'
 import type { ProfileSuggestion } from '../../lib/filamentProfiles'
 
 type Change = NonNullable<ProfileSuggestion['preview']>['changes'] extends (infer C)[] | undefined ? C : never
@@ -43,37 +46,35 @@ export function FilamentProfilesStep({
 }) {
   if (suggestions.length === 0) return null
   return (
-    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2" data-testid="filament-profiles">
-      <legend className="px-1 text-[13px] text-ink">Filament profiles</legend>
-      <ul className="mt-1 space-y-2">
+    <StepCard title="Filament profiles" testId="filament-profiles">
+      <ul className="space-y-3">
         {suggestions.map((suggestion) => {
           const { profile, preview } = suggestion
           const id = `filament-profile-${profile.id}`
           const unapplicable = preview?.applicable === false
           const sources = sourcesOf(profile)
           return (
-            <li key={profile.id} className="text-[12px]" data-testid={id}>
-              <label htmlFor={id} className="flex items-start gap-2 text-ink">
-                <input
+            <li key={profile.id} className="text-xs" data-testid={id}>
+              <label htmlFor={id} className="flex cursor-pointer items-start gap-2">
+                <Checkbox
                   id={id}
-                  type="checkbox"
                   className="mt-0.5"
                   checked={suggestion.on}
                   disabled={unapplicable}
-                  onChange={(event) => onToggle(profile.id, event.target.checked)}
+                  onCheckedChange={(checked) => onToggle(profile.id, checked === true)}
                 />
                 <span>
-                  <span className="text-[12.5px]">{profile.name}</span>
-                  <span className="text-muted"> for {slotsOf(suggestion)}</span>
+                  <span className="text-sm">{profile.name}</span>
+                  <span className="text-muted-foreground"> for {slotsOf(suggestion)}</span>
                 </span>
               </label>
-              <p className="mt-0.5 ml-5 text-muted">{profile.description}</p>
+              <p className="mt-0.5 ml-6 text-muted-foreground">{profile.description}</p>
               {unapplicable ? (
-                <p className="mt-0.5 ml-5 text-warn" role="status">
+                <p className="mt-0.5 ml-6 text-destructive" role="status">
                   Not applied: {preview.reason}. The print uses the preset as it is.
                 </p>
               ) : (
-                <ul className="sb-num mt-0.5 ml-5 text-ink" aria-label={`${profile.name} changes`}>
+                <ul className="sb-num mt-0.5 ml-6" aria-label={`${profile.name} changes`}>
                   {(preview?.changes?.length ? preview.changes : profile.settings).map((change) => {
                     const from = 'current' in change && !suggestion.unchecked ? current(change) : null
                     return (
@@ -87,32 +88,37 @@ export function FilamentProfilesStep({
                 </ul>
               )}
               {suggestion.unchecked && (
-                <p className="mt-0.5 ml-5 text-muted">
+                <p className="mt-0.5 ml-6 text-muted-foreground">
                   Couldn't read the preset, so this wasn't checked against this print. If it can't apply, the print
                   goes ahead without it and says so.
                 </p>
               )}
               {(profile.notes ?? []).map((note) => (
-                <p key={note.text} className="mt-0.5 ml-5 text-muted">
+                <p key={note.text} className="mt-0.5 ml-6 text-muted-foreground">
                   {note.text}
                 </p>
               ))}
               {sources.map((source) => (
-                <a
-                  key={source.url}
-                  href={source.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={source.quotes.map((quote) => `“${quote}”`).join('\n')}
-                  className="mt-0.5 ml-5 block text-accent hover:underline"
-                >
-                  Why: {source.title}
-                </a>
+                <Tooltip key={source.url}>
+                  <TooltipTrigger asChild>
+                    <a
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-0.5 ml-6 block w-fit text-primary underline-offset-4 hover:underline"
+                    >
+                      Why: {source.title}
+                    </a>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-sm whitespace-pre-line">
+                    {source.quotes.map((quote) => `“${quote}”`).join('\n')}
+                  </TooltipContent>
+                </Tooltip>
               ))}
             </li>
           )
         })}
       </ul>
-    </fieldset>
+    </StepCard>
   )
 }

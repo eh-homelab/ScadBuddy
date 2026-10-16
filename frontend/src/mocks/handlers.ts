@@ -3331,10 +3331,14 @@ export const handlers = [
     const rawPlateId = Number(search.get('plate_id') ?? 1)
     const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []
+    // #3652 — several plates answer with their slots alone.
+    const plateIds = search.getAll('plate_ids').map(Number)
     const slots =
       search.get('all_plates') === 'true'
         ? every
-        : every.filter((slot) => slot.slot_id === plateId)
+        : plateIds.length > 0
+          ? every.filter((slot) => plateIds.includes(slot.slot_id))
+          : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
