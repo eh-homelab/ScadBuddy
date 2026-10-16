@@ -233,11 +233,13 @@ on shutdown.
     old replica takes fails `housekeeping_sweep_lost_slices` as unregistered, and that
     sweep waits for the next tick (300 s).
   - **This release adds a sweep**, `housekeeping_sweep_print_attachments` (#3047): it
-    forgets the attachment rows of a print whose archive was deleted in Bambuddy (the
-    photos went with it; a copy promoted to a template stays). It forgets an archive
-    only on Bambuddy's own 404, `{"detail": "Archive not found"}`; any other 404 (a
-    wrong URL, a proxy) or an outage forgets nothing and stops the sweep. It runs on the first Schedule, so 0 leaves
-    the rows. It needs the same `Recreate` rollout.
+    forgets the attachment rows of a print whose archive was deleted in Bambuddy. The
+    archive photos went with it; the copies in the project's `Media/` folder stay in
+    Bambuddy's library, untracked, and a copy promoted to a template stays too. It
+    forgets an archive only on Bambuddy's own 404, `{"detail": "Archive not found"}`;
+    any other 404 (a wrong URL, a proxy) or an outage forgets nothing for that archive,
+    and the sweep goes on to the next and fails at the end. It runs on the first
+    Schedule, so 0 leaves the rows. It needs the same `Recreate` rollout.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
