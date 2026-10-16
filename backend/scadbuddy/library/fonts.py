@@ -246,11 +246,12 @@ def _covered(ranges: list[tuple[int, int]], point: int) -> bool:
 
 def _drawn(char: str) -> bool:
     """Whether ``char`` is one a font needs a glyph for: not blank, a control or format
-    character (a zero-width joiner), or a variation selector (an emoji's U+FE0F)."""
+    character (a zero-width joiner, an emoji tag), a variation selector (an emoji's
+    U+FE0F), or a skin-tone modifier, which only shades the emoji before it."""
     if char.isspace():
         return False
     point = ord(char)
-    if 0xFE00 <= point <= 0xFE0F or 0xE0100 <= point <= 0xE01EF:
+    if 0xFE00 <= point <= 0xFE0F or 0xE0100 <= point <= 0xE01EF or 0x1F3FB <= point <= 0x1F3FF:
         return False
     return unicodedata.category(char) not in ("Cc", "Cf")
 
@@ -296,8 +297,12 @@ def missing_glyphs(
         return []
     ranges = coverage[1]
     missing: list[str] = []
+    seen: set[str] = set()
     for char in text:
-        if _drawn(char) and char not in missing and not _covered(ranges, ord(char)):
+        if char in seen:
+            continue
+        seen.add(char)
+        if _drawn(char) and not _covered(ranges, ord(char)):
             missing.append(char)
     return missing
 

@@ -1,7 +1,15 @@
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { GlyphCoverage } from '../api/types'
-import { GLYPH_ANSWERS_KEPT, GLYPH_ASKS_IN_FLIGHT, askMissingGlyphs, forgetGlyphAnswers } from './useMissingGlyphs'
+import {
+  GLYPH_ANSWERS_KEPT,
+  GLYPH_ASKS_IN_FLIGHT,
+  GLYPH_CHECK_DEBOUNCE_MS,
+  askMissingGlyphs,
+  forgetGlyphAnswers,
+  useMissingGlyphs,
+} from './useMissingGlyphs'
 
 describe('askMissingGlyphs', () => {
   beforeEach(() => forgetGlyphAnswers())
@@ -40,5 +48,43 @@ describe('askMissingGlyphs', () => {
     }
     await Promise.all(answers)
     expect(asked).toHaveBeenCalledTimes(answers.length)
+  })
+})
+
+describe('useMissingGlyphs', () => {
+  beforeEach(() => forgetGlyphAnswers())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the last answer while a new text waits on the debounce and the server', async () => {
+    const pending: ((coverage: GlyphCoverage) => void)[] = []
+    vi.spyOn(api, 'getGlyphs').mockImplementation(
+      (font, text) =>
+        text === 'Hi 😀'
+          ? Promise.resolve({ font, missing: ['😀'] })
+          : new Promise<GlyphCoverage>((resolve) => pending.push(resolve)),
+    )
+    const { result, rerender } = renderHook(({ text }) => useMissingGlyphs('Lobster Two', text), {
+      initialProps: { text: 'Hi 😀' },
+    })
+    await waitFor(() => expect(result.current).toEqual(['😀']))
+
+    vi.useFakeTimers()
+    rerender({ text: 'Hi 😀 there' })
+    // A keystroke: the warning stays rather than blinking off.
+    expect(result.current).toEqual(['😀'])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GLYPH_CHECK_DEBOUNCE_MS)
+    })
+    // Asked, not yet answered: still the last answer.
+    expect(pending).toHaveLength(1)
+    expect(result.current).toEqual(['😀'])
+    vi.useRealTimers()
+    await act(async () => {
+      pending[0]?.({ font: 'Lobster Two', missing: [] })
+    })
+    expect(result.current).toEqual([])
   })
 })
