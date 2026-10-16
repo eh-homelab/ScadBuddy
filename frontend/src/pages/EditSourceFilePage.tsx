@@ -3,9 +3,19 @@ import { Link, Navigate, useNavigate, useParams } from 'react-router'
 import { ApiError, api } from '../api/client'
 import { SourceFileTabs } from '../components/SourceFileTabs'
 import { SourceWorkbench } from '../components/SourceWorkbench'
-import { Button } from '../components/ui/Button'
-import { Dialog } from '../components/ui/Dialog'
+import { Hint } from '../components/Hint'
+import { PageLoading, PageProblem } from '../components/PageState'
 import { Spinner } from '../components/ui/Spinner'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
 import { modelPath, sourceFilePath } from '../lib/deeplink'
 import { MAIN_SOURCE, SOURCE_FILE_PATTERN } from '../lib/sourceFiles'
 import { useAsync } from '../lib/useAsync'
@@ -56,22 +66,16 @@ function SourceFileEditor({ slug, file }: { slug: string; file: string }) {
   if (!SOURCE_FILE_PATTERN.test(file) || loaded.error) {
     const why = !SOURCE_FILE_PATTERN.test(file) ? `${file} is not a .scad file name.` : loaded.error?.message
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">That file is not here</h1>
-        <p className="mt-2 text-[13px] text-muted">{why}</p>
-        <Link to={sourceFilePath(slug, MAIN_SOURCE)} className="mt-4 inline-block text-[13px] text-accent underline">
-          Open {MAIN_SOURCE}
-        </Link>
-      </div>
+      <PageProblem title="That file is not here" message={why}>
+        <Button asChild variant="outline">
+          <Link to={sourceFilePath(slug, MAIN_SOURCE)}>Open {MAIN_SOURCE}</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
   if (loaded.loading || text === null) {
-    return (
-      <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading {file}
-      </p>
-    )
+    return <PageLoading label={`Loading ${file}`} />
   }
 
   const builtin = record?.origin === 'builtin'
@@ -112,39 +116,36 @@ function SourceFileEditor({ slug, file }: { slug: string; file: string }) {
       <SourceWorkbench
         breadcrumb={
           <>
-            <Link to={modelPath(slug)} className="shrink-0 text-[12px] text-muted hover:text-ink">
+            <Link to={modelPath(slug)} className="shrink-0 text-sm text-muted-foreground hover:text-foreground">
               {record?.name ?? slug}
             </Link>
-            <span className="text-faint">/</span>
-            <h1 className="truncate text-[13px] font-medium">{file}</h1>
+            <span className="text-muted-foreground">/</span>
+            <h1 className="truncate text-sm font-medium">{file}</h1>
           </>
         }
         fields={
           <>
             <SourceFileTabs slug={slug} current={file} canEdit={canEdit}>
               {canEdit && (
-                <button
-                  type="button"
-                  onClick={() => setDeleting(true)}
-                  disabled={dirty}
-                  title={dirty ? 'Save or discard your edits first.' : undefined}
-                  className="rounded-[6px] px-2 py-0.5 text-warn hover:bg-surface-2 disabled:opacity-50"
-                >
-                  Delete file
-                </button>
+                <Hint content={dirty ? 'Save or discard your edits first.' : undefined} wrap={dirty}>
+                  <Button type="button" variant="destructive" size="xs" onClick={() => setDeleting(true)} disabled={dirty}>
+                    Delete file
+                  </Button>
+                </Hint>
               )}
             </SourceFileTabs>
             {stale !== null && (
               <div
                 data-testid="file-changed-elsewhere"
                 role="status"
-                className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-primary/40 bg-primary/10 px-3 py-1.5 text-xs"
               >
                 <span>
                   This model was changed elsewhere since you opened {file}. Reload it (your edits
                   here are discarded), or keep editing and save over it.
                 </span>
                 <Button
+                  type="button"
                   size="sm"
                   onClick={() => {
                     setStale(null)
@@ -154,6 +155,7 @@ function SourceFileEditor({ slug, file }: { slug: string; file: string }) {
                   Reload {file}
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="ghost"
                   onClick={() => {
@@ -177,31 +179,33 @@ function SourceFileEditor({ slug, file }: { slug: string; file: string }) {
         dirty={dirty}
         onSave={save}
       />
-      <Dialog
+      <AlertDialog
         open={deleting}
-        title={`Delete ${file}?`}
-        description={`It is removed as one revision, so an older version still has it. If ${MAIN_SOURCE} includes or uses it, the model stops rendering until that line goes.`}
-        onClose={() => {
-          if (!deleteBusy) setDeleting(false)
+        onOpenChange={(open) => {
+          if (!open && !deleteBusy) setDeleting(false)
         }}
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setDeleting(false)} disabled={deleteBusy}>
-              Cancel
-            </Button>
-            <Button variant="danger" onClick={() => void remove()} disabled={deleteBusy}>
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{`Delete ${file}?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {`It is removed as one revision, so an older version still has it. If ${MAIN_SOURCE} includes or uses it, the model stops rendering until that line goes.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteError && (
+            <p role="alert" className="text-sm text-destructive">
+              {deleteError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteBusy}>Cancel</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={() => void remove()} disabled={deleteBusy}>
               {deleteBusy && <Spinner />}
               Delete
             </Button>
-          </>
-        }
-      >
-        {deleteError && (
-          <p role="alert" className="text-[13px] text-warn">
-            {deleteError}
-          </p>
-        )}
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

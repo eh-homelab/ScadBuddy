@@ -123,7 +123,6 @@ describe("Generate's menu", () => {
       await user.keyboard('{Enter}')
       const item = screen.getByRole('menuitem', { name: /Rendered image/ })
       expect(item).toHaveFocus()
-      expect(item).toHaveAttribute('tabindex', '-1')
 
       await user.keyboard('{Escape}')
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()

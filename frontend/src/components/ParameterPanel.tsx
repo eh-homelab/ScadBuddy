@@ -1,9 +1,12 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, InstalledFamily, ParamValue } from '../api/types'
 import { missingFamiliesOf, type MissingFonts } from '../lib/fonts'
 import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, rangeProblem, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
-import { Button } from './ui/Button'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 const GLOBAL_GROUP = 'Global'
 
@@ -76,32 +79,6 @@ export function ParameterPanel({
   }
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
-  // #968 — the WAI-ARIA tabs pattern: the tablist is one Tab stop (the selected tab), and
-  // the arrow keys, Home and End move between tabs, selecting each as it is reached.
-  const ids = useId()
-  const tabId = (index: number) => `${ids}-tab-${index}`
-  const panelId = `${ids}-panel`
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
-  const currentIndex = current ? tabs.indexOf(current) : -1
-  function onTabKey(event: KeyboardEvent) {
-    const last = tabs.length - 1
-    const next =
-      event.key === 'ArrowRight'
-        ? currentIndex === last ? 0 : currentIndex + 1
-        : event.key === 'ArrowLeft'
-          ? currentIndex <= 0 ? last : currentIndex - 1
-          : event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? last
-              : null
-    const group = next === null ? undefined : tabs[next]
-    if (next === null || !group) return
-    event.preventDefault()
-    setActive(group.name)
-    tabRefs.current[next]?.focus()
-  }
-
   const extruders = useMemo<Map<string, number | null | undefined>>(
     () =>
       rendered ? extrudersIn(schema, values, rendered.colors, rendered.params) : extrudersOf(schema, values),
@@ -121,116 +98,86 @@ export function ParameterPanel({
   const changed = diffFromDefaults(schema, values).length
   const isDefault = changed === 0
 
+  const row = (param: (typeof groups)[number]['params'][number]) => (
+    <li key={param.name} data-param={param.name}>
+      <ParamWidget
+        param={param}
+        value={values[param.name] ?? (param.initial as ParamValue)}
+        slug={slug}
+        version={version}
+        fonts={fonts}
+        sampleText={sampleText}
+        extruder={extruderOf(param.name)}
+        missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
+        fontRefusal={missingFonts}
+        onFontInstalled={onFontInstalled}
+        onChange={(next) => onChange(param.name, next)}
+      />
+    </li>
+  )
+
   return (
-    <section
-      aria-label="Parameters"
-      className="flex h-full min-h-0 w-full flex-col border-r border-line bg-surface"
-    >
+    <section aria-label="Parameters" className="flex h-full min-h-0 w-full flex-col border-r bg-card">
       {toolbar}
-      <div
-        role="tablist"
-        onKeyDown={onTabKey}
-        aria-label="Parameter groups"
-        // #942 — wrapped onto rows, never scrolled: a template with many groups (Dollhouse
-        // Kit has 15) hid most of them past an edge with no scrollbar, fade or arrow.
-        className="flex shrink-0 flex-wrap gap-x-0.5 gap-y-1 border-b border-line px-2 pt-2"
-      >
-        {tabs.map((group, index) => {
-          const selected = group.name === current?.name
-          // #2444 — a tab holding a value nothing can render is marked, so the field that
-          // stops the render can be found from any other tab.
-          const flagged = group.params.some((param) => rangeProblem(param, values[param.name]) !== null)
-          return (
-            <button
-              key={group.name}
-              ref={(element) => {
-                tabRefs.current[index] = element
-              }}
-              id={tabId(index)}
-              role="tab"
-              type="button"
-              aria-selected={selected}
-              // One panel, showing the selected group: every tab controls it.
-              aria-controls={panelId}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => setActive(group.name)}
-              className={`-mb-px shrink-0 border-b-2 px-2.5 pb-2 text-[13px] transition-colors ${
-                selected
-                  ? 'border-accent text-ink'
-                  : 'border-transparent text-muted hover:text-ink'
-              }`}
-            >
-              {group.name}
-              {flagged && (
-                <>
-                  <span aria-hidden="true" data-testid="tab-flagged" className="ml-1 text-warn">
-                    •
-                  </span>
-                  <span className="sr-only"> (a value to fix)</span>
-                </>
-              )}
-            </button>
-          )
-        })}
-      </div>
-
-      <div className={`min-h-0 flex-1 overflow-y-auto ${growsWithPage ? 'short:flex-none phone:flex-none' : ''}`}>
-        {globalGroup && (
-          <div className="border-b border-line bg-surface-2/40">
-            <ul className="divide-y divide-line/60">
-              {globalGroup.params.map((param) => (
-                <li key={param.name} data-param={param.name}>
-                  <ParamWidget
-                    param={param}
-                    value={values[param.name] ?? (param.initial as ParamValue)}
-                    slug={slug}
-                    version={version}
-                    fonts={fonts}
-                    sampleText={sampleText}
-                    extruder={extruderOf(param.name)}
-                    missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
-                    fontRefusal={missingFonts}
-                    onFontInstalled={onFontInstalled}
-                    onChange={(next) => onChange(param.name, next)}
-                  />
-                </li>
-              ))}
-            </ul>
-          </div>
+      {/* #968 — Radix's tabs: one Tab stop, the arrows, Home and End moving the selection. */}
+      <Tabs value={current?.name ?? ''} onValueChange={setActive} className="flex min-h-0 flex-1 flex-col gap-0">
+        {tabs.length > 0 && (
+          <TabsList
+            variant="line"
+            aria-label="Parameter groups"
+            // #942 — wrapped onto rows, never scrolled: a template with many groups (Dollhouse
+            // Kit has 15) hid most of them past an edge with no scrollbar, fade or arrow.
+            className="h-auto w-full shrink-0 flex-wrap justify-start gap-x-1 gap-y-1 border-b px-2 pt-1.5 pb-1.5"
+          >
+            {tabs.map((group) => {
+              // #2444 — a tab holding a value nothing can render is marked, so the field that
+              // stops the render can be found from any other tab.
+              const flagged = group.params.some((param) => rangeProblem(param, values[param.name]) !== null)
+              return (
+                <TabsTrigger key={group.name} value={group.name} className="h-7 flex-none px-2">
+                  {group.name}
+                  {flagged && (
+                    <>
+                      <Badge
+                        aria-hidden="true"
+                        data-testid="tab-flagged"
+                        variant="destructive"
+                        className="size-2 min-w-0 rounded-full bg-destructive p-0"
+                      />
+                      <span className="sr-only"> (a value to fix)</span>
+                    </>
+                  )}
+                </TabsTrigger>
+              )
+            })}
+          </TabsList>
         )}
 
-        {current && (
-          // #2455 — the panel wraps the list: as the <ul>'s own role it replaced the list
-          // semantics, and a screen reader lost "list, N items".
-          <div id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)}>
-            <ul className="divide-y divide-line/60">
-              {current.params.map((param) => (
-                <li key={param.name} data-param={param.name}>
-                  <ParamWidget
-                    param={param}
-                    value={values[param.name] ?? (param.initial as ParamValue)}
-                    slug={slug}
-                    version={version}
-                    fonts={fonts}
-                    sampleText={sampleText}
-                    extruder={extruderOf(param.name)}
-                    missingFonts={missingOf(param.name, values[param.name] ?? (param.initial as ParamValue))}
-                    fontRefusal={missingFonts}
-                    onFontInstalled={onFontInstalled}
-                    onChange={(next) => onChange(param.name, next)}
-                  />
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
+        <ScrollArea
+          // Radix lays its content out as a table, which grows to the widest row: block keeps
+          // the phone-width rule (#362) that nothing pushes the panel wider than the screen.
+          className={`min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block! ${growsWithPage ? 'short:flex-none phone:flex-none' : ''}`}>
+          {globalGroup && (
+            <div className="border-b bg-ui-muted/40">
+              <ul className="divide-y">{globalGroup.params.map(row)}</ul>
+            </div>
+          )}
 
-      <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-line px-3 py-2">
-        <span className="text-[12px] text-faint">
+          {tabs.map((group) => (
+            // #2455 — the panel wraps the list: as the <ul>'s own role it replaced the list
+            // semantics, and a screen reader lost "list, N items".
+            <TabsContent key={group.name} value={group.name}>
+              <ul className="divide-y">{group.params.map(row)}</ul>
+            </TabsContent>
+          ))}
+        </ScrollArea>
+      </Tabs>
+
+      <footer className="flex shrink-0 items-center justify-between gap-3 border-t px-3 py-2">
+        <span className="text-xs text-muted-foreground">
           {isDefault ? 'Defaults' : `${changed} changed from defaults`}
         </span>
-        <Button size="sm" onClick={onReset} disabled={isDefault}>
+        <Button type="button" variant="outline" size="sm" onClick={onReset} disabled={isDefault}>
           Reset to defaults
         </Button>
       </footer>

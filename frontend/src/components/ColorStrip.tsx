@@ -1,4 +1,5 @@
 import { inkOn, normalizeHex } from '../lib/format'
+import { Hint } from './Hint'
 
 /**
  * Filament colours in extruder order — the one saturated element in the UI.
@@ -22,13 +23,16 @@ export function ColorStrip({
         const hex = normalizeHex(color)
         return (
           <li key={`${hex}-${index}`}>
-            <span
-              title={`Extruder ${index + 1} — ${hex}`}
-              style={{ background: hex, color: inkOn(hex) }}
-              className={`sb-num flex items-center justify-center rounded-[3px] font-semibold ring-1 ring-black/25 ring-inset ${box}`}
-            >
-              {showNumbers ? index + 1 : ''}
-            </span>
+            <Hint content={`Extruder ${index + 1} — ${hex}`}>
+              <span
+                role="img"
+                aria-label={`Extruder ${index + 1} — ${hex}`}
+                style={{ background: hex, color: inkOn(hex) }}
+                className={`sb-num flex items-center justify-center rounded-[3px] font-semibold ring-1 ring-black/25 ring-inset ${box}`}
+              >
+                {showNumbers ? index + 1 : ''}
+              </span>
+            </Hint>
           </li>
         )
       })}

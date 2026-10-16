@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { cn } from "@/lib/utils"
+import { usePortalContainer } from "@/components/ui/portal-container"
 import { keepOpenOnCompanionToggle } from "@/lib/modal"
 import { Dialog as SheetPrimitive } from "radix-ui"
 
@@ -27,7 +28,7 @@ function SheetClose({
 function SheetPortal({
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Portal>) {
-  return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />
+  return <SheetPrimitive.Portal data-slot="sheet-portal" container={usePortalContainer()} {...props} />
 }
 
 function SheetOverlay({

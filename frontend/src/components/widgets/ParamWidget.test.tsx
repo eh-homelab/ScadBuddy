@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Param, ParamValue } from '../../api/types'
 import { UNINSTALLABLE_FONT } from '../../mocks/fixtures'
 import { ParamWidget } from './ParamWidget'
+import { optionNames, selectOption } from '../../test/select'
 
 const fonts = [
   { family: 'Liberation Sans', styles: ['Regular', 'Bold'] },
@@ -61,12 +62,12 @@ describe('slider', () => {
     const range = screen.getByRole('slider', { name: 'Text size' })
     const number = screen.getByRole('spinbutton', { name: 'Text size value' })
 
-    for (const input of [range, number]) {
-      expect(input).toHaveAttribute('min', '6')
-      expect(input).toHaveAttribute('max', '28')
-      expect(input).toHaveAttribute('step', '0.5')
-    }
-    expect(range).toHaveValue('14')
+    expect(number).toHaveAttribute('min', '6')
+    expect(number).toHaveAttribute('max', '28')
+    expect(number).toHaveAttribute('step', '0.5')
+    expect(range).toHaveAttribute('aria-valuemin', '6')
+    expect(range).toHaveAttribute('aria-valuemax', '28')
+    expect(range).toHaveAttribute('aria-valuenow', '14')
   })
 
   it('sizes the number box for the widest value its range holds (#367)', () => {
@@ -378,8 +379,8 @@ describe('select', () => {
   it('labels options by name and submits their value', async () => {
     const { onChange, user } = setup(param, 'left')
     const select = screen.getByRole('combobox', { name: 'Hole position' })
-    expect(screen.getByRole('option', { name: 'Left' })).toBeInTheDocument()
-    await user.selectOptions(select, 'right')
+    expect(await optionNames(user, select)).toEqual(['Left', 'Right'])
+    await selectOption(user, select, 'Right')
     expect(onChange).toHaveBeenCalledWith('right')
   })
 
@@ -405,7 +406,7 @@ describe('select', () => {
         onChange={onChange}
       />,
     )
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Layers' }), '2')
+    await selectOption(user, screen.getByRole('combobox', { name: 'Layers' }), 'Two')
     expect(onChange).toHaveBeenCalledWith(2)
   })
 })
@@ -426,7 +427,7 @@ describe('color', () => {
 
   it('shows a short hex whole, and sends nothing for a colour left as it was', async () => {
     const { onChange, user } = setup(param, '#ABC')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     expect(hex).toHaveValue('#AABBCC')
     await user.click(hex)
     await user.tab()
@@ -436,7 +437,7 @@ describe('color', () => {
 
   it('sends a colour typed in another spelling only when it is another colour', async () => {
     const { onChange, user } = setup(param, '#ff0000')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('red')
     await user.tab()
@@ -451,7 +452,7 @@ describe('color', () => {
   // colour is never padded into one.
   it('turns a colour name into its hex', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('red')
     expect(onChange).not.toHaveBeenCalled()
@@ -463,7 +464,7 @@ describe('color', () => {
 
   it.each([['blah'], ['#12'], ['#GGG']])('keeps %j as typed and says it is no colour', async (typed) => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard(typed)
     await user.tab()
@@ -475,7 +476,7 @@ describe('color', () => {
 
   it('sends nothing while a hex is half typed, and takes a whole one at once', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('#00FF0')
     expect(onChange).not.toHaveBeenCalled()
@@ -486,7 +487,7 @@ describe('color', () => {
 
   it('takes a hex typed without its #, sending it with one', async () => {
     const { onChange, user } = setup(param, '#1B6CA8')
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('F00')
     await user.tab()
@@ -499,7 +500,7 @@ describe('color', () => {
     const view = render(
       <ParamWidget slug="name-keychain" param={param} value="#1B6CA8" fonts={fonts} onChange={onChange} />,
     )
-    const hex = screen.getByRole('textbox', { name: 'Plate hex' })
+    const hex = screen.getByRole('textbox', { name: 'Plate' })
     await user.tripleClick(hex)
     await user.keyboard('#00FF')
     // A preset applied while the box still has focus.
@@ -510,8 +511,9 @@ describe('color', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 
-  it('pairs a colour picker with the hex field', () => {
-    const { container } = render(
+  it('pairs a colour picker with the hex field', async () => {
+    const user = userEvent.setup()
+    render(
       <ParamWidget
         slug="name-keychain"
         param={param}
@@ -521,7 +523,8 @@ describe('color', () => {
         onChange={vi.fn()}
       />,
     )
-    const picker = container.querySelector('input[type="color"]')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    const picker = document.querySelector('input[type="color"]')
     expect(picker).toHaveValue('#1b6ca8')
     expect(screen.getAllByDisplayValue('#1B6CA8')).not.toHaveLength(0)
   })
@@ -536,14 +539,27 @@ describe('font', () => {
     caption: 'Typeface',
   }
 
-  it('offers every installed family and style for completion', () => {
-    setup(param, 'Liberation Sans:style=Bold')
-    const options = screen.getByTestId('font-options').querySelectorAll('option')
-    expect([...options].map((option) => option.getAttribute('value'))).toEqual([
+  it('offers every installed family and style for completion', async () => {
+    const { user } = setup(param, '')
+    await user.click(screen.getByRole('combobox', { name: 'Typeface' }))
+    await user.keyboard('{ArrowDown}')
+    const list = await screen.findByRole('listbox', { name: 'Installed fonts' })
+    expect(within(list).getAllByRole('option').map((option) => option.textContent)).toEqual([
       'Liberation Sans:style=Regular',
       'Liberation Sans:style=Bold',
       'DejaVu Sans:style=Book',
     ])
+  })
+
+  it('takes a completion clicked with the pointer, the field keeping the focus (#3672)', async () => {
+    const { onChange, user } = setup(param, '')
+    const field = screen.getByRole('combobox', { name: 'Typeface' })
+    await user.click(field)
+    await user.keyboard('{ArrowDown}')
+    const list = await screen.findByRole('listbox', { name: 'Installed fonts' })
+    await user.click(within(list).getByRole('option', { name: 'DejaVu Sans:style=Book' }))
+    expect(onChange).toHaveBeenLastCalledWith('DejaVu Sans:style=Book')
+    expect(field).toHaveFocus()
   })
 
   it('accepts a font the server did not list', async () => {
@@ -563,7 +579,7 @@ describe('font', () => {
     const { onChange, user } = setup(param, 'Liberation Sans:style=Bold')
     const styles = screen.getByRole('combobox', { name: 'Typeface style' })
 
-    await user.selectOptions(styles, 'Regular')
+    await selectOption(user, styles, 'Regular')
 
     expect(onChange).toHaveBeenLastCalledWith('Liberation Sans:style=Regular')
   })
@@ -579,10 +595,10 @@ describe('font', () => {
     await user.click(screen.getByRole('button', { name: 'Browse' }))
     const dialog = await screen.findByRole('dialog', { name: 'Choose a font' })
     await waitFor(() =>
-      expect(within(dialog).getByRole('button', { name: /Pacifico/ })).toBeInTheDocument(),
+      expect(within(dialog).getByRole('option', { name: /Pacifico/ })).toBeInTheDocument(),
     )
 
-    await user.click(within(dialog).getByRole('button', { name: /Pacifico/ }))
+    await user.click(within(dialog).getByRole('option', { name: /Pacifico/ }))
 
     await waitFor(() => expect(onChange).toHaveBeenLastCalledWith('Pacifico:style=Regular'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

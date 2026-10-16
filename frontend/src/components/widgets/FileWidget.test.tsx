@@ -184,12 +184,12 @@ describe('file parameter samples', () => {
   it('lists each sample with a thumbnail from the template', () => {
     setup('', withSamples)
     const group = screen.getByTestId('samples-label_art')
-    const buttons = within(group).getAllByRole('button')
+    const buttons = within(group).getAllByRole('radio')
     expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Use sample sample-heart.svg',
       'Use sample sample-star.png',
     ])
-    expect(buttons.every((button) => button.getAttribute('aria-pressed') === 'false')).toBe(true)
+    expect(buttons.every((button) => button.getAttribute('aria-checked') === 'false')).toBe(true)
     expect(within(buttons[0]!).getByRole('presentation')).toHaveAttribute(
       'src',
       api.sampleContentUrl(SLUG, 'sample-heart.svg'),
@@ -198,11 +198,11 @@ describe('file parameter samples', () => {
 
   it('takes a picked sample by its bare name and previews it', async () => {
     const { onChange, user } = setup('', withSamples)
-    await user.click(screen.getByRole('button', { name: 'Use sample sample-star.png' }))
+    await user.click(screen.getByRole('radio', { name: 'Use sample sample-star.png' }))
 
     expect(onChange).toHaveBeenCalledWith('sample-star.png')
-    expect(screen.getByRole('button', { name: 'Use sample sample-star.png' })).toHaveAttribute(
-      'aria-pressed',
+    expect(screen.getByRole('radio', { name: 'Use sample sample-star.png' })).toHaveAttribute(
+      'aria-checked',
       'true',
     )
     expect(screen.getByText('Template sample')).toBeInTheDocument()
@@ -222,7 +222,7 @@ describe('file parameter samples', () => {
     )
     await screen.findByText('heart.svg')
 
-    await user.click(screen.getByRole('button', { name: 'Use sample sample-heart.svg' }))
+    await user.click(screen.getByRole('radio', { name: 'Use sample sample-heart.svg' }))
     expect(onChange).toHaveBeenLastCalledWith('sample-heart.svg')
     expect(screen.queryByText('heart.svg')).not.toBeInTheDocument()
 

@@ -3,6 +3,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
+import { usePortalContainer } from "@/components/ui/portal-container"
 import { Dialog as DialogPrimitive } from "radix-ui"
 import {
   ModalCompanionContext,
@@ -80,7 +81,7 @@ function DialogTrigger({
 function DialogPortal({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Portal>) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />
+  return <DialogPrimitive.Portal data-slot="dialog-portal" container={usePortalContainer()} {...props} />
 }
 
 function DialogClose({
@@ -310,8 +311,10 @@ function ModalDialogContent({
  */
 function DialogContent({ placement, overlayClassName, ...props }: React.ComponentProps<typeof DialogLayer>) {
   const { open, modal } = React.useContext(DialogModeContext)
+  // Into the full-screen workspace when it provides itself (#3672), else the body.
+  const container = usePortalContainer() ?? document.body
   if (modal) return <ModalDialogContent {...props} />
-  return open ? createPortal(<DialogLayer placement={placement} overlayClassName={overlayClassName} {...props} />, document.body) : null
+  return open ? createPortal(<DialogLayer placement={placement} overlayClassName={overlayClassName} {...props} />, container) : null
 }
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {

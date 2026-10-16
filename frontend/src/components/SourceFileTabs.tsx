@@ -4,9 +4,13 @@ import { ApiError, api } from '../api/client'
 import { sourceFilePath } from '../lib/deeplink'
 import { MAX_SOURCE_FILES, newSourceFileProblem, sourceFileName } from '../lib/sourceFiles'
 import { useAsync } from '../lib/useAsync'
-import { Button } from './ui/Button'
-import { Dialog } from './ui/Dialog'
+import { Hint } from './Hint'
 import { Spinner } from './ui/Spinner'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
 
 interface Props {
   slug: string
@@ -88,72 +92,71 @@ export function SourceFileTabs({ slug, current, canEdit, children }: Props) {
   }
 
   return (
-    <div className="flex items-center gap-1 border-t border-line px-3 py-1 text-[12px]">
+    <div className="flex items-center gap-1 border-t px-3 py-1 text-xs">
+      {/* Links, as each file is a page of its own; drawn as line tabs (#3672). */}
       <nav aria-label="Source files" className="flex min-w-0 items-center gap-1 overflow-x-auto">
         {names.map((file) => (
           <Link
             key={file}
             to={sourceFilePath(slug, file)}
             aria-current={file === current ? 'page' : undefined}
-            className={`shrink-0 rounded-[6px] px-2 py-0.5 font-mono ${
-              file === current ? 'bg-surface-2 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
-            }`}
+            className={cn(
+              buttonVariants({ variant: 'ghost', size: 'xs' }),
+              'shrink-0 font-mono',
+              file === current ? 'bg-ui-muted text-foreground' : 'text-muted-foreground',
+            )}
           >
             {file}
           </Link>
         ))}
       </nav>
       {canEdit && (
-        <button
-          type="button"
-          onClick={() => setAdding(true)}
-          disabled={full}
-          title={full ? `A model holds at most ${MAX_SOURCE_FILES} .scad files.` : undefined}
-          className="shrink-0 rounded-[6px] px-2 py-0.5 text-muted hover:bg-surface-2 hover:text-ink disabled:opacity-50"
-        >
-          New file
-        </button>
+        <Hint content={full ? `A model holds at most ${MAX_SOURCE_FILES} .scad files.` : undefined} wrap={full}>
+          <Button type="button" variant="ghost" size="xs" onClick={() => setAdding(true)} disabled={full} className="shrink-0">
+            New file
+          </Button>
+        </Hint>
       )}
       <div className="ml-auto flex shrink-0 items-center gap-2">{children}</div>
 
-      <Dialog
-        open={adding}
-        title="New source file"
-        description="A .scad file beside model.scad, which it can include or use. It is created now, as one revision."
-        onClose={close}
-        footer={
-          <>
-            <Button variant="ghost" onClick={close} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={() => void create()} disabled={busy || name === '' || problem !== null}>
-              {busy && <Spinner />}
-              Create
-            </Button>
-          </>
-        }
-      >
-        <form onSubmit={(event) => void create(event)}>
-          <label className="flex flex-col gap-1 text-[13px] text-muted">
-            File name
-            <input
+      <Dialog open={adding} onOpenChange={(open) => !open && close()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>New source file</DialogTitle>
+            <DialogDescription>
+              A .scad file beside model.scad, which it can include or use. It is created now, as one revision.
+            </DialogDescription>
+          </DialogHeader>
+          <form id="new-source-file-form" onSubmit={(event) => void create(event)} className="flex flex-col gap-2">
+            <Label htmlFor="new-source-file-name">File name</Label>
+            <Input
+              id="new-source-file-name"
               value={typed}
               onChange={(event) => setTyped(event.target.value)}
               placeholder="parts.scad"
               aria-invalid={problem !== null}
               aria-describedby="new-source-file-hint"
-              className="h-8 w-full rounded-[6px] border border-line bg-surface-2 px-2 font-mono text-[13px] outline-none focus:border-line-strong"
+              className="font-mono"
             />
-          </label>
-          <p id="new-source-file-hint" className={`mt-1 text-[12px] ${problem ? 'text-warn' : 'text-faint'}`}>
-            {problem ?? (name !== '' && name !== typed.trim() ? `Saved as ${name}.` : '')}
-          </p>
-        </form>
-        {error && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
-            {error}
-          </p>
-        )}
+            <p id="new-source-file-hint" className={`text-xs ${problem ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {problem ?? (name !== '' && name !== typed.trim() ? `Saved as ${name}.` : '')}
+            </p>
+            {error && (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            )}
+          </form>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={close} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" form="new-source-file-form" disabled={busy || name === '' || problem !== null}>
+              {busy && <Spinner />}
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   )

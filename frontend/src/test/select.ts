@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import type { UserEvent } from '@testing-library/user-event'
 
 /**
@@ -24,4 +24,27 @@ export async function optionDisabled(user: UserEvent, combobox: HTMLElement, opt
   const disabled = (await screen.findByRole('option', { name: option })).getAttribute('aria-disabled') === 'true'
   await user.keyboard('{Escape}')
   return disabled
+}
+
+/**
+ * #3672 — opens `trigger`'s list, picks the option named `name`, and waits for the list
+ * to close.
+ */
+export async function selectOption(user: UserEvent, trigger: HTMLElement, name: string | RegExp): Promise<void> {
+  await user.click(trigger)
+  const listbox = await screen.findByRole('listbox')
+  await user.click(within(listbox).getByRole('option', { name }))
+  await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
+}
+
+/** #3672 — the names of `trigger`'s options, read by opening its list and closing it again. */
+export async function optionNames(user: UserEvent, trigger: HTMLElement): Promise<string[]> {
+  await user.click(trigger)
+  const listbox = await screen.findByRole('listbox')
+  const names = within(listbox)
+    .getAllByRole('option')
+    .map((option) => option.textContent ?? '')
+  await user.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
+  return names
 }

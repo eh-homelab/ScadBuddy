@@ -286,7 +286,7 @@ describe('UpstreamUpdateButton (#160)', () => {
     await user.click(screen.getByRole('button', { name: 'Update available' }))
     // In flight: framed by the state it was opened from.
     const dialog = screen.getByRole('dialog', { name: 'Update available' })
-    expect(within(dialog).getByText('Working out the merge')).toBeInTheDocument()
+    expect(within(dialog).getByRole('status', { name: 'Working out the merge' })).toBeInTheDocument()
     answer?.()
 
     expect(
@@ -305,7 +305,7 @@ describe('UpstreamUpdateButton (#160)', () => {
     const { user, onChanged } = await renderButton()
 
     await user.click(screen.getByRole('button', { name: 'Upstream gone' }))
-    const dialog = screen.getByRole('dialog', { name: 'Upstream gone' })
+    const dialog = screen.getByRole('alertdialog', { name: 'Upstream gone' })
     expect(dialog).toHaveTextContent('no longer exists')
     await user.click(within(dialog).getByRole('button', { name: 'Detach' }))
 

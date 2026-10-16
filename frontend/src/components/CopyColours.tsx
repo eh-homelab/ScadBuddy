@@ -1,7 +1,7 @@
 import { useId } from 'react'
 import { normalizeHex } from '../lib/format'
 import { Swatch } from './print/Swatch'
-import { FilamentColourPicker } from './widgets/FilamentColourPicker'
+import { FilamentColourDisclosure } from './widgets/FilamentColourPicker'
 
 /** #3637 — the colours a copy prints in: each of `colours` swapped as `recolour` says. */
 function printedColours(colours: string[], recolour: Record<string, string>): string[] {
@@ -84,7 +84,7 @@ export function CopyColours({
                     </button>
                   )}
                 </div>
-                <FilamentColourPicker label={`${colour} of ${label}`} value={now} onPick={(hex) => swap(colour, hex)} />
+                <FilamentColourDisclosure label={`${colour} of ${label}`} value={now} onPick={(hex) => swap(colour, hex)} />
               </li>
             )
           })}

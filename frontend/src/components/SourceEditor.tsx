@@ -9,7 +9,8 @@ import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
 import { editorTheme } from '../lib/openscadLanguage'
 import { useLatest } from '../lib/useLatest'
-import { Button } from './ui/Button'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 
 setupMonaco()
 
@@ -217,12 +218,12 @@ export function SourceEditor({
       {shown && (
         <div
           data-testid="definition-bar"
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-surface-2 px-3 py-1"
+          className="flex shrink-0 items-center justify-between gap-3 border-b bg-ui-muted/60 px-3 py-1"
         >
-          <span className="min-w-0 truncate text-[12px] text-muted">
-            <span className="sb-num text-ink">{shown.label}</span> — read-only
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            <span className="sb-num text-foreground">{shown.label}</span> — read-only
           </span>
-          <Button size="sm" variant="ghost" onClick={back}>
+          <Button type="button" size="sm" variant="ghost" onClick={back}>
             ← Back to {fileName}
           </Button>
         </div>
@@ -274,11 +275,15 @@ export function SourceEditor({
             })
           }}
           options={shown ? VIEWING_OPTIONS : readOnly ? READ_ONLY_OPTIONS : OPTIONS}
-          loading={<span className="text-[13px] text-muted">Loading the editor</span>}
+          loading={
+            <div role="status" aria-label="Loading the editor" className="size-full p-3">
+              <Skeleton className="size-full rounded-lg" />
+            </div>
+          }
         />
       </div>
       {/* Read as part of the editor's name (#1672), so hidden here from screen readers. */}
-      <p aria-hidden="true" className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+      <p aria-hidden="true" className="shrink-0 border-t px-3 py-0.5 text-[11px] text-muted-foreground">
         {LEAVE_HINT}
       </p>
     </div>

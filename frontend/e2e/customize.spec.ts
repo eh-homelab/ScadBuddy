@@ -252,7 +252,7 @@ test.describe('customizer', () => {
     await page.getByRole('tab', { name: 'Features' }).click()
 
     const samples = page.getByTestId('samples-label_art')
-    await expect(samples.getByRole('button')).toHaveCount(2)
+    await expect(samples.getByRole('radio')).toHaveCount(2)
 
     const rendered = page.waitForRequest(
       (request) =>
@@ -260,7 +260,7 @@ test.describe('customizer', () => {
         request.url().endsWith('/render') &&
         request.postDataJSON()?.inputs?.params?.label_art === 'sample-heart.svg',
     )
-    await samples.getByRole('button', { name: 'Use sample sample-heart.svg' }).click()
+    await samples.getByRole('radio', { name: 'Use sample sample-heart.svg' }).click()
 
     const preview = page.getByRole('img', { name: 'Preview of sample-heart.svg' })
     await expect(preview).toBeVisible()
@@ -354,8 +354,8 @@ test.describe('font picker', () => {
     // The preview defaults to the text the model will actually set.
     await expect(dialog.getByRole('textbox', { name: 'Sample text' })).toHaveValue('Reagan')
 
-    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Pacifico')
-    const row = dialog.getByRole('button', { name: /Pacifico/ })
+    await dialog.getByRole('combobox', { name: 'Search fonts' }).fill('Pacifico')
+    const row = dialog.getByRole('option', { name: /Pacifico/ })
     await expect(row).toBeVisible()
     await expect(row.locator('span').first()).toHaveCSS('font-family', /Pacifico/)
 
@@ -373,8 +373,8 @@ test.describe('font picker', () => {
 
     await page.getByRole('button', { name: 'Browse' }).click()
     const dialog = page.getByRole('dialog', { name: 'Choose a font' })
-    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Playfair')
-    await dialog.getByRole('button', { name: /Playfair Display/ }).click()
+    await dialog.getByRole('combobox', { name: 'Search fonts' }).fill('Playfair')
+    await dialog.getByRole('option', { name: /Playfair Display/ }).click()
 
     await expect(dialog.getByRole('alert')).toContainText('could not be downloaded')
     await expect(dialog).toBeVisible()
@@ -430,8 +430,10 @@ test.describe('customizer at 200% zoom (#971)', () => {
     const section = page.getByRole('region', { name: 'Parameters' })
     await expect(section).toBeVisible()
     const list = section.getByRole('tabpanel')
-    // Inside the window: the list's box ends on screen, and what it holds scrolls in it.
-    const box = await list.evaluate((element) => element.parentElement?.getBoundingClientRect().bottom ?? 0)
+    // Inside the window: the list's scrolling box ends on screen, and what it holds scrolls in it.
+    const box = await list.evaluate(
+      (element) => element.closest('[data-slot="scroll-area-viewport"]')?.getBoundingClientRect().bottom ?? Infinity,
+    )
     expect(box).toBeLessThanOrEqual(450 + 1)
     const last = list.locator('[data-param]').last()
     await last.scrollIntoViewIfNeeded()

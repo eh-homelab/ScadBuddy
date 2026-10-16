@@ -27,7 +27,7 @@ export function NumberWidget({
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? `${id}-error` : undefined}
         onCommit={(next) => onChange(param.type === 'integer' ? Math.round(next) : next)}
-        className="sb-field sb-num"
+        className="sb-num"
       />
     </Field>
   )
