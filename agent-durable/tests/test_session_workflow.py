@@ -70,6 +70,7 @@ from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     FORK_POINT_QUERY,
+    MESSAGE_MAX,
     SEGMENT_CONTEXT_QUERY,
     TOOLS_QUEUE,
     TURN_QUERY,
@@ -575,7 +576,9 @@ async def test_only_the_budgets_own_failure_ends_a_turn_as_the_budgets(
     errors = [e for e in log if e["type"] == "error"]
     assert [e["code"] for e in errors] == [code]
     if code == "turn_failed":
-        # The session's own text survives in the failure, quote and all (#3568).
+        # The session's own text survives in the failure, quote and all (#3568). Whole,
+        # since finish_turn keeps only the first MESSAGE_MAX characters (#3915).
+        assert len(error) < MESSAGE_MAX
         assert error in errors[0]["message"]
 
 
