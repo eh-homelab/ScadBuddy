@@ -43,8 +43,9 @@ async def test_a_blocked_loop_is_logged_with_the_stack_that_blocks_it(
 async def test_a_loop_that_keeps_running_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     metrics = Metrics()
     caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
-    async with LoopWatch(metrics, threshold=0.2, interval=0.05):
-        await asyncio.sleep(0.4)
+    # A threshold far above any scheduling jitter under `pytest -n`.
+    async with LoopWatch(metrics, threshold=1.0, interval=0.1):
+        await asyncio.sleep(0.5)
     assert not caplog.records
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
     assert _sample(metrics, "scadbuddy_event_loop_lag_seconds_count") >= 3
@@ -74,3 +75,17 @@ async def test_a_full_default_executor_is_logged_with_what_holds_it(
     assert _sample(metrics, "scadbuddy_default_executor_stalls_total") == 1
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
     assert _sample(metrics, "scadbuddy_default_executor_wait_seconds_sum") >= 0.3
+
+
+async def test_leaving_the_watch_does_not_wait_for_a_held_default_executor() -> None:
+    """The stall the watch reports must not hold the worker's shutdown too."""
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    held = loop.run_in_executor(None, _holds_the_executor, 1.0)
+    watch = LoopWatch(Metrics(), threshold=2.0, interval=0.05)
+    await watch.__aenter__()
+    left = time.monotonic()
+    await watch.__aexit__(None, None, None)
+    assert time.monotonic() - left < 0.5
+    await held
