@@ -1345,7 +1345,10 @@ class PreparedPlates(BaseModel):
     #: carried, which then says nothing of an unlisted plate.
     printer_model: str | None = None
     #: As :attr:`PreparedRun.project`. ``None`` in a run accepted before it was carried,
-    #: whose plan resolves the project itself.
+    #: whose plan resolves the project itself. The plan trusts it: a default project
+    #: deleted between the check and the plan fails the run on its folder rather than
+    #: falling through to "No project", a window of seconds accepted for one read
+    #: (#4008 review).
     project: ResolvedProject | None = None
 
     @field_validator("printer_status", mode="after")
