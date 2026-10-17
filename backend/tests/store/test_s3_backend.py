@@ -47,16 +47,17 @@ async def test_the_client_retries_in_standard_mode_by_default(s3: S3Settings) ->
     backend = S3ContentBackend(s3)
     try:
         client = await backend.client()
-        assert backend.config.retries == {"mode": "standard"}
-        assert client.meta.config.s3 == {"addressing_style": "path"}
+        # Config's options are set at run time, untyped: read them from its __dict__.
+        assert vars(client.meta.config)["retries"] == {"mode": "standard"}
+        assert vars(client.meta.config)["s3"] == {"addressing_style": "path"}
     finally:
         await backend.aclose()
 
 
 async def test_a_given_config_replaces_the_retries(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3, config=AioConfig(retries={"max_attempts": 1}))
-    assert backend.config.retries == {"max_attempts": 1}
-    assert backend.config.s3 == {"addressing_style": "path"}
+    assert vars(backend.config)["retries"] == {"max_attempts": 1}
+    assert vars(backend.config)["s3"] == {"addressing_style": "path"}
     await backend.aclose()
 
 
