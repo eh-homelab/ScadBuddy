@@ -58,15 +58,21 @@ class S3ContentBackend:
         *,
         multipart_threshold: int = 64 << 20,
         part_size: int = 16 << 20,
+        config: AioConfig | None = None,
     ) -> None:
+        """``config`` is merged over the default, botocore's standard retry mode (three
+        attempts, https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html);
+        a check that must fail fast passes its own ``retries``."""
         self.settings = settings
         self.multipart_threshold = multipart_threshold
         self.part_size = part_size
-        self._config = AioConfig(
+        self.config = AioConfig(
             s3={"addressing_style": "path" if settings.path_style else "auto"},
             connect_timeout=5,
-            retries={"max_attempts": 1},
+            retries={"mode": "standard"},
         )
+        if config is not None:
+            self.config = self.config.merge(config)
         self._exits = AsyncExitStack()
         self._client: S3Client | None = None
         self._opening = asyncio.Lock()
@@ -91,7 +97,7 @@ class S3ContentBackend:
                         region_name=self.settings.region,
                         aws_access_key_id=self.settings.access_key_id,
                         aws_secret_access_key=self.settings.secret_access_key,
-                        config=self._config,
+                        config=self.config,
                     )
                 )
             return client

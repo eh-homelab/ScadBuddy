@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiobotocore.config import AioConfig
 from botocore.exceptions import EndpointConnectionError
 
 from scadbuddy.library.settings_store import S3Settings
@@ -40,6 +41,23 @@ class RecordedReads(io.BufferedReader):
 
 def test_object_key_is_prefix_kind_sha() -> None:
     assert object_key("p", "font", "ab") == "p/font/ab"
+
+
+async def test_the_client_retries_in_standard_mode_by_default(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    try:
+        client = await backend.client()
+        assert backend.config.retries == {"mode": "standard"}
+        assert client.meta.config.s3 == {"addressing_style": "path"}
+    finally:
+        await backend.aclose()
+
+
+async def test_a_given_config_replaces_the_retries(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3, config=AioConfig(retries={"max_attempts": 1}))
+    assert backend.config.retries == {"max_attempts": 1}
+    assert backend.config.s3 == {"addressing_style": "path"}
+    await backend.aclose()
 
 
 async def test_upload_returns_the_prefixed_kind_sha_key(s3: S3Settings) -> None:
@@ -213,7 +231,9 @@ async def test_a_connection_error_is_not_a_missing_object() -> None:
             prefix="t",
             access_key_id="testing",
             secret_access_key="testing",
-        )
+        ),
+        # One attempt: a refused connection fails at once, not after standard's retries.
+        config=AioConfig(retries={"max_attempts": 1}),
     )
     try:
         # Not a BlobMissingError, which would drop the index row of a blob still there.
