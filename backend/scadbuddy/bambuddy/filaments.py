@@ -42,7 +42,7 @@ import logging
 import math
 import re
 from collections.abc import Callable, Sequence
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -877,6 +877,29 @@ def one_plate_folded(
     if all_plates:
         return plate_id, chosen
     return (chosen[0], None) if len(chosen) == 1 else (chosen[0], chosen)
+
+
+class _Plated(Protocol):
+    plate_id: int
+    all_plates: bool
+    plate_ids: list[int] | None
+    __pydantic_fields_set__: set[str]
+
+
+def fold_plates(request: _Plated) -> None:
+    """Apply :func:`one_plate_folded` to a request model in place, keeping the fields it
+    was sent as its set fields (#3768 review): ``exclude_unset`` dumps (a batch's
+    stored request and its ``batch_request_id``) read the same before and after the
+    fold. Only a one-plate list, which leaves ``plate_ids`` empty, marks ``plate_id``
+    set, so a dump re-read names the plate that prints."""
+    folded = one_plate_folded(request.plate_id, request.all_plates, request.plate_ids)
+    if folded == (request.plate_id, request.plate_ids):
+        return
+    sent = set(request.__pydantic_fields_set__)
+    request.plate_id, request.plate_ids = folded
+    if folded[1] is None and "plate_ids" in sent:
+        sent.add("plate_id")
+    request.__pydantic_fields_set__ = sent
 
 
 def plates_named(plates: Sequence[int]) -> str:

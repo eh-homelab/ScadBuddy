@@ -43,7 +43,7 @@ async def test_a_library_files_chosen_plates_each_count() -> None:
     assert await _prints({"file_id": 7}, {"copies": 3, "all_plates": True}) is None
 
 
-@pytest.mark.parametrize("plate_ids", [3, "1,3", {"1": 3}, [], [1, "3"], [True], [0]])
+@pytest.mark.parametrize("plate_ids", [3, "1,3", {"1": 3}, [], [1, "3"], [True], [2.0], [0]])
 async def test_plate_ids_that_are_not_plate_numbers_are_refused_not_a_type_error(
     plate_ids: object,
 ) -> None:

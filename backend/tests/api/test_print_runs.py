@@ -1004,6 +1004,13 @@ def test_one_chosen_plate_is_that_plates_print() -> None:
     plain = PrintRunRequest.model_validate(body())
     assert not {"plate_id", "plate_ids"} & plain.model_fields_set
     assert "plate_id" not in plain.model_dump(exclude_unset=True)
+    # Several plates move `plate_id` to the first without marking it sent, so a dump
+    # re-reads to the same request; one plate marks it, so the dump names that plate.
+    several = PrintRunRequest.model_validate({**body(), "plate_ids": [3, 2]})
+    assert several.plate_id == 2 and "plate_id" not in several.model_fields_set
+    assert PrintRunRequest.model_validate(several.model_dump(exclude_unset=True)) == several
+    assert "plate_id" in alone.model_fields_set
+    assert PrintRunRequest.model_validate(alone.model_dump(exclude_unset=True)) == alone
     # All plates still wins over a chosen one.
     every = PrintRunRequest.model_validate({**body(), "all_plates": True, "plate_ids": [2]})
     assert every.asked_plates() is None

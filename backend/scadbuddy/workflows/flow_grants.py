@@ -58,7 +58,7 @@ def _chosen_plates(request: dict[str, Any]) -> int:
 
     Anything but a non-empty list of whole plate numbers is refused, so the call is
     outside its grant (a person decides it) rather than a TypeError. That is stricter
-    than the print route, whose lax parsing also takes `["3"]` or `[true]`: such a call
+    than the print route, whose lax parsing also takes `["3"]`, `[true]` or `[2.0]`: such a call
     asks a person, never passes a grant on a count it could not read."""
     plate_ids = request.get("plate_ids")
     if plate_ids is None:
