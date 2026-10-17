@@ -66,9 +66,9 @@ the outbox full, or a failed write) never reaches the log or any socket. Without
 cursor, the cold load's re-read happened to cover such a drop. With one, the drop goes
 unseen there too, as it always did for a page already open.
 
-A socket runs one ``check`` at a time, off the loop that reads its frames, so a slow
-log never holds up its subscribes. A ``check`` sent while one is running is answered
-"every topic changed".
+A socket answers its ``check`` frames in order, on a worker beside the loop that reads
+its frames, so a slow log never holds up its subscribes. Past `CHECK_QUEUE` waiting, a
+``check`` is answered "every topic changed".
 
 Security
 --------
@@ -154,6 +154,8 @@ CURSOR_HEADER = "X-ScadBuddy-Last-Event"
 CHECK_MAX_EVENTS = 1000
 #: The most cursors one ``check`` may carry: one per request of a read.
 CHECK_MAX_SINCE = 8
+#: The most ``check`` frames one socket keeps waiting for its worker.
+CHECK_QUEUE = 32
 
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -414,46 +416,39 @@ async def _check(frame: dict[str, Any], topics: set[str], events: object, send: 
 
 
 class _Checks:
-    """A socket's one ``check`` in flight, run beside its frame loop."""
+    """A socket's ``check`` frames, answered in order by one worker beside its frame
+    loop: a slow log never holds up a subscribe, and several checks sent together (a
+    cold load's views) each get a real answer. Past `CHECK_QUEUE` waiting, a check is
+    answered "every topic changed" at once."""
 
-    def __init__(self) -> None:
-        self.running: asyncio.Task[None] | None = None
+    def __init__(self, topics: set[str], events: object, send: Send) -> None:
+        self.topics = topics
+        self.events = events
+        self.send = send
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(CHECK_QUEUE)
 
-    async def start(
-        self, frame: dict[str, Any], topics: set[str], events: object, send: Send
-    ) -> None:
-        if self.running is not None and not self.running.done():
-            # One at a time: the client reads, as it would without a cursor.
+    async def submit(self, frame: dict[str, Any]) -> None:
+        try:
+            self.queue.put_nowait(frame)
+        except asyncio.QueueFull:
             requested = frame.get("topics")
             if isinstance(frame.get("id"), int) and isinstance(requested, list):
                 named = [t for t in dict.fromkeys(requested) if valid_topic(t)]
-                await send({"type": "changed", "id": frame["id"], "topics": named})
+                await self.send({"type": "changed", "id": frame["id"], "topics": named})
             else:
-                await _check(frame, topics, events, send)  # refused before any read
-            return
-        self.running = asyncio.create_task(self._run(frame, topics, events, send))
+                await _check(frame, self.topics, self.events, self.send)  # refused, no read
 
-    @staticmethod
-    async def _run(frame: dict[str, Any], topics: set[str], events: object, send: Send) -> None:
-        # The socket may close under the answer; the session is ending then anyway.
-        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
-            await _check(frame, topics, events, send)
-
-    def cancel(self) -> None:
-        if self.running is not None:
-            self.running.cancel()
+    async def work(self) -> None:
+        while True:
+            await _check(await self.queue.get(), self.topics, self.events, self.send)
 
 
-async def _read(websocket: WebSocket, topics: set[str], send: Send, events: object = None) -> None:
-    checks = _Checks()
-    try:
-        await _read_frames(websocket, topics, send, events, checks)
-    finally:
-        checks.cancel()
-
-
-async def _read_frames(
-    websocket: WebSocket, topics: set[str], send: Send, events: object, checks: _Checks
+async def _read(
+    websocket: WebSocket,
+    topics: set[str],
+    send: Send,
+    events: object = None,
+    checks: _Checks | None = None,
 ) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
@@ -479,7 +474,10 @@ async def _read_frames(
         if kind == "pong":
             continue
         if kind == "check" and isinstance(frame, dict):
-            await checks.start(frame, topics, events, send)
+            if checks is None:
+                await send({"type": "error", "message": "this socket answers no checks"})
+            else:
+                await checks.submit(frame)
             continue
         requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):
@@ -573,7 +571,9 @@ async def _serve(websocket: WebSocket, state: AppState) -> None:
             # Whichever part ends first ends the session.
             group.cancel_scope.cancel()
 
-        group.start_soon(run, _read(websocket, topics, send, state.events))
+        checks = _Checks(topics, state.events, send)
+        group.start_soon(run, _read(websocket, topics, send, state.events, checks))
+        group.start_soon(run, checks.work())
         group.start_soon(run, pump(subscription, topics, send))
         group.start_soon(run, _ping(send))
 

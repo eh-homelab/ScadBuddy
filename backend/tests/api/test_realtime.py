@@ -604,11 +604,11 @@ def test_a_check_the_log_cannot_answer_names_every_topic(
         assert check(ws, [seen.id], "settings") == ["settings"]
 
 
-def test_a_slow_check_holds_up_neither_subscribes_nor_a_second_check(
+def test_a_slow_check_holds_up_no_subscribe_and_later_checks_wait_their_turn(
     client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A check runs beside the frame loop, one per socket: a second is answered "every
-    topic changed" at once, and a subscribe is confirmed while the first waits."""
+    """Checks run on a worker beside the frame loop, in order: a subscribe is confirmed
+    while one waits on the log, and a second gets a real answer once the first is done."""
     seen = SettingsChanged(section="connection")
     logged.publish(seen)
     release = threading.Event()
@@ -624,10 +624,48 @@ def test_a_slow_check_holds_up_neither_subscribes_nor_a_second_check(
         subscribe(ws, "settings")
         ws.send_json({"type": "check", "id": 1, "since": [seen.id], "topics": ["settings"]})
         ws.send_json({"type": "check", "id": 2, "since": [seen.id], "topics": ["settings"]})
-        assert ws.receive_json() == {"type": "changed", "id": 2, "topics": ["settings"]}
         subscribe(ws, "fonts")
         release.set()
         assert ws.receive_json() == {"type": "changed", "id": 1, "topics": []}
+        assert ws.receive_json() == {"type": "changed", "id": 2, "topics": []}
+
+
+def test_checks_past_the_queue_are_answered_every_topic_changed(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    release = threading.Event()
+    replay = logged.replay
+
+    async def slow(after: int, *, limit: int = 100) -> Replay:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return await replay(after, limit=limit)
+
+    monkeypatch.setattr(logged, "replay", slow)
+    monkeypatch.setattr(realtime, "CHECK_QUEUE", 1)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+
+        def send_check(check_id: int) -> None:
+            ws.send_json(
+                {"type": "check", "id": check_id, "since": [seen.id], "topics": ["settings"]}
+            )
+
+        send_check(1)
+        subscribe(ws, "fonts")  # a round trip: the worker has taken check 1 by now
+        for check_id in (2, 3, 4):  # 2 waits; 3 and 4 are over the cap
+            send_check(check_id)
+        assert [ws.receive_json() for _ in range(2)] == [
+            {"type": "changed", "id": 3, "topics": ["settings"]},
+            {"type": "changed", "id": 4, "topics": ["settings"]},
+        ]
+        release.set()
+        assert [ws.receive_json() for _ in range(2)] == [
+            {"type": "changed", "id": 1, "topics": []},
+            {"type": "changed", "id": 2, "topics": []},
+        ]
 
 
 def test_a_malformed_check_is_answered_with_an_error(client: TestClient, logged: LoggedBus) -> None:

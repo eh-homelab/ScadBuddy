@@ -28,6 +28,13 @@ export function fakeRealtime({ confirm = true, confirmation }: { confirm?: boole
     setStatus(next: RealtimeStatus) {
       status = next
     },
+    /** The server confirming `topic` again, as after a reconnect. */
+    async confirm(topic: string, again: Confirmation = {}) {
+      await act(async () => {
+        for (const listener of [...(listeners.get(topic) ?? [])]) listener('resync', again)
+        await vi.advanceTimersByTimeAsync(0)
+      })
+    },
     async signal(topic: string, kind = 'event', data: Record<string, unknown> = {}) {
       await act(async () => {
         for (const listener of [...(listeners.get(topic) ?? [])]) {

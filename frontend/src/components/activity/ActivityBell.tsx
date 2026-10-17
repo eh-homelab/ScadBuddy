@@ -146,7 +146,11 @@ export function ActivityBell() {
       timer = setTimeout(
         () => {
           first = 0
-          void refresh()
+          // Once shown, a later confirmation (a reconnect's) asks from what it saw.
+          const { record } = recordRead(refresh, (applied) => applied)
+          void record.shown.then((shown) => {
+            if (shown) activityRead.current = record
+          })
         },
         Math.max(0, Math.min(DEBOUNCE_MS, first + MAX_WAIT_MS - now)),
       )

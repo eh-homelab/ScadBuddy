@@ -83,6 +83,28 @@ describe('ActivityBell', () => {
       expect(check).not.toHaveBeenCalledWith(expect.anything(), ['activity'])
     })
 
+    it('asks from the newest read shown after one an event started', async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e9' } })
+      const check = vi.spyOn(getRealtime(), 'check').mockResolvedValue([])
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(1)
+      expect(check).toHaveBeenCalledWith(['e5'], ['activity'])
+      check.mockClear()
+      setActivityListCursor('e7')
+      await live.signal('activity', 'activity.changed', { activity_id: 'render:x', principal: 'browser' })
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(2)
+      // A reconnect's confirmation: the server's last is what the event's read saw.
+      await live.confirm('activity', { last: 'e7' })
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(check).not.toHaveBeenCalled()
+      expect(reads()).toBe(2)
+    })
+
     it('reads again when the server says activity changed since', async () => {
       setActivityListCursor('e5')
       const live = fakeRealtime({ confirmation: { last: 'e9' } })

@@ -67,7 +67,12 @@ export function inReadScope<T>(scope: ReadScope, fn: () => T): T {
   }
 }
 
-/** Called by the API client as a request starts: a function to call with its answer. */
+/**
+ * Called by the API client as a request starts: a function to call with its answer.
+ * Only a request started synchronously inside `inReadScope` joins a scope. A `load` that
+ * awaits before its first request leaves its scope empty, so it always reads again on
+ * a confirmation: start the request first if a loader is reshaped.
+ */
 export function trackRequest(): (headers: Headers | undefined) => void {
   if (open.length === 0) return () => {}
   const answer: Answer = {}
