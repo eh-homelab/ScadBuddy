@@ -708,14 +708,14 @@
       "id": 31,
       "type": "timeseries",
       "title": "Worker event loop",
-      "description": "How late a no-op posted to each render worker's event loop ran (#3788). A held loop times workflow tasks out at 10 s while CPU reads idle; each stall over 1 s is counted and logged with every thread's stack (logger scadbuddy.core.loop_watch).",
+      "description": "How late a no-op posted to each render worker's event loop ran (#3788). A held loop times workflow tasks out at 10 s while CPU reads idle; each stall over 1 s is counted and logged with every thread's stack (logger scadbuddy.core.loop_watch). to_thread wait is how long a no-op waited for a thread of the loop's default executor: an activity whose first await is asyncio.to_thread does not start until one is free.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 8, "y": 67, "w": 8, "h": 8 },
       "fieldConfig": {
         "defaults": { "unit": "s", "min": 0 },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "stalls" },
+            "matcher": { "id": "byRegexp", "options": "^(to_thread )?stalls$" },
             "properties": [
               { "id": "unit", "value": "short" },
               { "id": "custom.axisPlacement", "value": "right" }
@@ -735,6 +735,18 @@
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "sum(increase(scadbuddy_event_loop_stalls_total{namespace=\"$namespace\", job=\"scadbuddy-render\"}[$__rate_interval]))",
           "legendFormat": "stalls"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (pod, le) (rate(scadbuddy_default_executor_wait_seconds_bucket{namespace=\"$namespace\", job=\"scadbuddy-render\"}[$__rate_interval])))",
+          "legendFormat": "to_thread wait p99 {{pod}}"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_default_executor_stalls_total{namespace=\"$namespace\", job=\"scadbuddy-render\"}[$__rate_interval]))",
+          "legendFormat": "to_thread stalls"
         }
       ]
     }

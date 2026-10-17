@@ -10,6 +10,12 @@ still held, with every thread's stack, so the log names the call that holds it.
 
 A watch thread that itself wakes late was kept from running too: something held the
 GIL, not only the loop. Its stall log says how late it woke.
+
+The loop also hands a no-op to its default executor, the pool behind every
+``asyncio.to_thread``, one at a time. How long it waited for a thread is
+``scadbuddy_default_executor_wait_seconds``; one still waiting after ``threshold`` is
+logged the same way. An activity whose first await is a ``to_thread`` (``project``)
+does not start while every thread of that pool is held, though the loop runs on.
 """
 
 from __future__ import annotations
@@ -57,6 +63,9 @@ class LoopWatch:
         self.interval = interval
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        #: The executor no-op in flight: when it was handed over, and whether it ran.
+        self._probe: tuple[float, threading.Event] | None = None
+        self._probe_reported = False
 
     async def __aenter__(self) -> LoopWatch:
         loop = asyncio.get_running_loop()
@@ -88,12 +97,14 @@ class LoopWatch:
             def beat(posted: float = posted, ran: threading.Event = ran) -> None:
                 self.metrics.event_loop_lag.observe(time.monotonic() - posted)
                 ran.set()
+                self._hand_probe(loop)
 
             try:
                 loop.call_soon_threadsafe(beat)
             except RuntimeError:
                 return  # the loop is closed
             if ran.wait(self.threshold):
+                self._check_probe(loop_thread)
                 continue
             self.metrics.event_loop_stalls.inc()
             logger.warning(
@@ -107,3 +118,42 @@ class LoopWatch:
                 if self._stopping.is_set() or loop.is_closed():
                     return
             logger.warning("the event loop ran again after %.1f s", time.monotonic() - posted)
+
+    def _hand_probe(self, loop: asyncio.AbstractEventLoop) -> None:
+        """On the loop: a no-op to the default executor, unless one still waits."""
+        if self._probe is not None:
+            return
+        handed, started = time.monotonic(), threading.Event()
+
+        def probe() -> None:
+            self.metrics.default_executor_wait.observe(time.monotonic() - handed)
+            started.set()
+
+        self._probe = (handed, started)
+        try:
+            loop.run_in_executor(None, probe)
+        except RuntimeError:
+            self._probe = None  # the executor is shut down
+
+    def _check_probe(self, loop_thread: int) -> None:
+        if self._probe is None:
+            return
+        handed, started = self._probe
+        if started.is_set():
+            if self._probe_reported:
+                logger.warning(
+                    "the default executor started a task again after %.1f s",
+                    time.monotonic() - handed,
+                )
+            self._probe, self._probe_reported = None, False
+            return
+        if self._probe_reported or time.monotonic() - handed < self.threshold:
+            return
+        self._probe_reported = True
+        self.metrics.default_executor_stalls.inc()
+        logger.warning(
+            "the default executor has not started a task for %.1f s (asyncio.to_thread"
+            " waits for a free thread); every thread's stack:\n%s",
+            time.monotonic() - handed,
+            _stacks(loop_thread),
+        )

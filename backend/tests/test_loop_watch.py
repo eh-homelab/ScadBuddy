@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -47,3 +48,29 @@ async def test_a_loop_that_keeps_running_logs_nothing(caplog: pytest.LogCaptureF
     assert not caplog.records
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
     assert _sample(metrics, "scadbuddy_event_loop_lag_seconds_count") >= 3
+
+
+def _holds_the_executor(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+async def test_a_full_default_executor_is_logged_with_what_holds_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`asyncio.to_thread` work waits for a free default-executor thread: an activity
+    whose first await is one never starts while every thread is held (#3788's
+    ``project``), with the loop itself running."""
+    metrics = Metrics()
+    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    async with LoopWatch(metrics, threshold=0.2, interval=0.05):
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(_holds_the_executor, 0.6)
+        await asyncio.sleep(0.2)
+    held = [r for r in caplog.records if "default executor" in r.getMessage()]
+    assert held, caplog.text
+    assert "_holds_the_executor" in held[0].getMessage()
+    assert _sample(metrics, "scadbuddy_default_executor_stalls_total") == 1
+    assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
+    assert _sample(metrics, "scadbuddy_default_executor_wait_seconds_sum") >= 0.3

@@ -733,7 +733,10 @@ workers restart.
     is how late a no-op posted to it ran. A loop held for over a second counts in
     `scadbuddy_event_loop_stalls_total` and logs every thread's stack while it is
     still held (logger `scadbuddy.core.loop_watch`): that is what times workflow tasks
-    out at 10 s with the pod's CPU idle. For a hang it does not catch,
+    out at 10 s with the pod's CPU idle. `scadbuddy_default_executor_wait_seconds`
+    and `scadbuddy_default_executor_stalls_total` do the same for the pool behind
+    `asyncio.to_thread`: an activity that starts with one waits for a free thread
+    while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
   - Scale the Deployment freely.
 
