@@ -12,6 +12,23 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
   }
 }
 
+/**
+ * #3856 — how a subject chip reads: the name the server found for it, else its raw
+ * reference made legible (a library file, a folder, a project, an output's short id).
+ */
+export function subjectLabel(subject: { value: string; label?: string | null }): string {
+  if (subject.label) return subject.label
+  const [prefix, id] = subject.value.split(/:(.*)/s)
+  if (id) {
+    if (prefix === 'library') return `Library file ${id}`
+    if (prefix === 'library-folder') return `Library folder ${id}`
+    if (prefix === 'project') return `Project ${id}`
+    if (prefix === 'output') return `Output ${id.slice(0, 8)}`
+  }
+  if (subject.value === 'library-files') return 'Library files'
+  return subject.value
+}
+
 /** The `since` choices; the URL keeps the token, the API gets the absolute time. */
 export const SINCE_OPTIONS = [
   { value: '24h', label: 'Last 24 hours', hours: 24 },

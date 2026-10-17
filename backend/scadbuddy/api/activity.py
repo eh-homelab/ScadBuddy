@@ -29,7 +29,10 @@ from scadbuddy.activity.index import (
 from scadbuddy.activity.kinds import KindRegistry
 from scadbuddy.activity.models import STATUSES, ActivityRow, ActivityStatus, Facet, FacetType
 from scadbuddy.api.components import component_dep
+from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -122,6 +125,9 @@ class KindOut(BaseModel):
 class CountOut(BaseModel):
     value: str
     count: int
+    #: How a subject reads, where ScadBuddy knows it (#3856): the model's name for a
+    #: slug, the output's for ``output:<id>``. The value stays the filter.
+    label: str | None = None
 
 
 class ActivityFacets(BaseModel):
@@ -250,13 +256,44 @@ async def list_activity(
     return ActivityPage(items=[_item(r, advanced) for r in rows], next_cursor=next_cursor)
 
 
-def _counts(counts: list[Count]) -> list[CountOut]:
-    return [CountOut(value=c.value, count=c.count) for c in counts]
+def _counts(counts: list[Count], labels: Mapping[str, str] | None = None) -> list[CountOut]:
+    return [
+        CountOut(value=c.value, count=c.count, label=(labels or {}).get(c.value)) for c in counts
+    ]
+
+
+def _subject_labels(
+    subjects: list[Count], catalogue: Catalogue, outputs: OutputStore
+) -> dict[str, str]:
+    """The names ScadBuddy holds for the subjects: a model's, and an output's (its own
+    name, else its model's). A library file or project is Bambuddy's, so it has none."""
+    values = {c.value for c in subjects}
+    metas = {}
+    for value in values:
+        if not value.startswith("output:"):
+            continue
+        try:
+            metas[value] = outputs.get(value.removeprefix("output:"))
+        except OutputNotFoundError:
+            continue  # deleted since: the chip keeps its id
+    wanted = values | {meta.slug for meta in metas.values()}
+    slugs = [slug for slug in catalogue.slugs() if slug in wanted]
+    names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+    labels = {value: name for value, name in names.items() if value in values}
+    for value, meta in metas.items():
+        name = meta.name or names.get(meta.slug)
+        if name:
+            labels[value] = name
+    return labels
 
 
 @router.get("/facets", response_model=ActivityFacets)
 async def activity_facets(
-    request: Request, activity: ActivityDep, since: datetime | None = None
+    request: Request,
+    activity: ActivityDep,
+    catalogue: CatalogueDep,
+    outputs: OutputsDep,
+    since: datetime | None = None,
 ) -> ActivityFacets:
     """What the filter bar offers: every kind with its facets, the statuses, and the
     principals, tools and subjects present since ``since`` (default the last 7 days)."""
@@ -279,7 +316,10 @@ async def activity_facets(
         statuses=list(STATUSES),
         principals=_counts(counts.principals),
         tools=_counts(counts.tools),
-        subjects=_counts(counts.subjects),
+        subjects=_counts(
+            counts.subjects,
+            await asyncio.to_thread(_subject_labels, counts.subjects, catalogue, outputs),
+        ),
     )
 
 

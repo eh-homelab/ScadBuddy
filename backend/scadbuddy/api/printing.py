@@ -1256,7 +1256,11 @@ async def post_project(
         ops,
         response,
         kind=ops.kinds["create_project"],
-        subject="project",
+        # The project linked, or the name of the one created: one chip per project on the
+        # Activity page, not one for them all (#3856).
+        subject=(
+            f"project:{body.project_id}" if body.project_id is not None else body.name or "project"
+        ),
         request=body,
         idempotency_key=idempotency_key,
     )

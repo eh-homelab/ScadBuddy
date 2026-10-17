@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import psycopg
 from fastapi.testclient import TestClient
 
-from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity.index import ActivityIndex, Count
+from scadbuddy.api.activity import _subject_labels
+from scadbuddy.library.outputs import OutputNotFoundError
 from tests.api.conftest import AgentTables, SeedActivity
 from tests.support.operations import press
 
@@ -101,9 +104,9 @@ def test_unknown_param_is_400(client: TestClient) -> None:
 def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> None:
     seed_activity(id="render:a", principal="token:t1", via_tool="render_model", subject="box")
     body = client.get("/api/v1/activity/facets").json()
-    assert {"value": "token:t1", "count": 1} in body["principals"]
-    assert {"value": "render_model", "count": 1} in body["tools"]
-    assert {"value": "box", "count": 1} in body["subjects"]
+    assert {"value": "token:t1", "count": 1, "label": None} in body["principals"]
+    assert {"value": "render_model", "count": 1, "label": None} in body["tools"]
+    assert {"value": "box", "count": 1, "label": None} in body["subjects"]
     render = next(k for k in body["kinds"] if k["key"] == "render")
     assert {"name": "slug", "type": "keyword", "label": "Model", "filterable": True} in render[
         "facets"
@@ -111,6 +114,42 @@ def test_facets_from_data(client: TestClient, seed_activity: SeedActivity) -> No
     assert body["statuses"] == ["queued", "running", "waiting", "succeeded", "failed", "cancelled"]
     later = client.get("/api/v1/activity/facets", params={"since": "2999-01-01T00:00:00Z"}).json()
     assert later["principals"] == []
+
+
+def test_a_model_subject_is_labelled_with_its_name(
+    client: TestClient, seed_activity: SeedActivity, model: str
+) -> None:
+    """#3856: a chip reads as the model's name; the value it filters on stays the slug.
+    A subject ScadBuddy holds no name for (a library file, an output gone) has none."""
+    seed_activity(id="render:a", subject=model)
+    seed_activity(id="render:b", subject="library:296")
+    seed_activity(id="render:c", subject="output:" + "0" * 32)
+    subjects = {s["value"]: s for s in client.get("/api/v1/activity/facets").json()["subjects"]}
+    assert subjects[model]["label"] == "Demo"
+    assert subjects["library:296"]["label"] is None
+    assert subjects["output:" + "0" * 32]["label"] is None
+
+
+def test_an_output_subject_is_labelled_with_its_name_else_its_models() -> None:
+    named = SimpleNamespace(name="Kai's tag", slug="keychain")
+    unnamed = SimpleNamespace(name=None, slug="keychain")
+    metas = {"a" * 32: named, "b" * 32: unnamed}
+
+    def get(output_id: str) -> SimpleNamespace:
+        if output_id not in metas:
+            raise OutputNotFoundError(output_id)
+        return metas[output_id]
+
+    catalogue = SimpleNamespace(
+        slugs=lambda: ["keychain"],
+        list_models=lambda slugs: [SimpleNamespace(slug=s, name="Name Keychain") for s in slugs],
+    )
+    subjects = [
+        Count(value, 1)
+        for value in ("output:" + "a" * 32, "output:" + "b" * 32, "output:" + "c" * 32)
+    ]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(get=get))  # type: ignore[arg-type]
+    assert labels == {"output:" + "a" * 32: "Kai's tag", "output:" + "b" * 32: "Name Keychain"}
 
 
 def test_facets_without_agent_tables(client: TestClient) -> None:

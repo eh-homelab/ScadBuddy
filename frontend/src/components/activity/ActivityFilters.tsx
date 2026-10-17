@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { SearchIcon, XIcon } from 'lucide-react'
-import { CHIPS_SHOWN, principalLabel, SINCE_OPTIONS } from './labels'
+import { CHIPS_SHOWN, principalLabel, SINCE_OPTIONS, subjectLabel } from './labels'
 
 interface Props {
   query: ActivityQuery
@@ -106,9 +106,9 @@ const ANY_TIME = 'any'
 
 /** The values of one facet as chips, plus any selected value the facets do not list. */
 function valueChips(
-  listed: Array<{ value: string; count: number }>,
+  listed: Array<{ value: string; count: number; label?: string | null }>,
   selected: string,
-): Array<{ value: string; count: number | null }> {
+): Array<{ value: string; count: number | null; label?: string | null }> {
   const extra = selected && !listed.some((l) => l.value === selected) ? [{ value: selected, count: null }] : []
   return [...listed, ...extra]
 }
@@ -301,8 +301,8 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             onValueChange={(subject) => onChange({ ...query, subject })}
           >
             {shownSubjects.map((s) => (
-              <ToggleGroupItem key={s.value} value={s.value} className={CHIP}>
-                {s.value}
+              <ToggleGroupItem key={s.value} value={s.value} className={CHIP} title={s.value}>
+                {subjectLabel(s)}
                 <Count count={s.count} />
               </ToggleGroupItem>
             ))}
