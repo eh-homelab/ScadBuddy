@@ -38,6 +38,7 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
 
   it('reads a query result, a workflow input, a result and an activity input stored by reference', async () => {
     const subject = `session-${randomUUID()}`
+    const tool = `session-${randomUUID()}`
     const dataConverter = subjectDataConverter(new MemoryKeys(), new FilePayloadStore(root))
     const client = new Client({ connection: env.connection, namespace: 'default', dataConverter })
     const taskQueue = `store-${subject}`
@@ -55,8 +56,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       await handle.signal('finish')
       expect(await handle.result()).toBe(`${words} (done)`)
       // An activity's input over OFFLOAD_BYTES: the agent-tools worker's own walk.
-      expect(await client.workflow.execute('toolInput', { workflowId: `session-${randomUUID()}`, taskQueue, args: [words] })).toBe(words.length)
+      expect(await client.workflow.execute('toolInput', { workflowId: tool, taskQueue, args: [words] })).toBe(words.length)
     })
-    expect(readdirSync(join(root, subject)).length).toBeGreaterThan(0)
+    // Both by reference, not inline: each subject's payloads are files on the share.
+    for (const s of [subject, tool]) expect(readdirSync(join(root, s)).length).toBeGreaterThan(0)
   })
 })
