@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from scadbuddy.render.glb import read_glb, write_glb
@@ -19,18 +18,13 @@ ORANGE = "#F98C36"  # their bodies
 
 def test_a_library_files_preview_draws_its_painting(tmp_path: Path) -> None:
     read = read_plate_parts(makerworld_path(CARROT).read_bytes(), 1)
-    painted = [part for part in read.parts if part.paint is not None]
-    assert len(painted) == 2  # the two carrots, kept whole for the mesh checks
-    assert all(part.mesh.is_watertight for part in painted)
+    # The two carrots are one orange entry, their painting kept and their mesh whole.
+    (body,) = [part for part in read.parts if part.colour == ORANGE]
+    assert body.paint is not None and body.mesh.is_watertight
+    assert [part.colour for part in read.parts].count(ORANGE) == 1
     write_glb(read.parts, tmp_path / "preview.glb")
     drawn = read_glb(tmp_path / "preview.glb")
-    green = [part for part in drawn if part.colour == GREEN]
-    orange = [part for part in drawn if part.colour == ORANGE]
-    assert len(green) == 2
-    # The leaves grow out of the top of each body: no green below its carrot's middle.
-    for leaves in green:
-        body = min(
-            orange, key=lambda p: np.linalg.norm(p.mesh.centroid[:2] - leaves.mesh.centroid[:2])
-        )
-        low, high = body.mesh.bounds[:, 2]
-        assert leaves.mesh.bounds[0, 2] > (low + high) / 2
+    (leaves,) = [part for part in drawn if part.colour == GREEN]
+    (orange,) = [part for part in drawn if part.colour == ORANGE]
+    # The leaves grow out of the bodies' tops: no green in their lower three quarters.
+    assert leaves.mesh.bounds[0, 2] > 0.75 * orange.mesh.bounds[1, 2]

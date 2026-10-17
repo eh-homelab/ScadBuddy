@@ -73,7 +73,8 @@ CACHE_DIRNAME = "library-views"
 #: each count.
 MAX_CACHED = 64
 #: Moves when what a view of the same bytes is changes, so an older one is not served.
-VIEW_VERSION = 1
+#: 2: a painted part is drawn in its painting's colours (#3956).
+VIEW_VERSION = 2
 _HASH = re.compile(r"[0-9a-f]{64}")
 
 

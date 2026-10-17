@@ -10,7 +10,7 @@ from typing import cast
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import pieces, remap, states
+from scadbuddy.render.paint import PaintCodeError, pieces, remap, states
 
 CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 MODEL_ENTRY = "3D/3dmodel.model"
@@ -81,8 +81,11 @@ class ColourPart:
 def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
     """``parts`` as they print (#3956): each painted part split into one part per colour
     its faces print in, where Bambu Studio's painting puts each (`paint.pieces`), its own
-    colour's first. What a preview draws, whose colours are per mesh; one unpainted
-    passes as it is."""
+    colour's first, every colour upper case. What a preview draws, whose colours are per
+    mesh; one unpainted passes as it is.
+
+    Each distinct code is read once, as its leaves' barycentric corners, and applied to
+    every face that carries it at once: a painting repeats codes across many faces."""
     out: list[ColourPart] = []
     for part in parts:
         if part.paint is None:
@@ -90,34 +93,31 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             continue
         faces = np.asarray(part.mesh.faces)
         corners = np.asarray(part.mesh.vertices, dtype=np.float64)[faces]
-        codes = part.paint.codes
-        plain = np.array([not code for code in codes], dtype=bool)
-        by_colour: dict[str, list[np.ndarray]] = {part.colour.upper(): [corners[plain]]}
-        for index in np.flatnonzero(~plain):
-            for triangle, state in pieces(codes[index], corners[index]):
+        own = part.colour.upper()
+        by_code: dict[str, list[int]] = {}
+        for index, code in enumerate(part.paint.codes):
+            by_code.setdefault(code, []).append(index)
+        by_colour: dict[str, list[np.ndarray]] = {own: []}
+        for code, indices in by_code.items():
+            chosen = corners[indices]
+            for weights, state in pieces(code, np.eye(3)):
                 if state > len(part.paint.colours):
-                    raise ValueError(f"the painting names extruder {state}, which has no colour")
-                colour = part.colour if state == 0 else part.paint.colours[state - 1]
-                by_colour.setdefault(colour.upper(), []).append(triangle[None])
+                    raise PaintCodeError(
+                        f"the painting names extruder {state}, which has no colour"
+                    )
+                colour = own if state == 0 else part.paint.colours[state - 1].upper()
+                by_colour.setdefault(colour, []).append(np.einsum("ij,njk->nik", weights, chosen))
         for colour, chunks in by_colour.items():
-            triangles = np.concatenate(chunks)
-            if len(triangles) == 0:
+            if not chunks:
                 continue
+            triangles = np.concatenate(chunks)
             mesh = trimesh.Trimesh(
                 vertices=triangles.reshape(-1, 3),
                 faces=np.arange(len(triangles) * 3).reshape(-1, 3),
                 process=False,
             )
-            own = colour == part.colour.upper()
-            out.append(
-                replace(
-                    part,
-                    name=part.name if own else f"{part.name} ({colour})",
-                    colour=part.colour if own else colour,
-                    mesh=mesh,
-                    paint=None,
-                )
-            )
+            name = part.name if colour == own else f"{part.name} ({colour})"
+            out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None))
     return out
 
 
