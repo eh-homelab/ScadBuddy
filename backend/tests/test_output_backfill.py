@@ -40,6 +40,7 @@ from scadbuddy.library.outputs import (
     reap_orphan_holds,
     release_parts,
 )
+from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
@@ -73,6 +74,54 @@ async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
     old = store.create(job.model_copy(update={"outputs": [], "id": "old"}), name="mine")
     assert store.manifest(old.id) == []
     return store, old, job, written
+
+
+@pytest.mark.parametrize(
+    ("name", "read", "none"),
+    [
+        (outputs_module.BACKFILL_NAME, OutputStore.backfill, None),
+        (outputs_module.PARAMS_NAME, OutputStore.params, {}),
+        (outputs_module.BOM_NAME, OutputStore.bom, []),
+        (outputs_module.MANIFEST_NAME, OutputStore.manifest, []),
+        (outputs_module.ARRANGED_NAME, OutputStore.arranged_from, []),
+        (outputs_module.RECORD_NAME, OutputStore.record, None),
+    ],
+)
+async def test_no_reader_checks_then_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    read: Callable[[OutputStore, str], object],
+    none: object,
+) -> None:
+    """A regression guard, not a race reproduction: should a check-then-read come back,
+    this fails. The attach clears ``backfill.json`` on its own thread, and a read that
+    found it and then could not open it raised (a CI flake on #3975).
+
+    ``is_file`` answering yes for the gone file is what made a check-then-read fail
+    (main's, before the fix); the read-once readers never ask it, so here each must
+    read a missing file as none. Should a check come back, this fails."""
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    (store.directory(old.id) / name).unlink(missing_ok=True)
+    is_file = Path.is_file
+    monkeypatch.setattr(Path, "is_file", lambda self: self.name == name or is_file(self))
+    assert read(store, old.id) == none
+
+
+async def test_inputs_cleared_as_they_are_read_read_as_the_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As above for ``inputs.json``, whose absence means an output from before inputs.
+    (Before read-once this already held, through a warning for an "unreadable" file.)"""
+    store, old, _, _ = await _legacy_output(tmp_path)
+    expected = legacy_inputs(store.params(old.id))
+    (store.directory(old.id) / outputs_module.INPUTS_NAME).unlink(missing_ok=True)
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: self.name == outputs_module.INPUTS_NAME or is_file(self)
+    )
+    assert store.inputs(old.id) == expected
 
 
 @pytest.mark.requires_postgres

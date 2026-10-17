@@ -217,6 +217,15 @@ class OutputFiles(Protocol):
         ...
 
 
+def _read_if_there(path: Path) -> str | None:
+    """The file's text, or None when there is none: read once, so a file cleared between
+    a check and the read is not an error. A directory there is none, as `is_file` said."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError):
+        return None
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
@@ -321,11 +330,10 @@ class OutputStore:
         return None
 
     def params(self, output_id: str) -> dict[str, ParamValue]:
-        directory = self._find_dir(output_id)
-        params_path = directory / PARAMS_NAME
-        if not params_path.is_file():
+        text = _read_if_there(self._find_dir(output_id) / PARAMS_NAME)
+        if text is None:
             return {}
-        loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
+        loaded: dict[str, ParamValue] = json.loads(text)
         return loaded
 
     def inputs(
@@ -334,11 +342,15 @@ class OutputStore:
         """The output's inputs; one from before them reads as its params at ``v`` 0.
         A caller that already read :meth:`params` passes them, so they are read once."""
         path = self._find_dir(output_id) / INPUTS_NAME
-        if not path.is_file():
+        try:
+            text = _read_if_there(path)
+        except OSError:
+            text = ""  # unreadable: as damaged, below
+        if text is None:
             return legacy_inputs(self.params(output_id) if params is None else params)
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            loaded = json.loads(text)
+        except ValueError:
             loaded = None
         if not isinstance(loaded, dict):
             # The record itself (meta, files, params) is intact: read it as one from
@@ -500,43 +512,41 @@ class OutputStore:
         return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
-        path = self.directory(output_id) / BOM_NAME
-        if not path.is_file():
+        text = _read_if_there(self.directory(output_id) / BOM_NAME)
+        if text is None:
             return []
-        return [BomEntry.model_validate(e) for e in json.loads(path.read_text(encoding="utf-8"))]
+        return [BomEntry.model_validate(e) for e in json.loads(text)]
 
     def manifest(self, output_id: str) -> list[ManifestObject]:
         """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
         try:
-            path = self.directory(output_id) / MANIFEST_NAME
+            text = _read_if_there(self.directory(output_id) / MANIFEST_NAME)
         except OutputNotFoundError:
             return []
-        if not path.is_file():
+        if text is None:
             return []
-        return [
-            ManifestObject.model_validate(m) for m in json.loads(path.read_text(encoding="utf-8"))
-        ]
+        return [ManifestObject.model_validate(m) for m in json.loads(text)]
 
     def arranged_from(self, output_id: str) -> list[str]:
         """For an arranged output, the outputs its objects came from, and each library
         file ScadBuddy did not make as `library:<id>` (#2284)."""
         try:
-            path = self.directory(output_id) / ARRANGED_NAME
+            text = _read_if_there(self.directory(output_id) / ARRANGED_NAME)
         except OutputNotFoundError:
             return []
-        if not path.is_file():
+        if text is None:
             return []
-        return _ID_LIST.validate_json(path.read_text(encoding="utf-8"))
+        return _ID_LIST.validate_json(text)
 
     def backfill(self, output_id: str) -> BackfillState | None:
         """The re-render queued to give this output a manifest (#902), if any."""
         try:
-            path = self.directory(output_id) / BACKFILL_NAME
+            text = _read_if_there(self.directory(output_id) / BACKFILL_NAME)
         except OutputNotFoundError:
             return None
-        if not path.is_file():
+        if text is None:  # none, or the attach just cleared it
             return None
-        return BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+        return BackfillState.model_validate_json(text)
 
     def start_backfill(self, output_id: str, job_id: str) -> None:
         _replace(
@@ -579,10 +589,10 @@ class OutputStore:
         self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
-        path = self.directory(output_id) / RECORD_NAME
-        if not path.is_file():
+        text = _read_if_there(self.directory(output_id) / RECORD_NAME)
+        if text is None:
             return None
-        return OutputRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return OutputRecord.model_validate_json(text)
 
     def files(self, output_id: str) -> list[str]:
         directory = self.directory(output_id) / FILES_DIR
