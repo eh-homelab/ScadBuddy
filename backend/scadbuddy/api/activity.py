@@ -262,12 +262,18 @@ def _counts(counts: list[Count], labels: Mapping[str, str] | None = None) -> lis
     ]
 
 
+#: How many subjects (the most frequent) the facets look up a name for (#3856).
+LABELLED_SUBJECTS = 100
+
+
 def _subject_labels(
     subjects: list[Count], catalogue: Catalogue, outputs: OutputStore
 ) -> dict[str, str]:
     """The names ScadBuddy holds for the subjects: a model's, and an output's (its own
     name, else its model's). A library file or project is Bambuddy's, so it has none."""
-    values = {c.value for c in subjects}
+    # The most frequent first: past them a chip shows its reference, and the facets
+    # stay one catalogue read and a bounded number of output reads.
+    values = {c.value for c in subjects[:LABELLED_SUBJECTS]}
     metas = {}
     for value in values:
         if not value.startswith("output:"):

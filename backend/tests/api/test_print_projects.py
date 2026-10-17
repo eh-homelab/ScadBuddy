@@ -15,7 +15,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
-from tests.support.operations import press
+from tests.support.operations import press, subjects
 
 API = f"{BASE}/api/v1"
 
@@ -69,6 +69,8 @@ def test_creating_a_project_pairs_it_with_a_folder(client: TestClient, model: st
     ).json()
     assert (body["id"], body["folder_id"]) == (7, 9)
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
+    # #3856: prefixed, so a name never passes for a model's slug or another subject.
+    assert subjects(client, "create_project") == ["project-name:Reagan keychains"]
 
 
 def test_scadbuddy_keeps_no_project_membership(app: FastAPI) -> None:

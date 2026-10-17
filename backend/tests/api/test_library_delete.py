@@ -11,10 +11,8 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.operations.component import OPERATIONS
-from tests.api.test_model_operations import _state
 from tests.api.test_send import BASE, configure
-from tests.support.operations import press
+from tests.support.operations import press, subjects
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -68,15 +66,6 @@ def test_one_file_goes_to_bambuddy_s_trash(client: TestClient) -> None:
     assert gone.calls.last.request.headers["X-API-Key"] == "s3cret"
 
 
-def _subjects(client: TestClient) -> list[str]:
-    pool = _state(client.app).components.get(OPERATIONS).store._pool  # type: ignore[arg-type]
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT subject FROM operations WHERE kind = 'library_file_delete'"
-        ).fetchall()
-    return [row["subject"] for row in rows]
-
-
 @respx.mock
 def test_one_file_s_delete_names_the_file_as_its_subject(client: TestClient) -> None:
     """#3856: the Activity page's Subject filter finds the operation by its file."""
@@ -93,7 +82,7 @@ def test_one_file_s_delete_names_the_file_as_its_subject(client: TestClient) -> 
     assert delete(client, 89).status_code == 200
     assert delete(client, 89, 90).status_code == 200
 
-    assert sorted(_subjects(client)) == ["library-files", "library:89"]
+    assert subjects(client, "library_file_delete") == ["library:89", "library-files"]
 
 
 @respx.mock

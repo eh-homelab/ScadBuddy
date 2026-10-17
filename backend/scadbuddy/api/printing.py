@@ -1257,9 +1257,14 @@ async def post_project(
         response,
         kind=ops.kinds["create_project"],
         # The project linked, or the name of the one created: one chip per project on the
-        # Activity page, not one for them all (#3856).
+        # Activity page, not one for them all (#3856). The name is prefixed, so one that
+        # reads like a model's slug or ``library:89`` never shares that subject's chip.
         subject=(
-            f"project:{body.project_id}" if body.project_id is not None else body.name or "project"
+            f"project:{body.project_id}"
+            if body.project_id is not None
+            else f"project-name:{body.name}"
+            if body.name
+            else "project"
         ),
         request=body,
         idempotency_key=idempotency_key,

@@ -14,7 +14,8 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
 
 /**
  * #3856 — how a subject chip reads: the name the server found for it, else its raw
- * reference made legible (a library file, a folder, a project, an output's short id).
+ * reference made legible (a library file, a folder, a project by id or by name, an
+ * output's short id).
  */
 export function subjectLabel(subject: { value: string; label?: string | null }): string {
   if (subject.label) return subject.label
@@ -23,6 +24,7 @@ export function subjectLabel(subject: { value: string; label?: string | null }):
     if (prefix === 'library') return `Library file ${id}`
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
+    if (prefix === 'project-name') return `Project “${id}”`
     if (prefix === 'output') return `Output ${id.slice(0, 8)}`
   }
   if (subject.value === 'library-files') return 'Library files'
