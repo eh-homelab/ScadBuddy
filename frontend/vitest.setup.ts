@@ -45,7 +45,9 @@ beforeAll(() => {
   // connection was refused, so nothing was sent: send it again, and MSW sees it.
   const intercepted = globalThis.fetch
   globalThis.fetch = async (input, init) => {
+    // fetch itself lets init.signal override the Request's own, so this does too.
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    const url = input instanceof Request ? input.url : String(input)
     for (let attempt = 1; ; attempt++) {
       try {
         return await intercepted(input instanceof Request ? input.clone() : input, init)
@@ -54,7 +56,7 @@ beforeAll(() => {
         if (!refused || signal?.aborted || attempt === 3) throw error
         // On stderr rather than console.warn, which tests spy on: a line here means the
         // upstream escape still happens, and this wrapper is still needed.
-        process.stderr.write(`vitest.setup: resending a request MSW let through (mswjs/interceptors#862)\n`)
+        process.stderr.write(`vitest.setup: resending ${url}, which MSW let through (mswjs/interceptors#862)\n`)
       }
     }
   }
