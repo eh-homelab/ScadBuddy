@@ -30,7 +30,7 @@ export function resending(
       } catch (error) {
         const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
         if (!refused || signal?.aborted) throw error
-        if (attempt === tries) {
+        if (attempt >= tries) {
           log(`vitest.setup: gave up on ${url} after ${tries} refused tries (mswjs/interceptors#862)`)
           throw error
         }
