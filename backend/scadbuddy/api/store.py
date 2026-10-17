@@ -14,8 +14,9 @@ from temporalio.service import RPCError
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.config import StoreBackend
-from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.library.settings_store import StoreNotReadyError, load_render_store_settings
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.store import migrate
 from scadbuddy.store.content import StoreUsage
 from scadbuddy.store.factory import store_usage
 from scadbuddy.store.index import BlobIndex
@@ -53,10 +54,16 @@ async def get_store_usage(state: StateDep) -> StoreUsage:
         "Copy every recorded blob from `source` to `target`, `batch` at a time; each row"
         " switches to its copy when ScadBuddy next starts with `store_backend` set to"
         " `target`. A second request while one runs joins it; one after it ended retries"
-        " what failed. Save the target's settings first. 409 once `store_backend` is"
-        " already `target`."
+        " what failed. Save the target's settings first: 422, saying what is missing,"
+        " while either backend cannot be built. 409 once `store_backend` is already"
+        " `target`."
     ),
-    responses={status.HTTP_409_CONFLICT: {"description": "`store_backend` is already `target`."}},
+    responses={
+        status.HTTP_409_CONFLICT: {"description": "`store_backend` is already `target`."},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "A backend cannot be built from the saved settings."
+        },
+    },
 )
 async def migrate_store(
     params: StoreMigrationParams, state: StateDep, ops: OperationsDep
@@ -66,6 +73,10 @@ async def migrate_store(
     if saved.store_backend == params.target:
         # The copy is for before the flip; after it, the start-up switch has run.
         raise HTTPException(status.HTTP_409_CONFLICT, f"store_backend is already {params.target}")
+    try:
+        await migrate.check_backends(saved, pool, state.settings, params.source, params.target)
+    except StoreNotReadyError as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
     started = await asyncio.to_thread(BlobIndex(pool).now)
     # No update to answer, so not `start_command`: a plain start that joins a running one.
     handle = await ops.client.start_workflow(

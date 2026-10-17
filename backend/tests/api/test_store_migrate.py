@@ -66,7 +66,11 @@ def test_post_starts_once_and_get_reports_the_rows(
             await asyncio.sleep(0.05)
         return MigrationBatch(moved=0, remaining=0, failed=[])
 
+    async def ready(*_: Any) -> None:
+        pass
+
     monkeypatch.setattr(migrate, "build_backend", build)
+    monkeypatch.setattr(migrate, "check_backends", ready)
     monkeypatch.setattr(migrate, "migrate_batch", batch)
     _rows(
         pg_conninfo,
@@ -125,6 +129,19 @@ def test_a_migration_to_the_saved_backend_is_refused(client: TestClient, pg_conn
     )
     answer = client.post("/api/v1/store/migrate", json={"source": "bambuddy", "target": "s3"})
     assert answer.status_code == 409, answer.text
+
+
+def test_a_migration_to_an_unready_backend_is_refused_before_it_starts(
+    client: TestClient,
+) -> None:
+    """A run that could not build its target would end before copying, and GET would
+    show nothing wrong: POST builds both first."""
+    answer = client.post("/api/v1/store/migrate", json={"source": "bambuddy", "target": "s3"})
+    assert answer.status_code == 422, answer.text
+    assert (
+        "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
+        in answer.json()["detail"]
+    )
 
 
 @pytest.mark.parametrize(

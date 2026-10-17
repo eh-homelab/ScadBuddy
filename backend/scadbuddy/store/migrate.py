@@ -20,7 +20,13 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import StoreNotReadyError, load_render_store_settings
+from scadbuddy.library.settings_store import (
+    BAMBUDDY_NOT_READY,
+    S3_NOT_READY,
+    RenderStoreSettings,
+    StoreNotReadyError,
+    load_render_store_settings,
+)
 from scadbuddy.store.backends import build_backend
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.content import ContentBackend
@@ -151,6 +157,31 @@ async def _copy_through(
         index.mark_migrated, row.key, ref, backend=target.backend, backend_id=backend_id
     )
     return None if marked else ""
+
+
+async def check_backends(
+    current: RenderStoreSettings,
+    pool: Pool,
+    defaults: Settings,
+    source: StoreBackend,
+    target: StoreBackend,
+) -> None:
+    """`StoreNotReadyError`, saying what to save, unless both backends build from the
+    settings as they are now: a run that could not build one would end before it
+    copied, and `GET /store/migrate` would show nothing wrong. The target first, the
+    one a migration's settings are most likely still missing for."""
+    for name in (target, source):
+        if name == "s3" and current.s3 is None:
+            raise StoreNotReadyError(S3_NOT_READY)
+        if name == "s3" and current.s3 is not None and not current.s3.prefix:
+            raise StoreNotReadyError("the S3 store needs a prefix saved first")
+        if name == "bambuddy" and (not current.bambuddy_url or current.library_folder_id is None):
+            raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+    settings = RenderSettingsSource(pool, defaults)
+    settings.seed(current)
+    async with AsyncExitStack() as stack:
+        for name in (target, source):
+            stack.push_async_callback(build_backend(name, current, settings, pool).aclose)
 
 
 def migrate_activity(pool: Pool, defaults: Settings) -> Callable[..., Any]:

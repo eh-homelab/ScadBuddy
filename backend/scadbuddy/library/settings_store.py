@@ -183,6 +183,9 @@ class StoreNotReadyError(ValueError):
 S3_NOT_READY = (
     "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
 )
+BAMBUDDY_NOT_READY = (
+    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
+)
 
 
 class S3Settings(BaseModel):
@@ -757,10 +760,7 @@ class SettingsStore:
             url = changes.get("bambuddy_url", current.bambuddy_url)
             inbox = changes.get("library_folder_id", current.library_folder_id)
             if not url or inbox is None:
-                raise StoreNotReadyError(
-                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                    " saved first"
-                )
+                raise StoreNotReadyError(BAMBUDDY_NOT_READY)
         if changes.get("store_backend") == "s3":
             current = self.load()
             if _s3_settings(lambda name: changes.get(name, getattr(current, name))) is None:
@@ -829,10 +829,7 @@ class SettingsStore:
         if backend == "bambuddy" and (
             not merged("bambuddy_url") or merged("library_folder_id") is None
         ):
-            raise StoreNotReadyError(
-                "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                " saved first"
-            )
+            raise StoreNotReadyError(BAMBUDDY_NOT_READY)
         if backend == "s3" and _s3_settings(merged) is None:
             raise StoreNotReadyError(S3_NOT_READY)
 
