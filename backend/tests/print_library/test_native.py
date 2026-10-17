@@ -337,3 +337,12 @@ async def test_a_3mf_with_only_a_cover_lists_with_a_thumbnail(
     [row] = await native.library_listing(folder_id=None)
     assert row.thumbnail_path is not None
     assert await native.thumbnail(f.id, None) == cover
+
+
+async def test_a_cover_past_the_cap_is_no_thumbnail(native: NativeLibrary, tmp_path: Path) -> None:
+    plain = tmp_path / "big-cover.3mf"
+    with zipfile.ZipFile(plain, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+        z.writestr("Metadata/thumbnail.png", b"\0" * (9 << 20))
+    f = await upload(native, plain)
+    assert not f.has_thumbnail and await native.thumbnail(f.id, None) is None

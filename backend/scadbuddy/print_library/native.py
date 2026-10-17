@@ -78,7 +78,9 @@ def _read_upload(data: BinaryIO) -> tuple[list[LibraryPlate], bool]:
             settings = (
                 archive.getinfo(MODEL_SETTINGS_NAME) if MODEL_SETTINGS_NAME in names else None
             )
-        cover = COVER_NAME in names
+            cover = (
+                COVER_NAME in names and archive.getinfo(COVER_NAME).file_size <= MAX_THUMBNAIL_BYTES
+            )
         if settings is None or settings.file_size > MAX_PLATE_SETTINGS_BYTES:
             return [], cover
         data.seek(0)
