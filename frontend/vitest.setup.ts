@@ -34,7 +34,25 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
-beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
+beforeAll(() => {
+  server.listen({ onUnhandledFrame: 'error' })
+  // MSW intercepts at the socket, and a request can slip past it to the real network:
+  // one on a kept-alive socket, or the one after an aborted request
+  // (mswjs/interceptors#862, still in 0.45.8). Nothing listens there, so the page shows
+  // "could not reach its server" (#3936, #3935). It is a race and shows under load. The
+  // connection was refused, so nothing was sent: send it again, and MSW sees it.
+  const intercepted = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await intercepted(input instanceof Request ? input.clone() : input, init)
+      } catch (error) {
+        const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
+        if (!refused || init?.signal?.aborted || attempt === 3) throw error
+      }
+    }
+  }
+})
 afterEach(async () => {
   // Unmounted here, before the tick below, rather than in Testing Library's own hook,
   // which runs after this one: a page left dirty (Settings, useLeaveGuard) takes its
