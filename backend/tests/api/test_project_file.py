@@ -625,10 +625,8 @@ def test_the_default_project_is_set_only_in_settings(client: TestClient) -> None
     def last() -> Any:
         return client.get("/api/v1/print/projects").json()["last_project_id"]
 
-    assert client.put("/api/v1/print/projects/last", json={"project_id": PROJECT}).status_code in (
-        404,
-        405,
-    )
+    removed = client.put("/api/v1/print/projects/last", json={"project_id": PROJECT})
+    assert removed.status_code == 404, removed.text
     assert last() is None
     remember_project(client, PROJECT)
     assert last() == PROJECT

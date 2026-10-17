@@ -245,7 +245,7 @@ describe('SessionTouched', () => {
       // One print: its run and its queue item.
       row({ type: 'print_run', id: 'run-1', before: 'out-1', tool: 'print_output' }),
       row({ type: 'print', id: '77', before: 'out-1', tool: 'print_output' }),
-      row({ type: 'setting', id: 'last_project', action: 'modified', tool: 'set_last_project' }),
+      row({ type: 'setting', id: 'bed_type:2', action: 'modified', tool: 'remember_printer_bed_type' }),
       row({ type: 'unclassified', id: null, tool: 'browser_click' }),
     ])
     renderPage(<SessionTouched sessionId="sess-sum" />)

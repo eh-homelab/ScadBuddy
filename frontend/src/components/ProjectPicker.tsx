@@ -235,7 +235,7 @@ export function ProjectPicker({
    * #317 — the other picker on the page may have just created the project in view, which
    * this one's list predates. Re-read once per such id across every picker sharing the
    * list (`rereadFor`). The re-read only refreshes the list: `value` is the parent's, and
-   * the remembered `last_project_id` may still be the old project.
+   * the default project (`last_project_id`) is unchanged by a choice (#3188).
    */
   const missing =
     choices !== null && folderId === null && value !== null && current === undefined ? value : null

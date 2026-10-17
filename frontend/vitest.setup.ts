@@ -1,12 +1,14 @@
+import path from 'node:path'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, configure, getConfig } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, vi } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
+import { resending } from './src/test/resend'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -34,24 +36,21 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
+/** `fetch` as MSW patched it, put back once the file is done. */
+let mswFetch: typeof fetch | undefined
 beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
-  // MSW intercepts at the socket, and a request can slip past it to the real network:
-  // one on a kept-alive socket, or the one after an aborted request
-  // (mswjs/interceptors#862, still in 0.45.8). Nothing listens there, so the page shows
-  // "could not reach its server" (#3936, #3935). It is a race and shows under load. The
-  // connection was refused, so nothing was sent: send it again, and MSW sees it.
+  // MSW lets some requests through to the real network; `resending` sends them again.
   const intercepted = globalThis.fetch
-  globalThis.fetch = async (input, init) => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await intercepted(input instanceof Request ? input.clone() : input, init)
-      } catch (error) {
-        const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
-        if (!refused || init?.signal?.aborted || attempt === 3) throw error
-      }
-    }
-  }
+  mswFetch = intercepted
+  // The test in the line, as files run in parallel and their stderr interleaves. One
+  // refused in a file's own hooks has no test (`> -`); "outside a test" means not even
+  // a file. Neither is a fault.
+  globalThis.fetch = resending(intercepted, (line) => {
+    const { testPath, currentTestName } = expect.getState()
+    const file = testPath ? path.relative(process.cwd(), testPath) : 'outside a test'
+    process.stderr.write(`${line} [${file} > ${currentTestName ?? '-'}]\n`)
+  })
 })
 afterEach(async () => {
   // Unmounted here, before the tick below, rather than in Testing Library's own hook,
@@ -74,7 +73,11 @@ afterEach(async () => {
   // `pointer-events: none`, and the next test could click nothing (#3671).
   document.body.style.pointerEvents = ''
 })
-afterAll(() => server.close())
+afterAll(() => {
+  // MSW's fetch back first, so `server.close()` then finds its own and restores the real one.
+  if (mswFetch) globalThis.fetch = mswFetch
+  server.close()
+})
 
 if (!globalThis.matchMedia) {
   globalThis.matchMedia = ((query: string) => ({
