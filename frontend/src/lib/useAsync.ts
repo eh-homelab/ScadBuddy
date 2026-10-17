@@ -82,16 +82,16 @@ export function useAsync<T>(
   /** The topics the subscription effect below follows now, or '' when none. */
   const followed = useRef('')
   /** The current key's newest read that is shown: what it saw (#1039). */
-  const firstRead = useRef<ReadRecord | undefined>(undefined)
+  const shownRead = useRef<ReadRecord | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
-    firstRead.current = undefined
+    shownRead.current = undefined
     const read = () => {
       const mine = ++sequence.current
       const scope = new ReadScope()
       let shown: (ok: boolean) => void = () => {}
-      firstRead.current = { scope, shown: new Promise((resolve) => (shown = resolve)) }
+      shownRead.current = { scope, shown: new Promise((resolve) => (shown = resolve)) }
       inReadScope(scope, load)
         .then((data) => {
           const current = !cancelled && sequence.current === mine
@@ -168,7 +168,7 @@ export function useAsync<T>(
           if (decide && !decide(data)) return
           setSnapshot({ key: at, data })
           // A later confirmation (a reconnect's) asks from what is on screen now.
-          if (latest.current.key === at) firstRead.current = { scope, shown: Promise.resolve(true) }
+          if (latest.current.key === at) shownRead.current = { scope, shown: Promise.resolve(true) }
         },
         (cause: unknown) => {
           if (!mounted.current || sequence.current !== mine) return
@@ -183,7 +183,7 @@ export function useAsync<T>(
   }, [])
 
   const staleFor = useCallback(
-    (topic: string, confirmation: Confirmation) => readAgain(firstRead.current, topic, confirmation),
+    (topic: string, confirmation: Confirmation) => readAgain(shownRead.current, topic, confirmation),
     [],
   )
   /** A topic's subscription is live: read again unless the first read is known current. */
