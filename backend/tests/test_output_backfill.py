@@ -75,22 +75,36 @@ async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
     return store, old, job, written
 
 
-async def test_a_backfill_cleared_as_it_is_read_reads_as_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("name", "read", "none"),
+    [
+        (outputs_module.BACKFILL_NAME, OutputStore.backfill, None),
+        (outputs_module.PARAMS_NAME, OutputStore.params, {}),
+        (outputs_module.BOM_NAME, OutputStore.bom, []),
+        (outputs_module.MANIFEST_NAME, OutputStore.manifest, []),
+        (outputs_module.ARRANGED_NAME, OutputStore.arranged_from, []),
+        (outputs_module.RECORD_NAME, OutputStore.record, None),
+    ],
+)
+async def test_a_file_cleared_as_it_is_read_reads_as_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    read: Callable[[OutputStore, str], object],
+    none: object,
 ) -> None:
-    """The attach clears ``backfill.json`` on its own thread: a read that found it there
-    and then could not open it saw it cleared, not an error (a CI flake on #3975)."""
+    """The attach clears ``backfill.json`` on its own thread, and a read that found it
+    and then could not open it raised (a CI flake on #3975); every reader reads once.
+
+    ``is_file`` answering yes for the gone file is what made a check-then-read fail
+    (main's, before the fix); the read-once readers never ask it, so here each must
+    read a missing file as none. Should a check come back, this fails."""
     store, old, job, _ = await _legacy_output(tmp_path)
     store.start_backfill(old.id, job.id)
-    (store.directory(old.id) / outputs_module.BACKFILL_NAME).unlink()
-    # Against the old check-then-read this forced the window; the read-once code never
-    # asks, so here it pins only that a cleared file reads as none. Keep it: it is what
-    # fails if the check comes back.
+    (store.directory(old.id) / name).unlink(missing_ok=True)
     is_file = Path.is_file
-    monkeypatch.setattr(  # it was there when looked for
-        Path, "is_file", lambda self: self.name == outputs_module.BACKFILL_NAME or is_file(self)
-    )
-    assert store.backfill(old.id) is None
+    monkeypatch.setattr(Path, "is_file", lambda self: self.name == name or is_file(self))
+    assert read(store, old.id) == none
 
 
 @pytest.mark.requires_postgres
