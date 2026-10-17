@@ -15,6 +15,7 @@ import pytest
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy_durable.gate.activities import GateActivities
+from scadbuddy_durable.gate.canonical import response_hash
 from scadbuddy_durable.gate.ids import durable_request_id
 from scadbuddy_durable.gate.store import SYSTEM, OpenInput, ResolveInput, open_input, resolve_input
 
@@ -109,6 +110,19 @@ async def test_open_writes_the_row_and_its_events_once(agent_db: Conn) -> None:
     assert "input" not in entry
     cur = await agent_db.execute("SELECT status FROM ai_sessions WHERE id = %s", (sid,))
     assert await cur.fetchone() == ("waiting_approval",)
+
+
+async def test_resolve_keeps_the_hash_of_the_raw_response(agent_db: Conn) -> None:
+    sid = await _session(agent_db)
+    args = _open(sid)
+    await open_input(agent_db, args)
+    raw = {"kind": "approval", "decision": "approve"}
+    await resolve_input(
+        agent_db,
+        ResolveInput(args.request_id, "approved", ME, {"decision": "approve"}, raw_response=raw),
+    )
+    cur = await agent_db.execute("SELECT response_hash FROM ai_input_responses")
+    assert await cur.fetchone() == (response_hash({"decision": "approve", "kind": "approval"}),)
 
 
 async def test_resolve_records_the_outcome_events_and_audit(agent_db: Conn) -> None:

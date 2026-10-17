@@ -1,3 +1,4 @@
+import { responseHash } from '../src/gate/canonical.js'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import postgres, { type Sql } from 'postgres'
@@ -170,9 +171,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect((await events(sql, sid))[0]?.type).toBe('question.asked')
       const response = { answers: ['Red'] }
       await resolveInput(sql, { requestId: args.requestId, outcome: 'answered', responder: ME_RESPONDER, response })
-      const rows = await sql`SELECT response FROM ai_input_responses`
-      expect(rows.map((r) => ({ ...r }))).toEqual([{ response }])
+      const rows = await sql`SELECT response, response_hash FROM ai_input_responses`
+      expect(rows.map((r) => ({ ...r }))).toEqual([{ response, response_hash: null }])
       expect(await count(sql, 'ai_audit')).toBe(0)
+    })
+
+    it('keeps the hash of the raw response, key order aside (#3724)', async () => {
+      const sid = await newSession(sql)
+      const args = open(sid, 'run-1', 'answer')
+      await openInput(sql, args)
+      await resolveInput(sql, {
+        requestId: args.requestId,
+        outcome: 'answered',
+        responder: ME_RESPONDER,
+        response: { answers: ['Red'] },
+        rawResponse: { kind: 'answer', choice: 'Red' },
+      })
+      const [row] = await sql`SELECT response_hash FROM ai_input_responses`
+      expect(row?.response_hash).toBe(responseHash({ choice: 'Red', kind: 'answer' }))
     })
 
     it('two resolutions race and one wins', async () => {
@@ -339,7 +355,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
                    parent_principal, outside_reason, hops
             FROM ai_pending_input ORDER BY request_id`,
           responses: await s`
-            SELECT request_id, session_id, kind, outcome, response, responder, reason, hops
+            SELECT request_id, session_id, kind, outcome, response, response_hash, responder, reason, hops
             FROM ai_input_responses ORDER BY request_id`,
           events: (await s<{ session_id: string; seq: string; event: string }[]>`
             SELECT session_id, seq, event FROM ai_session_events ORDER BY session_id, seq`).map((r) => ({ ...r })),
@@ -396,7 +412,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
               attention: { reason: 'done', on_timeout: 'proceed' },
             },
           },
-          { op: 'resolve', args: { requestId: durableRequestId(s1, 'r1', 'toolu_c'), outcome: 'answered', responder: ME, response: { answers: ['Red'] } } },
+          { op: 'resolve', args: { requestId: durableRequestId(s1, 'r1', 'toolu_c'), outcome: 'answered', responder: ME, response: { answers: ['Red'] }, rawResponse: { kind: 'answer', choice: 'Red' } } },
           // a flow turn's escalating entry, resolved by a session; and a Reset's cancel
           { op: 'open', args: o(s2, 'r1', 'toolu_d', flow) },
           { op: 'resolve', args: { requestId: durableRequestId(s2, 'r1', 'toolu_d'), outcome: 'denied', responder: { kind: 'session', id: s1, label: 'Parent' }, reason: 'no' } },

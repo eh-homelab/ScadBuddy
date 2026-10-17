@@ -1,6 +1,7 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
+import { responseHash } from './canonical.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
@@ -33,6 +34,17 @@ export type DurableGateOptions = {
   timeoutMs?: number
   /** How long `cancel_input` may take before its caller decides without it (spec: 10 s). */
   cancelTimeoutMs?: number
+}
+
+/**
+ * The `respond` Update's ID (#3717): the same request, response, responder and role
+ * always give the same ID, so a retry after a 503 joins the Update the workflow
+ * already accepted and gets its outcome; any difference is a new Update, which the
+ * validator still judges. A hash, so the ID stays far inside Temporal's length limit
+ * whatever the request id or response holds.
+ */
+export function respondUpdateId(args: RespondArgs): string {
+  return `respond-${responseHash([args.request_id, args.response, args.responder, args.role])}`
 }
 
 function refusalOf(err: unknown): RespondRefusal | undefined {
@@ -75,7 +87,7 @@ export class DurableGate {
   /** Answers one entry; the workflow's validator may refuse it (RespondRefusal). */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args] }))
+    return this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId: respondUpdateId(args) }))
   }
 
   /**

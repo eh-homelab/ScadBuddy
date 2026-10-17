@@ -11,6 +11,7 @@ import { QuestionError } from '../questions/service.js'
 import type { SessionManager } from '../sessions/manager.js'
 import { canSee, type InputOutcome, type Owner, PROTOCOL_VERSION } from '../sessions/protocol.js'
 import { approvalEntry, questionEntry } from '../gate/classic.js'
+import { responseHash } from '../gate/canonical.js'
 import { DurableUnavailable } from '../gate/durable.js'
 import type { PendingInputEntry } from '../gate/projection.js'
 import { roleOf } from '../gate/role.js'
@@ -367,11 +368,36 @@ async function respondDurable(
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
-    if (err instanceof RespondRefusal) throw refused(err)
+    if (err instanceof RespondRefusal) {
+      // A retry after the run continued as new (#3717): the Update ID is per run, so the
+      // new run refuses a decision the old one took. The same decision by the same
+      // responder is that decision's outcome, read from the record, not a refusal.
+      if (err.code === 'resolved' || err.code === 'stale') {
+        const done = await repeated(sessions, requestId, body, principal)
+        if (done) return done
+      }
+      throw refused(err)
+    }
     if (err instanceof WorkflowNotFoundError) throw stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
   }
+}
+
+/**
+ * A request already decided exactly as `body` says, by `principal`: its recorded outcome. An
+ * approval is the same when its decision is; an answer when the hash of the response
+ * the person sent (`ai_input_responses.response_hash`, #3724) is.
+ */
+async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
+  const done = await sessions.projection.recorded(requestId)
+  if (!done || done.kind !== body.kind) return undefined
+  if (done.responder.kind !== principal.kind || done.responder.id !== principal.id) return undefined
+  const same =
+    body.kind === 'approval'
+      ? (done.response as { decision?: string } | null)?.decision === body.decision
+      : done.responseHash !== null && done.responseHash === responseHash(body)
+  return same ? { id: requestId, kind: done.kind, outcome: done.outcome } : undefined
 }
 
 export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDeps): void {
