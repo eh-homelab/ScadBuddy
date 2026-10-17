@@ -164,6 +164,8 @@ describe('AnalyzerPanel', () => {
   })
 
   it('names the plate the mesh checks read when several plates are chosen (#3762 review)', async () => {
+    // `allPlates` only shows the note (the dialog sets it for any print of more than one
+    // plate); the plate and the "each chosen plate" wording come from the request.
     renderPanel({ allPlates: true, request: { ...request, plate_id: 2, plate_ids: [2, 3] } })
     await screen.findByTestId('diagnostic-SB1003')
     expect(screen.getByTestId('print-checks')).toHaveTextContent(

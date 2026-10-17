@@ -9,6 +9,10 @@ source, plate, model or option is a substitution, not a narrowing, and an agent 
 arguments carry no meaning ScadBuddy could judge smaller, so a tool call is never
 narrowed (its parent denies it or passes it up). A field left out is the same as one
 sent as null.
+
+The grant reads a print's `plate_ids` more strictly than the print route does
+(`flow_grants._chosen_plates`): anything but a non-empty list of whole plate numbers,
+`["3"]` or `[2.0]` included, is outside the grant and goes to a person.
 """
 
 from __future__ import annotations

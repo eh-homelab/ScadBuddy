@@ -892,6 +892,8 @@ def fold_plates(request: _Plated) -> None:
     stored request and its ``batch_request_id``) read the same before and after the
     fold. Only a one-plate list, which leaves ``plate_ids`` empty, marks ``plate_id``
     set, so a dump re-read names the plate that prints."""
+    # Called from an `after` validator: safe only while neither model sets
+    # `validate_assignment`, which would run the validator again on each assignment.
     folded = one_plate_folded(request.plate_id, request.all_plates, request.plate_ids)
     if folded == (request.plate_id, request.plate_ids):
         return

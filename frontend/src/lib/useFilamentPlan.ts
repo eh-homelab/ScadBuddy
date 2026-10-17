@@ -161,6 +161,8 @@ export function useFilamentPlan(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
+    // `latest` and `latestPlate` are stable refs, listed for exhaustive-deps, which cannot
+    // see through `useLatest`; `chosenPlates` is what re-runs this on a change of plates.
   }, [choices, key, latest, latestPlate, chosenPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
