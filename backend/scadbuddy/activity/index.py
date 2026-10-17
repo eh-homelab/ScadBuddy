@@ -165,7 +165,8 @@ _SUBJECT_KEY = sql.SQL(
 
 def subject_key(subject: str) -> str:
     """``subject`` as :data:`_SUBJECT_KEY` reads it: the key one subject is counted and
-    filtered under, whichever spelling wrote it."""
+    filtered under, whichever spelling wrote it. The msw mock's ``subjectKey`` copies it
+    too (see the note above ``_LIBRARY_RUN``)."""
     if match := _LIBRARY_RUN.fullmatch(subject):
         return f"library:{match[1]}"
     if _OUTPUT_ID.fullmatch(subject):
