@@ -271,11 +271,14 @@ class BlobIndex:
         return _stat(row) if row is not None else None
 
     def shares_backend_id(self, backend: str, backend_id: str) -> bool:
+        """Whether a row names the object, as its own or as its migrated copy: a copy
+        still running across the flip is recorded only beside its row."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
-                " AS shared",
-                (backend, backend_id),
+                "SELECT EXISTS (SELECT 1 FROM store_blobs"
+                " WHERE (backend, backend_id) = (%s, %s)"
+                " OR (migrated_backend, migrated_backend_id) = (%s, %s)) AS shared",
+                (backend, backend_id, backend, backend_id),
             ).fetchone()
         return bool(row and row["shared"])
 

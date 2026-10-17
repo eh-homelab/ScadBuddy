@@ -444,3 +444,21 @@ async def test_a_row_left_on_the_old_backend_is_missing_not_an_error(
         await store.aclose()
         assert isinstance(store.backend, S3ContentBackend)
         await store.backend.aclose()
+
+
+async def test_a_copy_recorded_only_beside_its_row_counts_as_recorded(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend
+) -> None:
+    """A copy still running across the flip leaves its object named only in the
+    migrated columns; the unrecorded sweep must not take it for an orphan."""
+    src = local_content(tmp_path / "a", pool)
+    ref = await src.put("piece", b"beside", name="b", scope=SCOPE)
+    index = BlobIndex(pool)
+    try:
+        backend_id = await target.upload("piece", b"beside", name="b", scope=SCOPE)
+        assert not index.shares_backend_id("s3", backend_id)
+        assert index.mark_migrated(f"piece-{ref.sha256}", ref, backend="s3", backend_id=backend_id)
+        assert index.shares_backend_id("s3", backend_id)
+        assert not index.shares_backend_id("local", backend_id)
+    finally:
+        await target.aclose()
