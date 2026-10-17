@@ -1,4 +1,4 @@
-import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
+import { ExternalStorage, type Payload, type PayloadCodec, type SerializationContext, type StorageDriver } from '@temporalio/common'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -260,9 +260,13 @@ export function referenceOf(payload: Payload): { subject: string; digest: string
     driverName?: unknown
     claimData?: { subject?: unknown; digest?: unknown }
   }
-  const subject = ref.claimData?.subject
-  const digest = ref.claimData?.digest
   if (ref.driverName !== STORE_DRIVER) throw new SealError(`a payload is stored by an unknown driver ${String(ref.driverName)}`)
+  return claimOf(ref.claimData ?? {})
+}
+
+/** The session and digest a claim names, checked: it becomes a path on the data share. */
+function claimOf(claim: { subject?: unknown; digest?: unknown }): { subject: string; digest: string } {
+  const { subject, digest } = claim
   if (typeof subject !== 'string' || !SESSION.test(subject) || typeof digest !== 'string' || !DIGEST.test(digest)) {
     throw new SealError("a stored payload's reference names no session or digest")
   }
@@ -313,9 +317,7 @@ export class SubjectPayloadCodec implements PayloadCodec {
       const ref = referenceOf(p)
       if (ref) {
         if (!this.#store) throw new SealError(`a payload of ${ref.subject} is stored by reference, and no store is set`)
-        const data = await this.#store.get(ref.subject, ref.digest)
-        if (!data) throw new SubjectForgotten(`the stored payload ${ref.digest.slice(0, 12)} of ${ref.subject} is gone: forgotten?`)
-        p = { metadata: { encoding: encoder.encode(SUBJECT_ENCODING), [SUBJECT_METADATA]: encoder.encode(ref.subject) }, data }
+        p = storedPayload(ref, await this.#store.get(ref.subject, ref.digest))
       }
       const subject = sealedSubject(p)
       if (subject === undefined) {
@@ -327,6 +329,43 @@ export class SubjectPayloadCodec implements PayloadCodec {
     }
     return out
   }
+}
+
+/**
+ * The data converter of every client and worker that reads durable subjects' payloads
+ * (main.ts): the codec, and with a `store` the payloads it keeps by reference.
+ */
+export function subjectDataConverter(
+  keys: PayloadKeys,
+  store?: PayloadStore,
+): { payloadCodecs: PayloadCodec[]; externalStorage?: ExternalStorage } {
+  const payloadCodecs = [new SubjectPayloadCodec(keys, store)]
+  // The SDK walks every inbound payload for references before any codec runs, and
+  // refuses one (TMPRL1105) unless a driver is configured: a fork's query pages over
+  // OFFLOAD_BYTES came back refused (#3739). Outbound stays the codec's (selector null).
+  return store ? { payloadCodecs, externalStorage: new ExternalStorage({ drivers: [storeDriver(store)], driverSelector: () => null }) } : { payloadCodecs }
+}
+
+/** Reads what a reference names back as the sealed payload it was; the codec opens it. */
+function storeDriver(store: PayloadStore): StorageDriver {
+  return {
+    name: STORE_DRIVER,
+    type: 'scadbuddy.file',
+    store: () => Promise.reject(new SealError('the codec stores payloads, not External Storage')),
+    retrieve: (_context, claims) =>
+      Promise.all(
+        claims.map(async ({ claimData }) => {
+          const ref = claimOf(claimData)
+          return storedPayload(ref, await store.get(ref.subject, ref.digest))
+        }),
+      ),
+  }
+}
+
+/** A stored payload as the sealed payload it was, or SubjectForgotten when it is gone. */
+function storedPayload(ref: { subject: string; digest: string }, data: Uint8Array | undefined): Payload {
+  if (!data) throw new SubjectForgotten(`the stored payload ${ref.digest.slice(0, 12)} of ${ref.subject} is gone: forgotten?`)
+  return { metadata: { encoding: encoder.encode(SUBJECT_ENCODING), [SUBJECT_METADATA]: encoder.encode(ref.subject) }, data }
 }
 
 /** Re-wraps every payload key sealed under `previous` to `current` (key rotation, main.ts). */
