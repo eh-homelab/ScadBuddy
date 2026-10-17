@@ -504,9 +504,11 @@ class OutputStore:
             path = self.directory(output_id) / BACKFILL_NAME
         except OutputNotFoundError:
             return None
-        if not path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:  # none, or the attach just cleared it
             return None
-        return BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+        return BackfillState.model_validate_json(text)
 
     def start_backfill(self, output_id: str, job_id: str) -> None:
         _replace(

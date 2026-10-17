@@ -75,6 +75,18 @@ async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
     return store, old, job, written
 
 
+async def test_a_backfill_cleared_as_it_is_read_reads_as_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attach clears ``backfill.json`` on its own thread: a read that found it there
+    and then could not open it saw it cleared, not an error (a CI flake on #3975)."""
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    (store.directory(old.id) / outputs_module.BACKFILL_NAME).unlink()
+    monkeypatch.setattr(Path, "is_file", lambda self: True)  # it was there when looked for
+    assert store.backfill(old.id) is None
+
+
 @pytest.mark.requires_postgres
 async def test_a_finished_rerender_gives_the_output_its_manifest_and_holds(
     tmp_path: Path, pg_conninfo: str
