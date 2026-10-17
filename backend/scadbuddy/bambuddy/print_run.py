@@ -1673,7 +1673,9 @@ async def plan_run(
                 "process preset for the chosen nozzle.",
             )
         plan = SlicePlan(
-            whole_file=source.slices_whole_file,
+            # A map chosen by hand is read only by a slice of the whole file (#3955).
+            whole_file=source.slices_whole_file
+            or (nozzle_plan is not None and nozzle_plan.by_hand),
             printer_preset=resolved.printer_preset,
             process_preset=resolved.process_preset,
             filament_presets=resolved.filament_presets,

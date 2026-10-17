@@ -110,11 +110,13 @@ export function NozzlePlanStep({ plan, sides, onSide }: StepProps) {
           <p className="text-xs text-muted-foreground">The Filament Track Switch feeds any spool to either nozzle.</p>
         )}
         {/* #2737 review: say it here, before a slice lands to show it; only for a plan on both
-            sides, as one held to a single side is never regrouped. */}
+            sides, as one held to a single side is never regrouped. #3955: a side chosen by
+            hand pins every filament where this plan puts it. */}
         {new Set((plan?.slots ?? []).map((slot) => slot.side)).size > 1 && (
           <p className="text-xs text-muted-foreground" data-testid="nozzle-side-hint">
-            The slicer groups filaments itself to cut purging, so it may put one on the other side: once a single
-            plate is chosen and sliced, its preview shows where each went.
+            {(plan?.slots ?? []).some((slot) => sides[String(slot.slot_id)])
+              ? 'With a side chosen here, the slice keeps every filament on the side shown.'
+              : 'Left on Automatic, the slicer groups filaments itself to cut purging, so it may put one on the other side: choose a side to keep it there.'}
           </p>
         )}
       </CardContent>

@@ -56,10 +56,17 @@ describe('NozzlePlanStep (#2166)', () => {
     expect(screen.queryByTestId('nozzle-side-hint')).toBeNull()
   })
 
-  it('says the slicer may not keep a side set here (#2737 review)', () => {
-    render(<NozzlePlanStep plan={plan} sides={{ '1': 'L' }} onSide={vi.fn()} />)
+  it('says the slicer groups filaments itself while every side is Automatic (#2737 review)', () => {
+    render(<NozzlePlanStep plan={plan} sides={{}} onSide={vi.fn()} />)
     expect(screen.getByTestId('nozzle-side-hint')).toHaveTextContent(
-      'The slicer groups filaments itself to cut purging, so it may put one on the other side',
+      'Left on Automatic, the slicer groups filaments itself to cut purging, so it may put one on the other side: choose a side to keep it there.',
     )
+  })
+
+  it('says a side set here is kept (#3955)', () => {
+    render(<NozzlePlanStep plan={plan} sides={{ '1': 'L' }} onSide={vi.fn()} />)
+    const hint = screen.getByTestId('nozzle-side-hint')
+    expect(hint).toHaveTextContent('With a side chosen here, the slice keeps every filament on the side shown.')
+    expect(hint).not.toHaveTextContent('groups filaments itself')
   })
 })

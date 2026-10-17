@@ -83,7 +83,7 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     expect(screen.getByTestId('preview-side-1')).toHaveTextContent('right nozzle')
   })
 
-  it('says a side chosen by hand was not kept (#2703)', () => {
+  it('says plainly that a side chosen by hand was not kept, with no reason given (#2703, #3955)', () => {
     const byHand = { ...plan, slots: plan.slots!.map((slot) => (slot.slot_id === 1 ? { ...slot, by_hand: true } : slot)) }
     pane(
       slice([
@@ -93,9 +93,11 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
       ]),
       byHand,
     )
-    expect(screen.getByTestId('slice-departures')).toHaveTextContent(
-      'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left you chose: it groups filaments itself to cut purging, so a side set by hand is not kept.',
+    const notes = screen.getByTestId('slice-departures')
+    expect(notes).toHaveTextContent(
+      'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left you chose. Check the sides before printing.',
     )
+    expect(notes).not.toHaveTextContent('a side set by hand is not kept')
   })
 
   it("warns that a spool moved to the other side may not reach it without the Track Switch (#2737 review)", () => {
