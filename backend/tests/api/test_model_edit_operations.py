@@ -22,6 +22,7 @@ from httpx import Response
 from scadbuddy.api import model_files
 from scadbuddy.api import models as models_api
 from scadbuddy.api import operations as operations_api
+from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.upstream import MergeConflictError, MergePlan, MergePreview
 from scadbuddy.operations.claims import ClaimStore
@@ -57,7 +58,7 @@ def _accepted(send: Callable[[dict[str, str]], Response]) -> Response:
     # included) fails on its own text.
     while (
         (answer := send(key)).status_code == 503
-        and answer.headers.get("content-type", "").startswith("application/problem+json")
+        and answer.headers.get("content-type", "").startswith(PROBLEM_MEDIA_TYPE)
         and answer.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM
     ):
         assert time.monotonic() < resend_until, answer.text
