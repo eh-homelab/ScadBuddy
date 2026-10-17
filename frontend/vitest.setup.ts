@@ -7,6 +7,7 @@ import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
+import { resending } from './src/test/resend'
 
 // A find*/waitFor re-runs its query on every DOM change, and by default each miss
 // builds its error with prettyDOM of the whole document: on a page of ~1000 elements
@@ -38,32 +39,9 @@ getComputedStyle(document.documentElement)
 let mswFetch: typeof fetch | undefined
 beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
-  // MSW intercepts at the socket, and a request can slip past it to the real network:
-  // one on a kept-alive socket, or the one after an aborted request
-  // (mswjs/interceptors#862, still in 0.45.8). Nothing listens there, so the page shows
-  // "could not reach its server" (#3936, #3935). It is a race and shows under load. The
-  // connection was refused, so nothing was sent: send it again, and MSW sees it.
+  // MSW lets some requests through to the real network; `resending` sends them again.
   const intercepted = globalThis.fetch
-  globalThis.fetch = async (input, init) => {
-    // fetch itself lets init.signal override the Request's own, so this does too.
-    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-    const url = input instanceof Request ? input.url : String(input)
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await intercepted(input instanceof Request ? input.clone() : input, init)
-      } catch (error) {
-        const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
-        if (!refused || signal?.aborted) throw error
-        if (attempt === 3) {
-          process.stderr.write(`vitest.setup: gave up on ${url} after 3 refused tries (mswjs/interceptors#862)\n`)
-          throw error
-        }
-        // On stderr rather than console.warn, which tests spy on: a line here means the
-        // upstream escape still happens, and this wrapper is still needed.
-        process.stderr.write(`vitest.setup: resending ${url}, which MSW let through (mswjs/interceptors#862)\n`)
-      }
-    }
-  }
+  globalThis.fetch = resending(intercepted, (line) => process.stderr.write(`${line}\n`))
   mswFetch = intercepted
 })
 afterEach(async () => {
