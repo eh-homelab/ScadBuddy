@@ -1225,11 +1225,11 @@ async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectC
     """Every Bambuddy project, with the library folder that belongs to it (#79), and
     every library folder of no project, a destination of its own (#3651).
 
-    Also the project the last send went to, the Settings default project and sort, and
-    when each was last touched, so the picker opens where it was left. ScadBuddy models
-    no relationship between a model and a project: which prints belong to a project is
-    on the project's own page, and keeping a second answer here would be a copy that
-    goes stale.
+    Also the default project (``last_project_id``), which only Settings changes (#3188),
+    the picker's sort, and when each destination was last touched. ScadBuddy models no
+    relationship between a model and a project: which prints belong to a project is on
+    the project's own page, and keeping a second answer here would be a copy that goes
+    stale.
     """
     settings = store.load()
     touches = await uploads.destination_touches()
@@ -1237,7 +1237,6 @@ async def get_projects(store: SettingsStoreDep, uploads: UploadsDep) -> ProjectC
         return await describe_projects(
             client,
             last_project_id=settings.last_project_id,
-            default_project_id=settings.default_project_id,
             sort=settings.destination_sort,
             touches=touches,
             inbox_id=settings.library_folder_id,
@@ -1273,25 +1272,6 @@ async def get_default_project(
             outputs=metas,
             library_file_ids=list(dict.fromkeys(library_file_id or [])),
         )
-
-
-class LastProject(BaseModel):
-    """The project the pickers open on (#317); ``null`` is "No project"."""
-
-    project_id: int | None = None
-
-
-@router.put("/projects/last", response_model=LastProject, summary="Remember the chosen project")
-async def put_last_project(
-    body: LastProject, store: SettingsStoreDep, uploads: UploadsDep
-) -> LastProject:
-    """The project chosen on the Customize page or in the print dialog, which both open
-    on next (``last_project_id``). ScadBuddy's own preference: it needs no Bambuddy.
-    Choosing a project touches it (#3651), for the picker's "last touched" order."""
-    settings = await asyncio.to_thread(store.remember_project, body.project_id)
-    if body.project_id is not None:
-        await uploads.touch_destination("project", body.project_id)
-    return LastProject(project_id=settings.last_project_id)
 
 
 @router.post(

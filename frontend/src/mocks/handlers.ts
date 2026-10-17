@@ -14,7 +14,6 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  LastProject,
   ModelProjectPut,
   ModelProjects,
   CatalogueLibrary,
@@ -151,8 +150,6 @@ const state = {
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #3651 — the library folders of no project the destination picker offers. */
   folders: fixtures.destinationFolders.map((f) => ({ ...f })) as FolderView[],
-  /** #79 — per-model projects. No global fallback. */
-  lastProjectId: null as number | null,
   /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
   modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
@@ -168,6 +165,11 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  /**
+   * The slots each plate of an output uses, by output id then plate number, as the
+   * server reads them from the 3MF. Unset, plate N uses slot N.
+   */
+  plateSlots: {} as Record<string, Record<number, number[]>>,
   /** A template pipeline's outputs on every finished render of a slug; none unless set. */
   jobOutputs: {} as Record<string, NonNullable<Job['outputs']>>,
   renderColors: {} as Record<string, string[]>,
@@ -318,7 +320,6 @@ export function resetMockState(): void {
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.folders = fixtures.destinationFolders.map((f) => ({ ...f }))
-  state.lastProjectId = null
   state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
@@ -328,6 +329,7 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.plateSlots = {}
   state.jobOutputs = {}
   state.renderColors = {}
   state.mediaFiles.clear()
@@ -390,6 +392,18 @@ export function setMockMergeFiles(slug: string, files: MergeFiles): void {
  */
 export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
   state.plates[slug] = plates
+}
+
+/**
+ * The slots each plate of output `outputId` uses, `{plate: [slot, ...]}`, for the
+ * filament read (`GET /print/outputs/:id/filaments`). Unset, plate N uses slot N.
+ */
+export function setMockPlateSlots(outputId: string, slots: Record<number, number[]>): void {
+  state.plateSlots[outputId] = slots
+}
+
+function slotsOfPlate(outputId: string, plate: number): number[] {
+  return state.plateSlots[outputId]?.[plate] ?? [plate]
 }
 
 /** Every finished render of `slug` reports these outputs, as a template's pipeline does. */
@@ -484,15 +498,13 @@ export function mockLibraryOutput(fileId: number): string | undefined {
 export function mockDestinationState(): {
   projects: readonly ProjectView[]
   outputs: readonly Output[]
-  defaultProjectId: number | null
   lastProjectId: number | null
   inboxId: number | null
 } {
   return {
     projects: state.projects,
     outputs: state.outputs,
-    defaultProjectId: state.settings.default_project_id ?? null,
-    lastProjectId: state.lastProjectId,
+    lastProjectId: state.settings.last_project_id ?? null,
     inboxId: state.settings.library_folder_id ?? null,
   }
 }
@@ -3360,27 +3372,28 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
-    // #480 — like the server, each plate uses only some of the slots (here plate N uses
-    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
-    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
-    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
-    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
-    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
-    // `choices.filaments` payload instead of ever hitting this route. That assumption is
-    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
-    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
-    // instead of every other test's single-plate fixture silently losing slots.
+    // #480 — like the server, each plate uses only some of the slots (`setMockPlateSlots`;
+    // unset, plate N uses slot N, so plate 1 has only slot 1), and `all_plates` answers
+    // with the union of every plate's slots: an all-plates read differs from a plate-1
+    // read. This filters the shared `fixtures.filamentOptions` for every caller, not just
+    // the plate-2+/all-plates tests that motivate it — it stays safe only because
+    // useFilamentPlan.ts's shortcut for plate 1 alone (or no plate) seeds it from the
+    // bulk `choices.filaments` payload instead of ever hitting this route. That
+    // assumption is pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1
+    // without all plates" (#525 finding 3) — if it ever removes the shortcut, that test
+    // fails here instead of every other test's single-plate fixture silently losing slots.
     const rawPlateId = Number(search.get('plate_id') ?? 1)
     const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []
-    // #3652 — several plates answer with their slots alone.
+    // #3652 — several plates answer with the union of their own slots.
     const plateIds = search.getAll('plate_ids').map(Number)
+    const used = new Set(
+      (plateIds.length > 0 ? plateIds : [plateId]).flatMap((plate) =>
+        slotsOfPlate(output.id, plate),
+      ),
+    )
     const slots =
-      search.get('all_plates') === 'true'
-        ? every
-        : plateIds.length > 0
-          ? every.filter((slot) => plateIds.includes(slot.slot_id))
-          : every.filter((slot) => slot.slot_id === plateId)
+      search.get('all_plates') === 'true' ? every : every.filter((slot) => used.has(slot.slot_id))
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
@@ -3434,8 +3447,7 @@ export const handlers = [
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
     // #3651 — a library folder in place of a project is used as it is, under no project.
-    const projectId =
-      body.folder_id != null ? null : (body.project_id ?? state.settings.default_project_id ?? state.lastProjectId)
+    const projectId = body.folder_id != null ? null : (body.project_id ?? state.settings.last_project_id ?? null)
     const folderId =
       body.folder_id ??
       (projectId === null ? null : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null))
@@ -3508,8 +3520,7 @@ export const handlers = [
     HttpResponse.json({
       projects: state.projects,
       folders: state.folders,
-      last_project_id: state.lastProjectId,
-      default_project_id: state.settings.default_project_id ?? null,
+      last_project_id: state.settings.last_project_id ?? null,
       sort: state.settings.destination_sort ?? 'touched',
     } satisfies ProjectChoices),
   ),
@@ -3556,14 +3567,6 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
-  }),
-
-  // #317 — the project both pickers open on.
-  http.put(`${base}/print/projects/last`, async ({ request }) => {
-    const body = (await request.json()) as LastProject
-    state.lastProjectId = body.project_id ?? null
-    touchDestination(state.lastProjectId, null)
-    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
   }),
 
   // #1660 — the project each model was last filed into, per preset.
@@ -3631,7 +3634,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
-    const projectId = body.project_id ?? state.lastProjectId
+    const projectId = body.project_id ?? state.settings.last_project_id ?? null
     if (projectId === null) {
       return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
     }

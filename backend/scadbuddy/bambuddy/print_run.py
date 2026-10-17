@@ -61,6 +61,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     every_plate,
     family,
+    fold_plates,
     gather_plate_options,
     plates_named,
     queue_filaments,
@@ -245,6 +246,13 @@ class PrintRunRequest(BaseModel):
     def _one_destination(self) -> Self:
         if self.folder_id is not None and self.project_id is not None:
             raise ValueError("choose a project or a library folder, not both")
+        return self
+
+    @model_validator(mode="after")
+    def _one_plate_is_plate_id(self) -> PrintRunRequest:
+        # One chosen plate is that plate's print, under the key `plate_id` gives it
+        # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
+        fold_plates(self)
         return self
 
     def asked_plates(self) -> list[int] | None:
@@ -455,13 +463,11 @@ class ChoosesProject(Protocol):
 def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
     """The request's ``project_id`` when it sent one, ``null`` included ("No project");
     when it left the field out, none if it chose a library folder instead (#3651), else
-    the Settings default project, else the remembered ``last_project_id`` (#317)."""
+    the default project (``last_project_id``, #317), which only Settings changes (#3188)."""
     if "project_id" in request.model_fields_set:
         return request.project_id
     if getattr(request, "folder_id", None) is not None:
         return None
-    if settings.default_project_id is not None:
-        return settings.default_project_id
     return settings.last_project_id
 
 
@@ -469,17 +475,14 @@ async def resolve_project(
     client: BambuddyClient, request: ChoosesProject, settings: StoredSettings
 ) -> int | None:
     """:func:`chosen_project`, with a project left out resolved only to one Bambuddy still
-    has, as ``destinations.default_destination`` does: a Settings default or a last send's
-    project that was deleted falls through to the next, then to none, rather than failing
-    the print on its folder (#3651 review). A project the request names is used as sent."""
+    has, as ``destinations.default_destination`` does: a default project that was deleted
+    falls through to none rather than failing the print on its folder (#3651 review). A
+    project the request names is used as sent."""
     project_id = chosen_project(request, settings)
     if project_id is None or "project_id" in request.model_fields_set:
         return project_id
     known = {project.id for project in await client.projects()}
-    for fallback in (settings.default_project_id, settings.last_project_id):
-        if fallback is not None and fallback in known:
-            return fallback
-    return None
+    return project_id if project_id in known else None
 
 
 async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
@@ -1223,7 +1226,7 @@ async def prepare_run(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
     plate_warnings: list[FilamentWarning] = []
-    missing = [plate for plate in plate_ids if laid_out and plate not in laid_out]
+    missing = [plate for plate in plate_ids if plate not in laid_out] if laid_out else []
     if source.is_sliced and missing:
         # A sliced file is never refused (#2671): the dialog offers only its plates, so
         # a request for another one prints the rest, or the file's first, and says so.

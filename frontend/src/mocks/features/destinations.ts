@@ -6,15 +6,15 @@ import { mockLibraryFileFolder } from './library'
 /**
  * #3651 — the project some content opens on, as the backend decides it
  * (`bambuddy/destinations.py`): the one project all of it is in already, else the
- * Settings default, else the last send's, else none. A project no longer listed is never
- * a default.
+ * Settings default (`last_project_id`, #3188), else none. A project no longer listed is
+ * never a default.
  */
 
 const base = '/api/v1'
 
 export const handlers = [
   http.get(`${base}/print/projects/default`, ({ request }) => {
-    const { projects, outputs, defaultProjectId, lastProjectId, inboxId } = mockDestinationState()
+    const { projects, outputs, lastProjectId, inboxId } = mockDestinationState()
     // The mocked inbox (2) doubles as Reagan Keychain's folder, which a real one never is.
     const ownerOf = (folderId: number | null | undefined) =>
       folderId == null || folderId === inboxId
@@ -43,11 +43,9 @@ export const handlers = [
     const answer: DefaultDestination =
       together && known(shared)
         ? { project_id: shared, reason: 'content' }
-        : known(defaultProjectId)
-          ? { project_id: defaultProjectId, reason: 'settings' }
-          : known(lastProjectId)
-            ? { project_id: lastProjectId, reason: 'last' }
-            : { project_id: null, reason: 'none' }
+        : known(lastProjectId)
+          ? { project_id: lastProjectId, reason: 'settings' }
+          : { project_id: null, reason: 'none' }
     return HttpResponse.json(answer)
   }),
 ]

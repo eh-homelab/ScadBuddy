@@ -2,8 +2,9 @@
 
 One rule, wherever ScadBuddy asks where an output goes: when every piece of content in
 question (each output or library file being printed or arranged) is already in one
-Bambuddy project, that project; otherwise the project Settings names; otherwise the
-project the last send went to. The user can always choose another.
+Bambuddy project, that project; otherwise the default project Settings names
+(``last_project_id``, which only Settings changes, #3188). The user can always choose
+another.
 
 An output is in a project when a copy of it sits in the project's folder (Generate
 filed it, or a print uploaded it there, #316) or it was last printed into it. A library
@@ -25,9 +26,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 
-#: Why the default is what it is: the content's own project, the Settings default, the
-#: last send's project, or none at all ("No project").
-DefaultReason = Literal["content", "settings", "last", "none"]
+#: Why the default is what it is: the content's own project, the Settings default, or
+#: none at all ("No project").
+DefaultReason = Literal["content", "settings", "none"]
 
 #: Library files read from Bambuddy at once for one default (#3651 review): an Arrange
 #: of many files stays quick without flooding Bambuddy.
@@ -54,7 +55,7 @@ async def default_destination(
     Two reads of Bambuddy, the projects and the folder tree, plus one per library file,
     ``LIBRARY_READS`` at a time.
     A project that is no longer in Bambuddy is never a default, so a deleted Settings
-    default falls through to the last send's project rather than failing the print.
+    default falls through to "No project" rather than failing the print.
     """
     known = {project.id for project in await client.projects()}
     folder_project = {
@@ -95,8 +96,6 @@ async def default_destination(
         (project_id,) = shared
         if project_id in known:
             return DefaultDestination(project_id=project_id, reason="content")
-    if settings.default_project_id is not None and settings.default_project_id in known:
-        return DefaultDestination(project_id=settings.default_project_id, reason="settings")
     if settings.last_project_id is not None and settings.last_project_id in known:
-        return DefaultDestination(project_id=settings.last_project_id, reason="last")
+        return DefaultDestination(project_id=settings.last_project_id, reason="settings")
     return DefaultDestination()

@@ -140,6 +140,10 @@ ENDED_RPC = frozenset({RPCStatusCode.DEADLINE_EXCEEDED, RPCStatusCode.CANCELLED}
 #: The largest request a submit sends as a workflow input. Temporal refuses a payload
 #: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
 MAX_WORKFLOW_INPUT_BYTES = 1024 * 1024
+#: How long deleting a model waits for the renders it cancelled to settle (#2387): a
+#: cancelled run writes its `cancelled` row within a workflow task or two.
+CANCEL_SETTLE_WAIT = 10.0
+CANCEL_SETTLE_POLL = 0.25
 
 
 class RenderService:
@@ -165,6 +169,8 @@ class RenderService:
         #: Upsert §4.2's Search Attributes (registered on the cluster first).
         self.search_attributes = search_attributes
         self._listened_before = False
+        #: How long :meth:`cancel_renders_of` waits for its cancels to settle.
+        self.cancel_wait = CANCEL_SETTLE_WAIT
         self._boot: asyncio.Task[None] | None = None
         metrics.store_info.labels(projection.backend).set(1)
         self._publish_limits()
@@ -802,6 +808,61 @@ class RenderService:
         self.metrics.oldest_pending.set(
             max(0.0, (now() - oldest).total_seconds()) if oldest is not None else 0.0
         )
+
+    async def cancel_renders_of(self, slug: str) -> None:
+        """Cancel every unfinished job of ``slug`` (#2387), renders and arranges alike,
+        whoever holds a claim on it, and wait up to ``cancel_wait`` seconds for them to
+        settle. For deleting the model: a render of a model that is going is worth
+        nothing, and the one in the way is most often the preview its own page started.
+        Both kinds run `TemplatePipeline`, whose run cancelled by hand settles its row
+        `cancelled` (`_settle_failed`). A job submitted while this waits (the page
+        still open, previewing again) is cancelled too, on the next look. Whether any is
+        left is the delete's own check (`refuse_delete`), not an answer from here."""
+        cancelled: set[str] = set()
+        deadline: float | None = None
+        while True:
+            jobs = await asyncio.to_thread(self.store.unfinished, slug)
+            if not jobs:
+                return
+            for job in jobs:
+                if job.id not in cancelled:
+                    cancelled.add(job.id)
+                    await self._cancel_for_delete(job, slug)
+            now = asyncio.get_running_loop().time()
+            if deadline is None:
+                deadline = now + self.cancel_wait
+            elif now >= deadline:
+                return
+            await asyncio.sleep(CANCEL_SETTLE_POLL)
+
+    async def _cancel_for_delete(self, job: Job, slug: str) -> None:
+        if job.workflow_run_id is None:
+            # A row an older release inserted, whose workflow is `render-<id>`: every
+            # claim on it goes, not just one, as a model that is going has nobody left
+            # to render it for.
+            legacy = await asyncio.to_thread(self.store.drop_claims, job.id, slug=slug)
+            if legacy is not None:
+                self._settled(legacy, "superseded")
+            await self._cancel_workflow(job)
+            return
+        assert job.workflow_id is not None
+        handle = self.client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
+        try:
+            await handle.cancel(rpc_timeout=RPC_TIMEOUT)
+        except RPCError as error:
+            if not execution_gone(error):
+                logger.warning(
+                    "could not cancel a render of a model being deleted",
+                    extra={"job_id": job.id, "status": error.status.name},
+                )
+                self.metrics.store_errors.labels("cancel_workflow").inc()
+        except Exception as error:
+            logger.warning(
+                "could not cancel a render of a model being deleted",
+                extra={"job_id": job.id, "error_type": type(error).__name__},
+                exc_info=True,
+            )
+            self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _cancel_workflow(self, job: Job) -> None:
         try:

@@ -834,12 +834,15 @@ export function PrintPicker({
   /**
    * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
    * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
-   * "All plates" the filament checks read every plate; the mesh checks read plate 1.
-   * Not before the plan is seeded: an empty plan is judged once and then again (#2361).
+   * "All plates" the filament checks read every plate, and with several plates chosen
+   * just those (#3652); the mesh checks read the first plate that prints, which
+   * `AnalyzerPanel` says under the findings. Not before the plan is seeded: an empty
+   * plan is judged once and then again (#2361). Nor with no plate chosen, which nothing
+   * prints (#3762 review).
    */
   const printChoices = printChoicesOf(selection)
   const analysisRequest: AnalysisRequest | null =
-    choices && printChoices && planReady
+    choices && printChoices && planReady && !noPlate
       ? {
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
@@ -853,10 +856,11 @@ export function PrintPicker({
   /**
    * #755, #760 — what the run would refuse for these choices, before Print: the same
    * refusals the run makes before upload. An error holds Print, since the run would 422;
-   * one for choices since changed does not.
+   * one for choices since changed does not. None with no plate chosen: Print is held
+   * already, and plate 1 is not checked or sliced for a print that names no plate.
    */
   const checkRequest: PrintRunRequest | null =
-    choices && printChoices
+    choices && printChoices && !noPlate
       ? {
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },

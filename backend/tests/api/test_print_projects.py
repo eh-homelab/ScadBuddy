@@ -287,7 +287,7 @@ def test_a_deleted_settings_default_falls_through_rather_than_failing_the_print(
     client: TestClient, model: str
 ) -> None:
     """#3651 review — a run that leaves the project out, with a Settings default that
-    Bambuddy no longer has, files under the last send's project instead of failing on
+    Bambuddy no longer has, files under no project (the inbox) instead of failing on
     the deleted project's folder."""
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
@@ -296,18 +296,14 @@ def test_a_deleted_settings_default_falls_through_rather_than_failing_the_print(
     slice_routes()
     queue_route()
     _projects_and_folders()
-    respx.get(f"{API}/library/folders/by-project/7").mock(
-        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
-    )
     deleted = respx.get(f"{API}/projects/99").mock(return_value=httpx.Response(404))
-    assert client.put("/api/v1/print/projects/last", json={"project_id": 7}).status_code == 200
-    saved = client.put("/api/v1/settings", json={"default_project_id": 99})
+    saved = client.put("/api/v1/settings", json={"last_project_id": 99})
     assert saved.status_code == 200, saved.text
 
     body = run_print(client, output_id, json=run_request()).json()
 
-    assert (body["project_id"], body["folder_id"]) == (7, 9)
-    assert uploaded.calls.last.request.url.params["folder_id"] == "9"
+    assert body["project_id"] is None
+    assert uploaded.calls.last.request.url.params["folder_id"] == "2"
     assert not deleted.called
 
 
@@ -327,7 +323,7 @@ def test_the_default_is_the_project_the_content_is_in_else_the_settings_one(
     client: TestClient, model: str
 ) -> None:
     """#3651 — a library file in project 7's folder opens on 7; one in "Home", on the
-    project Settings names, else on the last send's."""
+    project Settings names (#3188), else on none."""
     configure(client)
     _projects_and_folders()
     for file_id, folder_id in ((61, 9), (62, 30)):
@@ -347,15 +343,10 @@ def test_the_default_is_the_project_the_content_is_in_else_the_settings_one(
 
     assert default(61) == {"project_id": 7, "reason": "content"}
     assert default(61, 62) == {"project_id": None, "reason": "none"}
-    assert client.put("/api/v1/print/projects/last", json={"project_id": 7}).status_code == 200
-    assert default(62) == {"project_id": 7, "reason": "last"}
-    saved = client.put(
-        "/api/v1/settings", json={"default_project_id": 7, "destination_sort": "name"}
-    )
+    assert default(62) == {"project_id": None, "reason": "none"}
+    saved = client.put("/api/v1/settings", json={"last_project_id": 7, "destination_sort": "name"})
     assert saved.status_code == 200, saved.text
-    assert (saved.json()["default_project_id"], saved.json()["destination_sort"]) == (7, "name")
+    assert (saved.json()["last_project_id"], saved.json()["destination_sort"]) == (7, "name")
     assert default(62) == {"project_id": 7, "reason": "settings"}
     listed = client.get("/api/v1/print/projects").json()
-    assert (listed["default_project_id"], listed["sort"]) == (7, "name")
-    # Choosing project 7 touched it.
-    assert listed["projects"][0]["touched_at"] is not None
+    assert (listed["last_project_id"], listed["sort"]) == (7, "name")

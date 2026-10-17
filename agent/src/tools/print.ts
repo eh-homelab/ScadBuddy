@@ -419,10 +419,10 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'list_print_projects',
     description:
-      "Bambuddy's projects, to file prints under, and the one last used; also `folders`, the library " +
-      'folders of no project a print or file_output_in_project_folder may go to instead (`folder_id`), each ' +
-      'with its `path`; `default_project_id`, the Settings default; and `sort`, how the picker orders them. ' +
-      'get_default_print_project says where some content goes by default.' +
+      "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
+      'the user changes, in Settings; also `folders`, the library folders of no project a print or ' +
+      'file_output_in_project_folder may go to instead (`folder_id`), each with its `path`; and `sort`, how ' +
+      'the picker orders them. get_default_print_project says where some content goes by default.' +
       PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
@@ -431,12 +431,12 @@ export const printTools: Tool[] = [
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
     handler: async (args, { backend }) => {
-      const { last_project_id, projects, folders, default_project_id, sort } = await ok(
+      const { last_project_id, projects, folders, sort } = await ok(
         backend.GET('/api/v1/print/projects'),
         'list projects',
       )
       const { items, ...rest } = page(projects ?? [], args, (p) => String(p.id), 'list_print_projects')
-      return json({ last_project_id, default_project_id, sort, projects: items, folders: folders ?? [], ...rest })
+      return json({ last_project_id, sort, projects: items, folders: folders ?? [], ...rest })
     },
   }),
 
@@ -812,22 +812,6 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'remember_last_project',
-    description:
-      'Choose `last_project_id` (null for "No project"): the project a print dialog with no project of its own ' +
-      '(a library file) opens on, and a run that names none is filed under. The Customize page opens on the ' +
-      "project remembered for the model and preset instead (get_remembered_choices' `model_projects`), or on no " +
-      'project. list_print_projects shows the current `last_project_id`.',
-    input: z.object({ project_id: z.number().int().nullable() }),
-    risk: 'write',
-    routes: ['PUT /api/v1/print/projects/last'],
-    handler: async ({ project_id }, { backend }) =>
-      json(
-        await ok(backend.PUT('/api/v1/print/projects/last', { body: { project_id } }), 'remember the project'),
-      ),
-  }),
-
-  defineTool({
     name: 'remember_printer_bed_type',
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
@@ -880,9 +864,9 @@ export const printTools: Tool[] = [
       "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
-      'project: omit it for the Settings default, else the remembered project (`last_project_id`), or pass ' +
-      'null for "No project". `folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library ' +
-      'folder of no project instead; it cannot be sent with `project_id`. ' +
+      'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +
+      '`folder_id` (from list_print_projects\' `folders`) puts the 3MF in a library folder of no project ' +
+      'instead; it cannot be sent with a `project_id`. ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',

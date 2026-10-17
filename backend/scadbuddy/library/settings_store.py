@@ -268,14 +268,11 @@ class StoredSettings(BambuddyIds):
     #: a time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
-    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: The default Bambuddy project (#79), set only in Settings (#3188). A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
     #: defaults for the next filing (this, and ``model_projects`` below) rather than
     #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
-    #: The project a print or Generate defaults to when its content is not all in one
-    #: project already (#3651). ``None``: the project the last send went to.
-    default_project_id: int | None = None
     #: How the destination picker opens sorted (#3651); the dialog can re-sort.
     destination_sort: DestinationSort = "touched"
     #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
@@ -434,8 +431,6 @@ class SettingsPatch(BaseModel):
     )
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
-    #: The project prints and Generate default to (#3651); ``null``: the last one sent to.
-    default_project_id: int | None = None
     #: How the destination picker opens sorted (#3651); ``null`` puts back "touched".
     destination_sort: DestinationSort | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
@@ -874,15 +869,6 @@ class SettingsStore:
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
-
-    def remember_project(self, project_id: int | None) -> StoredSettings:
-        """Remember the project the last send went to, so the picker opens on it."""
-        with self._pool.connection() as conn:
-            if project_id is None:
-                conn.execute("DELETE FROM settings WHERE name = 'last_project_id'")
-            else:
-                _put(conn, "last_project_id", project_id)
-        return self._written("last_project")
 
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None

@@ -410,7 +410,6 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     if (file) return setting(`print_choices:library:${file}`, { model: null })
     return setting(slug ? `print_choices:${slug}` : null, { model: slug })
   },
-  remember_last_project: (input) => setting('last_project', { after: bambuddyId(input.project_id) }),
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)

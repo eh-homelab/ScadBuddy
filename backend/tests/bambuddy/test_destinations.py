@@ -100,7 +100,6 @@ async def test_touched_is_the_later_of_scadbuddys_touch_and_bambuddys_activity(
     choices = await describe_projects(
         bambuddy,
         touches={("project", 2): touched, ("folder", 3): touched},
-        default_project_id=2,
         sort="name",
     )
 
@@ -111,7 +110,7 @@ async def test_touched_is_the_later_of_scadbuddys_touch_and_bambuddys_activity(
     assert (by_id[2].modified_at, by_id[2].touched_at) == (None, touched)
     # Bambuddy's activity is later than the touch.
     assert choices.folders[0].touched_at == datetime(2026, 10, 5, 8, tzinfo=UTC)
-    assert (choices.default_project_id, choices.sort) == (2, "name")
+    assert choices.sort == "name"
 
 
 class _Copies:
@@ -164,7 +163,7 @@ async def test_content_all_in_one_project_defaults_to_it(bambuddy: BambuddyClien
     chosen = await default_destination(
         bambuddy,
         store,
-        StoredSettings(default_project_id=2),
+        StoredSettings(last_project_id=2),
         outputs=[output("a"), output("b", project_id=1)],
         library_file_ids=[7],
     )
@@ -181,7 +180,7 @@ async def test_content_in_two_projects_takes_the_settings_default(
     library_file(8, 30)
 
     chosen = await default_destination(
-        bambuddy, uploads(), StoredSettings(default_project_id=2), library_file_ids=[7, 8]
+        bambuddy, uploads(), StoredSettings(last_project_id=2), library_file_ids=[7, 8]
     )
 
     assert (chosen.project_id, chosen.reason) == (2, "settings")
@@ -198,7 +197,7 @@ async def test_content_partly_in_no_project_is_not_in_one(bambuddy: BambuddyClie
         bambuddy, uploads(), StoredSettings(last_project_id=2), library_file_ids=[7, 8]
     )
 
-    assert (chosen.project_id, chosen.reason) == (2, "last")
+    assert (chosen.project_id, chosen.reason) == (2, "settings")
 
 
 @respx.mock
@@ -211,7 +210,7 @@ async def test_a_project_gone_from_bambuddy_is_never_the_default(
     chosen = await default_destination(
         bambuddy,
         uploads(),
-        StoredSettings(default_project_id=99, last_project_id=98),
+        StoredSettings(last_project_id=99),
         outputs=[output("c", project_id=97)],
         library_file_ids=[9],
     )

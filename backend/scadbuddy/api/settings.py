@@ -127,8 +127,6 @@ class SettingsView(BaseModel):
     #: The principals whose activity the assistant follows; ``None``: ``["browser"]``.
     activity_follow: list[str] | None = None
     last_project_id: int | None = None
-    #: The project prints and Generate default to (#3651); ``None``: the last one sent to.
-    default_project_id: int | None = None
     #: How the destination picker opens sorted (#3651).
     destination_sort: DestinationSort = "touched"
     #: The domains an asset may be fetched from (#844), with their subdomains.
@@ -359,7 +357,6 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         activity_repair_window_seconds=stored.activity_repair_window_seconds,
         activity_follow=stored.activity_follow,
         last_project_id=stored.last_project_id,
-        default_project_id=stored.default_project_id,
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),

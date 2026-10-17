@@ -614,11 +614,10 @@ def test_the_stem_is_capped_in_utf16_code_units_as_fat32_and_exfat_count_a_name(
 
 
 @respx.mock
-def test_the_customize_pages_choice_is_remembered_as_the_last_project(
-    client: TestClient,
-) -> None:
-    """The picker on the Customize page and the print dialog's show the same project:
-    both default to ``last_project_id``, which a choice on either updates."""
+def test_the_default_project_is_set_only_in_settings(client: TestClient) -> None:
+    """#3188: the default project (``last_project_id``) is a Settings field, changed only
+    by the Settings write. There is no other route that sets it as a side effect of
+    choosing a project somewhere."""
     configure(client)
     respx.get(f"{API}/projects/").mock(return_value=httpx.Response(200, json=[]))
     respx.get(f"{API}/library/folders").mock(return_value=httpx.Response(200, json=[]))
@@ -626,19 +625,20 @@ def test_the_customize_pages_choice_is_remembered_as_the_last_project(
     def last() -> Any:
         return client.get("/api/v1/print/projects").json()["last_project_id"]
 
-    chosen = client.put("/api/v1/print/projects/last", json={"project_id": PROJECT})
-    assert chosen.json() == {"project_id": PROJECT}
+    assert client.put("/api/v1/print/projects/last", json={"project_id": PROJECT}).status_code in (
+        404,
+        405,
+    )
+    assert last() is None
+    remember_project(client, PROJECT)
     assert last() == PROJECT
-    cleared = client.put("/api/v1/print/projects/last", json={"project_id": None})
-    assert cleared.json() == {"project_id": None}
+    remember_project(client, None)
     assert last() is None
 
 
 def remember_project(client: TestClient, project_id: int | None) -> None:
-    assert (
-        client.put("/api/v1/print/projects/last", json={"project_id": project_id}).status_code
-        == 200
-    )
+    """Sets the default project the one way there is: the Settings write."""
+    assert client.put("/api/v1/settings", json={"last_project_id": project_id}).status_code == 200
 
 
 @respx.mock

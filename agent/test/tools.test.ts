@@ -917,7 +917,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
   })
 
   it('says what omitting the project and null each mean', () => {
-    expect(tool('print_output').description).toMatch(/project_id.*remembered.*null.*No project/s)
+    expect(tool('print_output').description).toMatch(/project_id.*default project.*null.*No project/s)
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
@@ -2314,21 +2314,11 @@ describe('get_output_preview (#308)', () => {
 describe('project tools (#317)', () => {
   const OUT = 'c'.repeat(32)
 
-  it('remember_last_project sends the chosen project, and null for "No project"', async () => {
-    const bodies: unknown[] = []
-    server.use(
-      http.put(`${BACKEND}/api/v1/print/projects/last`, async ({ request }) => {
-        const body = (await request.json()) as { project_id: number | null }
-        bodies.push(body)
-        return HttpResponse.json(body)
-      }),
-    )
-    const chosen = await tool('remember_last_project').execute({ project_id: 7 }, ctx())
-    const cleared = await tool('remember_last_project').execute({ project_id: null }, ctx())
-    expect(chosen.isError).toBeFalsy()
-    expect(cleared.isError).toBeFalsy()
-    expect(bodies).toEqual([{ project_id: 7 }, { project_id: null }])
-    expect(firstText(chosen)).toEqual({ project_id: 7 })
+  it('no tool changes the default project: only the user does, in Settings (#3188)', () => {
+    const routes = ALL_TOOLS.flatMap((t) => t.routes as readonly string[])
+    expect(routes).not.toContain('PUT /api/v1/settings')
+    expect(routes.filter((r) => r.includes('/print/projects/last'))).toEqual([])
+    expect(ALL_TOOLS.map((t) => t.name)).not.toContain('remember_last_project')
   })
 
   it('file_output_in_project_folder posts the project to the output and answers with the file', async () => {

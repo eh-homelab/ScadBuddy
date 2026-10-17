@@ -13,6 +13,10 @@ import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
+import { useAnalysis } from '../lib/useAnalysis'
+import { usePrintCheck } from '../lib/usePrintCheck'
+import type * as AnalysisModule from '../lib/useAnalysis'
+import type * as PrintCheckModule from '../lib/usePrintCheck'
 import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
@@ -77,6 +81,17 @@ vi.mock('./print/PlateScene', () => ({
     <div data-testid="plate-scene" data-url={url} data-colors={JSON.stringify([...colors])} />
   ),
 }))
+
+// #3768 review — the real hooks, spied on, so a test can read the request each render
+// asked for (null: nothing is read) without waiting out a debounce.
+vi.mock('../lib/usePrintCheck', async (importOriginal) => {
+  const actual = await importOriginal<typeof PrintCheckModule>()
+  return { ...actual, usePrintCheck: vi.fn(actual.usePrintCheck) }
+})
+vi.mock('../lib/useAnalysis', async (importOriginal) => {
+  const actual = await importOriginal<typeof AnalysisModule>()
+  return { ...actual, useAnalysis: vi.fn(actual.useAnalysis) }
+})
 
 const output = fixtures.outputs[0] as Output
 
@@ -685,7 +700,9 @@ describe('PrintPicker', () => {
     // on it then does nothing (seen under load: the run was never sent).
     await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await screen.findByTestId('queued-items')
+    // The run itself, not the queued items it later shows: under load the slice and
+    // queue that follow can outlast a find (#3960).
+    await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
       choices: { tier: null, process_name: '0.24mm Standard @BBL H2C' },
@@ -2643,11 +2660,11 @@ describe('PrintPicker · Projects', () => {
   })
 
   it('files the print under the project the run chose when the project list could not be read (#1830)', async () => {
-    // The server remembers project 2 as the last one printed to.
-    await fetch('/api/v1/print/projects/last', {
+    // The server's default project is 2.
+    await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: 2 }),
+      body: JSON.stringify({ last_project_id: 2 }),
     })
     const runs = watch('POST', '/run')
     const { bodies } = watch('POST', '/project')
@@ -2798,7 +2815,7 @@ describe('PrintPicker · Projects', () => {
     server.use(
       http.get('/api/v1/print/projects/default', async () => {
         await delay(150)
-        return HttpResponse.json({ project_id: 2, reason: 'last' })
+        return HttpResponse.json({ project_id: 2, reason: 'settings' })
       }),
     )
     const { user } = renderPicker()
@@ -3379,10 +3396,15 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await loaded()
     const plates = await screen.findByTestId('plate-choice')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).not.toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).not.toBeNull()
 
     await user.click(within(plates).getByTestId('plates-none'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('No plate chosen. Choose at least one to print.')
     expect(screen.getByTestId('run-print')).toBeDisabled()
+    // #3762 review: no plate is checked or judged for a print that names none.
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).toBeNull()
 
     await user.click(within(plates).getByTestId('plates-all'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('All 2 plates')
@@ -3769,8 +3791,8 @@ describe('PrintPicker · A library file (#313)', () => {
     expect(body).not.toHaveProperty('project_id')
   })
 
-  it('files a Simple-mode print under the last project printed to, with no picker shown (#768)', async () => {
-    await api.rememberProject(2)
+  it('files a Simple-mode print under the default project, with no picker shown (#768)', async () => {
+    await api.putSettings({ last_project_id: 2 })
     const run = vi.spyOn(api, 'runLibraryPrint')
     const { user } = renderPage(
       <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />,

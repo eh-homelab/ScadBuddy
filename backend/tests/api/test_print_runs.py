@@ -1001,6 +1001,30 @@ def test_chosen_plates_are_part_of_the_key_only_when_sent() -> None:
     assert len({run_key("a" * 32, r) for r in (plain, some, other)}) == 3
 
 
+def test_one_chosen_plate_is_that_plates_print() -> None:
+    """#3762 review: `plate_ids=[2]` queues what `plate_id=2` does, so it is the same
+    run, under the key from before plate lists existed."""
+    alone = PrintRunRequest.model_validate({**body(), "plate_ids": [2, 2]})
+    by_id = PrintRunRequest.model_validate({**body(), "plate_id": 2})
+    assert (alone.plate_id, alone.plate_ids) == (2, None)
+    assert run_key("a" * 32, alone) == run_key("a" * 32, by_id)
+    # A body without plates keeps its set fields, so `exclude_unset` dumps (a batch's
+    # request id) are what they were before the fold (#3768 review).
+    plain = PrintRunRequest.model_validate(body())
+    assert not {"plate_id", "plate_ids"} & plain.model_fields_set
+    assert "plate_id" not in plain.model_dump(exclude_unset=True)
+    # Several plates move `plate_id` to the first without marking it sent, so a dump
+    # re-reads to the same request; one plate marks it, so the dump names that plate.
+    several = PrintRunRequest.model_validate({**body(), "plate_ids": [3, 2]})
+    assert several.plate_id == 2 and "plate_id" not in several.model_fields_set
+    assert PrintRunRequest.model_validate(several.model_dump(exclude_unset=True)) == several
+    assert "plate_id" in alone.model_fields_set
+    assert PrintRunRequest.model_validate(alone.model_dump(exclude_unset=True)) == alone
+    # All plates still wins over a chosen one.
+    every = PrintRunRequest.model_validate({**body(), "all_plates": True, "plate_ids": [2]})
+    assert every.asked_plates() is None
+
+
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:
     """#836: a request with no rack position or algorithm keeps the key it had before
     the fields existed, and each choice is a print of its own."""

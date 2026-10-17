@@ -1863,19 +1863,19 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await filed[0]).toEqual({ project_id: 1 })
   })
 
-  it('uploads nothing on Generate with "No project", and remembers that choice', async () => {
+  it('uploads nothing on Generate with "No project", and leaves the default project alone', async () => {
     withLastProject(1)
     const filed = watchBodies('POST', '/project-file')
-    const remembered = watchBodies('PUT', '/print/projects/last')
+    // #3188 — the default project changes only in Settings, never as a picker's side effect.
+    const defaults = watchBodies('PUT', /\/(settings|print\/projects\/last)$/)
     const { user } = render()
     await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
     await chooseProject(user, pagePicker(), null)
-    await waitFor(() => expect(remembered).toHaveLength(1))
-    expect(await remembered[0]).toEqual({ project_id: null })
 
     await generate(user)
     expect(filed).toHaveLength(0)
     expect(screen.queryByTestId('project-filed')).not.toBeInTheDocument()
+    expect(defaults).toHaveLength(0)
   })
 
   it('keeps Print and the picker disabled until the project file is filed', async () => {
@@ -1929,11 +1929,10 @@ describe('CustomizePage, project file (#317)', () => {
     expect(pickerValue(pagePicker())).toBe('1')
   })
 
-  it('keeps a project created in the dialog while the remembered one is still the old one', async () => {
-    // The list keeps answering with the old project as the last one, as it does while
-    // the PUT that remembers the new choice has not landed (it never answers here).
+  it('keeps a project created in the dialog while the default one is still the old one', async () => {
+    // The list keeps answering with the old project as the default: a choice never
+    // changes it (#3188).
     withLastProject(1)
-    server.use(http.put('/api/v1/print/projects/last', () => new Promise<never>(() => undefined)))
     let listed = 0
     server.events.on('request:start', ({ request }) => {
       if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/print/projects') {
@@ -1966,10 +1965,9 @@ describe('CustomizePage, project file (#317)', () => {
     expect(listed).toBe(1)
   })
 
-  it('prints with "No project" even while remembering it has not landed', async () => {
+  it('prints with "No project" while the default project is another', async () => {
     withLastProject(1)
-    // The PUT that remembers the choice never answers: the run alone must carry it.
-    server.use(http.put('/api/v1/print/projects/last', () => new Promise<never>(() => undefined)))
+    // The default stays project 1 (#3188): the run alone must carry the choice.
     // The print run only: the dialog's analyzers also POST to `/analyzers/run` (#563).
     const ran = watchBodies('POST', /\/print\/outputs\/[^/]+\/run$/)
     const { user } = render()
@@ -2024,18 +2022,14 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await remembered[0]).toEqual({ preset_id: null, preset_name: null, project_id: 1 })
   })
 
-  it("opens on no project rather than another model's last one", async () => {
-    // The 2026-10-11 QA report: a project chosen on another model filed an apple into it.
+  it('opens on the Settings default project when the model has none of its own', async () => {
+    // The 2026-10-11 QA report filed an apple into a project chosen on another model;
+    // since #3188 `last_project_id` is the Settings default, which no choice changes.
     server.use(
       http.get('/api/v1/print/projects', () => HttpResponse.json({ projects: projectViews, last_project_id: 1 })),
     )
-    const filed = watchBodies('POST', '/project-file')
-    const { user } = render()
-    await firstRender()
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(pickerValue(pagePicker())).toBe('')
-    await generate(user)
-    expect(filed).toHaveLength(0)
+    render()
+    await waitFor(() => expect(pickerValue(pagePicker())).toBe('1'))
   })
 
   it("opens on the model's remembered project over the last one", async () => {

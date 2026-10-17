@@ -1004,7 +1004,6 @@ export const settings: Settings = {
   print_run_retention_seconds: null,
   operation_retention_seconds: null,
   last_project_id: null,
-  default_project_id: null,
   destination_sort: 'touched',
   render_timeout: 300,
   job_ttl: 3600,

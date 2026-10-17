@@ -95,10 +95,8 @@ class ProjectChoices(BaseModel):
     #: project: every folder of no project, except external ones and the inbox (from
     #: Settings) with what ScadBuddy keeps under it.
     folders: list[FolderView] = Field(default_factory=list)
-    #: The project the last send went to, so the picker opens where it was left.
+    #: The default project (Settings' `last_project_id`), which only Settings changes (#3188).
     last_project_id: int | None = None
-    #: The project Settings defaults to (#3651), when content is not in one already.
-    default_project_id: int | None = None
     #: How Settings says the picker opens sorted (#3651).
     sort: DestinationSort = "touched"
 
@@ -216,7 +214,6 @@ async def describe_projects(
     client: BambuddyClient,
     *,
     last_project_id: int | None = None,
-    default_project_id: int | None = None,
     sort: DestinationSort = "touched",
     touches: Touches | None = None,
     inbox_id: int | None = None,
@@ -244,7 +241,6 @@ async def describe_projects(
         ],
         folders=_destination_folders(tops, touched, inbox_id),
         last_project_id=last_project_id,
-        default_project_id=default_project_id,
         sort=sort,
     )
 

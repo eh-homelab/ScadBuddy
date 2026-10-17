@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -20,14 +22,18 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobTableKind
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows import pipeline_activities
+from scadbuddy.workflows.models import OutputRequest
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
 
@@ -633,23 +639,239 @@ def test_a_create_whose_commit_fails_is_a_503_that_leaves_nothing(client: TestCl
     assert created.json()["version"] is not None
 
 
-def test_a_model_with_a_render_in_progress_cannot_be_deleted(
-    app: FastAPI, client: TestClient, model: str, paths: DataPaths
+class _Handle:
+    """A render's workflow handle that records the cancel and, as the real run does
+    (`TemplatePipeline._settle_failed`), settles the row `cancelled` when ``settles``."""
+
+    def __init__(self, cancelled: list[tuple[str, str | None]], settle: Callable[[], None] | None):
+        self.cancelled = cancelled
+        self.settle = settle
+        self.workflow_id = ""
+        self.run_id: str | None = None
+
+    async def cancel(self, **_: object) -> None:
+        self.cancelled.append((self.workflow_id, self.run_id))
+        if self.settle is not None:
+            self.settle()
+
+
+def _plant_running(
+    app: FastAPI,
+    model: str,
+    workflow_id: str = "render-planted",
+    *,
+    job_id: str = "a" * 32,
+    kind: JobTableKind = "render",
+) -> Job:
+    projection = getattr(app.state, STATE_ATTR).projection
+    job = Job(id=job_id, slug=model, created_at=datetime.now(UTC), kind=kind)
+    projection.accept(job, workflow_id, workflow_id=workflow_id, run_id="r")
+    assert projection.mark_started(job.id) is not None
+    return job
+
+
+def _cancels(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, settle: Callable[[], None] | None
+) -> list[tuple[str, str | None]]:
+    render = getattr(app.state, STATE_ATTR).render
+    render.cancel_wait = 0.5
+    cancelled: list[tuple[str, str | None]] = []
+
+    def handle(workflow_id: str, *, run_id: str | None = None) -> _Handle:
+        made = _Handle(cancelled, settle)
+        made.workflow_id, made.run_id = workflow_id, run_id
+        return made
+
+    monkeypatch.setattr(render.client, "get_workflow_handle", handle)
+    return cancelled
+
+
+def test_deleting_a_model_cancels_its_render_in_progress_and_goes_ahead(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2387: opening a model starts its preview render, so a delete from its own page
+    met that render. A model that is going has no use for it: its workflow is
+    cancelled, and once the row settles the model is deleted."""
+    projection = getattr(app.state, STATE_ATTR).projection
+    job = _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, lambda: projection.release_claim(job.id, slug=model))
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 204, response.text
+    assert cancelled == [("render-planted", "r")]
+    assert projection.read(job.id).state == "cancelled"
+    assert not paths.model_source(model).is_file()
+
+
+def test_a_render_that_does_not_settle_once_cancelled_still_refuses_the_delete(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     projection = getattr(app.state, STATE_ATTR).projection
-    job = Job(id="a" * 32, slug=model, created_at=datetime.now(UTC))
-    projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
-    assert projection.mark_started(job.id) is not None
+    job = _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, None)
 
     response = client.delete(f"/api/v1/models/{model}", headers=press())
 
     assert response.status_code == 409
     assert response.headers["content-type"].startswith("application/problem+json")
+    # Marked, so the delete dialog waits for the render and retries.
+    assert response.json()["render_in_progress"] is True
+    assert cancelled == [("render-planted", "r")]
     assert paths.model_source(model).is_file()
 
     job.state = "done"
     assert projection.finish(job)
     assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
+
+
+def test_a_real_render_a_delete_cancels_settles_in_time_and_the_model_goes(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    """#2387 on the app's own worker: the delete's `handle.cancel()` reaches a running
+    render, whose run settles its row `cancelled` within the delete's wait."""
+    started, release = tmp_path / "started", tmp_path / "release"
+    set_fake_env(
+        Path(settings.openscad).parent,
+        "FAKE_HOLD",
+        {"started": str(started), "release": str(release)},
+    )
+    try:
+        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+        assert accepted.status_code == 202, accepted.text
+        deadline = time.monotonic() + 30
+        while not started.exists():
+            assert time.monotonic() < deadline, "the render never started"
+            time.sleep(0.05)
+
+        response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+        assert response.status_code == 204, response.text
+        job = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}").json()
+        assert job["status"] == "cancelled"
+        assert not paths.model_source(model).is_file()
+    finally:
+        release.touch()
+
+
+def test_a_delete_its_run_refuses_for_another_reason_cancels_nothing(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate made between the operation's check and its run refuses the delete
+    there: the render the user still wants is left running."""
+    state = getattr(app.state, STATE_ATTR)
+    _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, None)
+    asked: list[str] = []
+
+    def duplicates_of(slug: str) -> list[str]:
+        asked.append(slug)
+        # None at the check, one by the time the run looks again.
+        return [] if len(asked) == 1 else ["late-copy"]
+
+    monkeypatch.setattr(state.catalogue, "duplicates_of", duplicates_of)
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 409, response.text
+    assert response.json()["slugs"] == ["late-copy"]
+    assert cancelled == []
+    assert paths.model_source(model).is_file()
+
+
+def test_deleting_a_model_cancels_its_arrange_and_a_render_started_meanwhile(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arrange of the model's outputs is cancelled as a render is (the same
+    pipeline settles both), and a render the still-open page starts while the delete
+    waits is cancelled on the next look rather than waited out."""
+    projection = getattr(app.state, STATE_ATTR).projection
+    arrange = _plant_running(app, model, "arrange-planted", kind="arrange")
+    late = Job(id="b" * 32, slug=model, created_at=datetime.now(UTC))
+    settled: list[str] = []
+
+    def settle() -> None:
+        settled.append("x")
+        if len(settled) == 1:
+            # The arrange's cancel: it settles, and the page starts a new preview.
+            projection.release_claim(arrange.id, slug=model)
+            projection.accept(late, "render-late", workflow_id="render-late", run_id="r")
+            assert projection.mark_started(late.id) is not None
+        else:
+            projection.release_claim(late.id, slug=model)
+
+    cancelled = _cancels(app, monkeypatch, settle)
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 204, response.text
+    assert cancelled == [("arrange-planted", "r"), ("render-late", "r")]
+    assert not paths.model_source(model).is_file()
+
+
+def test_a_real_arrange_a_delete_cancels_settles_in_time_and_the_model_goes(
+    app: FastAPI,
+    client: TestClient,
+    paths: DataPaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3263: an arrange of the model's outputs, on the app's own worker, is held in
+    its write step; the delete's `handle.cancel()` reaches it, and its run settles the
+    row `cancelled` within the delete's wait, as a render's does."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    started, release = asyncio.Event(), tmp_path / "release"
+
+    async def held(req: OutputRequest, *_: object, **__: object) -> NoReturn:
+        started.set()
+        while not release.exists():
+            await asyncio.sleep(0.05)
+        raise AssertionError("the arrange was released, not cancelled")
+
+    monkeypatch.setattr(pipeline_activities, "build_output", held)
+    try:
+        accepted = client.post(
+            "/api/v1/outputs/arrange",
+            json={
+                "objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 3}]
+            },
+        )
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["id"]
+        deadline = time.monotonic() + 30
+        while not started.is_set():
+            assert time.monotonic() < deadline, "the arrange never reached its write step"
+            time.sleep(0.05)
+        assert getattr(app.state, STATE_ATTR).projection.read(job_id).kind == "arrange"
+
+        response = client.delete(f"/api/v1/models/{meta.slug}", headers=press())
+
+        assert response.status_code == 204, response.text
+        assert client.get(f"/api/v1/jobs/{job_id}").json()["status"] == "cancelled"
+        assert not paths.model_source(meta.slug).is_file()
+    finally:
+        release.touch()
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:

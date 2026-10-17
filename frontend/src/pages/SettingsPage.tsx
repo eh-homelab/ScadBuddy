@@ -91,14 +91,14 @@ function isSecret(name: FieldName): name is Secret {
   return (SECRETS as readonly string[]).includes(name)
 }
 
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'default_project_id']
+const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
   printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #426 — the blob store beside the inbox folder it needs.
-  projects: ['library_folder_id', 'default_project_id', 'destination_sort', 'store_backend'],
+  projects: ['library_folder_id', 'last_project_id', 'destination_sort', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
 }
@@ -731,7 +731,7 @@ function SettingsSections() {
 
   const bambuddy = bambuddyState.data
   const projects = projectsState.data?.projects ?? []
-  const project = value('default_project_id')
+  const project = value('last_project_id')
   const projectPaths = breadcrumbs(projects)
   const unit = value('display_unit') as DisplayUnit
 
@@ -1158,15 +1158,15 @@ function SettingsSections() {
                 help={
                   projectsState.error
                     ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-                    : 'Where a print, Arrange or Generate is filed when what it holds is not all in one project already (then it opens on that project). A model opens on the project it was last filed in. None set: the project the last send went to.'
+                    : 'Where a print, Arrange or Generate is filed when what it holds is not all in one project already (then it opens on that project). A model opens on the project it was last filed in. None set: no project.'
                 }
               >
                 <ChoiceSelect
                   id="default-project"
                   value={project}
-                  onValueChange={(next) => setField('default_project_id', next)}
+                  onValueChange={(next) => setField('last_project_id', next)}
                   choices={[
-                    { value: '', label: 'None: the last project sent to' },
+                    { value: '', label: 'No project' },
                     ...(project && !projects.some((entry) => String(entry.id) === project)
                       ? [{ value: project, label: `Project ${project}` }]
                       : []),
@@ -1185,7 +1185,7 @@ function SettingsSections() {
                   value={value('destination_sort')}
                   onValueChange={(next) => setField('destination_sort', next)}
                   choices={[
-                    { value: 'touched', label: 'Last touched: printed, filed or chosen' },
+                    { value: 'touched', label: 'Last touched: printed or filed' },
                     { value: 'modified', label: 'Modified in Bambuddy' },
                     { value: 'name', label: 'Name' },
                   ]}

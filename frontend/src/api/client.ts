@@ -74,7 +74,6 @@ import type {
   MediaView,
   MigrateResult,
   ModelPatch,
-  LastProject,
   DefaultDestination,
   ModelProjectPut,
   ModelProjects,
@@ -1811,13 +1810,6 @@ export const api = {
    */
   createProject: (body: ProjectRequest) =>
     command<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
-
-  /** #317 — the project both pickers open on; `null` is "No project". */
-  rememberProject: (projectId: number | null) =>
-    request<LastProject>('/print/projects/last', {
-      method: 'PUT',
-      body: JSON.stringify({ project_id: projectId } satisfies LastProject),
-    }),
 
   /** #1660 — the project this model was last filed into, per preset it was generated with. */
   getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),

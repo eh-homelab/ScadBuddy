@@ -342,8 +342,8 @@ describe('LibraryPage', () => {
     }
   })
 
-  it('prints a file in Simple mode under the last project printed to (#768)', async () => {
-    await api.rememberProject(2)
+  it('prints a file in Simple mode under the default project (#768)', async () => {
+    await api.putSettings({ last_project_id: 2 })
     const run = vi.spyOn(api, 'runLibraryPrint')
     // MSW's answers to the run's POST, the choices it remembers and the progress read
     // the sent dialog makes, counted until the test ends (see below).
@@ -538,6 +538,35 @@ describe('LibraryPage', () => {
     await user.click(screen.getByTestId('library-folder-root'))
 
     expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
+  })
+
+  it('scrolls the files back into view when a folder low in a long tree is chosen (#3957)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const pane = screen.getByTestId('library-pane')
+    const content = screen.getByTestId('library-content')
+    // Scrolled 800 px down the tree: the content column's top is 800 px above the pane's.
+    pane.scrollTop = 800
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600))
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, -800, 700, 400))
+
+    await user.click(screen.getByTestId('library-folder-1'))
+
+    await waitFor(() => expect(pane.scrollTop).toBe(0))
+  })
+
+  it('leaves the pane where it is when the files are already in view (#3957)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const pane = screen.getByTestId('library-pane')
+    pane.scrollTop = 40
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600))
+    vi.spyOn(screen.getByTestId('library-content'), 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 10, 700, 400))
+
+    await user.click(screen.getByTestId('library-folder-1'))
+    await screen.findByTestId('library-file-67')
+
+    expect(pane.scrollTop).toBe(40)
   })
 
   it('says when the library cannot be read', async () => {
