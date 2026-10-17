@@ -796,7 +796,10 @@ workers restart.
      backend, switches every copied row onto its copy in one statement; render workers
      do not, so restart the API with (or before) the workers, never a worker alone, and
      a replica that has not restarted yet misses on those blobs until it does: do not
-     roll them one at a time.
+     roll them one at a time. A row written to the source after that last `GET` and
+     before the restart stays on the source after the flip; such rows are caches that
+     rebuild (a piece re-renders, an upload is re-sent through `RemoteAssets.ensure`), so
+     there is no need to stop writes first: expect a few misses just after the flip.
 
   The migration never deletes from the source; clear the old inbox folder yourself once
   you are satisfied.
