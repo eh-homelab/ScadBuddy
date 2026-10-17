@@ -20,7 +20,9 @@ function ScrollArea({
         // Radix wraps the content in a `display: table` div, which grows to its widest
         // line rather than truncating it. With only a vertical scrollbar that width is
         // clipped out of sight: a long chat title pushed the switcher's actions menu
-        // off the panel, and with it Done and Archive. `block` keeps it to the viewport.
+        // off the panel, and with it Done and Archive. `block` keeps it to the viewport,
+        // which also means the content never overflows sideways: a caller that adds a
+        // horizontal ScrollBar must give its content a width of its own.
         className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block!"
       >
         {children}
