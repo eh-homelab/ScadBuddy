@@ -210,7 +210,8 @@ With no API change and no client change, the steps are skipped.
 into its base as that base stood then. Required checks are not strict, so two PRs
 that each regenerate cleanly can land a combined client that matches neither spec.
 A `go-client` job ("Go client is fresh") runs `scripts/generate-go-client.sh
---check` on every run that is not a PR (a push to main, the schedule), and
+--check` on every run that is not a PR (a push to main, a merge queue's commit,
+the schedule), and
 `CI Summary` requires it there.
 
 **The `go` job.** It calls `go-module-ci.yml`, copied from forge's: for each

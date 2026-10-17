@@ -1991,8 +1991,9 @@ jobs:
   # PR, against the PR merged into its base as that base stood then. Required checks
   # are not strict, so two PRs that each regenerate cleanly can land a combined client
   # that matches neither spec, and nothing on the PR side sees it. Every other run (a
-  # push to main, the weekly schedule) regenerates it from its own commit's spec and
-  # fails on drift; the fix is a PR that runs the generator. Nothing is pushed here.
+  # push to main, a merge queue's commit if one is enabled again, the weekly schedule)
+  # regenerates it from its own commit's spec and fails on drift; the fix is a PR that
+  # runs the generator. Nothing is pushed here.
   go-client:
     name: Go client is fresh
     if: ${{ github.event_name != 'pull_request' }}

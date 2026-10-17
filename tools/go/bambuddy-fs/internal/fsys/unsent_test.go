@@ -1127,3 +1127,43 @@ func TestARetryWhoseLostUploadWasRenamedIsNotSentAgain(t *testing.T) {
 		}
 	})
 }
+
+// As above with the name free (no `again`): the renamed lost upload is still the write.
+func TestARetryWhoseLostUploadWasRenamedIsNotSentAgainUnderAFreeName(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.loseAnswers = 1
+	lib.uploading = func(attempt int) {
+		if attempt != 2 {
+			return
+		}
+		var lost int
+		lib.locked(func() {
+			for id, f := range lib.files {
+				if f.Name == "X.3mf" {
+					lost = id
+				}
+			}
+		})
+		name := "Renamed.3mf"
+		if _, err := lib.UpdateFile(context.Background(), lost, &name, nil); err != nil {
+			t.Errorf("renaming the lost upload %d: %v", lost, err)
+		}
+	}
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "Top", "X.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if lib.uploads != 1 || len(lib.files) != 1 {
+			t.Fatalf("uploads %d: %+v", lib.uploads, lib.files)
+		}
+	})
+	if !libraryHas(lib, map[string]string{"4/Renamed.3mf": "new"}) {
+		lib.locked(func() { t.Fatalf("files: %+v", lib.files) })
+	}
+}
