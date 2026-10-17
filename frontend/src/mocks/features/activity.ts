@@ -14,7 +14,10 @@ const LIST_PARAMS = new Set([
 const ADVANCED_FIELDS = ['workflow_id', 'run_id', 'traceparent', 'source', 'source_id', 'facets'] as const
 const ADVANCED_DETAIL = new Set(['request', 'result', 'error'])
 
-/** backend/scadbuddy/activity/index.py's ``subject_key``: one subject's key under either spelling. */
+/**
+ * backend/scadbuddy/activity/index.py's ``subject_key`` (and its SQL twin ``_SUBJECT_KEY``):
+ * one subject's key under either spelling. Change it with those two.
+ */
 function subjectKey(subject: string): string {
   const library = /^library-(\d+)$/.exec(subject)
   if (library) return `library:${library[1]}`
