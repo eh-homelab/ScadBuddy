@@ -40,7 +40,7 @@ it('store_migrate POSTs the pair and returns the workflow id, not followed as an
     }),
   )
   const t = tool('store_migrate')
-  const result = await t.execute({ batch: 20 }, ctx())
+  const result = await t.execute({ source: 'bambuddy', target: 's3', batch: 20 }, ctx())
   expect(seen).toEqual({ method: 'POST', path: '/api/v1/store/migrate', body: { source: 'bambuddy', target: 's3', batch: 20 } })
   expect(body(result)).toEqual({ workflow_id: 'store-migrate-bambuddy-s3' })
 })
@@ -50,7 +50,7 @@ it('store_migrate reports the 409 once the store is already on the target', asyn
     http.post(`${BACKEND}/api/v1/store/migrate`, () => HttpResponse.json({ detail: 'store_backend is already s3' }, { status: 409 })),
   )
   const t = tool('store_migrate')
-  await expect(t.execute({}, ctx())).rejects.toThrow(/already s3/)
+  await expect(t.execute({ source: 'bambuddy', target: 's3' }, ctx())).rejects.toThrow(/already s3/)
 })
 
 it('store_migrate_status GETs the pair and returns the progress', async () => {
@@ -63,8 +63,20 @@ it('store_migrate_status GETs the pair and returns the progress', async () => {
     }),
   )
   const t = tool('store_migrate_status')
-  const result = await t.execute({}, ctx())
+  const result = await t.execute({ source: 'bambuddy', target: 's3' }, ctx())
   expect(asked?.searchParams.get('source')).toBe('bambuddy')
   expect(asked?.searchParams.get('target')).toBe('s3')
   expect(body(result)).toEqual(status)
+})
+
+it('store_migrate surfaces a 422 for an invalid pair', async () => {
+  server.use(
+    http.post(`${BACKEND}/api/v1/store/migrate`, () => HttpResponse.json({ detail: 'source and target are the same backend' }, { status: 422 })),
+  )
+  await expect(tool('store_migrate').execute({ source: 's3', target: 's3' }, ctx())).rejects.toThrow(/same backend/)
+})
+
+it('store_migrate_status surfaces a 404 when no migration ran', async () => {
+  server.use(http.get(`${BACKEND}/api/v1/store/migrate`, () => HttpResponse.json({ detail: 'no store migration ran' }, { status: 404 })))
+  await expect(tool('store_migrate_status').execute({ source: 'bambuddy', target: 's3' }, ctx())).rejects.toThrow(/no store migration ran/)
 })

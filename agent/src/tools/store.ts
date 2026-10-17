@@ -16,25 +16,25 @@ export const storeTools: Tool[] = [
     name: 'store_migrate',
     description:
       'Copy every recorded blob from the `source` store backend to `target`, `batch` at a time, as a ' +
-      'background workflow. Save the target backend\'s settings first. Each row switches to its copy when ' +
+      'background workflow. The target backend\'s settings must already be saved on the Settings page (no tool writes them). Each row switches to its copy when ' +
       'ScadBuddy next starts with store_backend set to `target`. A second call while it runs joins it; one ' +
       'after it ended retries what failed. Refused (409) once store_backend is already `target`. Follow it ' +
       'with store_migrate_status.',
     input: z.object({
-      source: backend.default('bambuddy'),
-      target: backend.default('s3'),
-      batch: z.number().int().min(1).max(1000).default(50).describe('Rows copied per batch'),
+      source: backend,
+      target: backend,
+      batch: z.number().int().min(1).max(1000).optional().describe('Rows copied per batch (the backend picks when omitted)'),
     }),
     risk: 'outward',
     routes: ['POST /api/v1/store/migrate'],
     summarize: ({ source, target }) => `Migrate the blob store from ${source} to ${target}`,
-    handler: async ({ source, target, batch }, ctx) =>
-      json(
-        await ok(
-          answered(ctx, () => ctx.backend.POST('/api/v1/store/migrate', { body: { source, target, batch } }), 'start store migration'),
-          'start store migration',
-        ),
-      ),
+    handler: async ({ source, target, batch }, ctx) => {
+      // The generated body type makes `batch` required (a pydantic default); the route takes it omitted.
+      const body = { source, target, ...(batch === undefined ? {} : { batch }) } as { source: typeof source; target: typeof target; batch: number }
+      return json(
+        await ok(answered(ctx, () => ctx.backend.POST('/api/v1/store/migrate', { body }), 'start store migration'), 'start store migration'),
+      )
+    },
   }),
 
   defineTool({
@@ -43,7 +43,7 @@ export const storeTools: Tool[] = [
       "A store migration's progress: rows still to copy (`remaining`), `copied`, the ones whose copy " +
       'failed and why (`failed`, up to 200 of `failed_count`), and whether it `running`. Refused (404) when ' +
       'none ever ran for the pair.',
-    input: z.object({ source: backend.default('bambuddy'), target: backend.default('s3') }),
+    input: z.object({ source: backend, target: backend }),
     risk: 'read',
     routes: ['GET /api/v1/store/migrate'],
     handler: async ({ source, target }, { backend }) =>
