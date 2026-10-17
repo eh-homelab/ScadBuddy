@@ -520,6 +520,15 @@ class PgNotifyEventBus:
             row = await cursor.fetchone()
         return None if row is None else int(row[0])
 
+    async def positions(self, event_ids: list[str]) -> dict[str, int]:
+        """`position` for several ids in one query; an unknown or pruned one is absent."""
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT event_id, seq FROM events WHERE event_id = ANY(%s)", (event_ids,)
+            )
+            rows = await cursor.fetchall()
+        return {str(event_id): int(seq) for event_id, seq in rows}
+
     async def prune_log(self) -> int:
         """Apply the retention settings; returns the rows removed."""
         removed = 0

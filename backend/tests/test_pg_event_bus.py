@@ -291,6 +291,7 @@ async def test_an_event_is_readable_in_the_log_when_it_is_heard(
     bus = await make_bus()
     subscription = bus.subscribe()
     positions: list[int] = []
+    ids: list[str] = []
 
     for n in range(5):
         bus.publish(_model(f"m{n}"))
@@ -300,8 +301,11 @@ async def test_an_event_is_readable_in_the_log_when_it_is_heard(
         seq = await bus.position(event.id)
         assert seq is not None
         positions.append(seq)
+        ids.append(event.id)
 
     assert positions == sorted(positions)
+    # #1039: the same places in one query, an unknown id left out.
+    assert await bus.positions([*ids, "0" * 32]) == dict(zip(ids, positions, strict=True))
 
 
 @pytest.mark.requires_postgres

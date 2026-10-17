@@ -374,6 +374,29 @@ describe('on a cold load, the confirmation is checked against the first read (#1
     await waitFor(() => expect(reads()).toBe(2))
   })
 
+  it('checks a later confirmation against the newest read shown, not the first', async () => {
+    const check = vi.spyOn(getRealtime(), 'check')
+    let cursor = 'e5'
+    let reads = 0
+    const load = () => {
+      const answered = trackRequest()
+      const mine = cursor
+      return Promise.resolve().then(() => {
+        answered(new Headers({ [CURSOR_HEADER]: mine }))
+        return ++reads
+      })
+    }
+    const { result } = renderHook(() => useAsync(load, [], ['models']))
+    await waitFor(() => expect(result.current.data).toBe(1))
+    cursor = 'e8'
+    await act(async () => signals[0]?.({ id: 'e8', kind: 'model.updated', topics: ['models'], data: {} }))
+    await waitFor(() => expect(result.current.data).toBe(2))
+    // A reconnect: the server's last is what the refresh saw.
+    await act(async () => signals[0]?.('resync', { last: 'e8' }))
+    expect(reads).toBe(2)
+    expect(check).not.toHaveBeenCalled()
+  })
+
   it('waits for a first read still in flight before it decides', async () => {
     const check = vi.spyOn(getRealtime(), 'check')
     let answer: (value: number) => void = () => {}

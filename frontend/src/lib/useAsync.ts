@@ -81,7 +81,7 @@ export function useAsync<T>(
   const topicList = topics.join('\n')
   /** The topics the subscription effect below follows now, or '' when none. */
   const followed = useRef('')
-  /** The current key's own first read: what it saw, and whether it is what is shown. */
+  /** The current key's newest read that is shown: what it saw (#1039). */
   const firstRead = useRef<ReadRecord | undefined>(undefined)
 
   useEffect(() => {
@@ -161,11 +161,14 @@ export function useAsync<T>(
       const fail = failing.current
       failing.current = []
       const mine = ++sequence.current
-      current().then(
+      const scope = new ReadScope()
+      inReadScope(scope, current).then(
         (data) => {
           if (!mounted.current || sequence.current !== mine) return
           if (decide && !decide(data)) return
           setSnapshot({ key: at, data })
+          // A later confirmation (a reconnect's) asks from what is on screen now.
+          if (latest.current.key === at) firstRead.current = { scope, shown: Promise.resolve(true) }
         },
         (cause: unknown) => {
           if (!mounted.current || sequence.current !== mine) return

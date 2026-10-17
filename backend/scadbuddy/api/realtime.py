@@ -343,13 +343,13 @@ async def changed_topics(events: object, since: list[str], topics: list[str]) ->
     """Which of ``topics`` an event logged after the earliest of ``since`` touched; all
     of them when that cannot be told (see "The cursor" in the module docstring)."""
     replay = getattr(events, "replay", None)
-    position = getattr(events, "position", None)
-    if replay is None or position is None or not since:
+    positions = getattr(events, "positions", None)
+    if replay is None or positions is None or not since:
         return topics
-    places = [await position(event_id) for event_id in since]
-    if any(place is None for place in places):
+    places = await positions(list(dict.fromkeys(since)))
+    if any(event_id not in places for event_id in since):
         return topics
-    after = min(place for place in places if place is not None)
+    after = min(places.values())
     wanted = set(topics)
     changed: set[str] = set()
     seen = 0

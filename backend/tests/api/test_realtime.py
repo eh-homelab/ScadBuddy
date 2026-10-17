@@ -478,6 +478,10 @@ class LoggedBus(InProcessEventBus):
                 return seq
         return None
 
+    async def positions(self, event_ids: list[str]) -> dict[str, int]:
+        places = {event_id: await self.position(event_id) for event_id in event_ids}
+        return {event_id: seq for event_id, seq in places.items() if seq is not None}
+
     async def replay(self, after: int, *, limit: int = 100) -> Replay:
         logged = [
             LoggedEvent(seq=seq, event=event)
