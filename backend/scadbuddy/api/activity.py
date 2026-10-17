@@ -289,6 +289,7 @@ def _subject_labels(
     wanted = values | {slug for _, slug in metas.values()}
     slugs = [slug for slug in catalogue.slugs() if slug in wanted]
     names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+    # An output's model is looked up only to name the output; it is no chip of its own.
     labels = {value: name for value, name in names.items() if value in values}
     for value, (own, slug) in metas.items():
         name = own or names.get(slug)
