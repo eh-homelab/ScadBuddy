@@ -353,6 +353,35 @@ describe('archive (#1885)', () => {
     expect(within(header).getByRole('button', { name: 'Archive' })).toBeInTheDocument()
   })
 
+  it("marks the open chat done from its header, beside Archive, where the user's own chat offers it", async () => {
+    const { user } = await openParent()
+    const header = () => screen.getByTestId('active-session-header')
+    // The desktop agent's chat is not the user's to finish.
+    expect(within(header()).queryByRole('button', { name: 'Done' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+
+    await user.click(within(header()).getByRole('button', { name: 'Done' }))
+    expect(sessionWrites().at(-1)).toEqual({ method: 'PATCH', path: expect.stringMatching(/^\/sessions\//), body: { done: true } })
+    // A done chat is offered no second Done; Archive stays.
+    await waitFor(() => expect(within(header()).queryByRole('button', { name: 'Done' })).toBeNull())
+    expect(within(header()).getByRole('button', { name: 'Archive' })).toBeInTheDocument()
+  })
+
+  it('says why a header Done was refused', async () => {
+    server.use(
+      http.patch('/api/v1/ai/sessions/:id', () => HttpResponse.json({ detail: 'a turn is running' }, { status: 409 })),
+    )
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    const header = screen.getByTestId('active-session-header')
+
+    await user.click(within(header).getByRole('button', { name: 'Done' }))
+    expect(await within(header).findByRole('alert')).toHaveTextContent('The chat was not marked done: a turn is running')
+    expect(within(header).getByRole('button', { name: 'Done' })).toBeInTheDocument()
+  })
+
   it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
     const { user } = await ownChat()
     await rowAction(user, OWN, `Archive ${OWN}`)
@@ -367,12 +396,13 @@ describe('archive (#1885)', () => {
     expect(await within(picker()).findByText('No archived chats.')).toBeInTheDocument()
   })
 
-  it('offers no Archive while a turn runs', async () => {
+  it('offers no Archive or Done while a turn runs', async () => {
     const { user } = renderShell({ stepMs: 60_000 })
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
     await user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'hello{Enter}')
     await screen.findByRole('button', { name: 'Stop' })
     expect(within(screen.getByTestId('active-session-header')).queryByRole('button', { name: 'Archive' })).toBeNull()
+    expect(within(screen.getByTestId('active-session-header')).queryByRole('button', { name: 'Done' })).toBeNull()
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
     expect(await offers(user, 'hello', /^Archive /)).toBe(false)
   })
