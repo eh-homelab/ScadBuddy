@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup, configure, getConfig } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, vi } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
@@ -41,7 +41,10 @@ beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
   // MSW lets some requests through to the real network; `resending` sends them again.
   const intercepted = globalThis.fetch
-  globalThis.fetch = resending(intercepted, (line) => process.stderr.write(`${line}\n`))
+  // The test's file in the line, as files run in parallel and their stderr interleaves.
+  globalThis.fetch = resending(intercepted, (line) =>
+    process.stderr.write(`${line} [${expect.getState().testPath ?? 'outside a test'}]\n`),
+  )
   mswFetch = intercepted
 })
 afterEach(async () => {

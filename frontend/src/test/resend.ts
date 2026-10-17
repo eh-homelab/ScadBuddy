@@ -10,6 +10,9 @@
  * happens, and this wrapper is still needed. With `tries` 1 there is no resend, so the
  * only line is the one for giving up.
  */
+// Taken at load, before a test fakes the timers: a faked one would never fire.
+const realSetTimeout = globalThis.setTimeout
+
 export function resending(
   intercepted: typeof fetch,
   log: (line: string) => void,
@@ -31,6 +34,8 @@ export function resending(
           throw error
         }
         if (attempt === 1) log(`vitest.setup: resending ${url}, which MSW let through (mswjs/interceptors#862)`)
+        // A task's pause, so the socket that let it through can settle before the resend.
+        await new Promise((resolve) => realSetTimeout(resolve, 0))
       }
     }
   }
