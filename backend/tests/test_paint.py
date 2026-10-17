@@ -194,3 +194,10 @@ def test_nested_splits_cover_the_triangle_exactly() -> None:
 def test_pieces_refuses_what_states_refuses(code: str) -> None:
     with pytest.raises(PaintCodeError):
         pieces(code + "0F", CORNERS)
+
+
+def test_a_split_leaf_of_extruder_3_and_up_reads_its_extension_groups() -> None:
+    # "481" renumbered: its leaves become extruders 20 (3 + 15 + 2, a `1111` group) and 3.
+    m12 = (V1 + V2) / 2
+    code = remap("481", {2: 20, 1: 3})
+    assert _found(code) == {_tri(V0, V1, m12): 3, _tri(m12, V2, V0): 20}

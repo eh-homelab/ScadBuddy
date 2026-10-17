@@ -117,6 +117,9 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
                 faces=np.arange(len(triangles) * 3).reshape(-1, 3),
                 process=False,
             )
+            # Each corner was written once per face: shared again, so a lightly painted
+            # part's preview is not three times its vertices and keeps its smoothing.
+            mesh.merge_vertices()
             name = part.name if colour == own else f"{part.name} ({colour})"
             out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None))
     return out

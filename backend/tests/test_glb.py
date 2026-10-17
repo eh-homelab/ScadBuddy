@@ -150,3 +150,13 @@ def test_a_painting_that_names_an_extruder_with_no_colour_is_refused() -> None:
     codes = ("8",) + ("",) * (len(box.faces) - 1)  # extruder 2, of one colour
     with pytest.raises(PaintCodeError, match="extruder 2"):
         painted_pieces([ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))])
+
+
+def test_each_colours_mesh_shares_its_corners() -> None:
+    """A painted part's colour meshes are not triangle soup: a box with one painted face
+    keeps its eight corners in its own colour's mesh, not three per face."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ("4",) + ("",) * (len(box.faces) - 1)
+    pieces = painted_pieces([ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))])
+    own = next(p for p in pieces if p.colour == "#FFFFFF")
+    assert len(own.mesh.vertices) == 8
