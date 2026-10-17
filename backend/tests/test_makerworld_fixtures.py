@@ -17,6 +17,8 @@ from scadbuddy.render.read_budget import ReadBudget
 from tests.support.fixtures import makerworld, makerworld_path
 
 FIXTURES = makerworld()
+# What a manifest's `arrange_reads` records of a fixture the reader reads.
+READ_KEYS = {"objects", "copies", "colours", "painted_parts", "negative_parts", "notes"}
 
 
 def ids(entry: dict[str, Any]) -> str:
@@ -37,7 +39,15 @@ def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -> None:
     # Every fixture reads since #2337; a refusal is the reader's own tests' to pin (#2490).
+    # Read whole, as read_objects takes bytes: unlike the hash above, this holds a file
+    # of up to 98 MB in memory, one per xdist worker.
     expected = entry["arrange_reads"]
+    # Exactly what a read records, so a refusal recorded any other way fails here too
+    # (#3579): nothing writes a `refused` key, which the old guard looked for.
+    assert set(expected) == READ_KEYS, (
+        f"{entry['file']}: the manifest records something other than a read; "
+        "pin it in the reader's tests"
+    )
     objects = read_objects(makerworld_path(entry["file"]).read_bytes(), ReadBudget())
     assert {
         "objects": len(objects),

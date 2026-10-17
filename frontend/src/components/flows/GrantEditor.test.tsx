@@ -50,7 +50,7 @@ describe('GrantEditor', () => {
     const { user } = render()
     const arrange = await rule('arrange')
     await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
-    expect(within(arrange).getByText(/any model, any number of calls/)).toHaveClass('text-warn')
+    expect(within(arrange).getByText(/any model, any number of calls/)).toHaveClass('text-destructive')
     await user.type(within(arrange).getByLabelText('Max calls'), '3')
     expect(within(arrange).queryByText(/any model, any number of calls/)).not.toBeInTheDocument()
   })

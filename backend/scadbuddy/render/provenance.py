@@ -141,9 +141,15 @@ def with_print_settings(project_settings: bytes, print_settings: Mapping[str, st
     """``project_settings.config`` with a template's ``print_settings`` (#770) over the
     process, listed in ``different_settings_to_system`` (the process's edits first, then
     one entry per filament and one for the printer, as Bambu Studio saves a project), so
-    Bambu Studio shows them as changes to the system preset. Every other key stays."""
+    Bambu Studio shows them as changes to the system preset. Every other key stays.
+
+    Each value takes the shape the project already stores its key in, as the print path
+    does with the process preset: on an H2C some keys are one entry per extruder variant,
+    and a bare value would collapse that list."""
     settings = json.loads(project_settings)
-    settings.update(print_settings)
+    for key, value in print_settings.items():
+        current = settings.get(key)
+        settings[key] = [value] * len(current) if isinstance(current, list) and current else value
     filaments = len(settings.get("filament_settings_id") or [])
     settings["different_settings_to_system"] = [";".join(print_settings), *[""] * filaments, ""]
     return (json.dumps(settings, indent=4) + "\n").encode("utf-8")

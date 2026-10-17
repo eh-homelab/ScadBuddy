@@ -8,6 +8,7 @@ import { fakeRealtime } from '../lib/realtime.fake'
 import { server } from '../mocks/server'
 import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
 import { intersect } from '../test/intersection'
+import { optionNames, selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
@@ -30,6 +31,11 @@ function Elsewhere() {
 
 function PrintRoute() {
   return <div data-testid="print-route">{useParams()['archiveId']}</div>
+}
+
+/** A filter's select, or the template picker, by its label. */
+function combobox(name: string): HTMLElement {
+  return screen.getByRole('combobox', { name })
 }
 
 function render(route = '/prints') {
@@ -114,7 +120,7 @@ describe('PrintsPage (#310): the global print history', () => {
     )
     render('/prints?printer=3')
     expect(await item(35)).toHaveTextContent('Printer 3')
-    expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: 'Printer 3' })).toHaveValue('3')
+    expect(combobox('Printer')).toHaveTextContent('Printer 3')
   })
 
   it('names a printing print’s printer once, even unnamed (#2363)', async () => {
@@ -158,7 +164,7 @@ describe('PrintsPage (#310): the global print history', () => {
   it('filters by status, and writes the filter into the URL', async () => {
     const { user } = render()
     await waitFor(async () => expect(await shown()).toHaveLength(4))
-    await user.selectOptions(screen.getByLabelText('Status'), 'failed')
+    await selectOption(user, combobox('Status'), 'Failed')
     await waitFor(async () => expect(await shown()).toEqual(['36']))
     expect(location()).toBe('/prints?status=failed')
   })
@@ -166,17 +172,24 @@ describe('PrintsPage (#310): the global print history', () => {
   it('arrives filtered from the URL, and filters by template and printer', async () => {
     const { user } = render('/prints?printer=2')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
-    expect(screen.getByLabelText('Printer')).toHaveValue('2')
-    expect(await within(screen.getByLabelText('Printer')).findByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
+    await waitFor(() => expect(combobox('Printer')).toHaveTextContent('3DP-H2C-042'))
 
-    await user.selectOptions(screen.getByLabelText('Printer'), '')
+    await selectOption(user, combobox('Printer'), 'Any printer')
     await waitFor(async () => expect(await shown()).toHaveLength(4))
-    const template = screen.getByLabelText('Template')
-    await waitFor(() =>
-      expect(within(template).getByRole('option', { name: 'Name Keychain' })).toBeInTheDocument(),
-    )
-    await user.selectOptions(template, 'name-keychain')
+    // #3653 — the templates are searchable.
+    await user.click(combobox('Template'))
+    await user.type(await screen.findByPlaceholderText('Search templates…'), 'keychan')
+    await user.click(await screen.findByRole('option', { name: 'Name Keychain' }))
     expect(location()).toBe('/prints?slug=name-keychain')
+    expect(combobox('Template')).toHaveTextContent('Name Keychain')
+  })
+
+  it('offers a status it does not know, even one named "any", as its own choice (#3674 review)', async () => {
+    const { user } = render('/prints?status=any')
+    await waitFor(() => expect(combobox('Status')).toHaveTextContent(/^any$/))
+    expect(await optionNames(user, combobox('Status'))).toEqual(expect.arrayContaining(['Any status', 'any']))
+    await selectOption(user, combobox('Status'), 'Any status')
+    expect(location()).toBe('/prints')
   })
 
   it('filters by date range', async () => {
@@ -224,7 +237,7 @@ describe('PrintsPage (#310): the global print history', () => {
   it('searches by text after a pause, and clears every filter', async () => {
     const { user } = render('/prints?status=printing')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
-    await user.selectOptions(screen.getByLabelText('Status'), '')
+    await selectOption(user, combobox('Status'), 'Any status')
     await user.type(screen.getByRole('searchbox', { name: 'Search prints' }), 'nova')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
     expect(location()).toBe('/prints?q=nova')
@@ -250,13 +263,12 @@ describe('PrintsPage (#310): the global print history', () => {
   it('keeps offering every printer seen after the list is filtered to one', async () => {
     const { user } = render()
     await waitFor(async () => expect(await shown()).toHaveLength(4))
-    const printer = screen.getByLabelText('Printer')
     // The printers are gathered from the items after they render.
-    await within(printer).findByRole('option', { name: '3DP-H2C-042' })
-    await user.selectOptions(printer, '2')
+    await waitFor(async () => expect(await optionNames(user, combobox('Printer'))).toContain('3DP-H2C-042'))
+    await selectOption(user, combobox('Printer'), '3DP-H2C-042')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
-    expect(within(printer).getByRole('option', { name: '3DP-31B-598' })).toHaveValue('1')
-    expect(within(printer).getByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
+    expect(location()).toBe('/prints?printer=2')
+    expect(await optionNames(user, combobox('Printer'))).toEqual(['Any printer', '3DP-31B-598', '3DP-H2C-042'])
   })
 
   it('says when nothing matches, and offers to clear the filters', async () => {
@@ -292,12 +304,12 @@ describe('PrintsPage (#310): the global print history', () => {
   it('switches to the list and back, remembering the choice', async () => {
     const { user } = render()
     await waitFor(async () => expect(await shown()).toHaveLength(4))
-    const view = screen.getByRole('group', { name: 'View' })
-    await user.click(within(view).getByRole('button', { name: 'List' }))
+    const view = screen.getByRole('radiogroup', { name: 'View' })
+    await user.click(within(view).getByRole('radio', { name: 'List' }))
     expect(location()).toBe('/prints?view=list')
     expect(screen.getByRole('list', { name: 'Prints' })).toHaveAttribute('data-view', 'list')
     expect(localStorage.getItem(PRINTS_VIEW_KEY)).toBe('list')
-    await user.click(within(view).getByRole('button', { name: 'Cards' }))
+    await user.click(within(view).getByRole('radio', { name: 'Cards' }))
     expect(screen.getByRole('list', { name: 'Prints' })).toHaveAttribute('data-view', 'cards')
   })
 
@@ -839,7 +851,9 @@ describe('changed parameters markup (#2457)', () => {
       expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
     }
     expect(dl).not.toHaveTextContent('more')
-    expect(screen.getByTestId('params-more')).toHaveTextContent('+2 more')
+    // Found as a user sees it, beside the list and outside the <dl> (#2457, #2878).
+    const more = within(dl.parentElement!).getByText('+2 more')
+    expect(dl).not.toContainElement(more)
   })
 })
 
@@ -854,7 +868,7 @@ describe('now printing (#977)', () => {
   it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
     render()
     const strip = await screen.findByRole('region', { name: 'Now printing' })
-    expect(within(strip).getByTestId('printer-now-1')).toHaveTextContent('Bracket')
+    expect(await within(strip).findByTestId('printer-now-1')).toHaveTextContent('Bracket')
     expect(await list()).toBeInTheDocument()
   })
 })

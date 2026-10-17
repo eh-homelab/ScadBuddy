@@ -72,7 +72,7 @@ test.describe('pasted source', () => {
 
     // Unsaved: leaving asks, and Stay keeps the edits.
     await page.getByRole('main').getByRole('link', { name: 'Models' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = page.getByRole('alertdialog', { name: 'Leave without saving?' })
     await dialog.getByRole('button', { name: 'Stay' }).click()
     await expect(page).toHaveURL(/\/new$/)
 

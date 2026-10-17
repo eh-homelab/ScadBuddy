@@ -176,6 +176,15 @@ const STATUS_OF: Record<ApprovalErrorCode, 400 | 403 | 404 | 409 | 410> = {
   invalid: 400,
 }
 
+/** How many due approvals one query of `expireDue` takes. */
+export const EXPIRE_PAGE = 500
+
+/**
+ * How many pages one `expireDue` sweep takes at most. The rest wait for the next tick, so
+ * a pathological backlog never holds one sweep open, nor grows its tried list, without end.
+ */
+export const EXPIRE_PAGES = 10
+
 /** A refused approval operation; `status` is the HTTP status a route answers with. */
 export class ApprovalError extends Error {
   override name = 'ApprovalError'
@@ -736,16 +745,26 @@ export class ApprovalService {
     by: Owner | undefined,
     reason: string | null,
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+    refresh = true,
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    // The decision and its `approval.resolved` commit together: a parked gate
-    // polling the row must not see the decision (and log the session's
-    // `running`) before the event that reports it is in the log.
+    // The decision, its `approval.resolved` and the session's status commit
+    // together (#3583, as #3256 for questions): a parked gate polling the row
+    // resumes on the decision's commit alone, so a status written in a later
+    // transaction could land after its turn had finished, and `running` was
+    // never logged. A status write that fails rolls the decision back.
+    // `refresh: false`: the caller (a finishing turn) sets the status itself.
     let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     // Started only once the UPDATE has won, so a lost race leaves no span.
     const traced: { span?: Span; committed?: boolean } = {}
     try {
       const approval = await this.deps.sql.begin(async (tx) => {
+        // The session row first (review of #3685): two settles of one session's approvals
+        // that overlapped each saw the other's decision as pending and neither moved the
+        // session back. Locked, the second waits for the first's commit, and its refresh
+        // reads both. Session before approval, as a turn that asks and a question's answer
+        // lock them, so the two orders never meet.
+        if (refresh) await tx`SELECT 1 FROM ai_sessions WHERE id = (SELECT session_id FROM ai_approvals WHERE id = ${id}) FOR UPDATE`
         const [row] = await tx.unsafe<Row[]>(
           `UPDATE ai_approvals
            SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
@@ -777,6 +796,7 @@ export class ApprovalService {
           const events = [
             scrubForLog(resolved, []),
             inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+            ...(refresh ? await this.statusRefresh(tx, settled.sessionId) : []),
           ]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
@@ -837,11 +857,16 @@ export class ApprovalService {
    * is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {
-    const [row] = await this.deps.sql<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
+    await this.append(sessionId, await this.statusRefresh(this.deps.sql, sessionId))
+  }
+
+  /** `refreshStatus`'s UPDATE on `db` (the pool, or the transaction that settles an approval); the event to log. */
+  private async statusRefresh(db: Sql | TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+    const [row] = await db<{ status: 'running' | 'idle' | 'waiting_input' }[]>`
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                         AND ${isNotDoneSummary(this.deps.sql)})
+                         AND ${isNotDoneSummary(db)})
               THEN 'waiting_input'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
             ELSE 'idle'
@@ -850,7 +875,7 @@ export class ApprovalService {
       WHERE id = ${sessionId} AND status = 'waiting_approval'
         AND NOT EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
       RETURNING status`
-    if (row) await this.append(sessionId, [event({ type: 'session.status', sessionId, status: row.status })])
+    return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
   }
 
   private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
@@ -917,7 +942,6 @@ export class ApprovalService {
       const session = await this.session(settled.sessionId)
       const parked = session?.turnActive === true && session.turnId === settled.turnId && settled.turnId !== null
       if (!parked) {
-        await this.refreshStatus(settled.sessionId)
         // The resumed turn is the decision's child (spec 2026-10-01 §5.4).
         if (approve) {
           await otelContext.with(contextFrom(settled.decisionTraceparent, otelContext.active()), () =>
@@ -941,7 +965,6 @@ export class ApprovalService {
     }
     if (result.resumed) return
     await this.revoke(approval.id, `the session could not resume: ${result.reason}`)
-    await this.refreshStatus(sessionId)
   }
 
   /** The panel's `approval.decision` client message; the seam #266's socket calls. */
@@ -957,27 +980,44 @@ export class ApprovalService {
   }
 
   private async expire(id: string): Promise<ApprovalRecord | undefined> {
-    const approval = await this.settle(id, 'expired', undefined, 'no decision before it expired')
-    if (approval?.sessionId) await this.refreshStatus(approval.sessionId)
-    return approval
+    return this.settle(id, 'expired', undefined, 'no decision before it expired')
   }
 
-  /** Expires every pending approval past its time; returns how many. */
-  async expireDue(): Promise<number> {
-    const due = await this.deps.sql<{ id: string }[]>`
-      SELECT id FROM ai_approvals WHERE decision IS NULL AND expires_at <= now() ORDER BY expires_at LIMIT 500`
+  /**
+   * Expires every pending approval past its time; returns how many. Taken `page` at a
+   * time, oldest first, each page leaving out what this sweep already tried: a page of
+   * rows that keep failing never holds back the ones after it (#2382). At most `pages`
+   * pages a sweep: the next sweep takes up what is left.
+   */
+  async expireDue(page = EXPIRE_PAGE, pages = EXPIRE_PAGES): Promise<number> {
     let n = 0
-    // One approval that fails to expire never holds back the rest (#2382): the first
-    // failure is thrown once every other one has been tried.
-    let failure: unknown
-    for (const { id } of due) {
-      try {
-        if (await this.expire(id)) n += 1
-      } catch (err) {
-        failure ??= err
+    const tried: string[] = []
+    // One approval that fails to expire never holds back the rest: the failures are
+    // thrown once every other one has been tried, the first alone or all of them.
+    const failures: unknown[] = []
+    let full = false
+    for (let taken = 0; taken < pages; taken += 1) {
+      const due = await this.deps.sql.unsafe<{ id: string }[]>(
+        `SELECT id FROM ai_approvals
+         WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
+         ORDER BY expires_at LIMIT $2`,
+        [tried, page],
+      )
+      for (const { id } of due) {
+        tried.push(id)
+        try {
+          if (await this.expire(id)) n += 1
+        } catch (err) {
+          failures.push(err)
+        }
       }
+      full = due.length === page
+      if (!full) break
     }
-    if (failure !== undefined) throw failure
+    // Said, so a backlog past the cap (rows that keep failing, say) is seen, not silent.
+    if (full) console.warn(`approval expiry sweep stopped at its cap of ${pages} pages of ${page}; the rest wait for the next sweep`)
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, `${failures.length} approvals failed to expire`)
     return n
   }
 
@@ -1040,10 +1080,9 @@ export class ApprovalService {
     const pending = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL ORDER BY created_at`
     let n = 0
-    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason)) n += 1
-    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     // `refresh: false`: the caller (a finishing turn) sets the status itself.
-    if (n > 0 && options.refresh !== false) await this.refreshStatus(sessionId)
+    for (const { id } of pending) if (await this.settle(id, 'cancelled', undefined, reason, {}, options.refresh !== false)) n += 1
+    n += await this.revokeUnused(sessionId, reason, options.keepResumeTurn ? { exceptResumeTurn: options.keepResumeTurn } : {})
     return n
   }
 
@@ -1275,8 +1314,8 @@ export class ApprovalService {
       // An abort (interrupt, shutdown) ends the wait and leaves the row
       // pending: the finishing turn cancels it or, on shutdown, keeps it
       // (sessions/manager.ts finish). The SDK has dropped the request by then.
+      // The status moved back with the decision's own commit (settle).
       const decided = await this.waitFor(approval.id, AbortSignal.any([context.signal, request.signal]))
-      await this.refreshStatus(context.sessionId)
       const source = { approvalId: decided.id, decision: decided.decision ?? undefined }
       if (decided.decision === 'approved') {
         if (await this.consumeById(decided.id)) {
@@ -1325,6 +1364,10 @@ export class ApprovalService {
  * next one names the query. Never the parameters: they can hold an input's summary.
  */
 export function sweepErrorText(err: unknown): string {
+  // Several failed: the first as one is said, and how many more.
+  if (err instanceof AggregateError && err.errors.length > 0) {
+    return `${sweepErrorText(err.errors[0])} (and ${err.errors.length - 1} more)`
+  }
   const message = err instanceof Error ? err.message : String(err)
   const query = (err as { query?: unknown } | null)?.query
   if (typeof query !== 'string' || query.trim() === '') return message

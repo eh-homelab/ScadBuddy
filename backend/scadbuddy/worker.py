@@ -9,6 +9,7 @@ import contextlib
 import logging
 import os
 import signal
+import socket
 import time
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -190,6 +191,8 @@ def build_worker_deps(
             history=None,
             fonts=FontService(settings.data_dir),
             metrics=metrics,
+            # #2788: none unless set, and never one the API reads (README).
+            downloads_dir=config.download_cache_dir,
         )
     except BaseException:
         # A refused start (an unready store) closes what it opened before propagating.
@@ -533,6 +536,13 @@ async def _serve_versioned(
 
 
 class _HealthServer(uvicorn.Server):
+    def __init__(self, config: uvicorn.Config, sock: socket.socket | None = None) -> None:
+        super().__init__(config)
+        self._sock = sock
+
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().serve(sockets if sockets is not None or self._sock is None else [self._sock])
+
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
         # `main` owns SIGTERM/SIGINT: they set `stop`, which stops this server too.
@@ -622,12 +632,25 @@ def _health_app(
     return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
 
 
+#: Where a worker serves /healthz and /metrics: a port to bind, or a socket already
+#: bound (#3807: a test holds its port from picking it to serving, so nothing else on
+#: the runner can take it in between).
+HealthListen = int | socket.socket
+
+
 def _health_server(
-    settings: Settings, metrics: Metrics, store: StoreBundle | None, port: int, task_queue: str
+    settings: Settings,
+    metrics: Metrics,
+    store: StoreBundle | None,
+    listen: HealthListen,
+    task_queue: str,
 ) -> _HealthServer:
     app = _health_app(settings, metrics, store, task_queue)
+    if isinstance(listen, socket.socket):
+        config = uvicorn.Config(app, log_config=None, access_log=False)
+        return _HealthServer(config, listen)
     return _HealthServer(
-        uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
+        uvicorn.Config(app, host="0.0.0.0", port=listen, log_config=None, access_log=False)
     )
 
 
@@ -712,7 +735,7 @@ async def run_worker(
     *,
     stop: asyncio.Event | None = None,
     stop_now: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
@@ -878,7 +901,7 @@ async def run_print_worker(
     *,
     stop: asyncio.Event | None = None,
     stop_now: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
@@ -928,7 +951,7 @@ async def run_projects_worker(
     settings: Settings,
     *,
     stop: asyncio.Event | None = None,
-    health_port: int | None = HEALTH_PORT,
+    health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
     §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never

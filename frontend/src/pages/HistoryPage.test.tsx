@@ -1,12 +1,16 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import type userEvent from '@testing-library/user-event'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output } from '../api/types'
-import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
+import { bbox, keychainSchema, models, outputs, prints } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { fakeRealtime } from '../lib/realtime.fake'
 import { setDisplayUnit } from '../lib/units'
+import { choose } from '../test/select'
+import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
@@ -30,6 +34,22 @@ beforeEach(() => {
   actions.length = 0
 })
 
+/**
+ * The plates on `name`'s row once it is scrolled into view. The row is found and brought
+ * into view again on every try: a slow CI shard can re-render it between the two, and a
+ * row rendered anew has a fresh, unseen placeholder (CI, 2026-10-14).
+ */
+async function shownPlates(name: string) {
+  return await waitFor(
+    async () => {
+      const item = await row(name)
+      intersect(item)
+      return within(item).getByRole('figure', { name: 'Plates' })
+    },
+    { timeout: 5000 },
+  )
+}
+
 function render() {
   return renderPage(
     <Routes>
@@ -51,9 +71,20 @@ function EditRoute() {
  * Rows are labelled by the output's name — its id is 32 hex characters. The name is
  * also one of the parameters, so it appears twice in its own row; the heading is first.
  */
+/** Opens `item`'s "More for …" menu and returns its entry named `name` (#3672). */
+async function menuItem(user: ReturnType<typeof userEvent.setup>, item: HTMLElement, name: string | RegExp): Promise<HTMLElement> {
+  await user.click(within(item).getByRole('button', { name: /^More for / }))
+  return screen.findByRole('menuitem', { name })
+}
+
 async function row(name: string): Promise<HTMLElement> {
   const headings = await screen.findAllByText(name)
   return (headings[0] as HTMLElement).closest('li') as HTMLElement
+}
+
+/** No print on record: a row says only where its file went. */
+function noPrints() {
+  server.use(http.get('/api/v1/prints', () => HttpResponse.json({ items: [], next_cursor: null })))
 }
 
 describe('HistoryPage', () => {
@@ -200,12 +231,14 @@ describe('HistoryPage', () => {
   })
 
   it('shows where an output already went, by Bambuddy id', async () => {
+    noPrints()
     render()
     expect(within(await row('Reagan')).getByText('queued #4471')).toBeInTheDocument()
     expect(within(await row('Nova')).getByText('in library #8790')).toBeInTheDocument()
   })
 
   it('deep-links each recorded id into Bambuddy', async () => {
+    noPrints()
     render()
     // The base comes from Settings, because an output record carries ids and no URL.
     const queued = within(await row('Reagan')).getByRole('link', { name: 'queued #4471' })
@@ -320,19 +353,19 @@ describe('HistoryPage', () => {
       if (request.method === 'DELETE') deleted.push(new URL(request.url).pathname)
     })
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Workshop'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })
     expect(dialog).toHaveTextContent('This cannot be undone.')
     expect(within(dialog).queryByRole('list', { name: 'Library copies' })).not.toBeInTheDocument()
     expect(deleted).toEqual([])
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    expect(within(await row('Workshop')).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+    expect(within(await row('Workshop')).getByRole('button', { name: 'More for Workshop' })).toBeInTheDocument()
     expect(deleted).toEqual([])
 
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Workshop'), /^Delete /))
     await user.click(
-      within(await screen.findByRole('dialog', { name: 'Delete Workshop?' })).getByRole('button', {
+      within(await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })).getByRole('button', {
         name: 'Delete output',
       }),
     )
@@ -350,9 +383,9 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
     expect(copies).toHaveTextContent('#8790 in the inbox folder')
     expect(copies).toHaveTextContent('#8789 in a project folder, kept')
@@ -368,9 +401,9 @@ describe('HistoryPage', () => {
   it('does not label a copy inbox or project before the settings have loaded', async () => {
     server.use(http.get('/api/v1/settings', () => delay('infinite')))
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
 
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     const copies = within(dialog).getByRole('list', { name: 'Library copies' })
     expect(copies).not.toHaveTextContent('in the inbox folder')
     expect(copies).not.toHaveTextContent('in a project folder')
@@ -386,8 +419,8 @@ describe('HistoryPage', () => {
       }),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
     await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
@@ -404,8 +437,8 @@ describe('HistoryPage', () => {
       ),
     )
     const { user } = render()
-    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Nova?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
 
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Bambuddy said no')
@@ -453,6 +486,40 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
+  it("shows the arranged result's plates once, in its next step, not on its row too (#2754 review)", async () => {
+    server.use(http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])))
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('group', { name: 'Next step' })
+    const arranged = (await screen.findByText('Arranged from 1 output')).closest('li')!
+    expect(await screen.findByRole('figure', { name: 'Plates' })).toBeInTheDocument()
+    expect(screen.getAllByRole('figure', { name: 'Plates' })).toHaveLength(1)
+    expect(within(arranged).queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the list up while it reads it again after an arrange (#2283)', async () => {
+    let slow = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async () => {
+        if (slow) await delay(3000)
+        return undefined // the default handler answers
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    const arrange = await screen.findByRole('button', { name: 'Arrange' })
+    slow = true
+    await user.click(arrange)
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument())
+    expect(screen.queryByText('Loading history')).not.toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Arranged' })).toBeInTheDocument()
+    expect(screen.getAllByText('Reagan').length).toBeGreaterThan(0)
+    expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
+  })
+
   it('says the result was saved here, with no link to where it already is (#2542)', async () => {
     const { user } = render()
     await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
@@ -495,19 +562,190 @@ describe('HistoryPage', () => {
     await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
     await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
     await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
-    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
-    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name!
+    const model = await screen.findByLabelText('Model')
+    await waitFor(() => expect(model).toBeEnabled())
+    await choose(user, model, binName)
+    await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
-    await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
+    await choose(user, screen.getByLabelText('File under'), binName)
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     const note = await screen.findByRole('status', { name: 'Arranged' })
-    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name
     expect(note).toHaveTextContent(`in ${binName}'s history.`)
     expect(within(note).getByRole('link', { name: 'Open in History' })).toHaveAttribute(
       'href',
       '/m/gridfinity-bin/history',
     )
+  })
+
+  it("says how an output's last print went, linked to its print, in place of the queue id (#2288)", async () => {
+    render()
+    // Reagan's newest print (archive 36) failed; its earlier one (35) succeeded.
+    const reagan = await row('Reagan')
+    const outcome = await within(reagan).findByRole('link', { name: 'Last print: Failed' })
+    expect(outcome).toHaveAttribute('href', '/prints/36')
+    expect(outcome).not.toHaveClass('text-ok')
+    expect(within(reagan).queryByText('queued #4471')).not.toBeInTheDocument()
+    // Nova's is still printing; Workshop's archive is gone from Bambuddy.
+    expect(await within(await row('Nova')).findByRole('link', { name: 'Last print: Printing' })).toHaveAttribute(
+      'href',
+      '/prints/37',
+    )
+    expect(
+      await within(await row('Workshop')).findByRole('link', { name: 'Last print: Deleted in Bambuddy' }),
+    ).toBeInTheDocument()
+  })
+
+  it('says a print that finishes while the page is open, without a reload (#2786 review)', async () => {
+    // Real time still passes, so the page's own waits run; `signal` advances the fakes.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const nova = outputs.find((o) => o.name === 'Nova')!
+    const print = prints.find((p) => p.archive_id === 37)!
+    const was = print.status
+    onTestFinished(() => {
+      print.status = was
+    })
+    render()
+    const row_ = await row('Nova')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Printing' })).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain(`print:${nova.id}`))
+    print.status = 'failed'
+    await realtime.signal(`print:${nova.id}`, 'print.settled')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Failed' })).toBeInTheDocument()
+  })
+
+  it("reads the prints again when one settles, not on its progress ticks (#2786 review)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const reads: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/prints') reads.push(request.url)
+    }
+    server.events.on('request:start', listen)
+    onTestFinished(() => {
+      server.events.removeListener('request:start', listen)
+    })
+    const nova = outputs.find((o) => o.name === 'Nova')!
+    render()
+    const row_ = await row('Nova')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Printing' })).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain(`print:${nova.id}`))
+    const before = reads.length
+    await realtime.signal(`print:${nova.id}`, 'print.progress')
+    await realtime.signal(`print:${nova.id}`, 'print.progress')
+    expect(reads).toHaveLength(before)
+    await realtime.signal(`print:${nova.id}`, 'print.settled')
+    await waitFor(() => expect(reads).toHaveLength(before + 1))
+  })
+
+  it('keeps the rows when the prints cannot be read (#2288)', async () => {
+    server.use(http.get('/api/v1/prints', () => problem(503, 'Bambuddy is unreachable')))
+    render()
+    expect(await within(await row('Reagan')).findByText('queued #4471')).toBeInTheDocument()
+    expect(screen.queryByText(/Last print/)).not.toBeInTheDocument()
+  })
+
+  it('shows a preview of every output that has one, larger on a click (#2288)', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    const preview = within(reagan).getByRole('button', { name: 'Preview Reagan' })
+    // Decorative inside its button, which carries the name.
+    expect(preview.querySelector('img')).toHaveAttribute('src', `/api/v1/outputs/${outputs[0]!.id}/thumbnail`)
+    await user.click(preview)
+    const dialog = await screen.findByRole('dialog', { name: 'Reagan' })
+    expect(within(dialog).getByRole('img', { name: 'Preview of Reagan' })).toBeInTheDocument()
+    // One with no thumbnail says so rather than leaving a gap.
+    const without = outputs.find((o) => !o.has_thumbnail && o.name)!
+    expect(within(await row(without.name!)).getByLabelText(`No preview of ${without.name!}`)).toBeInTheDocument()
+  })
+
+  it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
+    const { user } = render()
+    for (const name of ['Reagan', 'Nova', 'Workshop']) {
+      const item = await row(name)
+      expect(within(item).getByRole('button', { name: 'Download 3MF' })).toBeInTheDocument()
+      expect(await menuItem(user, item, `Queue ${name}`)).toBeInTheDocument()
+      expect(screen.getByRole('menuitem', { name: `Rename ${name}` })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+    }
+    await user.click(await menuItem(user, await row('Workshop'), 'Queue Workshop'))
+    const dialog = await screen.findByRole('dialog', { name: 'Queue' })
+    expect(within(dialog).getByTestId('run-print')).toHaveTextContent('Queue')
+  })
+
+  it('opens Print as Print after a Queue was closed (#2288)', async () => {
+    const { user } = render()
+    await user.click(await menuItem(user, await row('Workshop'), 'Queue Workshop'))
+    await user.click(within(await screen.findByRole('dialog', { name: 'Queue' })).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Print Workshop' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('renames an output, and a blank name gives it back its short id (#2288)', async () => {
+    const { user } = render()
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
+    const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
+    expect(field).toHaveValue('Workshop')
+    await user.clear(field)
+    await user.type(field, 'Shed sign{Enter}')
+    const renamed = await row('Shed sign')
+    expect(screen.queryByRole('textbox', { name: 'Name for Workshop' })).not.toBeInTheDocument()
+    // The server has it, not only the row.
+    const id = outputs.find((o) => o.name === 'Workshop')!.id
+    expect(((await (await fetch(`/api/v1/outputs/${id}`)).json()) as Output).name).toBe('Shed sign')
+
+    await user.click(await menuItem(user, renamed, 'Rename Shed sign'))
+    await user.clear(screen.getByRole('textbox', { name: 'Name for Shed sign' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText(id.slice(0, 8))).toBeInTheDocument()
+  })
+
+  it('keeps a row deleted while a rename was in flight deleted (#2786 review)', async () => {
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    const id = outputs.find((o) => o.name === 'Workshop')!.id
+    server.use(
+      http.patch('/api/v1/outputs/:id', async () => {
+        await answered
+        return HttpResponse.json({ ...outputs.find((o) => o.id === id)!, name: 'Shed sign' })
+      }),
+      http.delete('/api/v1/outputs/:id', () => new HttpResponse(null, { status: 204 })),
+    )
+    const { user } = render()
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
+    const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
+    await user.clear(field)
+    await user.type(field, 'Shed sign{Enter}')
+    await user.click(await menuItem(user, await row('Nova'), /^Delete /))
+    await user.click(
+      within(await screen.findByRole('alertdialog', { name: 'Delete Nova?' })).getByRole('button', {
+        name: 'Delete output',
+      }),
+    )
+    await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
+    answer()
+    expect(await row('Shed sign')).toBeInTheDocument()
+    expect(screen.queryAllByText('Nova')).toHaveLength(0)
+  })
+
+  it('keeps the name being typed and says why when a rename fails (#2288)', async () => {
+    server.use(http.patch('/api/v1/outputs/:id', () => problem(503, 'the volume is not writable')))
+    const { user } = render()
+    await user.click(await menuItem(user, await row('Workshop'), 'Rename Workshop'))
+    await user.type(screen.getByRole('textbox', { name: 'Name for Workshop' }), ' 2')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('the volume is not writable')
+    expect(screen.getByRole('textbox', { name: 'Name for Workshop' })).toHaveValue('Workshop 2')
   })
 
   it('offers Print on every output (#2287)', async () => {
@@ -545,8 +783,8 @@ describe('HistoryPage', () => {
     const workshop = await row('Workshop')
     await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
-    await user.click(within(workshop).getByRole('button', { name: 'Delete Workshop' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    await user.click(await menuItem(user, workshop, 'Delete Workshop'))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Workshop?' })
     await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
@@ -578,6 +816,51 @@ describe('HistoryPage', () => {
     expect(within(batch).getByText('Arranged from 2 outputs and 1 library file')).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
+  })
+
+  it('shows an arranged output\'s plates on its row, and a rendered one\'s not (#2282)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    const read: string[] = []
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged, outputs[1]])),
+      http.get('/api/v1/outputs/:id/plates', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: false, name: 'tags' },
+        ])
+      }),
+    )
+    render()
+    const batch = await row('Batch')
+    // #2754 review — read once the row nears the viewport, not as it mounts.
+    expect(within(batch).getByTestId('arranged-plates-pending')).toBeInTheDocument()
+    expect(read).toEqual([])
+    const plates = await shownPlates('Batch')
+    expect(plates).toHaveTextContent('2 plates')
+    expect(within(plates).getByRole('img', { name: 'Plate 1' })).toHaveAttribute(
+      'src',
+      `/api/v1/outputs/${'f'.repeat(32)}/plates/1/thumbnail`,
+    )
+    expect(plates).toHaveTextContent('Plate 2: tags')
+    expect(within(await row('Nova')).queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+    // Only the arranged output's plates are read. Not "read once": run after the file's
+    // other tests they are read twice (CI, 2026-10-14), which is no part of what this
+    // test is about.
+    expect(new Set(read)).toEqual(new Set(['f'.repeat(32)]))
+  })
+
+  it('shows a plate whose picture fails to load as one with none (#2754 review)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged])),
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])),
+    )
+    render()
+    const plates = await shownPlates('Batch')
+    fireEvent.error(within(plates).getByRole('img', { name: 'Plate 1' }))
+    expect(within(plates).queryByRole('img')).not.toBeInTheDocument()
+    expect(plates).toHaveTextContent('Plate 1')
   })
 })
 
@@ -616,11 +899,11 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
 
 describe('HistoryPage, item context (#975)', () => {
   it("names each row's actions after its output", async () => {
-    render()
+    const { user } = render()
     const nova = await row('Nova')
     expect(within(nova).getByRole('button', { name: 'Edit Nova' })).toBeInTheDocument()
     expect(within(nova).getByRole('button', { name: 'Send again Nova' })).toBeInTheDocument()
-    expect(within(nova).getByRole('button', { name: 'Delete Nova' })).toBeInTheDocument()
+    expect(await menuItem(user, nova, 'Delete Nova')).toBeInTheDocument()
   })
 
   it('reads a changed value as the value and its default, not the two run together', async () => {

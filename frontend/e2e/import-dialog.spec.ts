@@ -22,6 +22,11 @@ test.describe('import from URL', () => {
     const field = dialog.getByLabel('URL')
     await field.fill('https://example.com/enter-import.scad')
     await field.press('Enter')
+    // In flight only while msw's import handler holds it (`delay(120)` in
+    // src/mocks/handlers.ts); page.route cannot hold a request the service worker
+    // answers. React renders between the presses here, so this checks `importing` holds
+    // a second Enter in Chromium; the same-tick case the ref covers is
+    // ImportDialog.test.tsx's (#2558).
     await field.press('Enter')
 
     await expect(dialog).toBeHidden()

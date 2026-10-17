@@ -1,4 +1,5 @@
 import { useContext, useEffect, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import { createPath, UNSAFE_NavigationContext, useLocation, useNavigate } from 'react-router'
 import {
   activeDialog,
@@ -10,6 +11,7 @@ import {
   roleOf,
   setControlValue,
 } from './dom'
+import { fillableOf, type Fillable } from './fillable'
 import { touch, waitFor } from './highlight'
 import { AgentToolError } from './types'
 import { useAgentBridge, useAgentHandlers, useLatest } from './useAgentHandlers'
@@ -17,6 +19,12 @@ import { useAgentBridge, useAgentHandlers, useLatest } from './useAgentHandlers'
 const USER_ONLY_MESSAGE =
   'Only the user can press this: it confirms an action that leaves ScadBuddy or cannot be ' +
   'undone (send, print, delete, save settings). Ask the user to review it and press it.'
+
+/** What `fill` says when the control asked first (a preset pick over edits, #359). */
+const CONFIRM_FIRST = (dialog: Element) =>
+  `"${nameOf(dialog)}" opened instead: the value takes only once it is answered. Take a ` +
+  'snapshot to read it. Confirming may discard what is on screen; if the user made those ' +
+  'changes, ask them before you confirm.'
 
 /** `navigate` accepts in-app paths only: no scheme, no protocol-relative `//host`. */
 function checkRoute(route: string): string {
@@ -31,12 +39,15 @@ function checkRoute(route: string): string {
  * visible label it is (the snapshot and the screen show labels, and a preset's value
  * can be an opaque id).
  */
-function optionValue(select: HTMLSelectElement, label: string, value: string): string {
-  const options = [...select.options]
+function optionValue(select: HTMLSelectElement | Fillable, label: string, value: string): string {
+  const options =
+    select instanceof HTMLSelectElement
+      ? [...select.options].map((option) => ({ value: option.value, label: option.text }))
+      : select.options()
   if (options.some((option) => option.value === value)) return value
-  const byLabel = options.filter((option) => option.text.trim() === value.trim())
-  if (byLabel.length === 1) return (byLabel[0] as HTMLOptionElement).value
-  const listed = options.map((option) => `${JSON.stringify(option.text.trim())} (${JSON.stringify(option.value)})`).join(', ')
+  const byLabel = options.filter((option) => option.label.trim() === value.trim())
+  if (byLabel.length === 1) return (byLabel[0] as { value: string }).value
+  const listed = options.map((option) => `${JSON.stringify(option.label.trim())} (${JSON.stringify(option.value)})`).join(', ')
   throw new AgentToolError(
     'invalid_args',
     byLabel.length > 1
@@ -152,6 +163,20 @@ export function useGlobalAgentTools() {
       if (element.closest('.monaco-editor')) {
         throw new AgentToolError('invalid_args', 'Use replace_range to edit the source.')
       }
+      // A Radix select (#3672): set through what rendered it, as a <select> would be.
+      const fillable = fillableOf(element)
+      if (fillable) {
+        if (isDisabled(element)) throw new AgentToolError('invalid_args', `"${label}" is not editable.`)
+        const wanted = optionValue(fillable, label, value)
+        touch(element)
+        const before = activeDialog()
+        // Rendered now, as a <select>'s change event is: the dialog it may open is read next.
+        flushSync(() => fillable.set(wanted))
+        const dialog = fillable.value() === wanted ? null : activeDialog()
+        const filled = { filled: nameOf(element), value: fillable.value() }
+        if (!dialog || dialog === before) return filled
+        return { ...filled, confirm: CONFIRM_FIRST(dialog) }
+      }
       if (
         !(element instanceof HTMLInputElement) &&
         !(element instanceof HTMLTextAreaElement) &&
@@ -172,13 +197,7 @@ export function useGlobalAgentTools() {
       // dialog this fill opened counts: one already open holds the field itself.
       const dialog = element.value === target ? null : activeDialog()
       if (!dialog || dialog === before) return filled
-      return {
-        ...filled,
-        confirm:
-          `"${nameOf(dialog)}" opened instead: the value takes only once it is answered. Take a ` +
-          'snapshot to read it. Confirming may discard what is on screen; if the user made those ' +
-          'changes, ask them before you confirm.',
-      }
+      return { ...filled, confirm: CONFIRM_FIRST(dialog) }
     },
   })
 }

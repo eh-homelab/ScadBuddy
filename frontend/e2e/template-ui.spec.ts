@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { choose } from './select'
 
 // The ui-demo and ui-broken templates are msw fixtures (src/mocks/templateUi.ts); the real
 // stack has neither.
@@ -80,8 +81,44 @@ test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
   const ui = page.getByTestId('template-ui')
   await expect(ui.locator('sb-param[name="wall_color"]')).toBeVisible()
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeHidden()
-  await ui.locator('sb-param[name="mode"]').getByRole('combobox').selectOption('ball_lid')
+  // #3672 — a Radix select in the template's shadow root; its list portals to the page.
+  await choose(page, ui.locator('sb-param[name="mode"]').getByRole('combobox'), 'Ball with snap-on lid')
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeVisible()
   await expect(page.getByTestId('ui-origin')).toHaveText('Custom interface · built-in')
   expect(await violations(page)).toEqual([])
+})
+
+// #3777 — laid out, not only classed. The page slot's read-only view of inputs that would
+// not migrate keeps three lines of them visible however long the error, counted inside
+// the textarea's padding (#3844 review: a border-box floor of 3lh shows about two), and
+// where 30vh holds that floor, the textarea stays inside its alert.
+async function openUnmigrated(page: Page, height: number) {
+  await page.setViewportSize({ width: 1280, height })
+  await page.goto('/m/ui-unmigrated')
+  await choose(page, page.getByRole('combobox', { name: 'Preset' }), 'Old')
+  const saved = page.getByRole('textbox', { name: 'Saved inputs' })
+  await expect(saved).toBeVisible()
+  const alert = page.getByRole('alert').filter({ has: saved })
+  await expect(alert).toContainText('defines no migrate')
+  return { saved, alert }
+}
+
+test('keeps three lines of unmigrated inputs visible in a short window', async ({ page }) => {
+  const { saved } = await openUnmigrated(page, 300)
+  const lines = await saved.evaluate((el) => {
+    const style = el.ownerDocument.defaultView!.getComputedStyle(el)
+    const text = el.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+    return text / parseFloat(style.lineHeight)
+  })
+  expect(lines).toBeGreaterThanOrEqual(2.98)
+})
+
+test('keeps the unmigrated inputs inside their alert where 30vh holds them', async ({ page }) => {
+  const { saved, alert } = await openUnmigrated(page, 420)
+  const box = (await alert.boundingBox())!
+  // The precondition first (#3893 review): the alert is at its 30vh cap, so an overflow
+  // below is the textarea's, not a cap that moved.
+  expect(box.height).toBeCloseTo(0.3 * 420, 0)
+  const area = (await saved.boundingBox())!
+  expect(area.y + area.height).toBeLessThanOrEqual(box.y + box.height + 0.5)
 })

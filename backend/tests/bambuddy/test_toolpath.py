@@ -180,3 +180,10 @@ def test_a_number_past_float_range_is_not_drawn() -> None:
     data = path.encode()
     (size,) = struct.unpack_from("<I", data)
     assert json.loads(data[4 : 4 + size])["max_speed"] == 1
+
+
+def test_the_header_names_the_wire_format_version() -> None:
+    """#3360: the frontend's `TOOLPATH_VERSION` refuses any other, so the header says it."""
+    # The literal is the frontend's `TOOLPATH_VERSION`: the two move together, so a bump
+    # here edits this test and `frontend/src/lib/toolpath.ts` in the same change.
+    assert Toolpath().header()["version"] == toolpath.VERSION == 1

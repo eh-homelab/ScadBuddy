@@ -7,7 +7,10 @@ on the one before it deadlocks and the test times out, rather than passing slowl
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +27,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -88,6 +92,45 @@ def _expire(cache: Path) -> None:
     os.utime(kept, (0, 0))
 
 
+class _HeldPresets:
+    """/slicer/presets held until ``release`` is set, counting the reads as they
+    start: respx counts a call only once it has answered."""
+
+    def __init__(self, answer: Callable[[], httpx.Response]) -> None:
+        self.started = 0
+        self.asked = asyncio.Event()
+        self.release = asyncio.Event()
+        self._answer = answer
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.started += 1
+        self.asked.set()
+        await self.release.wait()
+        return self._answer()
+
+
+def _count_shields(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Awaitable[None]]:
+    """A wait until ``n`` opens are waiting on the shared first read (#3809 review). An open
+    awaits the shield the moment it makes it, so counting shields counts waiting opens,
+    with no guess at how long that takes."""
+    shields = 0
+    real = asyncio.shield
+
+    def counting(arg: Awaitable[catalogue._Catalogue]) -> asyncio.Future[catalogue._Catalogue]:
+        nonlocal shields
+        shields += 1
+        return real(arg)
+
+    monkeypatch.setattr(asyncio, "shield", counting)
+
+    async def until(n: int) -> None:
+        async with asyncio.timeout(5):
+            while shields < n:
+                await asyncio.sleep(0)
+
+    return until
+
+
 def _preset_routes() -> tuple[respx.Route, respx.Route]:
     return (
         respx.get(f"{API}/slicer/presets").mock(return_value=_ok("slicer-presets-h2c.json")),
@@ -114,7 +157,13 @@ async def test_the_printer_reads_do_not_wait_on_the_preset_catalogue(
 
     async with asyncio.timeout(5):
         view = await choices_for(
-            bambuddy, _source(), StoredSettings(), remembered=None, printer_id=1, cache=tmp_path
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=1,
+            cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert view.printer_id == 1
@@ -196,6 +245,91 @@ async def test_a_failed_refresh_keeps_the_old_catalogue(
     assert presets.call_count == 2
     catalogue.forget_catalogues()
     assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_refresh_whose_local_presets_read_fails_keeps_the_old_catalogue(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3422: either read failing fails the refresh. A refresh that kept the presets
+    without the local ones would share a smaller catalogue as a fresh one."""
+    _, local = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    _expire(tmp_path)
+    local.mock(return_value=httpx.Response(500))
+
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+    await asyncio.gather(*catalogue._refreshing.values())
+
+    assert local.call_count == 2
+    assert kept.stat().st_mtime == 0  # not rewritten
+    catalogue.forget_catalogues()
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_kept_catalogue_is_named_by_an_hmac_under_the_kek(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3313: a listing of the shared volume names no hash a guessed API key can be
+    checked against without the KEK."""
+    _preset_routes()
+    kek = Kek(id="k1", key=b"\x01" * 32)
+    key = catalogue.catalogue_name_key(kek)
+    assert key is not None and catalogue.catalogue_name_key(None) is None
+    assert catalogue.catalogue_name_key(Kek(id="k1", key=b"\x01" * 32)) == key
+
+    await cached_catalogue(bambuddy, tmp_path, name_key=key)
+
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    message = f"{bambuddy.config.base_url}\0{bambuddy.config.api_key or ''}".encode()
+    assert kept.name == f"v1-{hmac.new(key, message, hashlib.sha256).hexdigest()[:32]}.json"
+    assert kept.name != catalogue._path(tmp_path, bambuddy.config).name
+
+
+@respx.mock
+async def test_a_keep_removes_the_files_left_unwritten_past_the_orphan_age(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3423: a file for another URL, key or version, or a crashed write, goes once it
+    has sat unwritten for CATALOGUE_ORPHAN_AGE; a recent one stays."""
+    _preset_routes()
+    directory = tmp_path / catalogue.CATALOGUE_DIRNAME
+    directory.mkdir()
+    old = time.time() - catalogue.CATALOGUE_ORPHAN_AGE - 60
+    orphans = [directory / "v1-0123456789abcdef0123456789abcdef.json", directory / ".v0-x.json.1f"]
+    for orphan in orphans:
+        orphan.write_text("{}", encoding="utf-8")
+        os.utime(orphan, (old, old))
+    # The file this Bambuddy's catalogue was kept in under the KEK before a rotation:
+    # named under another key, it is never read again and goes the same way (#3816 review).
+    rotated = catalogue._path(tmp_path, bambuddy.config, b"k" * 32)
+    orphans.append(rotated)
+    rotated.write_text("{}", encoding="utf-8")
+    os.utime(rotated, (old, old))
+    recent = directory / "v1-fedcba9876543210fedcba9876543210.json"
+    recent.write_text("{}", encoding="utf-8")
+
+    await cached_catalogue(bambuddy, tmp_path)
+
+    kept = catalogue._path(tmp_path, bambuddy.config)
+    assert kept != rotated
+    assert sorted(directory.iterdir()) == sorted([kept, recent])
+
+
+def test_forget_catalogues_drops_a_refresh_whose_event_loop_has_closed() -> None:
+    """#3311: cancelling a task that has started on a loop since closed raises."""
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(asyncio.sleep(3600))
+    loop.run_until_complete(asyncio.sleep(0))
+    loop.close()
+    catalogue._refreshing[Path("left-by-an-earlier-test")] = task
+    try:
+        catalogue.forget_catalogues()
+    finally:
+        catalogue._refreshing.clear()
+    assert catalogue._refreshing == {}
 
 
 @respx.mock
@@ -313,6 +447,109 @@ async def test_a_failed_catalogue_read_is_not_kept(
 
 
 @respx.mock
+async def test_opens_with_nothing_kept_share_one_read(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2906: with no catalogue kept yet (a fresh volume, a new key), opens at once
+    each read /slicer/presets (~6 s, 1 MB). They now wait on one read."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
+
+    opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(3)]
+    await waiting(3)
+    held.release.set()
+    async with asyncio.timeout(5):
+        first, *rest = await asyncio.gather(*opens)
+
+    assert rest == [first, first]
+    assert held.started == 1
+    assert not catalogue._reading
+
+
+@respx.mock
+async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2906: choices_for cancels its catalogue read when another read fails first;
+    that must not take the shared read from the opens still waiting on it."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
+
+    given_up = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    still = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    await waiting(2)
+    given_up.cancel()
+    held.release.set()
+
+    async with asyncio.timeout(5):
+        assert (await still).process
+    assert given_up.cancelled()
+    assert held.started == 1
+    # Kept for the next open, though the one that started the read gave up on it.
+    assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
+
+
+@respx.mock
+async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = _HeldPresets(lambda: httpx.Response(500))
+    presets = respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    waiting = _count_shields(monkeypatch)
+
+    opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(2)]
+    await waiting(2)
+    held.release.set()
+    async with asyncio.timeout(5):
+        outcomes = await asyncio.gather(*opens, return_exceptions=True)
+
+    assert all(isinstance(outcome, ApiError) for outcome in outcomes)
+    assert held.started == 1
+    assert not catalogue._reading
+    # The next open reads again.
+    presets.mock(side_effect=None, return_value=_ok("slicer-presets-h2c.json"))
+    assert (await cached_catalogue(bambuddy, tmp_path)).process
+
+
+@respx.mock
+async def test_a_first_read_started_after_another_kept_the_file_reads_that_file(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3809 review: an open whose load missed just before another read kept the file
+    starts a read of its own; that read takes the kept file rather than ask again."""
+    presets, _ = _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    path = next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir())
+
+    assert (await catalogue._first_read(bambuddy.config, path)).process
+    assert presets.call_count == 1
+
+
+@respx.mock
+async def test_shutdown_stops_a_first_read_too(bambuddy: BambuddyClient, tmp_path: Path) -> None:
+    """#3809 review: a first read still running at shutdown is cancelled and awaited, as
+    the refreshes are, so its client closes."""
+    held = _HeldPresets(lambda: _ok("slicer-presets-h2c.json"))
+    respx.get(f"{API}/slicer/presets").mock(side_effect=held)
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
+    async with asyncio.timeout(5):
+        await held.asked.wait()
+    (reading,) = catalogue._reading.values()
+
+    await catalogue.stop_refreshes()
+
+    assert reading.cancelled()
+    opening.cancel()
+    await asyncio.gather(opening, return_exceptions=True)
+
+
+@respx.mock
 async def test_a_failing_catalogue_still_beats_the_filament_steps_failure(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
@@ -334,6 +571,36 @@ async def test_a_failing_catalogue_still_beats_the_filament_steps_failure(
             remembered=None,
             printer_id=1,
             cache=tmp_path,
+            catalogue_key=None,
+        )
+
+    assert "slicer presets" in raised.value.detail
+
+
+@respx.mock
+async def test_a_failing_catalogue_beats_the_filament_steps_failure_with_no_printer(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#2907: with no printer to open on, the catalogue and the filament step are read
+    on the other branch, and its failure still surfaces first there too."""
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=_ok("filament-requirements.json")
+    )
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await choices_for(
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=None,
+            cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert "slicer presets" in raised.value.detail
@@ -390,7 +657,13 @@ async def test_stalled_archives_cost_the_plate_preselection_not_the_dialog(
 
     async with asyncio.timeout(5):
         view = await choices_for(
-            bambuddy, _source(), StoredSettings(), remembered=None, printer_id=1, cache=tmp_path
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=1,
+            cache=tmp_path,
+            catalogue_key=None,
         )
 
     assert view.last_bed_type is None

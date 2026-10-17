@@ -194,6 +194,19 @@ def test_a_retention_under_a_day_is_refused(client: TestClient, field: str, valu
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "field", ["print_run_retention_seconds", "operation_retention_seconds", "activity_ttl_seconds"]
+)
+def test_a_retention_over_ten_years_is_refused(
+    client: TestClient, settings: Settings, field: str
+) -> None:
+    """A deployment stored 656868686867 s: every prune's ``now() - retention`` was out of
+    Postgres's timestamp range, so the activity sweep failed on every run."""
+    response = client.put("/api/v1/settings", json={field: 656868686867})
+    assert response.status_code == 422
+    assert field not in read_stored(settings.database_url)
+
+
 @pytest.fixture
 def three_day_namespace(app: FastAPI, temporal_address: str) -> Iterator[None]:
     """The operations client on a namespace that keeps a closed execution 3 days."""

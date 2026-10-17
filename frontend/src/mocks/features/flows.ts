@@ -770,6 +770,23 @@ export const handlers = [
     return HttpResponse.json({ problems: [...checkInputsSchema(inputs_schema), ...checkFlowScript(script)] })
   }),
   http.get('/api/v1/workflow-script/host-functions', () => HttpResponse.json(FLOW_HOST_FUNCTIONS)),
+  http.post('/api/v1/workflow-script/host-functions', async ({ request }) => {
+    const { inputs_schema } = (await request.json()) as { inputs_schema?: unknown }
+    if (inputs_schema == null || checkInputsSchema(inputs_schema).length > 0) return HttpResponse.json(FLOW_HOST_FUNCTIONS)
+    return HttpResponse.json({
+      ...FLOW_HOST_FUNCTIONS,
+      functions: [
+        ...FLOW_HOST_FUNCTIONS.functions,
+        {
+          name: 'inputs',
+          signature: 'async def inputs() -> FlowInputs',
+          parameters: [],
+          doc: "This run's inputs, as the flow's inputs.json declares them, defaults filled in.",
+        },
+      ],
+      types: [...FLOW_HOST_FUNCTIONS.types, { name: 'FlowInputs', source: 'class FlowInputs(TypedDict):\n    ...' }],
+    })
+  }),
   http.get('/api/v1/workflows/names/:name/versions/:commit/source', ({ params }) => {
     const found = newestFirst(String(params['name'])).find((d) => commitOf(d) === params['commit'])
     return found

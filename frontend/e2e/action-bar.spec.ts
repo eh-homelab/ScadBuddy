@@ -1,4 +1,5 @@
-import { expect, test, type Locator } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
+import { choose } from './select'
 
 /** The DOM this file reads, typed here because the e2e build has no DOM lib. */
 interface Box {
@@ -53,6 +54,12 @@ async function collisions(bar: Locator): Promise<{ overlaps: string[]; clipped: 
   })
 }
 
+/** #3651 — the project picker is a searchable list in a popover, not a `<select>`. */
+async function chooseProject(page: Page, picker: Locator, id: string) {
+  await picker.click()
+  await page.getByTestId('customize-project-select-list').getByTestId(`project-option-${id}`).click()
+}
+
 test.describe('action bar', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed')
 
@@ -62,7 +69,7 @@ test.describe('action bar', () => {
       await page.goto('/m/name-keychain')
       const bar = page.locator('footer').filter({ has: page.getByTestId('generate') })
 
-      await bar.getByLabel('Project').selectOption('1')
+      await chooseProject(page, bar.getByTestId('customize-project-select'), '1')
       const generate = page.getByTestId('generate')
       await expect(generate).toBeEnabled()
       await generate.click()
@@ -78,36 +85,36 @@ test.describe('action bar', () => {
   test("follows each preset's project and asks before filing it elsewhere (#1660)", async ({ page }) => {
     await page.goto('/m/name-keychain')
     const bar = page.locator('footer').filter({ has: page.getByTestId('generate') })
-    const project = bar.getByLabel('Project')
+    const project = bar.getByTestId('customize-project-select')
     const presets = page.getByRole('combobox', { name: 'Preset' })
     const generate = page.getByTestId('generate')
 
     // Tiny filed in Gridfinity Bins, the model with no preset in Reagan Keychain.
-    await presets.selectOption('template-tiny')
-    await project.selectOption('2')
+    await choose(page, presets, 'Tiny')
+    await chooseProject(page, project, '2')
     await expect(generate).toBeEnabled()
     await generate.click()
     await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')
-    await presets.selectOption('')
-    await project.selectOption('1')
+    await choose(page, presets, 'No preset')
+    await chooseProject(page, project, '1')
     await expect(generate).toBeEnabled()
     await generate.click()
     await expect(bar.getByTestId('project-filed')).toContainText('Saved to Reagan Keychain')
 
     // Loading Tiny again moves the picker to its project. Its values are on screen with
     // no preset selected, so the picker asks before replacing them.
-    await presets.selectOption('template-tiny')
-    await page.getByRole('dialog', { name: 'Apply preset Tiny?' }).getByRole('button', { name: 'Replace my changes' }).click()
-    await expect(project).toHaveValue('2')
+    await choose(page, presets, 'Tiny')
+    await page.getByRole('alertdialog', { name: 'Apply preset Tiny?' }).getByRole('button', { name: 'Replace my changes' }).click()
+    await expect(project).toHaveAttribute('data-value', '2')
 
     // Moved off it, Generate asks first.
-    await project.selectOption('1')
+    await chooseProject(page, project, '1')
     await expect(generate).toBeEnabled()
     await generate.click()
-    const dialog = page.getByRole('dialog', { name: 'File in another project?' })
+    const dialog = page.getByRole('alertdialog', { name: 'File in another project?' })
     await expect(dialog).toContainText('Tiny was last filed in Gridfinity Bins. File this in Reagan Keychain?')
     await dialog.getByRole('button', { name: 'Use Gridfinity Bins' }).click()
     await expect(bar.getByTestId('project-filed')).toContainText('Saved to Gridfinity Bins')
-    await expect(project).toHaveValue('2')
+    await expect(project).toHaveAttribute('data-value', '2')
   })
 })

@@ -24,8 +24,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api import outputs as outputs_api
-from scadbuddy.bambuddy import preview
+from scadbuddy.bambuddy import library_view, preview
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
@@ -57,7 +56,8 @@ def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dic
     assert started.status_code == 202, started.text
     op: dict[str, Any] = started.json()
     assert op["status"] == "running"
-    op = follow_operation(client, op, timeout=30)
+    # At the 0.1 s its own loop polled at, which the shard timings were measured with (#3510).
+    op = follow_operation(client, op, timeout=30, poll=0.1)
     assert op["status"] == "succeeded", op
     result: dict[str, Any] = op["result"]
     return result
@@ -545,17 +545,18 @@ def test_a_plate_too_big_to_read_is_refused_as_a_library_plate_is(
     """#2767: out of memory reading an output's plate is the library's 422, not a 500."""
     output_id = two_plate_output(client, model, paths)
 
-    def oom(*_: object) -> bytes:
+    def oom(*_: object) -> object:
         raise MemoryError
 
-    # Only this patch is undone: the autouse fixtures' patches stay for the read after.
+    # Out of memory inside the read itself: plate_glb maps it (test_library_view.py), the
+    # route only refuses. Only this patch is undone: the autouse fixtures' patches stay.
     with monkeypatch.context() as patched:
-        patched.setattr(outputs_api, "plate_glb", oom)
+        patched.setattr(library_view, "read_plate_parts", oom)
         response = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
     assert response.status_code == 422, response.text
     assert response.json()["detail"] == str(ReadOutOfMemoryError())
 
-    # Nothing is kept: the same plate reads once there is memory for it.
+    # The route has no cache to clear; this only checks the patch above was undone.
     again = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
     assert again.status_code == 200, again.text
 

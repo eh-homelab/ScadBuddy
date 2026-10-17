@@ -8,6 +8,7 @@ import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_UI_VERSIO
 import { setMockPresets } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { selectOption } from '../test/select'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
 import { renderPage } from '../test/utils'
@@ -255,13 +256,13 @@ describe('CustomizePage with a template UI', () => {
 
     // Saving remounts the picker, so the select is found again each time.
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Another' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('Another'), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('Another'), { timeout: 5000 })
     const select = preset()
     // Nothing on screen differs from it, so picking the other one loses nothing.
-    await user.selectOptions(select, 'From the UI')
+    await selectOption(user, select, 'From the UI')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    expect(select).toHaveDisplayValue('From the UI')
+    expect(select).toHaveTextContent('From the UI')
   })
 
   it('selects a preset the template UI loaded, so the next pick does not ask (#1457)', async () => {
@@ -282,10 +283,10 @@ describe('CustomizePage with a template UI', () => {
 
     await host!.presets.load(one.id)
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('One'), { timeout: 5000 })
     const select = preset()
-    await user.selectOptions(select, 'Two')
+    await selectOption(user, select, 'Two')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Two')
   })
@@ -307,15 +308,15 @@ describe('CustomizePage with a template UI', () => {
     await host!.presets.save('Two')
     await host!.presets.load(one.id)
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    await waitFor(() => expect(preset()).toHaveDisplayValue('One'), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Two')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await waitFor(() => expect(preset()).toHaveTextContent('One'), { timeout: 5000 })
+    await selectOption(user, preset(), 'Two')
 
     // The template UI fails: the picker moves into the generated form's toolbar.
     host!.openPrint('not-on-screen')
     await screen.findByRole('textbox', { name: 'Name on the tag' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Two' })).toBeInTheDocument(), { timeout: 5000 })
-    expect(preset()).not.toHaveDisplayValue('One')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    expect(preset()).not.toHaveTextContent('One')
     expect(screen.queryByText('Changed from One')).not.toBeInTheDocument()
   })
 
@@ -342,8 +343,8 @@ describe('CustomizePage with a template UI', () => {
     const { user } = open(UI_DEMO_SLUG)
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Plain')
     await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -378,8 +379,8 @@ describe('CustomizePage with a template UI', () => {
     const { user } = open(UI_DEMO_SLUG)
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
     const preset = () => screen.getByRole('combobox', { name: 'Preset' })
-    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
-    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Plain')
     await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
     await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -781,6 +782,54 @@ describe('the page slot', () => {
     expect(within(screen.getByTestId('workspace')).getByRole('alert')).toHaveTextContent('defines no migrate')
     // The template's page still mounts, on the current (default) values.
     await waitFor(() => expect(shadowText()).toMatch(/^custom /))
+  })
+
+  it("shows a preset's inputs read-only when they cannot be migrated, until another preset is applied (#1811)", async () => {
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'e'.repeat(32), name: 'Old', origin: 'mine', params: { name: 'Old' }, inputs: { params: { name: 'Old' }, v: 0 }, description: '', tags: [] },
+      { id: 'f'.repeat(32), name: 'Current', origin: 'mine', params: { name: 'Now' }, inputs: { params: { name: 'Now' }, v: 1 }, description: '', tags: [] },
+    ])
+    server.use(
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = open(UI_DEMO_SLUG)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(preset()).toBeEnabled(), { timeout: 5000 })
+    await selectOption(user, preset(), 'Old')
+
+    const workspace = screen.getByTestId('workspace')
+    const saved = await within(workspace).findByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
+    // The textarea's own alert, not whichever alert the row holds (a render error may be another).
+    const alert = saved.closest<HTMLElement>('[role="alert"]')
+    expect(alert).toHaveTextContent('could not be brought up to this template version: defines no migrate')
+    expect(saved).toHaveAttribute('readonly')
+    // Its value, what the user sees; textContent is only the initial value React mirrored.
+    expect(saved.value).toContain('"name": "Old"')
+    // Short, so the textarea scrolls rather than the capped row around it too.
+    expect(saved).toHaveAttribute('rows', '4')
+    // #3074: the cap is on the alert, and only its error text scrolls; no scroll
+    // container around the textarea, and no overflow-hidden to clip a long error.
+    expect(alert).toHaveClass('max-h-[30vh]')
+    expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
+    // And the textarea shrinks to fit too, scrolling inside itself, rather than spilling
+    // out of the 30vh box over the template where 30vh is under its 4 rows.
+    expect(saved).not.toHaveClass('shrink-0')
+    // But not to nothing: a long error shrinks its own text first, and the saved inputs
+    // keep three lines (#3624 review).
+    expect(saved).toHaveClass('min-h-[calc(3lh_+_1rem_+_2px)]')
+    expect(saved).not.toHaveClass('min-h-0')
+    for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
+      expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
+    }
+
+    await selectOption(user, preset(), 'Current')
+    await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
   })
 
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {

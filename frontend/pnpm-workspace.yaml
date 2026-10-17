@@ -1,3 +1,11 @@
 allowBuilds:
   esbuild: true
   msw: true
+
+# cmdk asks for its Radix pieces by caret range, which resolved them to releases days
+# old; held to the ones radix-ui (package.json) bundles, so there is one copy of each.
+overrides:
+  cmdk>@radix-ui/react-compose-refs: 1.1.5
+  cmdk>@radix-ui/react-dialog: 1.1.23
+  cmdk>@radix-ui/react-id: 1.1.4
+  cmdk>@radix-ui/react-primitive: 2.1.10

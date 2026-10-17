@@ -37,7 +37,7 @@ func NewV1PrintLibraryItemFileRequestBuilder(rawUrl string, requestAdapter i2ae4
 	return NewV1PrintLibraryItemFileRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get the file as Bambuddy's library holds it: what a print of it was made from. Alwaysa download: a library file can be any type (an SVG, an HTML page), and served onScadBuddy's origin under the type Bambuddy names it could run script there.
+// Get the file as Bambuddy's library holds it: what a print of it was made from. Alwaysa download: a library file can be any type (an SVG, an HTML page), and served onScadBuddy's origin under the type Bambuddy names it could run script there.#2788: a whole-file ask for a file Bambuddy states a hash for is served from theshared download cache when it is there, and streamed from Bambuddy while it iskept there when it is not, so the first byte never waits on the whole download. Aranged ask streams from Bambuddy as before.
 // returns a []byte when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemFileRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemFileRequestBuilderGetRequestConfiguration) ([]byte, error) {
@@ -58,7 +58,7 @@ func (m *V1PrintLibraryItemFileRequestBuilder) Get(ctx context.Context, requestC
 	return res.([]byte), nil
 }
 
-// ToGetRequestInformation the file as Bambuddy's library holds it: what a print of it was made from. Alwaysa download: a library file can be any type (an SVG, an HTML page), and served onScadBuddy's origin under the type Bambuddy names it could run script there.
+// ToGetRequestInformation the file as Bambuddy's library holds it: what a print of it was made from. Alwaysa download: a library file can be any type (an SVG, an HTML page), and served onScadBuddy's origin under the type Bambuddy names it could run script there.#2788: a whole-file ask for a file Bambuddy states a hash for is served from theshared download cache when it is there, and streamed from Bambuddy while it iskept there when it is not, so the first byte never waits on the whole download. Aranged ask streams from Bambuddy as before.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemFileRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemFileRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)

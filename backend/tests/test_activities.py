@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import shutil
 import threading
 import uuid
+import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -31,6 +33,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, file_assets
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
+from scadbuddy.render.bambu3mf import TooManyTrianglesError
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
@@ -47,6 +50,7 @@ from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.worker import make_current_until_polled
@@ -54,6 +58,7 @@ from scadbuddy.workflows import activities
 from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
+    IncompleteRenderError,
     RenderActivities,
     _heartbeating,
     _main_result,
@@ -61,6 +66,7 @@ from scadbuddy.workflows.activities import (
     _scope,
     _stage,
     _write_piece,
+    require_whole_3mf,
 )
 from scadbuddy.workflows.client import make_current, render_worker
 from scadbuddy.workflows.models import (
@@ -304,6 +310,96 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     assert isinstance(failure, Failure)
     assert failure.error == raised.value.message
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "error"),
+    [
+        ("render_solids", MaterialSplitError("mesh has no vertices")),
+        ("render_solids", zipfile.BadZipFile("File is not a zip file")),
+        ("finish_piece", TooManyTrianglesError("past 5000000 triangles", "triangles")),
+    ],
+)
+async def test_a_stage_that_fails_the_same_every_time_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, error: Exception
+) -> None:
+    """#604: a bad raw 3MF or an over-limit mesh fails the piece at once, rather than
+    after three attempts that each fail the same way."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+    if stage == "finish_piece":
+        await env.run(acts.render_solids, req, prepared, main)
+
+    async def fails(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(activities, f"{stage}_stage", fails)
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(getattr(acts, stage), req, prepared, main)
+    assert raised.value.non_retryable
+    assert raised.value.type == type(error).__name__
+    assert raised.value.message == str(error)
+
+
+async def test_a_raw_3mf_whose_model_does_not_parse_fails_render_solids_at_once(
+    tmp_path: Path,
+) -> None:
+    """#2997 review: the real stage, not a stand-in. A whole zip whose model is not XML
+    escapes `split_by_material` as its own error, so the piece fails at once (#604)."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+    raw = acts.deps.blobs.dir_for(req.piece_key) / jobs.RAW_RENDER_NAME
+    with zipfile.ZipFile(raw) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members[MODEL_ENTRY] = b"<model"
+    with zipfile.ZipFile(raw, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(acts.render_solids, req, prepared, main)
+    assert raised.value.non_retryable
+    assert raised.value.type == "ParseError"
+
+
+async def test_a_main_render_that_left_a_short_3mf_is_retried_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2997 review: a truncated raw 3MF (a full disk, say) fails the attempt with a
+    retryable error, so `render_solids` never reads one and its parse errors stay a bad
+    render."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    real_main = jobs._render_main
+
+    async def short(*args: Any, **kwargs: Any) -> Any:
+        output = await real_main(*args, **kwargs)
+        raw = acts.deps.blobs.dir_for(req.piece_key) / jobs.RAW_RENDER_NAME
+        raw.write_bytes(raw.read_bytes()[:100])
+        return output
+
+    monkeypatch.setattr(jobs, "_render_main", short)
+    with pytest.raises(IncompleteRenderError):
+        await env.run(acts.render_main, req, prepared)
+
+
+def test_a_3mf_without_its_model_is_not_whole(tmp_path: Path) -> None:
+    """#2997 review: the check reads the model `render_solids` parses, so a zip that
+    opens but holds no model (where `testzip` found nothing wrong) is refused too."""
+    path = tmp_path / "render.3mf"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+
+    with pytest.raises(IncompleteRenderError, match=r"no 3D/3dmodel\.model"):
+        require_whole_3mf(path)
 
 
 async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:
@@ -580,6 +676,35 @@ async def test_project_running_records_the_queue_wait_once(
 
 
 @pytest.mark.requires_postgres
+async def test_a_retried_project_is_counted_and_a_long_failing_one_logged(
+    tmp_path: Path, projection: JobProjection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#857: `project` retries without limit, so its retries are a metric to alert on
+    and one still failing after `PROJECT_RETRY_WARN_ATTEMPT` attempts is logged."""
+    metrics = Metrics()
+    deps = worker_deps(tmp_path, demo_paths(tmp_path), projection=projection)
+    acts = RenderActivities(replace(deps, metrics=metrics))
+    job = _submitted(projection)
+    write = Projection(job_id=job.id, slug="demo", state="running")
+
+    def at(attempt: int) -> ActivityEnvironment:
+        env = ActivityEnvironment()
+        env.info = replace(env.info, attempt=attempt)
+        return env
+
+    await at(1).run(acts.project, write)
+    sample = metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_project_retries_total") == 0
+    await at(2).run(acts.project, write)
+    assert sample("scadbuddy_render_project_retries_total") == 1
+    assert "has not been written" not in caplog.text
+    with caplog.at_level(logging.WARNING):
+        await at(activities_module.PROJECT_RETRY_WARN_ATTEMPT).run(acts.project, write)
+    assert sample("scadbuddy_render_project_retries_total") == 2
+    assert "has not been written after 11 attempts" in caplog.text
+
+
+@pytest.mark.requires_postgres
 async def test_an_arranges_wait_and_settling_are_counted_as_arrange(
     tmp_path: Path, projection: JobProjection
 ) -> None:
@@ -742,7 +867,7 @@ async def test_project_cancelled_onto_a_running_job(
     assert stored.state == "cancelled"
     assert stored.error == "cancelled"
     assert stored.steps == _cancelled(job).steps
-    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.superseded"]
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.cancelled"]
 
 
 @pytest.mark.requires_postgres
@@ -759,7 +884,7 @@ async def test_project_cancelled_onto_a_job_the_api_cancelled_keeps_its_error(
     assert stored.state == "cancelled"
     assert stored.error == CANCELLED_ERROR
     assert stored.steps == _cancelled(job).steps
-    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.superseded"]
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.cancelled"]
 
 
 @pytest.mark.requires_postgres

@@ -29,11 +29,18 @@ def geometry_of(size: PlateSize) -> PlateGeometry:
     return plate_for(None if size.key == "default" else size.key)
 
 
-def signature_of(part: Part, plan: SlotPlan | None, colours: Sequence[str]) -> frozenset[str]:
-    """The filaments ``part`` needs: its spools under ``plan``, else its colours."""
+def signature_of(
+    part: Part,
+    plan: SlotPlan | None,
+    colours: Sequence[str],
+    *,
+    printed: Sequence[str] | None = None,
+) -> frozenset[str]:
+    """The filaments ``part`` needs: its spools under ``plan``, else its colours.
+    ``printed``: the colours a recoloured copy prints in instead of the part's (#3637)."""
     order = [c.upper() for c in colours]
     needs: set[str] = set()
-    for colour in part.colours:
+    for colour in part.colours if printed is None else printed:
         slot = order.index(colour.upper()) + 1 if colour.upper() in order else None
         spool = plan.slots.get(slot) if plan is not None and slot is not None else None
         needs.add(f"spool:{spool}" if spool is not None else f"colour:{colour.upper()}")
@@ -57,6 +64,9 @@ class _Copy:
     group: str | None
     signature: frozenset[str]
     order: int
+    #: Its colours swapped (#3637), and so the colours it prints in.
+    recolour: dict[str, str]
+    colours: frozenset[str]
 
     @property
     def size(self) -> tuple[float, float]:
@@ -138,7 +148,7 @@ class _Sheet:
 def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
     """Place ``copy`` on ``sheet`` if a turn of it fits and the plate stays writable."""
     w, d = copy.size
-    key = ((w, d), frozenset(c.upper() for c in copy.part.colours), copy.part.bbox.size[2])
+    key = ((w, d), copy.colours, copy.part.bbox.size[2])
     if key in sheet.refused:
         return False
     turns = [(w, d, 0.0)] + ([(d, w, 90.0)] if abs(w - d) > _EPS else [])
@@ -156,7 +166,7 @@ def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
             o[0].x,
         )
     )
-    colours = sheet.colours | {c.upper() for c in copy.part.colours}
+    colours = sheet.colours | copy.colours
     height = max(sheet.height, copy.part.bbox.size[2])
     for spot, tw, td, rot in options:
         extent = (max(sheet.extent[0], spot.x + tw), max(sheet.extent[1], spot.y + td))
@@ -221,13 +231,15 @@ def arrange(
                 f"{item.part.file} lays out its own {item.part.plates} plates; pack it on its own"
             )
     geometry = geometry_of(plate)
-    order = list(colours) or list(dict.fromkeys(c for item in items for c in item.part.colours))
+    order = list(colours) or list(dict.fromkeys(c for item in items for c in item.colours()))
     copies = [
         _Copy(
             item.part,
             item.group if goal == "keep_together" else None,
-            signature_of(item.part, plan, order),
+            signature_of(item.part, plan, order, printed=item.colours()),
             n,
+            dict(item.recolour),
+            frozenset(item.colours()),
         )
         for n, item in enumerate(i for i in items for _ in range(i.count))
     ]
@@ -248,9 +260,7 @@ def arrange(
         if not _try(sheet, copy, geometry):
             w, d = copy.size
             why = (
-                fit_problem(
-                    (w, d, copy.part.bbox.size[2]), geometry, tower=len(copy.part.colours) > 1
-                )
+                fit_problem((w, d, copy.part.bbox.size[2]), geometry, tower=len(copy.colours) > 1)
                 or "no turn of it fits"
             )
             raise PackError(
@@ -274,7 +284,13 @@ def arrange(
         plates=[
             LayoutPlate(
                 items=[
-                    Placed(piece_key=c.part.piece_key, x=round(x, 3), y=round(y, 3), rot=rot)
+                    Placed(
+                        piece_key=c.part.piece_key,
+                        x=round(x, 3),
+                        y=round(y, 3),
+                        rot=rot,
+                        recolour=c.recolour,
+                    )
                     for c, x, y, rot in sorted(sheets[i].placed, key=lambda p: p[0].order)
                 ]
             )

@@ -1342,7 +1342,14 @@ async def delete_model(
 
 
 async def delete_template(slug: str, force: bool, state: AppState) -> None:
-    """The ``model_delete`` operation's run (#1054)."""
+    """The ``model_delete`` operation's run (#1054). The model's unfinished renders are
+    cancelled first (#2387); one that has not settled after the wait still refuses. A
+    delete the run refuses for another reason (a duplicate made since the check, the
+    model no longer the caller's) cancels nothing: that half is asked first."""
+    await asyncio.to_thread(
+        refuse_delete, slug, state.catalogue, state.render, force, renders=False
+    )
+    await state.render.cancel_renders_of(slug)
     output_ids = await asyncio.to_thread(
         _delete_model, slug, state.catalogue, state.render, state.outputs, force
     )
@@ -1381,9 +1388,17 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
-def refuse_delete(slug: str, catalogue: Catalogue, render: RenderService, force: bool) -> None:
+def refuse_delete(
+    slug: str,
+    catalogue: Catalogue,
+    render: RenderService,
+    force: bool,
+    *,
+    renders: bool = True,
+) -> None:
     """Why ``slug`` may not be deleted now: the operation's check, and its run again
-    just before the delete."""
+    just before the delete. The check leaves ``renders`` out: the run cancels them
+    (#2387), and only one still unfinished after that refuses."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -1398,9 +1413,13 @@ def refuse_delete(slug: str, catalogue: Catalogue, render: RenderService, force:
             )
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
-    if render.store.has_unfinished(slug):
+    if renders and render.store.has_unfinished(slug):
+        # A render the delete cancelled that did not settle in time (#2387).
+        # `render_in_progress` lets the delete dialog wait for it and retry.
         raise ApiError(
-            status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} has a render in progress; try again when it ends",
+            render_in_progress=True,
         )
 
 

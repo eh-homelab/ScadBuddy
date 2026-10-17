@@ -12,6 +12,7 @@ import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
 import { SETTLE_MS } from './settings/sectionNav'
+import { choose, optionDisabled } from '../test/select'
 
 // #322 — every runtime setting in the UI, with where its value came from; a save per
 // section; the remembered choices; About.
@@ -20,6 +21,22 @@ async function seeded() {
   await waitFor(() =>
     expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
   )
+}
+
+/**
+ * Moves the fake clock 20 ms at a time until `check` passes, at most half of SETTLE_MS
+ * in all, so a timer due at SETTLE_MS cannot fire before the test means it to.
+ */
+async function stepUntil(check: () => void): Promise<void> {
+  for (let moved = 0; ; moved += 20) {
+    try {
+      check()
+      return
+    } catch (error) {
+      if (moved >= SETTLE_MS / 2) throw error
+    }
+    await act(() => vi.advanceTimersByTimeAsync(20))
+  }
 }
 
 /** `text` in `field` as one paste: each keystroke re-renders all of Settings (#1485). */
@@ -72,16 +89,21 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
     return { scrolls, intoView, restore }
   }
 
-  /** A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected. */
+  /**
+   * A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected.
+   * Only those on the pane's content are listed: Radix measures its own controls too.
+   */
   function stubResizeObserver() {
     const observers: { fire: () => void; disconnected: boolean }[] = []
     class Fake {
       entry: { fire: () => void; disconnected: boolean }
       constructor(callback: () => void) {
         this.entry = { fire: callback, disconnected: false }
-        observers.push(this.entry)
       }
-      observe() {}
+      observe(target: Element) {
+        if (target.parentElement?.classList.contains('sb-settings')) observers.push(this.entry)
+      }
+      unobserve() {}
       disconnect() {
         this.entry.disconnected = true
       }
@@ -139,18 +161,23 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   it('stops keeping a deep-linked section in view after SETTLE_MS (#2947 review)', async () => {
     const { scrolls, restore } = stubLayout({ libraries: 5000 })
     const observers = stubResizeObserver()
-    const timeouts = vi.spyOn(window, 'setTimeout')
+    // Time itself, not one timer picked out by its closure's text (#3247 review), and
+    // only the time the test moves (#3804 review): a clock that also followed the wall
+    // could pass SETTLE_MS on a loaded machine before the first check.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
-      await seeded()
-      await waitFor(() => expect(scrolls).toContain(4992))
-      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
-      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
-      expect(settle).toBeDefined()
-      act(() => (settle![0] as () => void)())
+      // The page's loads wait on timers too (the mock API's delays), so move the clock
+      // in small steps, never near SETTLE_MS, until each step shows.
+      await stepUntil(() =>
+        expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
+      )
+      await stepUntil(() => expect(scrolls).toContain(4992))
+      expect(observers[0]!.disconnected).toBe(false)
+      act(() => vi.advanceTimersByTime(SETTLE_MS))
       expect(observers[0]!.disconnected).toBe(true)
     } finally {
-      timeouts.mockRestore()
+      vi.useRealTimers()
       restore()
       vi.unstubAllGlobals()
     }
@@ -212,10 +239,35 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       expect(window.location.hash).toBe('')
 
       act(() => window.history.back())
-      expect(await screen.findByRole('dialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+      expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
       expect(window.location.pathname).toBe('/settings')
     } finally {
       restore()
+    }
+  })
+
+  it('unfolds a deep-linked group inside a folded section, and scrolls to it once laid out (#3414)', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['assistant', 'assistant-mcp']))
+    const tops: Record<string, number> = {}
+    const { scrolls, restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#assistant-mcp' })
+      await seeded()
+      const group = await screen.findByRole('group', { name: 'MCP access' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'MCP access' })).toHaveAttribute('aria-expanded', 'true'))
+      expect(group.closest('section')!.querySelector('h2 button')).toHaveAttribute('aria-expanded', 'true')
+      // Measured while its section was folded, the group had no box; laid out, it has one,
+      // and the section nav's resize follow-up scrolls the pane there.
+      tops['assistant-mcp'] = 7000
+      act(() => {
+        for (const observer of observers) if (!observer.disconnected) observer.fire()
+      })
+      expect(scrolls.at(-1)).toBe(6992)
+    } finally {
+      restore()
+      vi.unstubAllGlobals()
+      localStorage.clear()
     }
   })
 
@@ -301,7 +353,7 @@ describe('SettingsPage field checks and descriptions (#2347, #2348, #2456)', () 
     await seeded()
     const assistant = document.getElementById('assistant')!
     expect(assistant).toHaveAccessibleName('Assistant')
-    const status = document.getElementById('ai-status-heading')!.closest('section')!
+    const status = document.getElementById('ai-status-heading')!.closest('[role="region"]')!
     expect(status).toHaveAccessibleName('Assistant status')
   })
 })
@@ -383,7 +435,7 @@ describe('SettingsPage sections (#322)', () => {
     const timeout = screen.getByLabelText('Render timeout')
     await user.clear(timeout)
     await user.type(timeout, '45')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
     expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
@@ -395,7 +447,7 @@ describe('SettingsPage sections (#322)', () => {
     await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
     expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here')
     // The other section kept its edit.
-    expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    expect(screen.getByLabelText('Show dimensions in')).toHaveTextContent('Inches (in)')
     expect(within(region('Preview')).getByText('Unsaved')).toBeInTheDocument()
     put.mockRestore()
   })
@@ -449,7 +501,7 @@ describe('SettingsPage sections (#322)', () => {
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     await user.clear(timeout)
     await user.type(timeout, '50')
-    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await choose(user, screen.getByLabelText('Show dimensions in'), 'Inches (in)')
     await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
 
@@ -503,10 +555,10 @@ describe('SettingsPage sections (#322)', () => {
     await seeded()
     const limit = screen.getByLabelText('Largest media upload')
     expect(limit).toHaveValue(1)
-    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GiB')
+    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveTextContent('GiB')
 
     // Picking a unit converts the number; typing one reinterprets it in that unit.
-    await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
+    await choose(user, screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
     expect(limit).toHaveValue(1073.742)
     await user.clear(limit)
     await user.type(limit, '500')
@@ -540,7 +592,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(timeout, '45')
 
     await user.click(screen.getByRole('link', { name: 'Catalogue' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(dialog).toHaveTextContent('Rendering')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.queryByText('The catalogue')).toBeNull()
@@ -582,7 +634,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     await user.click(screen.getByRole('button', { name: 'Go home' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(screen.queryByText('The catalogue')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByText('The catalogue')).toBeInTheDocument()
@@ -605,7 +657,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     expect(window.location.pathname).toBe('/settings')
     await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
@@ -636,7 +688,7 @@ describe('SettingsPage sections (#322)', () => {
     await user.type(screen.getByLabelText('Render timeout'), '45')
 
     act(() => window.history.back())
-    await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
     act(() => window.history.back())
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(window.location.pathname).toBe('/settings')
@@ -713,7 +765,7 @@ describe('SettingsPage remembered choices (#322)', () => {
     const { user } = renderPage(<SettingsPage />)
     await screen.findByRole('table', { name: 'Remembered choices' })
     await user.click(screen.getByRole('button', { name: 'Forget all' }))
-    await user.click(screen.getByRole('button', { name: 'Yes, forget all' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Yes, forget all' }))
     expect(await screen.findByText('Nothing is remembered yet.')).toBeInTheDocument()
   })
 })
@@ -827,9 +879,9 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    expect(store).toHaveValue('local')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeEnabled()
-    await user.selectOptions(store, 'bambuddy')
+    expect(store).toHaveTextContent('This server’s volume')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(false)
+    await choose(user, store, /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -840,14 +892,14 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     const own = screen.getByLabelText(/ScadBuddy.s own URL/)
     await user.clear(own)
     await enter(user, own, 'https://scadbuddy.test')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('store_backend')
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
   })
 
   it('falls back to the local store when the Bambuddy store loses its inbox', async () => {
@@ -855,10 +907,10 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const store = screen.getByLabelText('Blob store')
-    await waitFor(() => expect(store).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
-    expect(store).toHaveValue('local')
+    await waitFor(() => expect(store).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
+    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(true)
+    expect(store).toHaveTextContent('This server’s volume')
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: null, store_backend: 'local' })
@@ -868,21 +920,21 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
     // The choice follows the saved URL, so it moves once Connection is saved.
-    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
+    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('local'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('This server’s volume'))
   })
 
   it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
@@ -901,8 +953,8 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
     const own = screen.getByLabelText('ScadBuddy’s own URL')
     await user.clear(own)
     await enter(user, own, 'https://mine.test')
@@ -915,9 +967,9 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
-    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '3')
+    await choose(user, screen.getByLabelText(/Inbox folder/), 'Keychains')
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ library_folder_id: 3 })
@@ -942,22 +994,23 @@ describe('SettingsPage blob store (#426)', () => {
     const url = await screen.findByLabelText('Bambuddy URL')
     await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
     await enter(user, url, 'https://bambuddy.new.test')
-    const option = screen.getByRole('option', { name: /Bambuddy library/ })
-    expect(option).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
     expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(option).toBeEnabled())
+    await waitFor(async () =>
+      expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(false),
+    )
     expect(screen.queryByTestId('store-backend-hint')).toBeNull()
-    await user.selectOptions(screen.getByLabelText('Blob store'), 'bambuddy')
+    await choose(user, screen.getByLabelText('Blob store'), /Bambuddy library/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
     expect(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
     serve({ ...stored, library_folder_id: null })
-    renderPage(<SettingsPage />)
+    const { user } = renderPage(<SettingsPage />)
     await seeded()
-    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
+    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
   })
 
   it('shows what the blob store holds, where, against its caps', async () => {
@@ -1074,6 +1127,23 @@ describe('SettingsPage folded sections (#2173)', () => {
     await user.click(fold('Rendering'))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
     localStorage.clear()
+  })
+
+  it('keeps every fold the page renders in the stored list (#3415 review)', async () => {
+    // A Section or SubSection whose id is missing from FOLD_IDS would be pruned as stale.
+    const first = renderPage(<SettingsPage />)
+    await seeded()
+    const ids = [...document.querySelectorAll('[data-collapsible]')].map((fold) => fold.id)
+    expect(ids.length).toBeGreaterThan(0)
+    first.unmount()
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(ids))
+    try {
+      renderPage(<SettingsPage />)
+      await seeded()
+      expect(JSON.parse(localStorage.getItem('scadbuddy.settings.collapsed') ?? '[]')).toEqual(ids)
+    } finally {
+      localStorage.clear()
+    }
   })
 
   it('unfolds the section a link or the nav goes to', async () => {

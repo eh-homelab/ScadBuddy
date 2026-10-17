@@ -14,8 +14,14 @@ import {
 import { useAiAvailability } from '../../agent/chat/availability'
 import { downloadBlob } from '../../lib/embed'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tip } from './Tip'
+import { Spinner } from '../ui/spinner'
 
 /**
  * Settings → "AI activity" (#258): the agent service's audit log of AI actions
@@ -29,6 +35,9 @@ export function AiAuditSection() {
 }
 
 export const AUDIT_PAGE = 25
+
+/** The filters' "All": Radix's Select takes no empty value. */
+const ALL = 'all'
 
 const KIND_LABEL: Record<AuditKind, string> = {
   tool_call: 'Tool calls',
@@ -186,16 +195,16 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         ? httpText(entry)
         : (entry.detail ?? entry.input_summary)
   return (
-    <li className="border-b border-line px-4 py-2 text-[13px] last:border-b-0" data-testid="audit-entry">
+    <li className="border-b border-border px-4 py-2 text-[13px] last:border-b-0" data-testid="audit-entry">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="font-medium">{describe(entry)}</span>
-        {entry.tier && <span className="text-[12px] text-muted">{entry.tier}</span>}
+        {entry.tier && <span className="text-xs text-muted-foreground">{entry.tier}</span>}
         <span className={`text-[12px] font-medium ${outcomeClass(entry.outcome)}`}>
           {OUTCOME_LABEL[entry.outcome]}
         </span>
-        <span className="ml-auto text-[12px] text-muted sb-num">{when(entry.at)}</span>
+        <span className="sb-num ml-auto text-xs text-muted-foreground">{when(entry.at)}</span>
       </div>
-      <div className="mt-0.5 text-[12px] text-muted">
+      <div className="mt-0.5 text-xs text-muted-foreground">
         {entry.actor.label} via {SURFACE_LABEL[entry.surface]}
         {entry.client_ip && <> · <span className="sb-num">{entry.client_ip}</span></>}
         {entry.duration_ms !== null && <> · <span className="sb-num">{entry.duration_ms} ms</span></>}
@@ -204,9 +213,9 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         {cost && <> · <span className="sb-num">{cost}</span></>}
       </div>
       {text && (
-        <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>
-          {text}
-        </p>
+        <Tip content={text}>
+          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{text}</p>
+        </Tip>
       )}
       {body && <SavedBody url={body} />}
     </li>
@@ -242,16 +251,12 @@ function SavedBody({ url }: { url: string }) {
   }
 
   return (
-    <div className="mt-0.5 text-[12px]">
-      <button
-        type="button"
-        onClick={() => void download()}
-        disabled={busy}
-        className="text-accent underline disabled:opacity-60"
-        title="The body is kept while the session's 10 newest saved responses include it."
-      >
-        Download body
-      </button>
+    <div className="mt-0.5 text-xs">
+      <Tip wrap={busy} content="The body is kept while the session's 10 newest saved responses include it.">
+        <Button variant="link" size="xs" className="h-auto px-0" onClick={() => void download()} disabled={busy}>
+          Download body
+        </Button>
+      </Tip>
       {error && (
         <span role="alert" className="ml-2 text-warn">
           {error}
@@ -328,65 +333,82 @@ function AuditLogView() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="ai-audit-heading">
-      <h2 id="ai-audit-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        AI activity
-      </h2>
-      <div className="space-y-3 p-4">
-        <p className="text-[12px] text-muted">
+    <Card role="region" className="mt-4 gap-0 py-0" aria-labelledby="ai-audit-heading">
+      <CardHeader className="border-b py-3">
+        <h2 id="ai-audit-heading" className="font-heading text-sm font-medium">
+          AI activity
+        </h2>
+      </CardHeader>
+      <CardContent className="space-y-3 py-4">
+        <p className="text-xs text-muted-foreground">
           Every tool call the assistant or an MCP client made, what each assistant turn cost, every
           approval decision, and every change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
           secrets are never recorded.
         </p>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="text-[13px]">
-            <span className="block text-muted">Kind</span>
-            <select
-              className="sb-field mt-1"
-              value={kind}
-              onChange={(event) => filter(() => setKind(event.target.value as AuditKind | ''))}
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="audit-kind" className="text-[13px] font-normal text-muted-foreground">
+              Kind
+            </Label>
+            <Select
+              value={kind || ALL}
+              onValueChange={(next) => filter(() => setKind(next === ALL ? '' : (next as AuditKind)))}
             >
-              <option value="">All</option>
-              {AUDIT_KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {KIND_LABEL[k]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-[13px]">
-            <span className="block text-muted">Outcome</span>
-            <select
-              className="sb-field mt-1"
-              value={outcome}
-              onChange={(event) => filter(() => setOutcome(event.target.value as AuditOutcome | ''))}
+              <SelectTrigger id="audit-kind" className="min-w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All</SelectItem>
+                {AUDIT_KINDS.map((k) => (
+                  <SelectItem key={k} value={k}>
+                    {KIND_LABEL[k]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="audit-outcome" className="text-[13px] font-normal text-muted-foreground">
+              Outcome
+            </Label>
+            <Select
+              value={outcome || ALL}
+              onValueChange={(next) => filter(() => setOutcome(next === ALL ? '' : (next as AuditOutcome)))}
             >
-              <option value="">All</option>
-              {AUDIT_OUTCOMES.map((o) => (
-                <option key={o} value={o}>
-                  {OUTCOME_LABEL[o]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <Button size="sm" onClick={() => filter(() => first.reload())} disabled={first.loading}>
+              <SelectTrigger id="audit-outcome" className="min-w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All</SelectItem>
+                {AUDIT_OUTCOMES.map((o) => (
+                  <SelectItem key={o} value={o}>
+                    {OUTCOME_LABEL[o]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button variant="outline" onClick={() => filter(() => first.reload())} disabled={first.loading}>
             Refresh
           </Button>
         </div>
-      </div>
+      </CardContent>
 
       {first.error ? (
-        <p role="alert" className="px-4 pb-4 text-[13px] text-warn">
+        <p role="alert" className="px-4 py-4 text-[13px] text-warn">
           Could not read the audit log: {first.error.message}
         </p>
       ) : first.loading && !first.data ? (
-        <p className="flex items-center gap-2 px-4 pb-4 text-[13px] text-muted">
-          <Spinner /> Loading…
-        </p>
+        <div role="status" className="flex flex-col gap-2 px-4 py-4">
+          <span className="sr-only">Loading…</span>
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-3/4" />
+        </div>
       ) : entries.length === 0 ? (
-        <p className="px-4 pb-4 text-[13px] text-muted">Nothing recorded{kind || outcome ? ' for these filters' : ''}.</p>
+        <p className="px-4 py-4 text-[13px] text-muted-foreground">Nothing recorded{kind || outcome ? ' for these filters' : ''}.</p>
       ) : (
-        <ul className="border-t border-line" aria-label="AI activity entries">
+        <ul className="border-t border-border" aria-label="AI activity entries">
           {entries.map((entry) => (
             <AuditRow key={entry.id} entry={entry} />
           ))}
@@ -394,27 +416,27 @@ function AuditLogView() {
       )}
 
       {(next || moreError) && !first.error && (
-        <div className="flex items-center gap-3 border-t border-line px-4 py-2.5">
+        <div className="flex items-center gap-3 border-t border-border px-4 py-2.5">
           {next && (
-            <Button size="sm" onClick={() => void loadOlder()} disabled={loadingMore} aria-busy={loadingMore}>
+            <Button size="sm" variant="outline" onClick={() => void loadOlder()} disabled={loadingMore} aria-busy={loadingMore}>
               {loadingMore && <Spinner />}
               Load older
             </Button>
           )}
           {moreError && (
-            <p role="alert" className="text-[12px] text-warn">
+            <p role="alert" className="text-xs text-warn">
               {moreError}
             </p>
           )}
         </div>
       )}
 
-      <div className="border-t border-line p-4">
-        <label htmlFor="audit-retention" className="block text-[13px]">
+      <div className="border-t border-border p-4">
+        <Label htmlFor="audit-retention" className="text-[13px] font-normal">
           Keep entries for (days)
-        </label>
+        </Label>
         <div className="mt-1.5 flex items-center gap-2">
-          <input
+          <Input
             id="audit-retention"
             type="number"
             inputMode="numeric"
@@ -425,11 +447,10 @@ function AuditLogView() {
               setDraft(event.target.value)
               setSaved(null)
             }}
-            className="sb-field sb-num w-28"
+            className="sb-num w-28"
             {...USER_ONLY}
           />
           <Button
-            size="sm"
             onClick={() => void saveRetention()}
             disabled={saving || retentionText === ''}
             aria-busy={saving}
@@ -439,20 +460,20 @@ function AuditLogView() {
             Save
           </Button>
           {saved && (
-            <span role="status" className="text-[12px] text-ok">
+            <span role="status" className="text-xs text-ok">
               {saved}
             </span>
           )}
         </div>
         {saveError && (
-          <p role="alert" className="mt-1.5 text-[12px] text-warn">
+          <p role="alert" className="mt-1.5 text-xs text-warn">
             {saveError}
           </p>
         )}
-        <p className="mt-1.5 text-[12px] text-muted">
+        <p className="mt-1.5 text-xs text-muted-foreground">
           Older entries are deleted hourly. The log itself can&rsquo;t be edited.
         </p>
       </div>
-    </section>
+    </Card>
   )
 }

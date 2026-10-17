@@ -3,8 +3,10 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { FilamentOptions, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
+import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { FilamentPicker } from './FilamentPicker'
+import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
 function Harness({
@@ -134,7 +136,7 @@ describe('FilamentPicker', () => {
 
     // Scoped to the heading: a spool row may legitimately read "1000 g", and it is the
     // slot's own requirement that must never be spelled as a weight it does not have.
-    const heading = (id: number) => slot(id).querySelector('legend') as HTMLElement
+    const heading = (id: number) => document.getElementById(`filament-slot-${id}-heading`) as HTMLElement
     expect(heading(1)).toHaveTextContent('grams unknown until this is sliced')
     expect(heading(1)).not.toHaveTextContent('0 g')
     expect(heading(2)).not.toHaveTextContent('0 g')
@@ -207,6 +209,30 @@ describe('FilamentPicker', () => {
     expect(within(slot(1)).getByTestId('spool-9')).toBeChecked()
   })
 
+  it('closes only the open list on Escape, not the print dialog around it (#3636)', async () => {
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <Dialog open onOpenChange={(open) => !open && onClose()}>
+        <DialogContent>
+          <DialogTitle>Print</DialogTitle>
+          <Harness options={fixtures.filamentOptions} />
+        </DialogContent>
+      </Dialog>,
+    )
+    await expand(user, 1)
+    within(slot(1)).getByTestId('spool-9').focus()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(within(slot(1)).getAllByRole('radio')).toHaveLength(1)
+    expect(screen.getByTestId('change-slot-1')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByTestId('change-slot-1')).toHaveFocus()
+
+    // With nothing open, Escape is the dialog's again.
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps a slot with nothing chosen open', () => {
     open({ ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 21 }] })
 
@@ -263,7 +289,7 @@ describe('FilamentPicker', () => {
     await expand(user, 2)
     expect(within(slot(1)).queryByTestId('spool-9')).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByTestId('filter-material'), 'PLA')
+    await choose(user, screen.getByTestId('filter-material'), 'PLA')
 
     // The PETG spools go from BOTH slots: one inventory, one filter row.
     expect(within(slot(1)).queryByTestId('spool-9')).not.toBeInTheDocument()
@@ -322,7 +348,7 @@ describe('FilamentPicker', () => {
     await expand(user, 2)
     // Slot 2 starts on the Elegoo pink, which is PLA; filter to PETG and it must stay,
     // or the radio group would show nothing selected and read as an empty slot.
-    await user.selectOptions(screen.getByTestId('filter-material'), 'PETG')
+    await choose(user, screen.getByTestId('filter-material'), 'PETG')
 
     expect(within(slot(2)).getByTestId('spool-27')).toBeChecked()
   })
@@ -341,7 +367,7 @@ describe('FilamentPicker', () => {
 
     // "Load this spool into AMS-A slot 2" is an instruction, not a fault; colouring it
     // like one trains the user to ignore the colour.
-    expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-muted')
+    expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-subtle')
     expect(screen.getByTestId('filament-warnings-2').firstChild).toHaveClass('text-warn')
   })
 

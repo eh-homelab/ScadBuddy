@@ -110,6 +110,40 @@ def test_values_that_do_not_fit_are_refused_before_anything_starts(
     assert client.get("/api/v1/workflow-runs").json() == []
 
 
+def test_the_inputs_are_checked_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3417: the patterns may take PATTERNS_BUDGET_S; every other request must not wait.
+    A value that reaches its pattern shows the run's pattern budget still holds there."""
+    import regex
+
+    from scadbuddy.flows import inputs as inputs_module
+
+    seen: list[tuple[bool, bool]] = []
+    search = regex.search
+
+    def recorded(pattern: Any, string: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        seen.append((on_loop, inputs_module._patterns_deadline.get() is not None))
+        return search(pattern, string, *args, **kwargs)
+
+    schema = {
+        **SCHEMA,
+        "properties": {
+            **SCHEMA["properties"],
+            "slug": {"type": "string", "pattern": "^[a-z]+$", "maxLength": 64},
+        },
+    }
+    definition = register(client, READS, inputs_schema=schema)
+    monkeypatch.setattr(regex, "search", recorded)
+    assert start(client, definition["id"], "k", inputs={"slug": "BOX"}).status_code == 422
+    assert seen == [(False, True)]
+
+
 def test_a_flow_without_a_schema_takes_no_inputs(client: TestClient) -> None:
     definition = register(client, script("return 1"))
     refused = start(client, definition["id"], "k1", inputs={"slug": "box"})

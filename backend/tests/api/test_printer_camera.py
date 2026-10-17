@@ -23,8 +23,21 @@ from starlette.requests import ClientDisconnect
 
 from scadbuddy.api import printing
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy import client as bambuddy_client
 from scadbuddy.bambuddy.client import mjpeg_type
 from tests.api.test_send import API, configure
+
+
+class _AsyncStream(httpx.AsyncByteStream):
+    """A body served chunk by chunk, as a slow upstream would."""
+
+    def __init__(self, chunks: AsyncIterator[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._chunks:
+            yield chunk
+
 
 JPEG = b"\xff\xd8\xff\xe0camera-frame\xff\xd9"
 
@@ -392,3 +405,90 @@ def test_only_a_multipart_mjpeg_type_with_a_plain_boundary_is_kept(
     upstream: str | None, served: str
 ) -> None:
     assert mjpeg_type(upstream) == served
+
+
+@respx.mock
+def test_a_snapshot_refused_after_the_mint_maps_as_any_refusal(client: TestClient) -> None:
+    """#1006: the token minted, then the snapshot refused it (expired in a slow capture)."""
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(403, json={"detail": "Invalid stream token"})
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Read Status"
+
+
+@respx.mock
+def test_a_mint_with_no_token_is_a_bad_gateway(client: TestClient) -> None:
+    """#1006: a 200 whose body is not ``{"token": str}`` is Bambuddy's fault, named."""
+    configure(client)
+    snapshot = respx.get(f"{API}/printers/7/camera/snapshot")
+    bodies: list[object] = [{}, None, [], {"token": 5}]
+    answers = [httpx.Response(200, json=body) for body in bodies]
+    # Not JSON at all: a proxy's error page.
+    answers.append(httpx.Response(200, content=b"<html>", headers={"Content-Type": "text/html"}))
+    for answer in answers:
+        respx.post(f"{API}/printers/camera/stream-token").mock(return_value=answer)
+        response = client.get("/api/v1/print/printers/7/camera")
+        assert response.status_code == 502, answer.content
+        assert "no camera token" in response.json()["detail"]
+    assert not snapshot.called
+
+
+@respx.mock
+def test_a_snapshot_answered_416_is_refused_not_served_as_a_frame(client: TestClient) -> None:
+    """#3397: nothing asks the snapshot for a range, so a 416 is a refusal, never a frame."""
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(
+            416, content=JPEG, headers={"Content-Type": "image/jpeg", "Content-Range": "*/9"}
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    # Mapped as any unexpected answer is: Bambuddy's fault, naming the 416.
+    assert response.status_code == 502, response.text
+    assert response.json()["bambuddy_status"] == 416
+
+
+@respx.mock
+def test_a_frame_past_the_cap_is_refused_before_it_is_all_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
+) -> None:
+    """#1006: the frame is read with a cap, not buffered whole: the read stops at the
+    chunk that passes it, and the chunks after it are never pulled. #3397: an oversized
+    frame is Bambuddy's doing, so the snapshot call's span is failed."""
+    monkeypatch.setattr(bambuddy_client, "MAX_CAMERA_FRAME_BYTES", 64)
+    configure(client)
+    token_route()
+    pulled: list[int] = []
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for index in range(4):
+            pulled.append(index)
+            yield b"x" * 40
+
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(
+            200, stream=_AsyncStream(chunks()), headers={"Content-Type": "image/jpeg"}
+        )
+    )
+
+    spans.clear()
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    assert response.status_code == 502
+    assert "over 64 bytes" in response.json()["detail"]
+    assert pulled == [0, 1], "the third and fourth chunks are never read"
+    (snapshot,) = (
+        s for s in spans.get_finished_spans() if s.name == "bambuddy.printers.camera.snapshot"
+    )
+    assert snapshot.status.status_code == StatusCode.ERROR, snapshot.status
+    # No message is recorded (`core/trace_scrub.py`): the detail names the printer.
+    assert not snapshot.status.description
