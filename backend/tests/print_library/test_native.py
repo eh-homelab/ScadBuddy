@@ -290,3 +290,35 @@ async def test_the_component_builds_the_native_library_once(
         assert lib.native is lib.native and lib.native.content is content
         f = await upload(lib.native, three_mf)
         assert (await lib.native.library_file(f.id)).id == f.id
+
+
+def _rewritten(src: Path, out: Path, name: str, data: bytes) -> Path:
+    """``src`` with entry ``name`` replaced by ``data``, deflated (a small bomb)."""
+    with zipfile.ZipFile(src) as a, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as b:
+        for info in a.infolist():
+            if info.filename != name:
+                b.writestr(info, a.read(info.filename))
+        b.writestr(name, data)
+    return out
+
+
+async def test_a_settings_bomb_is_not_inflated(
+    native: NativeLibrary, three_mf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bomb = _rewritten(
+        three_mf, tmp_path / "bomb.3mf", "Metadata/model_settings.config", b" " * (32 << 20)
+    )
+    read = zipfile.ZipFile.read
+    monkeypatch.setattr(
+        zipfile.ZipFile, "read", lambda *a, **k: pytest.fail("inflated") or read(*a, **k)
+    )
+    f = await upload(native, bomb)
+    assert f.plates == [] and not f.has_thumbnail
+
+
+async def test_an_oversized_cover_is_no_thumbnail(
+    native: NativeLibrary, three_mf: Path, tmp_path: Path
+) -> None:
+    big = _rewritten(three_mf, tmp_path / "big.3mf", "Metadata/plate_1.png", b"\0" * (32 << 20))
+    f = await upload(native, big)
+    assert f.has_thumbnail and await native.thumbnail(f.id, 1) is None

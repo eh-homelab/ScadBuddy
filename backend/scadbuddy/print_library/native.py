@@ -32,7 +32,7 @@ from scadbuddy.print_library.store import (
     NativeLibraryStore,
     file_type_of,
 )
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, plates_of
 from scadbuddy.store.content import BlobScope, ContentStore
 
 #: `thumbnail_path` of a file that has a cover: `library_listing._entry` reads only
@@ -57,9 +57,25 @@ def _media_type(name: str, file_type: str) -> str:
     )
 
 
+#: An uploaded file is untrusted: an entry declaring more than its cap is not read.
+#: `zipfile` stops an entry at its declared size, so a header that understates one is a
+#: CRC failure (`BadZipFile`), never a bomb (`render/bambu3mf.py` `nozzles_statable`).
+#: Bambu Studio's `model_settings.config` is kilobytes; covers are PNGs of a few hundred.
+MAX_PLATE_SETTINGS_BYTES = 16 * 1024 * 1024
+MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024
+
+
+def _settings_fit(data: BinaryIO) -> bool:
+    with zipfile.ZipFile(data) as archive:
+        return archive.getinfo(MODEL_SETTINGS_NAME).file_size <= MAX_PLATE_SETTINGS_BYTES
+
+
 def _read_plates(data: BinaryIO) -> list[LibraryPlate]:
     """Ruling 9: read once, at upload. A file that will not read has no plates."""
     try:
+        if not _settings_fit(data):
+            return []
+        data.seek(0)
         entries = plates_of(data)
     except (zipfile.BadZipFile, KeyError, ElementTree.ParseError, ValueError, OSError):
         return []
@@ -289,6 +305,8 @@ def _member(archive: BinaryIO, names: list[str]) -> bytes | None:
             present = set(z.namelist())
             for name in names:
                 if name in present:
+                    if z.getinfo(name).file_size > MAX_THUMBNAIL_BYTES:
+                        return None
                     return z.read(name)
     except zipfile.BadZipFile:
         return None
