@@ -187,7 +187,9 @@ def _children(corners: np.ndarray, sides: int, special: int) -> list[np.ndarray]
 def pieces(code: str, corners: np.ndarray) -> list[tuple[np.ndarray, int]]:
     """Each leaf of ``code``'s painting of the triangle ``corners`` (3x3) as its own
     triangle and the extruder that prints it (0: the part's own), where Bambu Studio puts
-    it: a split node's children are its sides' midpoints' triangles, read last first."""
+    it: a split node's children are its sides' midpoints' triangles, read last first
+    (`TriangleSelector::deserialize` fills ``children[total - processed - 1]``), so they
+    go on the stack first to last and the last is popped first."""
     if not code:
         return [(corners, 0)]
     bits = _bits(code)

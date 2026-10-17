@@ -8,7 +8,8 @@ import pytest
 import trimesh
 
 from scadbuddy.render.glb import bounding_box, read_glb, write_glb
-from scadbuddy.render.split import ColourPart, Paint
+from scadbuddy.render.paint import PaintCodeError
+from scadbuddy.render.split import ColourPart, Paint, painted_pieces
 
 
 def _parts() -> list[ColourPart]:
@@ -141,3 +142,11 @@ def test_a_painted_part_is_one_mesh_per_colour_it_prints(tmp_path: Path) -> None
     write_glb([part], tmp_path / "p.glb")
     faces = {p.colour: len(p.mesh.faces) for p in read_glb(tmp_path / "p.glb")}
     assert faces == {"#FFFFFF": 10, "#00FF00": 2, "#FF0000": 1}
+
+
+def test_a_painting_that_names_an_extruder_with_no_colour_is_refused() -> None:
+    """A mesh model's `.paint.json` reaches here without the 3MF reader's check."""
+    box = trimesh.creation.box(extents=(1, 1, 1))
+    codes = ("8",) + ("",) * (len(box.faces) - 1)  # extruder 2, of one colour
+    with pytest.raises(PaintCodeError, match="extruder 2"):
+        painted_pieces([ColourPart(1, "Color 1", "#FFFFFF", box, Paint(codes, ("#FF0000",)))])

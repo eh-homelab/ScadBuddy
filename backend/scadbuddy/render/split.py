@@ -82,7 +82,8 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
     """``parts`` as they print (#3956): each painted part split into one part per colour
     its faces print in, where Bambu Studio's painting puts each (`paint.pieces`), its own
     colour's first, every colour upper case. What a preview draws, whose colours are per
-    mesh; one unpainted passes as it is.
+    mesh; one unpainted passes as it is (its colour already upper case, as every reader
+    gives it through `normalise_colour`).
 
     Each distinct code is read once, as its leaves' barycentric corners, and applied to
     every face that carries it at once: a painting repeats codes across many faces."""
