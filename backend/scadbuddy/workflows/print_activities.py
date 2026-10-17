@@ -34,7 +34,7 @@ from scadbuddy.bambuddy.dispatch import (
     wait_slice,
 )
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, UpstreamAnswer
-from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.output_reader import OutputNaming, OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
@@ -213,7 +213,8 @@ class PrintActivities:
         spec = input.source
         try:
             async with client_for(settings) as client:
-                naming = None
+                # An output's naming, which names its copy below; none for a library file.
+                naming: OutputNaming | None = None
                 if spec.kind == "output":
                     assert spec.output_id is not None
                     meta = await require(self.d.outputs, spec.output_id)
