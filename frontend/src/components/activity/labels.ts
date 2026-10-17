@@ -21,7 +21,8 @@ export function subjectLabel(subject: { value: string; label?: string | null }):
   if (subject.label) return subject.label
   const [prefix, id] = subject.value.split(/:(.*)/s)
   if (id) {
-    if (prefix === 'library') return `Library file ${id}`
+    // A Bambuddy file is `library:<id>`; an OpenSCAD library's checkout is `library:<name>`.
+    if (prefix === 'library') return /^\d+$/.test(id) ? `Library file ${id}` : `Library ${id}`
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
     if (prefix === 'project-name') return `Project “${id}”`

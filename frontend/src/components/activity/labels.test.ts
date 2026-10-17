@@ -8,6 +8,7 @@ describe('subjectLabel (#3856)', () => {
 
   it.each([
     ['library:89', 'Library file 89'],
+    ['library:BOSL2', 'Library BOSL2'],
     ['library-folder:4', 'Library folder 4'],
     ['library-files', 'Library files'],
     ['project:7', 'Project 7'],

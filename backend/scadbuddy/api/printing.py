@@ -1237,6 +1237,17 @@ async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
 PROJECT_NAME_SUBJECT_CHARS = 200
 
 
+def project_subject(body: ProjectRequest) -> str:
+    """The project linked, or the name of the one created: one chip per project on the
+    Activity page, not one for them all (#3856). The name is prefixed, so one that reads
+    like a model's slug or ``library:89`` never shares that subject's chip."""
+    if body.project_id is not None:
+        return f"project:{body.project_id}"
+    if body.name:
+        return f"project-name:{body.name[:PROJECT_NAME_SUBJECT_CHARS]}"
+    return "project"
+
+
 @router.post(
     "/projects",
     response_model=ProjectView,
@@ -1260,16 +1271,7 @@ async def post_project(
         ops,
         response,
         kind=ops.kinds["create_project"],
-        # The project linked, or the name of the one created: one chip per project on the
-        # Activity page, not one for them all (#3856). The name is prefixed, so one that
-        # reads like a model's slug or ``library:89`` never shares that subject's chip.
-        subject=(
-            f"project:{body.project_id}"
-            if body.project_id is not None
-            else f"project-name:{body.name[:PROJECT_NAME_SUBJECT_CHARS]}"
-            if body.name
-            else "project"
-        ),
+        subject=project_subject(body),
         request=body,
         idempotency_key=idempotency_key,
     )
