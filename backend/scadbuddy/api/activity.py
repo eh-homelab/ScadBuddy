@@ -33,7 +33,12 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
+from scadbuddy.library.outputs import (
+    OUTPUT_ID_PATTERN,
+    OutputMeta,
+    OutputNotFoundError,
+    OutputStore,
+)
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -275,7 +280,7 @@ def _subject_labels(
     # The most frequent first: past them a chip shows its reference, and the facets
     # stay one catalogue read and a bounded number of output reads.
     values = {c.value for c in subjects[:LABELLED_SUBJECTS]}
-    metas = {}
+    metas: dict[str, OutputMeta] = {}
     for value in values:
         if not value.startswith("output:"):
             continue

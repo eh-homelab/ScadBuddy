@@ -14,6 +14,7 @@ describe('subjectLabel (#3856)', () => {
     ['project:7', 'Project 7'],
     ['project-name:Reagan keychains', 'Project “Reagan keychains”'],
     ['project-name:a:b', 'Project “a:b”'],
+    [`project-name:${'x'.repeat(50)}`, `Project “${'x'.repeat(40)}…”`],
     [`output:${'a'.repeat(32)}`, 'Output aaaaaaaa'],
     ['keychain', 'keychain'],
     ['unknown:thing', 'unknown:thing'],

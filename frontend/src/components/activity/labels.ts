@@ -25,7 +25,8 @@ export function subjectLabel(subject: { value: string; label?: string | null }):
     if (prefix === 'library') return /^\d+$/.test(id) ? `Library file ${id}` : `Library ${id}`
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
-    if (prefix === 'project-name') return `Project “${id}”`
+    // Up to 200 characters, typed by a person: the chip shows the start, its title all.
+    if (prefix === 'project-name') return `Project “${id.length > 40 ? `${id.slice(0, 40)}…` : id}”`
     if (prefix === 'output') return `Output ${id.slice(0, 8)}`
   }
   if (subject.value === 'library-files') return 'Library files'
