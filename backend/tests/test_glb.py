@@ -8,7 +8,7 @@ import pytest
 import trimesh
 
 from scadbuddy.render.glb import bounding_box, read_glb, write_glb
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 
 
 def _parts() -> list[ColourPart]:
@@ -129,3 +129,15 @@ def test_a_preview_reads_back_as_the_parts_it_was_written_from(tmp_path: Path) -
         ("Color 2", "#1F6FEB"),
     ]
     assert bounding_box(parts) == bounding_box(_parts())
+
+
+def test_a_painted_part_is_one_mesh_per_colour_it_prints(tmp_path: Path) -> None:
+    """#3956: the painting shows. A box with one face painted whole in extruder 2 and one
+    split between extruders 1 and 2 ("481") reads back as its own colour and both paints."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ["" for _ in box.faces]
+    codes[0], codes[1] = "8", "481"  # extruder 2 whole; split 1 / 2
+    part = ColourPart(1, "Color 1", "#FFFFFF", box, Paint(tuple(codes), ("#FF0000", "#00FF00")))
+    write_glb([part], tmp_path / "p.glb")
+    faces = {p.colour: len(p.mesh.faces) for p in read_glb(tmp_path / "p.glb")}
+    assert faces == {"#FFFFFF": 10, "#00FF00": 2, "#FF0000": 1}

@@ -40,7 +40,7 @@ import json
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
@@ -744,6 +744,7 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         raise NoSuchPlateError(plate, count)
     instances: dict[str, int] = {}
     by_colour: dict[str, list[trimesh.Trimesh]] = {}
+    painted: list[ColourPart] = []
     for item in items:
         object_id = item.get("objectid", "")
         instance = instances.get(object_id, 0)
@@ -755,12 +756,19 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         for part in parts:
             if part.negative:
                 continue  # cut out by the slicer: neither shown nor checked
+            if part.paint is not None:
+                # Its own part, its painting kept: a preview draws each colour where
+                # the painting puts it, and the checks see its mesh whole (#3956).
+                painted.append(part)
+                continue
             by_colour.setdefault(part.colour, []).append(part.mesh)
     found: list[ColourPart] = []
     for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
         joined = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
         if isinstance(joined, trimesh.Trimesh):
             found.append(ColourPart(index, f"Color {index}", colour, joined))
+    for index, part in enumerate(painted, start=len(found) + 1):
+        found.append(replace(part, material_index=index, name=f"Color {index}"))
     if not found:
         raise UnreadableObjectsError(f"plate {plate} of the 3MF places no object with any geometry")
     return PlateRead(found, count)

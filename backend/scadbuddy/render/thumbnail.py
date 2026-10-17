@@ -32,7 +32,7 @@ from typing import Literal
 import numpy as np
 import trimesh
 
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, painted_pieces
 
 PLATE_PNG_SIZE = 512
 PLATE_SMALL_PNG_SIZE = 128
@@ -361,11 +361,14 @@ def _part_colours(parts: Sequence[ColourPart]) -> list[tuple[int, int, int]]:
 def render_plate_thumbnails(parts: Sequence[ColourPart]) -> PlateThumbnails:
     if not parts:
         raise ValueError("a plate thumbnail needs at least one colour part")
-    colours = _part_colours(parts)
+    # Drawn in the colours they print, painting included (#3956); the pick map stays one
+    # colour per part, as it names the parts.
+    drawn = painted_pieces(parts)
+    colours = _part_colours(drawn)
     supersampled = PLATE_PNG_SIZE * SUPERSAMPLE
     looking = tuple(-axis for axis in VIEW_POSITION)
-    lit = _rasterise(parts, looking, supersampled, shaded=True, colours=colours)
-    top = _rasterise(parts, (0.0, 0.0, -1.0), supersampled, shaded=True, colours=colours)
+    lit = _rasterise(drawn, looking, supersampled, shaded=True, colours=colours)
+    top = _rasterise(drawn, (0.0, 0.0, -1.0), supersampled, shaded=True, colours=colours)
     pick = _rasterise(
         parts, (0.0, 0.0, -1.0), PLATE_PNG_SIZE, shaded=False, colours=_pick_colours(len(parts))
     )
@@ -509,6 +512,7 @@ def render_view(
     client -- or a vision model -- can check the geometry from more than one side."""
     if not parts:
         raise ValueError("a view needs at least one colour part")
+    parts = painted_pieces(parts)
     forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_VIEW_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_VIEW_SIZE}")
@@ -571,6 +575,7 @@ def render_colour_breakdown(
     ``camera`` turns and frames every tile as :func:`render_view`'s does."""
     if not parts:
         raise ValueError("a breakdown needs at least one colour part")
+    parts = painted_pieces(parts)
     forward, look = _aim(view, camera)
     if not MIN_VIEW_SIZE <= size <= MAX_BREAKDOWN_TILE_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_BREAKDOWN_TILE_SIZE}")

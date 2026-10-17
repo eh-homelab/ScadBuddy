@@ -3,14 +3,14 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import remap, states
+from scadbuddy.render.paint import pieces, remap, states
 
 CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 MODEL_ENTRY = "3D/3dmodel.model"
@@ -76,6 +76,49 @@ class ColourPart:
     @property
     def watertight(self) -> bool:
         return bool(self.mesh.is_watertight)
+
+
+def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
+    """``parts`` as they print (#3956): each painted part split into one part per colour
+    its faces print in, where Bambu Studio's painting puts each (`paint.pieces`), its own
+    colour's first. What a preview draws, whose colours are per mesh; one unpainted
+    passes as it is."""
+    out: list[ColourPart] = []
+    for part in parts:
+        if part.paint is None:
+            out.append(part)
+            continue
+        faces = np.asarray(part.mesh.faces)
+        corners = np.asarray(part.mesh.vertices, dtype=np.float64)[faces]
+        codes = part.paint.codes
+        plain = np.array([not code for code in codes], dtype=bool)
+        by_colour: dict[str, list[np.ndarray]] = {part.colour.upper(): [corners[plain]]}
+        for index in np.flatnonzero(~plain):
+            for triangle, state in pieces(codes[index], corners[index]):
+                if state > len(part.paint.colours):
+                    raise ValueError(f"the painting names extruder {state}, which has no colour")
+                colour = part.colour if state == 0 else part.paint.colours[state - 1]
+                by_colour.setdefault(colour.upper(), []).append(triangle[None])
+        for colour, chunks in by_colour.items():
+            triangles = np.concatenate(chunks)
+            if len(triangles) == 0:
+                continue
+            mesh = trimesh.Trimesh(
+                vertices=triangles.reshape(-1, 3),
+                faces=np.arange(len(triangles) * 3).reshape(-1, 3),
+                process=False,
+            )
+            own = colour == part.colour.upper()
+            out.append(
+                replace(
+                    part,
+                    name=part.name if own else f"{part.name} ({colour})",
+                    colour=part.colour if own else colour,
+                    mesh=mesh,
+                    paint=None,
+                )
+            )
+    return out
 
 
 def normalise_colour(displaycolor: str | None) -> str:
