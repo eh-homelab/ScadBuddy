@@ -33,6 +33,13 @@ describe('resending (mswjs/interceptors#862)', () => {
     }
   })
 
+  it("treats init's explicit null signal as none, as fetch does", async () => {
+    const request = new Request('http://test/e', { signal: AbortSignal.abort() })
+    const intercepted = vi.fn().mockRejectedValueOnce(refused()).mockResolvedValue(new Response('ok'))
+    await expect(resending(intercepted, vi.fn(), 3)(request, { signal: null })).resolves.toBeInstanceOf(Response)
+    expect(intercepted).toHaveBeenCalledTimes(2)
+  })
+
   it('passes any other failure straight through', async () => {
     const intercepted = vi.fn().mockRejectedValue(new TypeError('bad url'))
     await expect(resending(intercepted, vi.fn(), 3)('http://test/d')).rejects.toThrow('bad url')
