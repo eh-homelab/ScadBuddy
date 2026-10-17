@@ -605,6 +605,7 @@ describe('PrintPicker', () => {
   it('keeps a folder chosen before a Re-arrange replaces the source (#3790 review)', async () => {
     // A regression pin, not new behaviour: a Re-arrange swaps the dialog's own output,
     // never `source` or `content`, so the default is not asked again and the choice stays.
+    const asked = vi.spyOn(api, 'getDefaultProject')
     const { user } = renderPicker()
     await loaded()
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
@@ -612,10 +613,12 @@ describe('PrintPicker', () => {
     await user.click(within(list).getByTestId('folder-option-1'))
     expect(screen.getByTestId('project-select')).toHaveTextContent('Folder: MakerWorld')
 
+    const before = asked.mock.calls.length
     await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
     expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
     await screen.findByTestId('filament-slot-1')
 
+    expect(asked).toHaveBeenCalledTimes(before)
     expect(screen.getByTestId('project-select')).toHaveTextContent('Folder: MakerWorld')
   })
 
