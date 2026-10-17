@@ -152,6 +152,22 @@ def test_an_output_subject_is_labelled_with_its_name_else_its_models() -> None:
     assert labels == {"output:" + "a" * 32: "Kai's tag", "output:" + "b" * 32: "Name Keychain"}
 
 
+def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> None:
+    """A malformed subject never reaches the store's paths, and a corrupt meta.json
+    leaves its chip unnamed rather than failing the facets."""
+    asked: list[str] = []
+
+    def get(output_id: str) -> SimpleNamespace:
+        asked.append(output_id)
+        raise ValueError("meta.json does not validate")
+
+    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    subjects = [Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32)]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(get=get))  # type: ignore[arg-type]
+    assert labels == {}
+    assert asked == ["d" * 32]
+
+
 def test_facets_without_agent_tables(client: TestClient) -> None:
     assert client.get("/api/v1/activity/facets").status_code == 200
 

@@ -11,6 +11,7 @@ runtime (``api/components.py``).
 import asyncio
 import contextlib
 import math
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
@@ -32,7 +33,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -278,10 +279,13 @@ def _subject_labels(
     for value in values:
         if not value.startswith("output:"):
             continue
+        output_id = value.removeprefix("output:")
+        if not re.fullmatch(OUTPUT_ID_PATTERN, output_id):
+            continue  # not an id at all: never let it near the store's paths
         try:
-            metas[value] = outputs.get(value.removeprefix("output:"))
-        except OutputNotFoundError:
-            continue  # deleted since: the chip keeps its id
+            metas[value] = outputs.get(output_id)
+        except (OutputNotFoundError, ValueError):
+            continue  # deleted since, or its meta unreadable: the chip keeps its id
     wanted = values | {meta.slug for meta in metas.values()}
     slugs = [slug for slug in catalogue.slugs() if slug in wanted]
     names = {record.slug: record.name for record in catalogue.list_models(slugs)}

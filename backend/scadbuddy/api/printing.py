@@ -1233,6 +1233,10 @@ async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
         return await describe_projects(client, last_project_id=settings.last_project_id)
 
 
+#: A new project's subject keeps this much of its name (#3856): enough to tell it apart.
+PROJECT_NAME_SUBJECT_CHARS = 200
+
+
 @router.post(
     "/projects",
     response_model=ProjectView,
@@ -1262,7 +1266,7 @@ async def post_project(
         subject=(
             f"project:{body.project_id}"
             if body.project_id is not None
-            else f"project-name:{body.name}"
+            else f"project-name:{body.name[:PROJECT_NAME_SUBJECT_CHARS]}"
             if body.name
             else "project"
         ),
