@@ -19,6 +19,12 @@ jobs:
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
       - run: echo after
+  block:
+    steps:
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: |
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
   bare:
     steps:
       - uses: docker/setup-buildx-action@v4
@@ -30,6 +36,7 @@ YML
 if out="$("$here/lint-buildx-mirror.sh" "$work" 2>&1)"; then
   echo "FAIL: a bare buildx step passed"; exit 1
 fi
-grep -q "w.yml:11:" <<<"$out" || { echo "FAIL: wrong step named: $out"; exit 1; }
+grep -q "w.yml:11:" <<<"$out" || { echo "FAIL: a block-scalar step passed: $out"; exit 1; }
+grep -q "w.yml:17:" <<<"$out" || { echo "FAIL: wrong step named: $out"; exit 1; }
 if grep -q "w.yml:4:" <<<"$out"; then echo "FAIL: the mirrored step was flagged: $out"; exit 1; fi
 echo "ok: lint-buildx-mirror"

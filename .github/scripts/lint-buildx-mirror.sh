@@ -4,6 +4,8 @@
 # Every docker/setup-buildx-action step pulls BuildKit from Google's Docker Hub
 # mirror (#3370): Docker Hub refuses some anonymous pulls from hosted runners, which
 # failed jobs before any test ran. This fails naming each step that does not.
+# It reads the one form the workflows use, `driver-opts: image=…` on one line; a
+# quoted value or a block scalar is flagged too, so write it that way.
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 python3 - "$root" <<'PY'
