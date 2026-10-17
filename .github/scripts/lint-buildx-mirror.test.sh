@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: docker/setup-buildx-action@v4
         with:
-          driver-opts: |
+          driver-opts: |-2 # two options
             network=host
             image=mirror.gcr.io/moby/buildkit:buildx-stable-1
   wrongblock:
