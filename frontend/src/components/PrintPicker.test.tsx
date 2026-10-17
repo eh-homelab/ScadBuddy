@@ -13,7 +13,10 @@ import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { addMockOutput, lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
-import { ANALYSIS_DEBOUNCE_MS } from '../lib/useAnalysis'
+import { useAnalysis } from '../lib/useAnalysis'
+import { usePrintCheck } from '../lib/usePrintCheck'
+import type * as AnalysisModule from '../lib/useAnalysis'
+import type * as PrintCheckModule from '../lib/usePrintCheck'
 import { startTracing } from '../lib/tracing'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
@@ -78,6 +81,17 @@ vi.mock('./print/PlateScene', () => ({
     <div data-testid="plate-scene" data-url={url} data-colors={JSON.stringify([...colors])} />
   ),
 }))
+
+// #3768 review — the real hooks, spied on, so a test can read the request each render
+// asked for (null: nothing is read) without waiting out a debounce.
+vi.mock('../lib/usePrintCheck', async (importOriginal) => {
+  const actual = await importOriginal<typeof PrintCheckModule>()
+  return { ...actual, usePrintCheck: vi.fn(actual.usePrintCheck) }
+})
+vi.mock('../lib/useAnalysis', async (importOriginal) => {
+  const actual = await importOriginal<typeof AnalysisModule>()
+  return { ...actual, useAnalysis: vi.fn(actual.useAnalysis) }
+})
 
 const output = fixtures.outputs[0] as Output
 
@@ -3371,25 +3385,19 @@ describe('PrintPicker · Plates of a 3MF', () => {
         ]),
       ),
     )
-    const checks = watch('POST', '/check')
-    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
     const { user } = renderPicker()
     await loaded()
     const plates = await screen.findByTestId('plate-choice')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
-    await waitFor(() => expect(analyses.ended).toBe(analyses.urls.length))
-    const checked = checks.urls.length
-    const analysed = analyses.urls.length
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).not.toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).not.toBeNull()
 
     await user.click(within(plates).getByTestId('plates-none'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('No plate chosen. Choose at least one to print.')
     expect(screen.getByTestId('run-print')).toBeDisabled()
-    // #3762 review: no plate is checked or judged for a print that names none. A wait
-    // past the debounce is the only way to see that nothing was sent; a slow machine can
-    // make it miss a stray request (pass), never fail on one that was not sent.
-    await new Promise((settle) => setTimeout(settle, ANALYSIS_DEBOUNCE_MS * 2))
-    expect(checks.urls).toHaveLength(checked)
-    expect(analyses.urls).toHaveLength(analysed)
+    // #3762 review: no plate is checked or judged for a print that names none.
+    expect(vi.mocked(usePrintCheck).mock.lastCall?.[1]).toBeNull()
+    expect(vi.mocked(useAnalysis).mock.lastCall?.[1]).toBeNull()
 
     await user.click(within(plates).getByTestId('plates-all'))
     expect(screen.getByTestId('plates-summary')).toHaveTextContent('All 2 plates')

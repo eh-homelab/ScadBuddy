@@ -269,6 +269,11 @@ def test_the_base_identity_moves_with_the_plate_set() -> None:
     # One chosen plate is that plate's print, as `PrintRunRequest` reads it (#3768 review).
     assert identity(AnalysisRequest(plate_ids=[2, 2])) == identity(AnalysisRequest(plate_id=2))
     assert AnalysisRequest(plate_ids=[2]).plate_id == 2
+    # Several make the mesh checks read the first that prints, never a plate left out.
+    several = AnalysisRequest(plate_id=1, plate_ids=[3, 2, 3])
+    assert (several.plate_id, several.plate_ids) == (2, [2, 3])
+    every = AnalysisRequest(all_plates=True, plate_ids=[3, 2])
+    assert (every.plate_id, every.plate_ids) == (1, [2, 3])
     one_three = identity(AnalysisRequest(plate_ids=[3, 1]))
     assert one_three["plates"] == [1, 3]
     assert one_three != identity(AnalysisRequest(plate_ids=[1, 2]))
