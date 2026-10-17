@@ -3,12 +3,12 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { durableHealthPort } from '../evals/durable.js'
 import { createBackendClient } from '../src/api/backend.js'
 import { CredentialStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
@@ -75,14 +75,6 @@ const skip = !hasUv()
     : !TEST_DATABASE_URL
       ? `${TEST_DATABASE_URL_ENV} is not set`
       : undefined
-
-async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const { port } = server.address() as { port: number }
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
 
 function withSearchPath(url: string, schema: string): string {
   const u = new URL(url)
@@ -187,7 +179,6 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     const databaseUrl = withSearchPath(url, schema)
 
     // agent-durable, with the real segment runner (no SCADBUDDY_DURABLE_SCRIPTED).
-    const port = await freePort()
     durable = start(
       'uv',
       ['run', '--frozen', 'python', '-m', 'scadbuddy_durable'],
@@ -199,7 +190,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
         SCADBUDDY_SECRET_KEY_FILE: kekFile,
         SCADBUDDY_DURABLE_TOOLS_JSON: path.join(dir, 'tools.json'),
         SCADBUDDY_DURABLE_CWD: path.join(dir, 'cwd'),
-        SCADBUDDY_DURABLE_HEALTH_PORT: String(port),
+        SCADBUDDY_DURABLE_HEALTH_PORT: '0',
         // Claude Code's own state, never the developer's.
         HOME: path.join(dir, 'home'),
         CLAUDE_CONFIG_DIR: path.join(dir, 'home'),
@@ -275,9 +266,12 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     for (;;) {
       if (durable.child.exitCode !== null) throw new Error(`the durable worker exited: ${durable.log()}`)
       if (projects.child.exitCode !== null) throw new Error(`the projects worker exited: ${projects.log()}`)
-      const status = await fetch(`http://127.0.0.1:${port}/healthz`)
-        .then((r) => r.json() as Promise<{ worker?: string }>)
-        .catch(() => undefined)
+      const port = durableHealthPort(durable.log())
+      const status = port === undefined
+        ? undefined
+        : await fetch(`http://127.0.0.1:${port}/healthz`)
+            .then((r) => r.json() as Promise<{ worker?: string }>)
+            .catch(() => undefined)
       if (status?.worker === 'running' && lines.includes('{"ready": true}')) break
       if (Date.now() > deadline) throw new Error(`the workers did not start: ${durable.log()}\n${projects.log()}`)
       await new Promise((r) => setTimeout(r, 500))

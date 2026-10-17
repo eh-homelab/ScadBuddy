@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import re
+import sys
 
 from scadbuddy_durable.health import serve_health
 
@@ -26,3 +29,27 @@ async def test_healthz_answers_the_status() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_the_sidecar_on_port_0_says_which_port_it_bound() -> None:
+    """#3655: a test starts it on port 0 and reads the port from this line, instead of
+    probing for a free one that something else can take before the sidecar binds it."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SCADBUDDY_")}
+    env["SCADBUDDY_DURABLE_HEALTH_PORT"] = "0"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "scadbuddy_durable", env=env, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        assert proc.stderr is not None
+        port = None
+        while port is None:
+            line = (await asyncio.wait_for(proc.stderr.readline(), timeout=30)).decode()
+            assert line, "the sidecar exited before it named its port"
+            if match := re.search(r"health on port (\d+)", line):
+                port = int(match[1])
+        status, body = await _get(port, "/healthz")
+        assert status == "HTTP/1.1 200 OK"
+        assert json.loads(body)["status"] == "ok"
+    finally:
+        proc.terminate()
+        await proc.wait()
