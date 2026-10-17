@@ -685,7 +685,9 @@ describe('PrintPicker', () => {
     // on it then does nothing (seen under load: the run was never sent).
     await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await screen.findByTestId('queued-items')
+    // The run itself, not the queued items it later shows: under load the slice and
+    // queue that follow can outlast a find (#3960).
+    await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
       choices: { tier: null, process_name: '0.24mm Standard @BBL H2C' },
