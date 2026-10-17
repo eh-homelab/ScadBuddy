@@ -196,6 +196,9 @@ class Target:
             # A file mapped to other sides must not be reused for this map.
             extruders = ",".join(self.filament_map.extruders)
             key = f"{key}>{extruders}:{','.join(self.filament_map.volumes)}"
+            if self.filament_map.pinned:
+                # A file the slicer must follow is not one it may regroup (#3955).
+                key = f"{key}!"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"

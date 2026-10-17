@@ -1167,9 +1167,12 @@ def replate_3mf(
         return re.sub(r'\btransform="[^"]*"', f'transform="{transform}"', tag, count=1)
 
     changed: dict[str, bytes] = {}
+    pinned = filament_map if filament_map is not None and filament_map.pinned else None
     for name, data in entries:
         if name == ROOT_MODEL_NAME:
             changed[name] = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
+        elif name == MODEL_SETTINGS_NAME and pinned is not None and pinned.fits(settings):
+            changed[name] = _pin_plates(data.decode("utf-8"), pinned).encode("utf-8")
         elif name == PROJECT_SETTINGS_NAME:
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
@@ -1197,6 +1200,22 @@ class FilamentMap:
 
     extruders: tuple[str, ...]
     volumes: tuple[str, ...]
+    #: The slice must keep this map (#3955): a side was chosen by hand. Every plate then
+    #: states it in the slicer's "Nozzle Manual" mode (:func:`_pin_plates`), which only
+    #: a slice of the whole file (``plate: 0``) can read. Otherwise the slicer's "Auto
+    #: For Flush" grouping picks within the sides ``extruder_nozzle_stats`` offer.
+    pinned: bool = False
+
+    @property
+    def nozzles(self) -> tuple[str, ...]:
+        """``filament_nozzle_map``: each filament's nozzle, one per side (its extruder,
+        0-based), so the filaments on a side share that side's nozzle."""
+        return tuple(str(int(extruder) - 1) for extruder in self.extruders)
+
+    def fits(self, settings: Mapping[str, Any]) -> bool:
+        """Whether it names one extruder per filament of the file whose project settings
+        are ``settings``: the slicer indexes it by filament."""
+        return len(self.extruders) == len(settings.get("filament_colour") or self.extruders)
 
 
 def _state_nozzles(
@@ -1209,19 +1228,55 @@ def _state_nozzles(
     (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is.
 
     ``filament_map`` is written as ``filament_map`` under ``filament_map_mode``
-    "Manual", with ``filament_volume_map`` beside it (#2166): only when it names one
-    extruder per filament of the file, since the slicer indexes it by filament."""
+    "Manual", with ``filament_volume_map`` beside it (#2166): only when it
+    :meth:`~FilamentMap.fits` the file. A pinned one also writes
+    ``filament_nozzle_map``, which the plates' "Nozzle Manual" mode reads from here
+    (:func:`_pin_plates`, #3955)."""
     if nozzle_stats is not None:
         settings["extruder_nozzle_stats"] = list(nozzle_stats)
         settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
     if nozzle_volume_type is not None:
         settings["nozzle_volume_type"] = list(nozzle_volume_type)
-    if filament_map is not None and len(filament_map.extruders) == len(
-        settings.get("filament_colour") or filament_map.extruders
-    ):
+    if filament_map is not None and filament_map.fits(settings):
         settings["filament_map"] = list(filament_map.extruders)
         settings["filament_map_mode"] = "Manual"
         settings["filament_volume_map"] = list(filament_map.volumes)
+        if filament_map.pinned:
+            settings["filament_nozzle_map"] = list(filament_map.nozzles)
+
+
+#: A plate's own filament map, which the slicer reads before the project's.
+_PLATE_MAP_METADATA = re.compile(
+    r'[ \t]*<metadata key="(?:filament_map_mode|filament_maps|filament_volume_maps)"'
+    r' value="[^"]*"\s*/>[ \t]*\r?\n?'
+)
+_PLATE_OPEN = re.compile(r"<plate>[ \t]*\r?\n?")
+
+
+def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
+    """``model_settings`` with every ``<plate>`` stating ``filament_map`` in the slicer's
+    "Nozzle Manual" mode, replacing whatever map the plate stated (#3955).
+
+    Measured against the deployed slicer (bambu-studio-api, BambuStudio 02.08.02.61,
+    2026-10-17), slicing through ``--load-settings`` as Bambuddy does: the project's
+    ``filament_map_mode`` "Manual" is not followed, the plate's is. Plain "Manual" is
+    still regrouped on an H2C: its grouping drops a filament's side when the filament's
+    preset has no variant for the nozzle's flow (the bundled PLA Basic has only
+    Standard, so a High Flow slice failed with "Group error in manual mode"). "Nozzle
+    Manual" builds the groups from ``filament_map``, the plate's ``filament_volume_maps``
+    and the project's ``filament_nozzle_map`` as given, Standard, High Flow or one of
+    each. A plate number on the command line makes the CLI want those as its own
+    arguments, which the sidecar never passes: "Nozzle Manual" is refused ("Invalid
+    parameters to the slicer") and plain "Manual" segfaults. So a pinned file is sliced
+    whole (``plate: 0``)."""
+    lines = (
+        '  <metadata key="filament_map_mode" value="Nozzle Manual"/>\n'
+        f'  <metadata key="filament_maps" value="{" ".join(filament_map.extruders)}"/>\n'
+        f'  <metadata key="filament_volume_maps" value="{" ".join(filament_map.volumes)}"/>\n'
+    )
+    return _PLATE_OPEN.sub(
+        lambda _: "<plate>\n" + lines, _PLATE_MAP_METADATA.sub("", model_settings)
+    )
 
 
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
@@ -1668,8 +1723,28 @@ def state_nozzles(
         zipfile.ZipFile(io.BytesIO(payload)) as archive,
         zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
     ):
+        pinned = filament_map if filament_map is not None and filament_map.pinned else None
+        if pinned is not None and (
+            PROJECT_SETTINGS_NAME not in archive.namelist()
+            or not pinned.fits(
+                json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+            )
+        ):
+            pinned = None
         for info in archive.infolist():
             name = info.filename
+            if name == MODEL_SETTINGS_NAME and pinned is not None:
+                # Counted against the archive's cap, as every entry is: an author's model
+                # settings list every part, so it can outgrow the project settings' cap.
+                text = _read_capped(archive, name, MAX_UNCOMPRESSED_BYTES - total)
+                data = _pin_plates(text.decode("utf-8"), pinned).encode("utf-8")
+                total += len(data)
+                if total > MAX_UNCOMPRESSED_BYTES:
+                    raise ArchiveTooLargeError(
+                        f"the 3MF inflates past {MAX_UNCOMPRESSED_BYTES} bytes"
+                    )
+                out.writestr(_entry(name), data)
+                continue
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(_read_capped(archive, name, MAX_SETTINGS_BYTES))
                 _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
