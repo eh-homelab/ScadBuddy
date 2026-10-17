@@ -789,10 +789,6 @@ class SettingsStore:
             problem = _s3_not_ready(lambda name: changes.get(name, getattr(current, name)))
             if problem is not None:
                 raise StoreNotReadyError(problem)
-        if changes.get("library_backend") == "native":
-            current = self.load()
-            if changes.get("store_backend", current.store_backend) == "local":
-                raise StoreNotReadyError(NATIVE_LIBRARY_NOT_READY)
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)
