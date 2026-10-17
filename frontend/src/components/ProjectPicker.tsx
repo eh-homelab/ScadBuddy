@@ -129,8 +129,9 @@ interface Props {
    */
   folder?: { value: number | null; onChange: (folderId: number | null) => void }
   /**
-   * The Settings default project (`last_project_id`), reported once the list has loaded, so the parent
-   * can seed `value` from it without ever handling a `ProjectChoices`.
+   * The Settings default project (`last_project_id`), reported once the list has
+   * loaded, so the parent can seed `value` from it without ever handling a
+   * `ProjectChoices`.
    */
   onLoaded?: (projectId: number | null) => void
   /**

@@ -603,6 +603,8 @@ describe('PrintPicker', () => {
   })
 
   it('keeps a folder chosen before a Re-arrange replaces the source (#3790 review)', async () => {
+    // A regression pin, not new behaviour: a Re-arrange swaps the dialog's own output,
+    // never `source` or `content`, so the default is not asked again and the choice stays.
     const { user } = renderPicker()
     await loaded()
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
