@@ -53,7 +53,11 @@ beforeAll(() => {
         return await intercepted(input instanceof Request ? input.clone() : input, init)
       } catch (error) {
         const refused = (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED'
-        if (!refused || signal?.aborted || attempt === 3) throw error
+        if (!refused || signal?.aborted) throw error
+        if (attempt === 3) {
+          process.stderr.write(`vitest.setup: gave up on ${url} after 3 refused tries (mswjs/interceptors#862)\n`)
+          throw error
+        }
         // On stderr rather than console.warn, which tests spy on: a line here means the
         // upstream escape still happens, and this wrapper is still needed.
         process.stderr.write(`vitest.setup: resending ${url}, which MSW let through (mswjs/interceptors#862)\n`)
