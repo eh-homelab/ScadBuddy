@@ -338,6 +338,12 @@ class PgNotifyEventBus:
         self.local = InProcessEventBus(queue_size=queue_size)
         #: The last event heard before now; what a ``bus.resync`` names.
         self.last_event_id: str | None = None
+        #: The last event heard since the listener last (re)connected, or None: every
+        #: event after it reaches this process's subscriptions (#1039's ``last``).
+        self.live_event_id: str | None = None
+        #: Listeners still applying what they heard to in-process state (#1039): while
+        #: any is, a read may show less than `last_event_id`, so it carries no cursor.
+        self.settling = 0
         self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = AsyncConnectionPool(
             conninfo,
             min_size=1,
@@ -473,6 +479,20 @@ class PgNotifyEventBus:
     ) -> Subscription:
         return self.local.subscribe(kinds=kinds, maxsize=maxsize)
 
+    def settle(self) -> Callable[[], None]:
+        """Mark in-process state as behind what was heard until the returned function is
+        called: a listener that applies an event asynchronously takes this as it hears it."""
+        self.settling += 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                self.settling -= 1
+
+        return release
+
     def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
         """See :meth:`InProcessEventBus.add_listener`: called for each event heard."""
         return self.local.add_listener(listener)
@@ -516,6 +536,15 @@ class PgNotifyEventBus:
             cursor = await conn.execute("SELECT seq FROM events WHERE event_id = %s", (event_id,))
             row = await cursor.fetchone()
         return None if row is None else int(row[0])
+
+    async def positions(self, event_ids: list[str]) -> dict[str, int]:
+        """`position` for several ids in one query; an unknown or pruned one is absent."""
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT event_id, seq FROM events WHERE event_id = ANY(%s)", (event_ids,)
+            )
+            rows = await cursor.fetchall()
+        return {str(event_id): int(seq) for event_id, seq in rows}
 
     async def prune_log(self) -> int:
         """Apply the retention settings; returns the rows removed."""
@@ -583,14 +612,19 @@ class PgNotifyEventBus:
             # Another version's kind, or something else NOTIFYing on the channel.
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
-        self.last_event_id = event.id
         self.metrics.events_received.inc()
+        # Listeners first: one that applies the event later takes `settle` here, before
+        # any read can be stamped with it (#1039).
         self.local.publish(event)
+        self.last_event_id = event.id
+        self.live_event_id = event.id
 
     def _connected(self, reconnected: bool) -> None:
         self._listening.set()
         if not reconnected:
             return
+        # What was heard before the gap says nothing about what followed it.
+        self.live_event_id = None
         logger.warning(
             "the event listener reconnected; subscribers are told to resync",
             extra={"last_event_id": self.last_event_id},

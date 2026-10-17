@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { Activity, ActivityFacets } from '../../api/types'
+import { CURSOR_HEADER } from '../../lib/readCursor'
 
 /**
  * The activity list, its facets and one row (backend/scadbuddy/api/activity.py), over an
@@ -96,6 +97,8 @@ function defaultFacets(): ActivityFacets {
 
 let rows = defaultRows()
 let facets = defaultFacets()
+/** #1039 — the event the list's answers say the server had heard; none by default. */
+let listCursor: string | undefined
 
 export function seedActivity(next: Activity[]): void {
   rows = next
@@ -105,9 +108,14 @@ export function setActivityFacets(next: ActivityFacets): void {
   facets = next
 }
 
+export function setActivityListCursor(next: string | undefined): void {
+  listCursor = next
+}
+
 export function reset(): void {
   rows = defaultRows()
   facets = defaultFacets()
+  listCursor = undefined
 }
 
 const PROBLEM = 'https://scadbuddy.dev/problems/'
@@ -230,9 +238,12 @@ export const handlers = [
       : filtered
     const page = after.slice(0, limit)
     const advanced = ['1', 'true'].includes(sp.get('advanced') ?? '')
-    return HttpResponse.json({
-      items: page.map((r) => shape(r, advanced)),
-      next_cursor: after.length > limit ? encodeCursor(page[page.length - 1]!) : null,
-    })
+    return HttpResponse.json(
+      {
+        items: page.map((r) => shape(r, advanced)),
+        next_cursor: after.length > limit ? encodeCursor(page[page.length - 1]!) : null,
+      },
+      listCursor === undefined ? undefined : { headers: { [CURSOR_HEADER]: listCursor } },
+    )
   }),
 ]

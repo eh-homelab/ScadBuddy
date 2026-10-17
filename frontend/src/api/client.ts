@@ -187,6 +187,7 @@ import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
 import type { Within } from '../lib/traceAction'
+import { adoptScope, inReadScope, ReadScope, trackRequest } from '../lib/readCursor'
 
 export const API_BASE = '/api/v1'
 
@@ -249,7 +250,7 @@ export class ApiError extends Error {
  */
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
-let settingsInFlight: { read: Promise<Settings>; started: number } | undefined
+let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -397,9 +398,14 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
   // Read before sending: a connection that goes offline while a long request waits
   // may already have delivered it, so that is "no answer", not "could not send".
   const offline = navigator.onLine === false
+  // What the answer saw of the event bus, for the read this request is part of (#1039).
+  const answered = trackRequest()
   try {
-    return await fetch(url, init)
+    const response = await fetch(url, init)
+    answered(response.headers)
+    return response
   } catch (cause) {
+    answered(undefined)
     if (init?.signal?.aborted) throw cause
     throw new ApiError(
       offline
@@ -2216,14 +2222,18 @@ export const api = {
   getSettings: (): Promise<Settings> => {
     const now = Date.now()
     if (!settingsInFlight || now - settingsInFlight.started >= SETTINGS_SHARE_MS) {
+      const scope = new ReadScope()
       const shared = {
-        read: request<Settings>('/settings').finally(() => {
+        read: inReadScope(scope, () => request<Settings>('/settings')).finally(() => {
           if (settingsInFlight === shared) settingsInFlight = undefined
         }),
         started: now,
+        scope,
       }
       settingsInFlight = shared
     }
+    // A caller joining it saw only what it saw.
+    adoptScope(settingsInFlight.scope)
     return settingsInFlight.read.then((settings) => structuredClone(settings))
   },
 

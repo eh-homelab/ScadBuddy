@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,7 +15,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
-from scadbuddy.api import realtime
+from scadbuddy.api import realtime, runtime
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import (
     AnalyzerDecisionEvent,
@@ -32,6 +36,7 @@ from scadbuddy.core.events import (
     SettingsChanged,
     Subscription,
 )
+from scadbuddy.core.pg_events import LoggedEvent, Replay
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 from scadbuddy.main import create_app
@@ -51,7 +56,9 @@ def bus(app: FastAPI) -> EventBus:
 
 def subscribe(ws: WebSocketTestSession, *topics: str) -> None:
     ws.send_json({"type": "subscribe", "topics": list(topics)})
-    assert ws.receive_json() == {"type": "subscribed", "topics": list(topics)}
+    ack = ws.receive_json()
+    ack.pop("last", None)  # on a bus with a log (#1039)
+    assert ack == {"type": "subscribed", "topics": list(topics)}
 
 
 def test_an_event_reaches_a_socket_following_its_topic(client: TestClient, bus: EventBus) -> None:
@@ -450,3 +457,298 @@ def test_rate_limit_refills() -> None:
     assert not limit.take()
     now[0] = 1.0
     assert limit.take()
+
+
+class LoggedBus(InProcessEventBus):
+    """The Postgres bus's cursor surface (#1039) in memory: ``last_event_id``, and a log
+    with ``position`` and ``replay``, of which the first ``pruned`` rows are gone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.log: list[Event] = []
+        self.last_event_id: str | None = None
+        self.live_event_id: str | None = None
+        self.pruned = 0
+        self.settling = 0
+
+    def settle(self) -> Callable[[], None]:
+        self.settling += 1
+        released = False
+
+        def release() -> None:  # once, however often called, as the Postgres bus's
+            nonlocal released
+            if not released:
+                released = True
+                self.settling -= 1
+
+        return release
+
+    def publish(self, event: Event) -> None:
+        self.log.append(event)
+        self.last_event_id = self.live_event_id = event.id
+        super().publish(event)
+
+    async def position(self, event_id: str) -> int | None:
+        for seq, event in enumerate(self.log, start=1):
+            if event.id == event_id and seq > self.pruned:
+                return seq
+        return None
+
+    async def positions(self, event_ids: list[str]) -> dict[str, int]:
+        places = {event_id: await self.position(event_id) for event_id in event_ids}
+        return {event_id: seq for event_id, seq in places.items() if seq is not None}
+
+    async def replay(self, after: int, *, limit: int = 100) -> Replay:
+        logged = [
+            LoggedEvent(seq=seq, event=event)
+            for seq, event in enumerate(self.log, start=1)
+            if seq > max(after, self.pruned)
+        ]
+        return Replay(events=logged[:limit], gap=after < self.pruned)
+
+
+@pytest.fixture
+def logged(app: FastAPI) -> LoggedBus:
+    bus = LoggedBus()
+    getattr(app.state, STATE_ATTR).events = bus
+    return bus
+
+
+def check(ws: WebSocketTestSession, since: list[str], *topics: str) -> list[str]:
+    ws.send_json({"type": "check", "id": 7, "since": since, "topics": list(topics)})
+    answer = ws.receive_json()
+    while answer["type"] == "event":  # one published meanwhile
+        answer = ws.receive_json()
+    assert answer["type"] == "changed" and answer["id"] == 7
+    changed: list[str] = answer["topics"]
+    return changed
+
+
+def test_a_read_carries_the_last_event_its_process_heard(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    assert realtime.CURSOR_HEADER not in client.get("/api/v1/settings").headers
+    event = SettingsChanged(section="connection")
+    logged.publish(event)
+    assert client.get("/api/v1/settings").headers[realtime.CURSOR_HEADER] == event.id
+
+
+def test_the_in_process_bus_gives_no_cursor(client: TestClient) -> None:
+    """It has no log to check one against, so the client re-reads as before."""
+    assert realtime.CURSOR_HEADER not in client.get("/api/v1/settings").headers
+
+
+def test_subscribed_carries_the_last_event_heard(client: TestClient, logged: LoggedBus) -> None:
+    event = SettingsChanged(section="connection")
+    logged.publish(event)
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings"]})
+        assert ws.receive_json() == {"type": "subscribed", "topics": ["settings"], "last": event.id}
+
+
+def test_a_check_names_only_the_topics_an_event_since_touched(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    logged.publish(FontInstalled(family="Inter"))
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings", "fonts", "models")
+        assert check(ws, [seen.id], "settings", "fonts", "models") == ["fonts"]
+        # Nothing after the last event: nothing changed.
+        assert check(ws, [logged.log[-1].id], "settings", "fonts") == []
+        # The earliest of several cursors counts.
+        assert check(ws, [logged.log[-1].id, seen.id], "settings", "fonts") == ["fonts"]
+
+
+@pytest.mark.parametrize("why", ["unknown", "pruned", "unfollowed", "too many"])
+def test_a_check_that_cannot_tell_names_every_topic(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch, why: str
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    logged.publish(SettingsChanged(section="connection"))
+    since = [seen.id]
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "fonts", "settings")
+        topics = ["fonts", "settings"]
+        expected = ["fonts", "settings"]
+        if why == "unknown":
+            since = ["0" * 32]
+        elif why == "pruned":
+            logged.pruned = 2
+        elif why == "unfollowed":
+            topics = ["fonts", "models"]
+            expected = ["models"]
+        else:
+            monkeypatch.setattr(realtime, "CHECK_MAX_EVENTS", 1)
+        assert check(ws, since, *topics) == expected
+
+
+def test_after_a_reconnect_subscribed_leaves_out_last_until_a_fresh_event(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    """A NOTIFY sent while the listener was down was never heard here: a read stamped
+    before the gap must ``check`` rather than take ``last`` at its word."""
+    logged.publish(SettingsChanged(section="connection"))
+    logged.live_event_id = None  # what `PgNotifyEventBus._connected` does on a reconnect
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings"]})
+        assert "last" not in ws.receive_json()
+    fresh = SettingsChanged(section="connection")
+    logged.publish(fresh)
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings"]})
+        assert ws.receive_json()["last"] == fresh.id
+
+
+def test_a_check_the_log_cannot_answer_names_every_topic(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+
+    async def down(_after: int, *, limit: int = 100) -> Replay:
+        raise OSError("the database went away")
+
+    monkeypatch.setattr(logged, "replay", down)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+        assert check(ws, [seen.id], "settings") == ["settings"]
+        # The socket stays open.
+        assert check(ws, [seen.id], "settings") == ["settings"]
+
+
+def test_a_slow_check_holds_up_no_subscribe_and_later_checks_wait_their_turn(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checks run on a worker beside the frame loop, in order: a subscribe is confirmed
+    while one waits on the log, and a second gets a real answer once the first is done."""
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    release = threading.Event()
+    replay = logged.replay
+
+    async def slow(after: int, *, limit: int = 100) -> Replay:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return await replay(after, limit=limit)
+
+    monkeypatch.setattr(logged, "replay", slow)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+        ws.send_json({"type": "check", "id": 1, "since": [seen.id], "topics": ["settings"]})
+        ws.send_json({"type": "check", "id": 2, "since": [seen.id], "topics": ["settings"]})
+        subscribe(ws, "fonts")
+        release.set()
+        assert ws.receive_json() == {"type": "changed", "id": 1, "topics": []}
+        assert ws.receive_json() == {"type": "changed", "id": 2, "topics": []}
+
+
+def test_checks_past_the_queue_are_answered_every_topic_changed(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    release = threading.Event()
+    replay = logged.replay
+
+    async def slow(after: int, *, limit: int = 100) -> Replay:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return await replay(after, limit=limit)
+
+    monkeypatch.setattr(logged, "replay", slow)
+    monkeypatch.setattr(realtime, "CHECK_QUEUE", 1)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+
+        def send_check(check_id: int) -> None:
+            ws.send_json(
+                {"type": "check", "id": check_id, "since": [seen.id], "topics": ["settings"]}
+            )
+
+        send_check(1)
+        subscribe(ws, "fonts")  # a round trip: the worker has taken check 1 by now
+        for check_id in (2, 3, 4):  # 2 waits; 3 and 4 are over the cap
+            send_check(check_id)
+        assert [ws.receive_json() for _ in range(2)] == [
+            {"type": "changed", "id": 3, "topics": ["settings"]},
+            {"type": "changed", "id": 4, "topics": ["settings"]},
+        ]
+        release.set()
+        assert [ws.receive_json() for _ in range(2)] == [
+            {"type": "changed", "id": 1, "topics": []},
+            {"type": "changed", "id": 2, "topics": []},
+        ]
+
+
+def test_a_malformed_check_is_answered_with_an_error(client: TestClient, logged: LoggedBus) -> None:
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "check", "id": 1, "since": [], "topics": ["fonts"]})
+        assert ws.receive_json()["type"] == "error"
+
+
+def _heard(client: TestClient) -> None:
+    """Waits until a read carries a cursor: the bus has heard an event."""
+    for _ in range(200):
+        if realtime.CURSOR_HEADER in client.get("/api/v1/settings").headers:
+            return
+        time.sleep(0.05)
+    raise AssertionError("the bus heard no event")
+
+
+@pytest.mark.requires_postgres
+def test_a_read_s_cursor_clears_the_re_read_on_the_postgres_bus(client: TestClient) -> None:
+    """#1039 end to end: a read's cursor, the ack's ``last`` and ``check`` agree on the
+    real log, and a change after the read is still named."""
+    client.put("/api/v1/settings", json={"public_url": "https://one.example"})
+    _heard(client)
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["settings", "fonts"]})
+        last = ws.receive_json()["last"]
+        assert check(ws, [last], "settings", "fonts") == []
+        client.put("/api/v1/settings", json={"public_url": "https://two.example"})
+        assert ws.receive_json()["topics"] == ["settings"]  # the event itself
+        assert check(ws, [last], "settings", "fonts") == ["settings"]
+
+
+def test_a_read_carries_no_cursor_while_a_listener_is_settling(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    logged.publish(SettingsChanged(section="connection"))
+    release = logged.settle()
+    assert realtime.CURSOR_HEADER not in client.get("/api/v1/settings").headers
+    release()
+    assert realtime.CURSOR_HEADER in client.get("/api/v1/settings").headers
+
+
+async def test_a_heard_settings_change_holds_cursors_until_it_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1039: the runtime settings are applied in a task after the event is heard. Until
+    then a read would show the old ones, so it must carry no cursor."""
+    bus = LoggedBus()
+    reread = threading.Event()
+    applied: list[str] = []
+
+    def snapshot() -> SimpleNamespace:
+        reread.wait(5)
+        return SimpleNamespace(runtime="new")
+
+    state = SimpleNamespace(events=bus, settings_store=SimpleNamespace(snapshot=snapshot))
+    monkeypatch.setattr(runtime, "apply_runtime", lambda _state, value: applied.append(value))
+    stop = runtime.follow_changes(state)  # type: ignore[arg-type]
+    try:
+        bus.publish(SettingsChanged(section="connection"))
+        assert realtime.last_heard(bus) is None
+        reread.set()
+        for _ in range(200):
+            if applied:
+                break
+            await asyncio.sleep(0.01)
+        assert applied == ["new"]
+        assert realtime.last_heard(bus) == bus.log[-1].id
+    finally:
+        reread.set()
+        stop()

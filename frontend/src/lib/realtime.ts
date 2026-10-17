@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import { API_BASE } from '../api/client'
 import { socketUrl } from './lsp'
+import { inReadScope, ReadScope } from './readCursor'
 
 /**
  * #266 — the UI's realtime channel, `WS /api/v1/ws` (backend `api/realtime.py`).
@@ -14,6 +15,11 @@ import { socketUrl } from './lsp'
  * A listener is also signalled `'resync'` — "read now" — when the server confirms a
  * subscription (after a connect or reconnect, so nothing changed between the read
  * and the first event goes unseen), and when the server says events were lost.
+ *
+ * #1039 — a confirmation's `'resync'` comes with `Confirmation`: the last event the
+ * server had heard by then. A listener whose read already saw it (`lib/readCursor.ts`)
+ * has missed nothing; one that saw something earlier can `check` whether anything
+ * since touched its topic, and read only if so.
  *
  * When the socket cannot connect within `fallbackMs`, `status` becomes
  * `'unavailable'`; callers that must stay current (#267, #268) poll while it is.
@@ -29,10 +35,19 @@ export interface RealtimeEvent {
 }
 
 export type RealtimeSignal = RealtimeEvent | 'resync'
-export type RealtimeListener = (signal: RealtimeSignal) => void
+/** Comes with the `'resync'` that confirms a subscription (#1039). */
+export interface Confirmation {
+  /**
+   * The last event the server had heard once the topic was followed. Absent when it
+   * does not know, or when the topic was already live and this listener only joined.
+   */
+  last?: string
+}
+export type RealtimeListener = (signal: RealtimeSignal, confirmation?: Confirmation) => void
 
 type ServerFrame =
-  | { type: 'subscribed'; topics: string[] }
+  | { type: 'subscribed'; topics: string[]; last?: string }
+  | { type: 'changed'; id: number; topics: string[] }
   | ({ type: 'event' } & RealtimeEvent)
   | { type: 'resync' }
   | { type: 'ping' }
@@ -55,6 +70,10 @@ export const FALLBACK_MS = 5_000
 const BASE_MS = 500
 const MAX_MS = 30_000
 const IDLE_MS = 60_000
+/** How long a `check` waits for its answer before it counts every topic as changed. */
+export const CHECK_MS = 3_000
+/** The server's error messages for a check it would not run (backend `api/realtime.py`). */
+const CHECK_REFUSALS = ['a check needs', 'expected subscribe or unsubscribe']
 
 export class RealtimeClient {
   private readonly url: string
@@ -76,6 +95,8 @@ export class RealtimeClient {
   private fallbackTimer: ReturnType<typeof setTimeout> | undefined
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private closed = false
+  private checks = 0
+  private readonly pending = new Map<number, (changed: string[] | undefined) => void>()
 
   constructor(options: RealtimeOptions = {}) {
     this.url = options.url ?? socketUrl(`${API_BASE}/ws`)
@@ -123,9 +144,10 @@ export class RealtimeClient {
     if (first) {
       this.send({ type: 'subscribe', topics: [topic] })
     } else if (this.confirmed.has(topic)) {
-      // Already live: this listener still needs its first read.
+      // Already live: this listener still needs its first read, unless a read it made
+      // already holds everything since (#1039: no `last`, so it asks).
       queueMicrotask(() => {
-        if (set.has(listener)) listener('resync')
+        if (set.has(listener)) listener('resync', {})
       })
     }
     this.ensureConnected()
@@ -140,8 +162,28 @@ export class RealtimeClient {
     }
   }
 
+  /**
+   * #1039 — which of `topics` an event since the read that saw `since` touched. Every
+   * one, when the server cannot tell, the socket is not open, or no answer comes in
+   * `CHECK_MS`: the caller then reads, as it would have without asking.
+   */
+  check(since: string[], topics: string[]): Promise<string[]> {
+    const id = ++this.checks
+    if (!this.send({ type: 'check', id, since, topics })) return Promise.resolve(topics)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => settle(undefined), CHECK_MS)
+      const settle = (changed: string[] | undefined) => {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        resolve(changed ?? topics)
+      }
+      this.pending.set(id, settle)
+    })
+  }
+
   close(): void {
     this.closed = true
+    this.failChecks()
     clearTimeout(this.reconnectTimer)
     clearTimeout(this.fallbackTimer)
     clearTimeout(this.idleTimer)
@@ -191,6 +233,7 @@ export class RealtimeClient {
       if (this.socket !== socket) return
       this.socket = undefined
       this.confirmed.clear()
+      this.failChecks()
       clearTimeout(this.idleTimer)
       this.scheduleReconnect()
     }
@@ -204,8 +247,11 @@ export class RealtimeClient {
         for (const topic of frame.topics) {
           if (!this.listeners.has(topic)) continue
           this.confirmed.add(topic)
-          this.emit(topic, 'resync')
+          this.emit(topic, 'resync', { last: typeof frame.last === 'string' ? frame.last : undefined })
         }
+        return
+      case 'changed':
+        this.pending.get(frame.id)?.(Array.isArray(frame.topics) ? frame.topics : undefined)
         return
       case 'event':
         for (const topic of frame.topics) {
@@ -219,24 +265,32 @@ export class RealtimeClient {
         return
       case 'error':
         console.warn('realtime:', frame.message)
+        // An error frame names no request. A refused check (or a server without them,
+        // which refuses every frame but a subscribe) fails the checks waiting; any other
+        // error (a refused topic, say) leaves them be.
+        if (CHECK_REFUSALS.some((refusal) => frame.message.startsWith(refusal))) this.failChecks()
         return
     }
   }
 
-  private emit(topic: string, signal: RealtimeSignal): void {
+  private emit(topic: string, signal: RealtimeSignal, confirmation?: Confirmation): void {
     for (const listener of [...(this.listeners.get(topic) ?? [])]) {
       try {
-        listener(signal)
+        listener(signal, confirmation)
       } catch (error) {
         console.error('a realtime listener failed', error)
       }
     }
   }
 
-  private send(frame: object): void {
-    if (this.socket?.readyState === this.WebSocketImpl.OPEN) {
-      this.socket.send(JSON.stringify(frame))
-    }
+  private send(frame: object): boolean {
+    if (this.socket?.readyState !== this.WebSocketImpl.OPEN) return false
+    this.socket.send(JSON.stringify(frame))
+    return true
+  }
+
+  private failChecks(): void {
+    for (const settle of [...this.pending.values()]) settle(undefined)
   }
 
   private scheduleReconnect(): void {
@@ -279,6 +333,52 @@ export class RealtimeClient {
   }
 }
 
+/** #1039 — a read, as `readAgain` judges it: what it saw, and whether its answer is in use. */
+export interface ReadRecord {
+  scope: ReadScope
+  shown: Promise<boolean>
+}
+
+/**
+ * Runs `load` as one read, recording what it saw for `readAgain`. `applied` says whether
+ * its answer is the one in use; a read whose answer was dropped vouches for nothing.
+ */
+export function recordRead<T>(
+  load: () => Promise<T>,
+  applied: (value: T) => boolean = () => true,
+): { record: ReadRecord; result: Promise<T> } {
+  const scope = new ReadScope()
+  const result = inReadScope(scope, load)
+  return { record: { scope, shown: result.then(applied, () => false) }, result }
+}
+
+/**
+ * #1039 — whether a subscription's confirmation means `read` must be made again: unless
+ * it saw the server's last event, or the server says nothing since touched `topic`.
+ * True whenever that cannot be told: no read, a failed one, one still unsettled after
+ * `CHECK_MS`, or one without cursors.
+ */
+export async function readAgain(
+  read: ReadRecord | undefined,
+  topic: string,
+  confirmation: Confirmation,
+): Promise<boolean> {
+  if (!read || !(await settledIn(read.shown, CHECK_MS))) return true
+  const since = read.scope.cursors()
+  if (!since) return true
+  if (since.length === 1 && since[0] === confirmation.last) return false
+  return (await getRealtime().check(since, [topic])).includes(topic)
+}
+
+/** `shown`, or false once `ms` pass without it: a hung read must not hold up its re-read. */
+function settledIn(shown: Promise<boolean>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms)
+  })
+  return Promise.race([shown, late]).finally(() => clearTimeout(timer))
+}
+
 let shared: RealtimeClient | undefined
 
 /** The tab's one client, created on first use. */
@@ -301,7 +401,7 @@ export function useSubscription(topic: string | undefined, onSignal: RealtimeLis
   })
   useEffect(() => {
     if (topic === undefined) return
-    return getRealtime().subscribe(topic, (signal) => latest.current(signal))
+    return getRealtime().subscribe(topic, (signal, confirmation) => latest.current(signal, confirmation))
   }, [topic])
 }
 
