@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -17,7 +17,7 @@ VALIDATION_EXIT = 192
 class TransferUrl(BaseModel):
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
-    #: Aware UTC. Dumped with "+00:00"; the Rust side parses either form.
+    #: Aware, normalised to UTC, so it always dumps with "Z".
     expires_at: datetime
 
     @field_validator("expires_at")
@@ -25,7 +25,7 @@ class TransferUrl(BaseModel):
     def _aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
-        return value
+        return value.astimezone(UTC)
 
 
 class SlicePlateInput(BaseModel):

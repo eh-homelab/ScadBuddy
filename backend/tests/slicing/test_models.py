@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from scadbuddy.slicing.models import (
@@ -97,3 +97,11 @@ def test_vectors_round_trip() -> None:
     ):
         for raw in dumped[key]:
             assert cls.model_validate(raw).model_dump(mode="json") == raw
+
+
+def test_expires_at_is_normalised_to_utc() -> None:
+    url = TransferUrl(
+        url="http://api/x",
+        expires_at=datetime(2026, 10, 16, 14, 0, tzinfo=timezone(timedelta(hours=2))),
+    )
+    assert url.model_dump(mode="json")["expires_at"] == "2026-10-16T12:00:00Z"

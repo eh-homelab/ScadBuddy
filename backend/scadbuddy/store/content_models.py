@@ -30,8 +30,9 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-#: Kinds whose life the sweep decides: pieces by `blob_refs` and grace, snapshots (a
-#: cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts are never swept.
+#: Kinds whose life the sweep decides: pieces and slices by `blob_refs` and grace,
+#: snapshots (a cache of git) by grace alone. Assets have `AssetStore.sweep`; fonts are
+#: never swept.
 SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice")
 
 
