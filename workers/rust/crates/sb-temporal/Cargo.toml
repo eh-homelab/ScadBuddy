@@ -1,0 +1,23 @@
+[package]
+name = "sb-temporal"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+temporalio-sdk = { workspace = true, features = ["experimental", "opentelemetry"] }
+temporalio-client = { workspace = true, features = ["experimental"] }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+axum.workspace = true
+prometheus.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+temporalio-sdk.workspace = true
