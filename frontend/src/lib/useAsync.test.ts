@@ -1,9 +1,10 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getRealtime, resetRealtime, type RealtimeSignal } from './realtime'
+import { getRealtime, resetRealtime, type RealtimeListener } from './realtime'
+import { CURSOR_HEADER, trackRequest } from './readCursor'
 import { RESYNC_WAIT_MS, useAsync } from './useAsync'
 
-let signals: ((signal: RealtimeSignal) => void)[] = []
+let signals: RealtimeListener[] = []
 
 beforeEach(() => {
   resetRealtime()
@@ -333,5 +334,81 @@ describe('with the socket already open (#1039)', () => {
     let reads = 0
     const { result } = renderHook(() => useAsync(() => Promise.resolve(++reads), []))
     await waitFor(() => expect(result.current.data).toBe(1))
+  })
+})
+
+describe('on a cold load, the confirmation is checked against the first read (#1039)', () => {
+  /** A load whose one request answers with `cursor` (none when null). */
+  function reading(cursor: string | null) {
+    let reads = 0
+    const load = () => {
+      const answered = trackRequest()
+      return Promise.resolve().then(() => {
+        answered(new Headers(cursor === null ? {} : { [CURSOR_HEADER]: cursor }))
+        return ++reads
+      })
+    }
+    return { load, reads: () => reads }
+  }
+
+  it("reads once when the first read saw the server's last event", async () => {
+    const check = vi.spyOn(getRealtime(), 'check')
+    const { load, reads } = reading('e5')
+    const { result } = renderHook(() => useAsync(load, [], ['models']))
+    await waitFor(() => expect(result.current.data).toBe(1))
+    await act(async () => signals[0]?.('resync', { last: 'e5' }))
+    expect(reads()).toBe(1)
+    expect(check).not.toHaveBeenCalled()
+  })
+
+  it('asks the server, and reads again only for a topic it names', async () => {
+    const check = vi.spyOn(getRealtime(), 'check').mockResolvedValueOnce([]).mockResolvedValueOnce(['fonts'])
+    const { load, reads } = reading('e5')
+    renderHook(() => useAsync(load, [], ['models', 'fonts']))
+    await waitFor(() => expect(reads()).toBe(1))
+    await act(async () => signals[0]?.('resync', { last: 'e7' }))
+    expect(check).toHaveBeenLastCalledWith(['e5'], ['models'])
+    expect(reads()).toBe(1)
+    await act(async () => signals[1]?.('resync', { last: 'e7' }))
+    expect(check).toHaveBeenLastCalledWith(['e5'], ['fonts'])
+    await waitFor(() => expect(reads()).toBe(2))
+  })
+
+  it('waits for a first read still in flight before it decides', async () => {
+    const check = vi.spyOn(getRealtime(), 'check')
+    let answer: (value: number) => void = () => {}
+    const load = () => {
+      const answered = trackRequest()
+      return new Promise<number>((resolve) => {
+        answer = (value) => {
+          answered(new Headers({ [CURSOR_HEADER]: 'e5' }))
+          resolve(value)
+        }
+      })
+    }
+    const { result } = renderHook(() => useAsync(load, [], ['models']))
+    await act(async () => signals[0]?.('resync', { last: 'e5' }))
+    await act(async () => answer(1))
+    expect(result.current.data).toBe(1)
+    expect(check).not.toHaveBeenCalled()
+  })
+
+  it('reads again when the first read saw no cursor, or failed', async () => {
+    const check = vi.spyOn(getRealtime(), 'check')
+    const { load, reads } = reading(null)
+    renderHook(() => useAsync(load, [], ['models']))
+    await waitFor(() => expect(reads()).toBe(1))
+    await act(async () => signals[0]?.('resync', { last: 'e5' }))
+    await waitFor(() => expect(reads()).toBe(2))
+
+    let tries = 0
+    signals = []
+    renderHook(() =>
+      useAsync(() => (++tries === 1 ? Promise.reject(new Error('down')) : Promise.resolve(tries)), [], ['fonts']),
+    )
+    await waitFor(() => expect(tries).toBe(1))
+    await act(async () => signals[0]?.('resync', { last: 'e5' }))
+    await waitFor(() => expect(tries).toBe(2))
+    expect(check).not.toHaveBeenCalled()
   })
 })

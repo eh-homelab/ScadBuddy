@@ -331,7 +331,8 @@ test.describe('real backend', () => {
         w.realtimeSocket.send(JSON.stringify({ type: 'subscribe', topics: ['models'] }))
     }, url.toString())
     const frames = () => page.evaluate(() => (globalThis as unknown as Page).realtimeFrames)
-    await expect.poll(frames).toContainEqual({ type: 'subscribed', topics: ['models'] })
+    // `last` too, once the bus has heard an event (#1039).
+    await expect.poll(frames).toContainEqual(expect.objectContaining({ type: 'subscribed', topics: ['models'] }))
 
     const slug = `e2e-ws-${Date.now().toString(36)}`
     const created = await request.post('/api/v1/models', {
@@ -348,6 +349,33 @@ test.describe('real backend', () => {
     } finally {
       await deleteModel(request, slug)
     }
+  })
+
+  test('reads a live list once on a cold load (#1039)', async ({ page }) => {
+    // The read carries the last event the server had heard, so the subscription's
+    // confirmation finds nothing new and reads nothing again. Only an event on `models`
+    // meanwhile would justify a second read, and nothing here makes one.
+    let reads = 0
+    page.on('request', (request) => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/v1/models') reads += 1
+    })
+    let confirmed = false
+    let news = false
+    page.on('websocket', (socket) => {
+      socket.on('framereceived', ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as { type: string; topics?: string[] }
+        if (!frame.topics?.includes('models')) return
+        if (frame.type === 'subscribed') confirmed = true
+        if (frame.type === 'event') news = true
+      })
+    })
+    await page.goto('/')
+    await expect(page.getByRole('heading', { name: 'Models' })).toBeVisible()
+    await expect.poll(() => confirmed).toBe(true)
+    // Room for a check's answer and the read it would start.
+    await page.waitForTimeout(1_500)
+    expect(news, 'a model changed meanwhile, so a second read was due').toBe(false)
+    expect(reads).toBe(1)
   })
 })
 

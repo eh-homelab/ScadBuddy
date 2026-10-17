@@ -52,6 +52,7 @@ from scadbuddy.api.limits import (
     BodySizeGate,
     RouteLimit,
 )
+from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
@@ -1417,6 +1418,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
+    # What each read saw of the event bus, so the UI need not read twice (#1039).
+    app.add_middleware(EventCursor, events=lambda: state.events)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

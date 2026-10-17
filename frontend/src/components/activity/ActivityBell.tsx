@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { Activity } from '../../api/types'
 import { DEFAULT_ACTIVITY_QUERY } from '../../lib/activityQuery'
-import { getRealtime, useSubscription } from '../../lib/realtime'
+import { getRealtime, readAgain, recordRead, useSubscription, type ReadRecord } from '../../lib/realtime'
 import { toast } from '../../lib/toast'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -76,9 +76,13 @@ export function ActivityBell() {
     }
   }, [])
 
+  /** What the last follow and activity reads saw, for a confirmation to judge (#1039). */
+  const followRead = useRef<ReadRecord | undefined>(undefined)
+  const activityRead = useRef<ReadRecord | undefined>(undefined)
   const loadFollow = useCallback(() => {
-    api
-      .getSettings()
+    const { record, result } = recordRead(() => api.getSettings())
+    followRead.current = record
+    result
       .then((settings) => {
         if (live.current) setFollow(settings.activity_follow ?? DEFAULT_FOLLOW)
       })
@@ -88,7 +92,12 @@ export function ActivityBell() {
   }, [])
   useEffect(loadFollow, [loadFollow])
   // Saved in Settings (here or elsewhere): follow the new list without a reload.
-  useSubscription('settings', loadFollow)
+  useSubscription('settings', (_signal, confirmation) => {
+    if (!confirmation) return loadFollow()
+    void readAgain(followRead.current, 'settings', confirmation).then((stale) => {
+      if (stale) loadFollow()
+    })
+  })
 
   const followKey = follow === null ? null : JSON.stringify(follow)
   const refresh = useCallback(async () => {
@@ -140,14 +149,20 @@ export function ActivityBell() {
         Math.max(0, Math.min(DEBOUNCE_MS, first + MAX_WAIT_MS - now)),
       )
     }
-    const stop = getRealtime().subscribe('activity', (signal) => {
+    const stop = getRealtime().subscribe('activity', (signal, confirmation) => {
+      if (confirmation) {
+        void readAgain(activityRead.current, 'activity', confirmation).then((stale) => {
+          if (stale) schedule()
+        })
+        return
+      }
       if (signal !== 'resync') {
         const principal = signal.data.principal
         if (typeof principal === 'string' && !principals.has(principal)) return
       }
       schedule()
     })
-    void refresh()
+    activityRead.current = recordRead(refresh).record
     return () => {
       stop()
       clearTimeout(timer)

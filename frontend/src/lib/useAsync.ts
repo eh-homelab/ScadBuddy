@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getRealtime, type RealtimeSignal } from './realtime'
+import { getRealtime, readAgain, type Confirmation, type ReadRecord, type RealtimeSignal } from './realtime'
+import { inReadScope, ReadScope } from './readCursor'
 
 export interface AsyncState<T> {
   data: T | undefined
@@ -19,6 +20,11 @@ export interface AsyncState<T> {
    * for the same deps no longer replaces it (an action's own answer is newer than that read).
    */
   setData: (next: T, options?: { supersede?: boolean }) => void
+  /**
+   * #1039 — for a caller that follows a topic itself: whether that subscription's
+   * confirmation means the current key's first read must be made again (`readAgain`).
+   */
+  staleFor: (topic: string, confirmation: Confirmation) => Promise<boolean>
 }
 
 /** How long a first read left to the subscription's resync waits for it (#1039). */
@@ -47,8 +53,10 @@ interface Snapshot<T> {
  * live, and that signal reads. A read made just before it is the same read twice, so
  * when the socket is already open (`willResync`: in-app navigation) the first read is
  * left to that signal. On a cold page load the socket is not open yet; the read
- * starts at once, and the signal's read is still needed, since a change made between
- * the first read and the server's `subscribed` would otherwise go unseen.
+ * starts at once, and a change made between it and the server's `subscribed` would
+ * otherwise go unseen. So the confirmation is checked against what that read saw
+ * (`lib/readCursor.ts`): it reads again only when the read did not see the server's
+ * last event and the server says something since touched the topic, or cannot say.
  */
 export function useAsync<T>(
   load: () => Promise<T>,
@@ -73,19 +81,28 @@ export function useAsync<T>(
   const topicList = topics.join('\n')
   /** The topics the subscription effect below follows now, or '' when none. */
   const followed = useRef('')
+  /** The current key's own first read: what it saw, and whether it is what is shown. */
+  const firstRead = useRef<ReadRecord | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
+    firstRead.current = undefined
     const read = () => {
       const mine = ++sequence.current
-      load()
+      const scope = new ReadScope()
+      let shown: (ok: boolean) => void = () => {}
+      firstRead.current = { scope, shown: new Promise((resolve) => (shown = resolve)) }
+      inReadScope(scope, load)
         .then((data) => {
-          if (!cancelled && sequence.current === mine) setSnapshot({ key, data })
+          const current = !cancelled && sequence.current === mine
+          if (current) setSnapshot({ key, data })
+          shown(current)
         })
         .catch((cause: unknown) => {
           if (!cancelled && sequence.current === mine) {
             setSnapshot({ key, error: cause instanceof Error ? cause : new Error(String(cause)) })
           }
+          shown(false)
         })
     }
     // This effect runs before the subscription's, so a list it has not followed yet is
@@ -162,12 +179,28 @@ export function useAsync<T>(
     })
   }, [])
 
+  const staleFor = useCallback(
+    (topic: string, confirmation: Confirmation) => readAgain(firstRead.current, topic, confirmation),
+    [],
+  )
+  /** A topic's subscription is live: read again unless the first read is known current. */
+  const confirmed = useCallback(
+    (topic: string, confirmation: Confirmation) => {
+      void staleFor(topic, confirmation).then((stale) => {
+        if (stale) refresh()
+      })
+    },
+    [refresh, staleFor],
+  )
+
   useEffect(() => {
     if (!topicList) return
     const realtime = getRealtime()
     const stops = topicList.split('\n').map((topic) =>
-      realtime.subscribe(topic, (signal) => {
-        if (!isNews.current || isNews.current(signal)) refresh()
+      realtime.subscribe(topic, (signal, confirmation) => {
+        if (isNews.current && !isNews.current(signal)) return
+        if (confirmation) confirmed(topic, confirmation)
+        else refresh()
       }),
     )
     followed.current = topicList
@@ -175,7 +208,7 @@ export function useAsync<T>(
       followed.current = ''
       for (const stop of stops) stop()
     }
-  }, [topicList, refresh])
+  }, [topicList, refresh, confirmed])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
   // The key the snapshot holds, so `supersede` never cancels another key's first load.
@@ -196,5 +229,6 @@ export function useAsync<T>(
     reload,
     refresh,
     setData,
+    staleFor,
   }
 }

@@ -176,7 +176,14 @@ export function ActionBar({
   const loadedProjects = modelProjects.data?.slug === slug ? modelProjects.data : undefined
   // Another tab (or the agent) filing this model, or a Forget in Settings, changes what
   // is remembered: read it again, or this tab confirms against a stale project.
-  useSubscription('settings', (signal) => {
+  useSubscription('settings', (signal, confirmation) => {
+    if (confirmation) {
+      // Only if something passed since the first read (#1039).
+      void modelProjects.staleFor('settings', confirmation).then((stale) => {
+        if (stale) modelProjects.refresh()
+      })
+      return
+    }
     const section = signal === 'resync' ? null : signal.data.section
     if (signal === 'resync' || section === 'model_project' || section === 'remembered') modelProjects.refresh()
   })

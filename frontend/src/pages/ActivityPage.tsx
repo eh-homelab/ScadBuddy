@@ -118,11 +118,11 @@ export function ActivityPage() {
   }, [key]);
   // The list re-reads on `activity` signals, but a burst (every render writes several) is
   // read once: signals within LIST_DEBOUNCE_MS merge, and none waits past LIST_MAX_WAIT_MS.
-  const { refresh: refreshList } = list;
+  const { refresh: refreshList, staleFor: listStaleFor } = list;
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let first = 0;
-    const stop = getRealtime().subscribe("activity", () => {
+    const schedule = () => {
       clearTimeout(timer);
       const now = Date.now();
       if (first === 0) first = now;
@@ -133,12 +133,19 @@ export function ActivityPage() {
         },
         Math.max(0, Math.min(LIST_DEBOUNCE_MS, first + LIST_MAX_WAIT_MS - now)),
       );
+    };
+    const stop = getRealtime().subscribe("activity", (_signal, confirmation) => {
+      // The confirmation is news only if something passed since the first read (#1039).
+      if (!confirmation) return schedule();
+      void listStaleFor("activity", confirmation).then((stale) => {
+        if (stale) schedule();
+      });
     });
     return () => {
       stop();
       clearTimeout(timer);
     };
-  }, [refreshList]);
+  }, [refreshList, listStaleFor]);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState<string>();
   const [open, setOpen] = useState<string | null>(null);
