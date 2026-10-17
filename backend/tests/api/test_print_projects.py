@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_print, run_request, run_routes
+from tests.api.test_print_run_choices import allow_reprints, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -255,6 +255,35 @@ def test_a_print_into_a_library_folder_uploads_there_under_no_project(
     listed = client.get("/api/v1/print/projects").json()
     assert [(row["id"], row["path"]) for row in listed["folders"]] == [(30, "Home")]
     assert listed["folders"][0]["touched_at"] is not None
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_print_into_a_folder_clears_the_outputs_earlier_project(
+    client: TestClient, model: str
+) -> None:
+    """#3790 review — an output printed into project 7 and then into a folder of no
+    project shows no project of its own any more."""
+    configure(client, library_folder_id=2)
+    allow_reprints(client)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    _projects_and_folders()
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
+    )
+
+    first = run_print(client, output_id, json=run_request(project_id=7)).json()
+    assert first["project_id"] == 7
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] == 7
+
+    second = run_print(client, output_id, json=run_request(folder_id=30)).json()
+
+    assert (second["project_id"], second["folder_id"]) == (None, 30)
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] is None
 
 
 @pytest.mark.requires_postgres

@@ -213,10 +213,7 @@ class PrintActivities:
         spec = input.source
         try:
             async with client_for(settings) as client:
-                # Resolved once and carried to the plan (#3790 review).
-                project = ResolvedProject(
-                    project_id=await resolve_project(client, input.request, settings)
-                )
+                naming = None
                 if spec.kind == "output":
                     assert spec.output_id is not None
                     meta = await require(self.d.outputs, spec.output_id)
@@ -226,6 +223,12 @@ class PrintActivities:
                     naming = await self.d.outputs.naming(meta)
                     if naming.invalid_meta is not None:
                         raise invalid_meta(naming.invalid_meta)
+                # Resolved once, after the refusals that need no Bambuddy, and carried
+                # to the plan (#3790 review).
+                project = ResolvedProject(
+                    project_id=await resolve_project(client, input.request, settings)
+                )
+                if naming is not None:
                     spec = spec.model_copy(
                         update={
                             "stem": naming.stem if project.project_id is not None else None,

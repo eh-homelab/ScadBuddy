@@ -20,6 +20,11 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.library.outputs import PlateSend, PrintRoute
 
+#: The fields a row lays over the file's even when ``None``: the last print's project
+#: is its own, ``None`` for a folder or no project (#3790 review). Every other null
+#: id leaves the file's.
+ALWAYS_OVERLAID = frozenset({"project_id"})
+
 
 class LastPrint(BaseModel):
     queue_item_id: int | None = None
@@ -29,12 +34,12 @@ class LastPrint(BaseModel):
     plates: list[PlateSend] = Field(default_factory=list)
 
     def fields(self) -> dict[str, Any]:
-        """What the row overrides on an ``OutputMeta``: a null id leaves the file's, except
-        the project, which is the last print's own, ``None`` for a folder or no project."""
+        """What the row overrides on an ``OutputMeta``: a null id leaves the file's,
+        except the fields in :data:`ALWAYS_OVERLAID`."""
         return {
             key: value
             for key, value in self.__dict__.items()
-            if value is not None or key == "project_id"
+            if value is not None or key in ALWAYS_OVERLAID
         }
 
 
