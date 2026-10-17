@@ -1,0 +1,310 @@
+//! Runs the Bambu Studio CLI once, reading its `--pipe` progress (spec 2026-10-16 §5.2).
+
+use std::ffi::OsString;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use nix::sys::signal::{Signal, killpg};
+use nix::sys::stat::Mode;
+use nix::unistd::{Pid, mkfifo};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::net::unix::pipe;
+use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
+
+use crate::models::{Arrange, SliceProgress};
+use crate::progress::{Line, LineBuffer};
+
+/// How much of the CLI's stderr is kept: its last lines name a validation failure.
+const STDERR_TAIL: usize = 8 * 1024;
+/// At most one progress callback a second; the last line seen is always delivered.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// How long stderr may stay open after the CLI exits (a straggler holding it).
+const STDERR_GRACE: Duration = Duration::from_secs(1);
+
+pub struct RunRequest<'a> {
+    pub cli: &'a Path,
+    pub input_3mf: &'a Path,
+    pub machine: &'a Path,
+    pub process: &'a Path,
+    pub filaments: &'a [PathBuf],
+    pub out_3mf: &'a Path,
+    pub slicedata_dir: Option<&'a Path>,
+    pub plate: u32,
+    pub arrange: Arrange,
+    pub allow_newer_file: bool,
+    pub debug: u8,
+}
+
+#[derive(Debug)]
+pub struct RunOutcome {
+    /// The CLI's exit code, or 128 + the signal that ended it.
+    pub exit_code: i32,
+    pub warnings: Vec<String>,
+    pub stderr_tail: String,
+    pub elapsed: Duration,
+}
+
+#[derive(Debug)]
+pub enum RunError {
+    /// `cancel` fired; the CLI's process group `pgid` was killed.
+    Cancelled {
+        pgid: i32,
+    },
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled { .. } => write!(f, "slice cancelled"),
+            Self::Io(e) => write!(f, "io: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {}
+
+impl From<std::io::Error> for RunError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<nix::Error> for RunError {
+    fn from(e: nix::Error) -> Self {
+        Self::Io(e.into())
+    }
+}
+
+/// The argv after the CLI's path, in the order spec §5.2 fixes; the input is last.
+pub fn command_line(req: &RunRequest<'_>, fifo: &Path) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec!["--pipe".into(), fifo.into()];
+    argv.extend(["--debug".into(), req.debug.to_string().into()]);
+    argv.push("--load-settings".into());
+    argv.push(joined([req.machine, req.process]));
+    argv.push("--load-filaments".into());
+    // `BambuStudio.cpp` splits both lists on ';'.
+    argv.push(joined(req.filaments.iter().map(PathBuf::as_path)));
+    if req.allow_newer_file {
+        argv.push("--allow-newer-file".into());
+    }
+    let arrange = match req.arrange {
+        Arrange::No => "0",
+        Arrange::Yes => "1",
+        Arrange::Auto => "auto",
+    };
+    argv.extend(["--arrange".into(), arrange.into()]);
+    argv.extend(["--slice".into(), req.plate.to_string().into()]);
+    if let Some(dir) = req.slicedata_dir {
+        argv.extend(["--export-slicedata".into(), dir.into()]);
+    }
+    argv.extend(["--export-3mf".into(), req.out_3mf.into()]);
+    argv.push(req.input_3mf.into());
+    argv
+}
+
+fn joined<'p>(paths: impl IntoIterator<Item = &'p Path>) -> OsString {
+    let mut out = OsString::new();
+    for (i, p) in paths.into_iter().enumerate() {
+        if i > 0 {
+            out.push(";");
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// Runs the CLI in its own process group; calls `on_progress` for each progress line
+/// (coalesced to at most one a second, the last one always delivered); kills the group
+/// when `cancel` fires or on any error (or when this future is dropped); never blocks on
+/// the fifo.
+pub async fn run(
+    req: RunRequest<'_>,
+    mut on_progress: impl FnMut(SliceProgress),
+    cancel: CancellationToken,
+) -> Result<RunOutcome, RunError> {
+    let dir = tempfile::Builder::new().prefix("sb-slice-").tempdir()?;
+    let fifo = dir.path().join("progress.fifo");
+    mkfifo(&fifo, Mode::S_IRWXU)?;
+    // O_RDWR | O_NONBLOCK: the open never waits for a writer, and our own write side means
+    // a read never sees EOF, so a CLI that exits before opening the pipe (a validation
+    // failure) or between its writes cannot end or hang the reader; the child's exit does.
+    let pipe = pipe::OpenOptions::new()
+        .read_write(true)
+        .open_receiver(&fifo)?;
+
+    let started = Instant::now();
+    let mut child = Command::new(req.cli)
+        .args(command_line(&req, &fifo))
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let pgid = Pid::from_raw(
+        child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or_else(|| std::io::Error::other("the CLI exited before it was seen"))?,
+    );
+    let mut group = Group(Some(pgid));
+
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_task = tokio::spawn(keep_tail(child.stderr.take(), stderr.clone()));
+    let stdout_task = tokio::spawn(keep_tail(child.stdout.take(), Arc::default()));
+
+    let mut lines = LineBuffer::default();
+    let mut progress = Coalesce::default();
+    let mut warnings = Vec::new();
+    let mut buf = vec![0u8; 4096];
+
+    let status = loop {
+        let due = progress.due();
+        tokio::select! {
+            status = child.wait() => break status?,
+            () = cancel.cancelled() => {
+                group.kill();
+                let _ = child.wait().await;
+                stderr_task.abort();
+                stdout_task.abort();
+                return Err(RunError::Cancelled { pgid: pgid.as_raw() });
+            }
+            ready = pipe.readable() => {
+                ready?;
+                let read = read_available(&pipe, &mut buf, &mut lines)?;
+                take(read, &mut progress, &mut warnings, &mut on_progress);
+            }
+            () = sleep_until(due) => progress.flush(&mut on_progress),
+        }
+    };
+    // The leader is reaped: its pid is free, so the group must not be signalled by it.
+    group.0 = None;
+    let elapsed = started.elapsed();
+
+    // Everything the CLI wrote before it exited is in the pipe's buffer.
+    let read = read_available(&pipe, &mut buf, &mut lines)?;
+    take(read, &mut progress, &mut warnings, &mut on_progress);
+    progress.flush(&mut on_progress);
+
+    let _ = tokio::time::timeout(STDERR_GRACE, stderr_task).await;
+    stdout_task.abort();
+    let stderr_tail = String::from_utf8_lossy(&stderr.lock().expect("stderr lock")).into_owned();
+
+    let exit_code = status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+    Ok(RunOutcome {
+        exit_code,
+        warnings,
+        stderr_tail,
+        elapsed,
+    })
+}
+
+/// Kills the process group on drop unless the leader was reaped.
+struct Group(Option<Pid>);
+
+impl Group {
+    fn kill(&mut self) {
+        if let Some(pgid) = self.0.take() {
+            let _ = killpg(pgid, Signal::SIGKILL);
+        }
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+#[derive(Default)]
+struct Coalesce {
+    last: Option<Instant>,
+    pending: Option<SliceProgress>,
+}
+
+impl Coalesce {
+    fn offer(&mut self, p: SliceProgress, on_progress: &mut impl FnMut(SliceProgress)) {
+        if self.last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
+            self.pending = None;
+            self.last = Some(Instant::now());
+            on_progress(p);
+        } else {
+            self.pending = Some(p);
+        }
+    }
+
+    fn due(&self) -> Option<Instant> {
+        self.pending.as_ref()?;
+        self.last.map(|t| t + PROGRESS_EVERY)
+    }
+
+    fn flush(&mut self, on_progress: &mut impl FnMut(SliceProgress)) {
+        if let Some(p) = self.pending.take() {
+            self.last = Some(Instant::now());
+            on_progress(p);
+        }
+    }
+}
+
+async fn sleep_until(due: Option<Instant>) {
+    match due {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Reads whatever the pipe holds now, without waiting.
+fn read_available(
+    pipe: &pipe::Receiver,
+    buf: &mut [u8],
+    lines: &mut LineBuffer,
+) -> Result<Vec<Line>, RunError> {
+    let mut out = Vec::new();
+    loop {
+        match pipe.try_read(buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend(lines.push(&buf[..n])),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+fn take(
+    read: Vec<Line>,
+    progress: &mut Coalesce,
+    warnings: &mut Vec<String>,
+    on_progress: &mut impl FnMut(SliceProgress),
+) {
+    for line in read {
+        match line {
+            Line::Progress(p) => progress.offer(p, on_progress),
+            Line::Warning(w) => warnings.push(w),
+            Line::Other => {}
+        }
+    }
+}
+
+/// Reads `stream` to its end, keeping its last `STDERR_TAIL` bytes in `tail`.
+async fn keep_tail(stream: Option<impl AsyncRead + Unpin>, tail: Arc<Mutex<Vec<u8>>>) {
+    let Some(mut stream) = stream else { return };
+    let mut buf = vec![0u8; 4096];
+    while let Ok(n) = stream.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+        let mut tail = tail.lock().expect("tail lock");
+        tail.extend_from_slice(&buf[..n]);
+        let excess = tail.len().saturating_sub(STDERR_TAIL);
+        tail.drain(..excess);
+    }
+}
