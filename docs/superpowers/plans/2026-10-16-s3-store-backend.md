@@ -28,7 +28,7 @@
 
 1. A put that dies after the S3 upload and before the `store_blobs` row leaves an orphan object; with `sweep_unrecorded` for S3, an object older than the cutoff with no row is removed and a younger one kept (Task 4).
 2. A blob over 64 MiB round-trips byte-identical through multipart and its sha256 check (Task 2).
-3. A `store_blobs` row still on the old backend after the flip is a cache miss, not an exception: `_release` refuses a cross-backend ref and `get` of a foreign-backend ref raises `BlobMissingError`, which `RenderPiece` treats as lost state (Task 5 test `test_a_row_left_on_the_old_backend_is_missing_not_an_error`).
+3. A `store_blobs` row still on the old backend after the flip is a cache miss, not an exception: `_release` refuses a cross-backend ref and `get` of a foreign-backend ref raises `BlobMissingError`, which `RenderPiece` treats as lost state (Task 5 test `test_a_row_left_on_the_old_backend_is_missing_not_an_error`). The copy phase never changes a row's `backend`, so the live store keeps reading every row until the restart switches them (Task 5 test `test_migrate_batch_copies_and_records_without_touching_the_row`).
 4. The S3 endpoint down at start: the API fails readiness with a clear error rather than hanging on the first call; `exists` surfaces a connection error as the SDK's exception, not `False` (Task 2 test `test_a_connection_error_is_not_a_missing_object`).
 5. A Settings save that switches to `s3` without the S3 fields is refused with 422 and the same wording as the Bambuddy case, in the API and in the msw mock (Task 1, Task 7).
 
@@ -270,57 +270,45 @@ git commit -m "feat(store): build the S3 bundle; sweep unrecorded S3 objects"
 ### Task 5: The migration between backends
 
 **Files:**
-- Create: `backend/scadbuddy/store/migrate.py`
-- Create: `backend/scadbuddy/workflows/store_migration.py`
-- Modify: `backend/scadbuddy/api/store.py` (routes), `backend/scadbuddy/main.py` (register the activity on the `library` worker beside the housekeeping activities, `:519-525`)
+- Create: `backend/scadbuddy/migrations/<ts>_store_blobs_migrated.sql` (nullable `migrated_backend text`, `migrated_backend_id text`, index on `(backend, migrated_backend)`)
+- Create: `backend/scadbuddy/store/migrate.py`, `backend/scadbuddy/workflows/store_migration.py`, `backend/scadbuddy/workflows/store_migration_models.py`
+- Modify: `backend/scadbuddy/store/index.py` (`put`/`swap` null the copy columns when they rewrite a row; `oldest`, `count_migrated`, `switch_migrated`), `backend/scadbuddy/store/content.py:387` (`_download` refuses a ref on another backend with `BlobMissingError`), `backend/scadbuddy/api/store.py` (routes), `backend/scadbuddy/main.py` (register the activity and the workflow on the `library` worker; call `switch_migrated(running backend)` after `build_store`)
 - Create: `backend/tests/store/test_migrate.py`, `backend/tests/api/test_store_migrate.py`
 
 **Interfaces:**
-- Consumes: `BlobIndex` (`store/index.py`: `stats`, `swap`), `build_backend` (Task 4), `start_command` (`workflows/commands.py`).
-- Produces: `migrate.py: class MigrationBatch(BaseModel): moved: int; remaining: int; failed: list[str]`; `async def migrate_batch(index: BlobIndex, source: ContentBackend, target: ContentBackend, *, limit: int, heartbeat: Callable[[str], None]) -> MigrationBatch` (for each `store_blobs` row with `backend == source.backend`, ordered by `touched_at`, up to `limit`: stream `source.download(row.backend_id)` into `target.upload` through a spooled temp file, verify the sha256, then `index.swap(key, BlobRef(..., backend=target.backend, backend_id=new_id), expected=row's BlobRef, ...)`; a CAS miss, a `BlobMissingError` or a target failure records the key in `failed` and moves on). `store_migration.py: @workflow.defn class StoreMigration` with `@workflow.run async def run(self, params: StoreMigrationParams) -> StoreMigrationResult` (`params: source: StoreBackend, target: StoreBackend, batch: int = 50`; loops `store_migrate_batch` activities with `heartbeat_timeout=60s`, `start_to_close=30min`, continue-as-new every 200 batches, a `progress` query returning `{moved, remaining, failed}`); `@activity.defn(name="store_migrate_batch")`. Workflow id `store-migrate-<source>-<target>`. Routes: `POST /store/migrate` body `{"source": "bambuddy", "target": "s3"}` → 202 `{workflow_id}` (start-if-not-running via `start_command`'s update-with-start conflict policy `USE_EXISTING`); `GET /store/migrate` → the query, 404 when none runs.
+- Consumes: `BlobIndex`, `build_backend` (Task 4; takes the backend name, so the target is built from saved settings while `store_backend` still names the source).
+- Produces: `migrate.py: class MigrationBatch(BaseModel): copied: int; remaining: int; failed: list[str]`; `async def migrate_batch(index, source, target, *, limit, skip: Sequence[str], heartbeat) -> MigrationBatch` (rows on `source.backend` without `migrated_backend == target.backend`, oldest first; stream `source.download` into a spooled file, verify sha256, `target.upload`, then `index.record_copy(key, sha256, source.backend, target.backend, target_id)` CAS on sha and backend; a CAS miss, `BlobMissingError` or a target failure records the key in `failed` and continues). `BlobIndex.switch_migrated(backend: str) -> int` (one `UPDATE … SET backend = migrated_backend, backend_id = migrated_backend_id, migrated_backend = NULL, migrated_backend_id = NULL WHERE migrated_backend = %s`). `store_migration.py: StoreMigration` (`run(params: StoreMigrationParams, carried: StoreMigrationProgress | None)`, loops `store_migrate_batch` with `heartbeat_timeout=60s`, `start_to_close=30min`, continue-as-new every 200 batches, `@workflow.query progress() -> StoreMigrationProgress {copied, remaining, failed}`, ends at `remaining == 0`). Workflow id `store-migrate-<source>-<target>`. Routes: `POST /store/migrate` body `{source, target, batch=50}` → 202 `{workflow_id}` (`start_workflow` with `WorkflowIDConflictPolicy.USE_EXISTING`; 422 for `source == target` or `local`); `GET /store/migrate?source=&target=` → `{source, target, copied, remaining, failed, running}` from the table plus the running query or the closed run's result; 404 only when no run has ever existed for the pair.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/store/test_migrate.py (local -> s3 over LocalContentBackend and the moto fixture)
-async def test_migrate_batch_moves_rows_and_bytes(pool, tmp_path, s3) -> None:
-    src = local_content(tmp_path / "a", pool); ref = await src.put("piece", b"zip", name="p.zip", scope=SCOPE)
-    tgt = S3ContentBackend(s3)
-    result = await migrate_batch(BlobIndex(pool), src.backend, tgt, limit=10, heartbeat=lambda _: None)
-    assert result == MigrationBatch(moved=1, remaining=0, failed=[])
-    stat = BlobIndex(pool).get(ref_key)  # the key the put used
-    assert stat.backend == "s3" and await tgt.exists(stat.backend_id)
-
-async def test_a_missing_source_object_is_recorded_and_skipped(...) -> None: ...
-async def test_a_row_touched_during_the_batch_is_left_for_the_next(...) -> None:  # CAS miss
-async def test_a_row_left_on_the_old_backend_is_missing_not_an_error(pool, tmp_path, s3) -> None:
+async def test_migrate_batch_copies_and_records_without_touching_the_row(...) -> None:
+    # after one batch: row.backend still "local"; migrated_backend == "s3"; target.exists(migrated_backend_id)
+async def test_a_re_put_row_loses_its_copy_and_is_copied_again(...) -> None:
+async def test_switch_migrated_flips_only_rows_copied_to_that_backend(...) -> None:
+async def test_a_missing_source_object_is_recorded_and_skipped(...) -> None:
+async def test_a_row_left_on_the_old_backend_is_missing_not_an_error(...) -> None:
     # a ContentStore over S3 asked for a ref whose backend is "local" raises BlobMissingError
 ```
 
 ```python
 # tests/api/test_store_migrate.py (requires_temporal; the api `client` fixture)
 async def test_post_starts_once_and_get_reports_progress(client) -> None: ...
+async def test_get_after_the_run_closes_still_lists_failed_keys(client) -> None: ...
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [ ] **Step 2: Run to verify they fail** — `uv run --frozen pytest tests/store/test_migrate.py tests/api/test_store_migrate.py -v`; FAIL with import errors.
 
-Run: `cd backend && uv run --frozen pytest tests/store/test_migrate.py tests/api/test_store_migrate.py -v`
-Expected: FAIL with import errors.
+- [ ] **Step 3: Implement** the migration file, `migrate.py`, the workflow and its models, the index methods, the `_download` guard (one comment citing spec §4.3), the routes, the `library` worker registration and the start-up switch in `main.py`. The activity builds both backends with `build_backend` from `load_render_store_settings` at run time and closes them in `finally`; an unready backend is a non-retryable `ApplicationError`.
 
-- [ ] **Step 3: Implement `migrate.py`, the workflow, the activity and the routes**
-
-`ContentStore.get` of a ref on another backend: add the check at the top of `_download` (`content.py:387`): `if ref.backend != self.name: raise BlobMissingError(...)` with a comment citing spec §4.3. The activity builds both backends with `build_backend` from `load_render_store_settings` at run time (the target's settings must be saved before `store_backend` is flipped, which Task 1's readiness allows). Register the activity in `main.py` beside the housekeeping activities so it runs in the API process (`library` queue, the data volume is not needed but the settings pool is).
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `cd backend && uv run --frozen pytest tests/store/test_migrate.py tests/api/test_store_migrate.py tests/store/test_content_store.py -v`
-Expected: PASS.
+- [ ] **Step 4: Run the tests to verify they pass** — the two files above plus `tests/store/test_content_store.py tests/store/test_factory.py`; PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/scadbuddy/store/migrate.py backend/scadbuddy/workflows/store_migration.py backend/scadbuddy/store/content.py backend/scadbuddy/api/store.py backend/scadbuddy/main.py backend/tests/store/test_migrate.py backend/tests/api/test_store_migrate.py
-git commit -m "feat(store): StoreMigration moves recorded blobs between backends"
+git add backend/scadbuddy/migrations/*_store_blobs_migrated.sql backend/scadbuddy/store/migrate.py backend/scadbuddy/store/index.py backend/scadbuddy/workflows/store_migration.py backend/scadbuddy/workflows/store_migration_models.py backend/scadbuddy/store/content.py backend/scadbuddy/api/store.py backend/scadbuddy/main.py backend/tests/store/test_migrate.py backend/tests/api/test_store_migrate.py
+git commit -m "feat(store): StoreMigration copies recorded blobs between backends; the switch happens at start"
 ```
 
 ---

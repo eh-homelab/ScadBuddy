@@ -142,15 +142,29 @@ columns (`worker_role.py`, and `tests/test_render_worker_role.py` must still ren
 
 A blob's `backend_id` is per backend, and `_release` refuses a ref from another
 backend, so switching `store_backend` with blobs recorded under `bambuddy` leaves them
-unreadable by the new store. The migration is a housekeeping activity on the `library`
-queue, `store_migrate`, started by `POST /store/migrate` and recorded as an
-`operations` row (kind `store_migrate`, idempotent on the pair `from, to`): for each
-`store_blobs` row whose `backend` is the old one, download from the old backend,
-upload to the new one, and CAS the row's `backend` and `backend_id`; a reference by a
-running render is left to its next pass. The old backend stays readable until the
-operator flips `store_backend`; a row still on the old backend after the flip is a
-cache miss that `RenderPiece` re-renders (as a `PieceStateLostError` does today). The
-switch is: run the migration to completion, then flip, then restart. The health route's
+unreadable by the new store. The migration is two-phase, because the live API and
+workers keep running on the old backend while it copies, and a row whose `backend`
+changed under them reads as missing (re-rendered and re-put, orphaning the copy):
+
+- **Copy.** A `StoreMigration` workflow on the `library` queue, started by
+  `POST /store/migrate` (one per `source, target` pair; a second POST joins it), runs
+  `store_migrate_batch` activities: for each `store_blobs` row on the source without a
+  copy on the target, download, verify the sha256, upload to the target, and record the
+  target's id in the row's `migrated_backend` and `migrated_backend_id` columns, CAS on
+  the row's sha and backend. `backend` and `backend_id` are not touched. A row whose
+  sha or backend changes (a running render re-put it) loses its copy columns and is
+  copied again on the next pass; a row that fails is skipped for the run and listed.
+  `GET /store/migrate` reports what the table says (rows copied and remaining) plus the
+  run's failed keys, running or closed.
+- **Switch.** The operator flips `store_backend` and restarts. At start on the new
+  backend, one statement moves every row whose `migrated_backend` is that backend onto
+  its copy and clears the copy columns, so the rows flip atomically with the process
+  that can read them. The old backend's objects stay where they are (nothing deletes
+  them; a later sweep may). A row still on the old backend after the flip (never
+  copied) is a cache miss that `RenderPiece` re-renders, as a `PieceStateLostError` is
+  today.
+
+The order is: run the copy to `remaining: 0`, flip, restart. The health route's
 `configured_backend` already shows a flip waiting on a restart.
 
 ### 4.4 Deployment
