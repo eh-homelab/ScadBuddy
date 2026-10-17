@@ -241,10 +241,13 @@ class PrintRunRequest(BaseModel):
     @model_validator(mode="after")
     def _one_plate_is_plate_id(self) -> PrintRunRequest:
         # One chosen plate is that plate's print, under the key `plate_id` gives it
-        # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run.
-        self.plate_id, self.plate_ids = one_plate_folded(
-            self.plate_id, self.all_plates, self.plate_ids
-        )
+        # (#3762 review): `plate_ids=[2]` and `plate_id=2` are the same run. Assigned only
+        # when it moves: an assignment marks the field set, and `exclude_unset` dumps (a
+        # batch's request id, #3768 review) must stay as they were for a body without
+        # plates.
+        folded = one_plate_folded(self.plate_id, self.all_plates, self.plate_ids)
+        if folded != (self.plate_id, self.plate_ids):
+            self.plate_id, self.plate_ids = folded
         return self
 
     def asked_plates(self) -> list[int] | None:

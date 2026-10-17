@@ -999,6 +999,11 @@ def test_one_chosen_plate_is_that_plates_print() -> None:
     by_id = PrintRunRequest.model_validate({**body(), "plate_id": 2})
     assert (alone.plate_id, alone.plate_ids) == (2, None)
     assert run_key("a" * 32, alone) == run_key("a" * 32, by_id)
+    # A body without plates keeps its set fields, so `exclude_unset` dumps (a batch's
+    # request id) are what they were before the fold (#3768 review).
+    plain = PrintRunRequest.model_validate(body())
+    assert not {"plate_id", "plate_ids"} & plain.model_fields_set
+    assert "plate_id" not in plain.model_dump(exclude_unset=True)
     # All plates still wins over a chosen one.
     every = PrintRunRequest.model_validate({**body(), "all_plates": True, "plate_ids": [2]})
     assert every.asked_plates() is None

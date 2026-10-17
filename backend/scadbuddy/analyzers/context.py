@@ -85,10 +85,10 @@ class AnalysisRequest(BaseModel):
     @model_validator(mode="after")
     def _one_plate_is_plate_id(self) -> AnalysisRequest:
         # As `PrintRunRequest` folds it (#3768 review), so the mesh checks read the plate
-        # that prints.
-        self.plate_id, self.plate_ids = one_plate_folded(
-            self.plate_id, self.all_plates, self.plate_ids
-        )
+        # that prints. Assigned only when it moves, which would mark the fields set.
+        folded = one_plate_folded(self.plate_id, self.all_plates, self.plate_ids)
+        if folded != (self.plate_id, self.plate_ids):
+            self.plate_id, self.plate_ids = folded
         return self
 
 

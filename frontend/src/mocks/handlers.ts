@@ -3352,7 +3352,7 @@ export const handlers = [
     // with the union of every plate's slots: an all-plates read differs from a plate-1
     // read. This filters the shared `fixtures.filamentOptions` for every caller, not just
     // the plate-2+/all-plates tests that motivate it — it stays safe only because
-    // PrintPicker.tsx's `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the
+    // useFilamentPlan.ts's shortcut for plate 1 alone (or no plate) seeds it from the
     // bulk `choices.filaments` payload instead of ever hitting this route. That
     // assumption is pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1
     // without all plates" (#525 finding 3) — if it ever removes the shortcut, that test
