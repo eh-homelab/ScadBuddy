@@ -300,11 +300,10 @@ class OutputStore:
         return None
 
     def params(self, output_id: str) -> dict[str, ParamValue]:
-        directory = self._find_dir(output_id)
-        params_path = directory / PARAMS_NAME
-        if not params_path.is_file():
+        text = _read_if_there(self._find_dir(output_id) / PARAMS_NAME)
+        if text is None:
             return {}
-        loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
+        loaded: dict[str, ParamValue] = json.loads(text)
         return loaded
 
     def inputs(
@@ -556,10 +555,10 @@ class OutputStore:
         self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
-        path = self.directory(output_id) / RECORD_NAME
-        if not path.is_file():
+        text = _read_if_there(self.directory(output_id) / RECORD_NAME)
+        if text is None:
             return None
-        return OutputRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return OutputRecord.model_validate_json(text)
 
     def files(self, output_id: str) -> list[str]:
         directory = self.directory(output_id) / FILES_DIR

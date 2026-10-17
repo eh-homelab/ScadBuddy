@@ -83,6 +83,9 @@ async def test_a_backfill_cleared_as_it_is_read_reads_as_none(
     store, old, job, _ = await _legacy_output(tmp_path)
     store.start_backfill(old.id, job.id)
     (store.directory(old.id) / outputs_module.BACKFILL_NAME).unlink()
+    # Against the old check-then-read this forced the window; the read-once code never
+    # asks, so here it pins only that a cleared file reads as none. Keep it: it is what
+    # fails if the check comes back.
     is_file = Path.is_file
     monkeypatch.setattr(  # it was there when looked for
         Path, "is_file", lambda self: self.name == outputs_module.BACKFILL_NAME or is_file(self)
