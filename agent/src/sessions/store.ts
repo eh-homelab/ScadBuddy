@@ -1,7 +1,7 @@
 import type { SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import { openBytes, sealBytes } from '../secrets.js'
-import type { PayloadKeys } from '../temporal/payloadCodec.js'
+import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/payloadCodec.js'
 
 // The Agent SDK `SessionStore` adapter on Postgres (#300, spec §6 "Storage"):
 // the SDK mirrors every transcript line here, so any replica can resume a
@@ -129,9 +129,19 @@ export class PostgresSessionStore implements SessionStore {
           sealed: sealBytes(dek, json, entryContext(key.sessionId, subpath, uuid ?? `#${id}`)),
         }
       })
-      await this.sql`
-        INSERT INTO ai_session_entries ${this.sql(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed')}
-        ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+      // The key may come from a cache that outlives a forget on another replica (#3316).
+      // forgetSubject tombstones under the subject's lock and deletes the entries later,
+      // so a write under that lock, shared, lands either before the tombstone (and goes
+      // with the entries) or after it, and is refused as a fresh key lookup would be.
+      const subject = `session-${key.sessionId}`
+      await this.sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
+        const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
+        if (forgotten) throw new SubjectForgotten(`${subject} was forgotten: its transcript is not written`)
+        await tx`
+          INSERT INTO ai_session_entries ${tx(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed')}
+          ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+      })
     } finally {
       dek.fill(0)
     }
