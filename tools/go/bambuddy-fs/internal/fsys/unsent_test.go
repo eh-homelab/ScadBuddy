@@ -1082,3 +1082,48 @@ func TestARetryWhoseLostUploadWasDeletedSendsAgain(t *testing.T) {
 		}
 	})
 }
+
+// The file a lost answer made is renamed before the retry (#3318): it is still the
+// write, stored, so it is not sent again under a new key and no duplicate is left.
+func TestARetryWhoseLostUploadWasRenamedIsNotSentAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	lib.loseAnswers = 1
+	lib.uploading = func(attempt int) {
+		if attempt != 2 {
+			return
+		}
+		var lost int
+		lib.locked(func() {
+			for id, f := range lib.files {
+				if f.Name == "X.3mf" && id != 10 {
+					lost = id
+				}
+			}
+		})
+		name := "Renamed.3mf"
+		if _, err := lib.UpdateFile(context.Background(), lost, &name, nil); err != nil {
+			t.Errorf("renaming the lost upload %d: %v", lost, err)
+		}
+	}
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "Top", "X.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	if !libraryHas(lib, map[string]string{"4/Renamed.3mf": "new"}) {
+		lib.locked(func() { t.Fatalf("files: %+v", lib.files) })
+	}
+	lib.locked(func() {
+		if lib.uploads != 1 {
+			t.Fatalf("uploads %d: %+v", lib.uploads, lib.files)
+		}
+		if slices.ContainsFunc(lib.keys, func(k string) bool { return k != lib.keys[0] }) {
+			t.Fatalf("keys: %q", lib.keys)
+		}
+	})
+}
