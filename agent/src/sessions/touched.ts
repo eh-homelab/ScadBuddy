@@ -36,7 +36,7 @@ export const RESOURCE_TYPES = [
   'library',
   'font',
   // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
-  // `print_choices:<slug>`, `last_project`, `bed_type:<printer>`).
+  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`).
   'setting',
   // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
   'project',
