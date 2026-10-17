@@ -14,7 +14,8 @@ test.describe('the "/" skill menu at 390 px (#1920)', () => {
     await expect(composer).toBeFocused()
 
     await composer.pressSequentially('/')
-    const list = panel.getByRole('listbox', { name: 'Skills' })
+    // #3673 — a popover on <body>, anchored to the composer.
+    const list = page.getByRole('listbox', { name: 'Skills' })
     await expect(list.getByRole('option')).toHaveText(['/scadbuddy:authoring', '/scadbuddy:customize', '/scadbuddy:print'])
     await expect(composer).toHaveAttribute('aria-controls', (await list.getAttribute('id'))!)
 

@@ -13,6 +13,7 @@ import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
+import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
 import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
 import { turnToolName } from './turnTools.js'
@@ -30,14 +31,21 @@ import {
 // and each call, so a plugin disabled, removed or failing its egress check since is gone
 // at once, as it would be from a classic turn's next query.
 
-/** Under the state dir: a durable session's (or flow run's) saved http bodies, `<id>/http` (#2496). */
+/**
+ * Under the state dir: a flow run's saved http bodies, `flow-<id>/http` (#2496). A durable
+ * session's bodies are in Postgres since #2374; a bare `<id>` directory is one a pod left
+ * before that, cleared by the sweep and by forget.
+ */
 export const DURABLE_TURNS_DIR = 'durable-turns'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** How long a flow run's saved bodies are kept: its run has no row here to outlive. */
 export const FLOW_BODIES_KEPT_MS = 7 * 24 * 3600_000
 
-/** Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts). */
+/**
+ * Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts).
+ * A session's is only a directory left by a pod that ran before #2374.
+ */
 export async function removeTurnDir(root: string, subject: string): Promise<void> {
   const name = subject.startsWith('session-') ? subject.slice('session-'.length) : subject
   if (!UUID.test(name) && !(name.startsWith('flow-') && UUID.test(name.slice('flow-'.length)))) return
@@ -45,9 +53,10 @@ export async function removeTurnDir(root: string, subject: string): Promise<void
 }
 
 /**
- * The saved bodies of durable sessions that no longer exist, and of flow runs older than
- * FLOW_BODIES_KEPT_MS, on this pod (#2496): each replica keeps its own (the server is
- * pinned), so each sweeps its own, whichever pod the session was forgotten on.
+ * The saved bodies of flow runs older than FLOW_BODIES_KEPT_MS on this pod (#2496), and
+ * the directories of durable sessions that no longer exist, which only a pod that ran
+ * before #2374 wrote: each replica keeps its own (the server is pinned), so each sweeps
+ * its own, whichever pod the session was forgotten on.
  */
 export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
   const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
@@ -77,6 +86,12 @@ export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
   settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
+  /**
+   * The headless browser's lists and the sessions' approved origins (#982,
+   * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
+   * classic turn's are (browser/guard.ts). Without it they run at their tiers.
+   */
+  browserOrigins?: BrowserOriginsAccess | undefined
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
@@ -137,7 +152,7 @@ export function builtinNote(names: readonly string[]): string {
     'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
     'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
     (names.some((n) => BACKGROUND_BUILTINS.includes(n))
-      ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+      ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
         'session as a new message when it is due and the session is idle.'
       : '')
   )
@@ -153,6 +168,17 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       ...(forwarded?.plugins ?? []).map((p) => p.url),
       ...(deps.credentialSecrets ? await deps.credentialSecrets() : []),
     ]
+    // A flow run has no session to remember an approval in.
+    const browserPlugins = (forwarded?.plugins ?? []).map((p) => p.name)
+    const browser = deps.browserOrigins
+      ? browserGuard({ store: deps.browserOrigins, sessionId: context.flow ? undefined : context.session, plugins: browserPlugins })
+      : undefined
+    const browserParts = browser
+      ? {
+          guard: (name: string, input: unknown) => browser.check(name, input),
+          screen: (name: string, input: unknown, text: string) => browser.screen(name, input, text),
+        }
+      : {}
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
       // An unlisted plugin tool is outward (registry.ts), as in a classic turn. One
@@ -165,8 +191,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
         tierOf,
-        mayPark: (name) => tierOf(name) === 'outward',
-        fixedTier: tierOf,
+        // A browser call's tier depends on the page it opens (#982): any may park.
+        mayPark: (name) => browser?.covers(name) === true || tierOf(name) === 'outward',
+        fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+        ...browserParts,
         // Its MCP session is kept for the durable session, on its own route (#2581).
         ...(keep
           ? {
@@ -296,6 +324,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               tz: tasks.tz,
               now: tasks.now ?? (() => new Date()),
               commandQueue: tasks.commandQueue,
+              workspace: builtins.files,
             }
           : undefined
         servers.push({
@@ -304,6 +333,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
           tierOf: () => 'outward',
           mayPark: () => true,
+          callIds: true,
         })
         notes.push(builtinNote(named))
       }
@@ -312,7 +342,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       problems.push(...forwardedPackages.problems)
       secrets.push(...forwardedPackages.secrets)
       for (const plugin of forwardedPackages.plugins) {
-        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
+        browserPlugins.push(plugin.name)
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward', ...browserParts })
       }
     }
     return {

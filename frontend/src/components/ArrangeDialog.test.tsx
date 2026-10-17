@@ -1,20 +1,23 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
-import { fromFiles, fromOutputs } from '../lib/arrange'
+import { fromFiles, fromOutputs, GOAL_LABELS, objectNames } from '../lib/arrange'
 import { startTracing } from '../lib/tracing'
 import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
 import { addMockOutput, lastArrangeRequest, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { choose, optionNames } from '../test/select'
 import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ArrangeDialog } from './ArrangeDialog'
 
 const first = fixtures.outputs[0] as Output
+/** A model's name, as the File under and Model lists show it. */
+const nameOf = (slug: string) => fixtures.models.find((m) => m.slug === slug)!.name ?? slug
 const second: Output = { ...first, id: 'o-2', name: 'second', manifest: [] }
 
 describe('ArrangeDialog: sources of any kind (#1864)', () => {
@@ -51,8 +54,8 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     await user.clear(star)
     await user.type(star, '5')
     const filing = screen.getByLabelText('File under')
-    expect(filing).toHaveValue('gridfinity-bin')
-    await user.selectOptions(filing, 'name-keychain')
+    expect(filing).toHaveTextContent(nameOf('gridfinity-bin'))
+    await choose(user, filing, nameOf('name-keychain'))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({
@@ -105,10 +108,11 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
     const filing = await screen.findByLabelText('File under')
-    expect(filing).toHaveValue('name-keychain')
-    await waitFor(() => expect(within(filing).getAllByRole('option')).toHaveLength(fixtures.models.length))
-    expect(within(filing).getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
-    await user.selectOptions(filing, 'gridfinity-bin')
+    expect(filing).toHaveTextContent(nameOf('name-keychain'))
+    await user.click(filing)
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(fixtures.models.length))
+    expect(screen.getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' })
@@ -140,13 +144,17 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
       <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Add from a model' }))
-    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
-    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    const model = await screen.findByLabelText('Model')
+    await waitFor(() => expect(model).toBeEnabled())
+    await choose(user, model, nameOf('gridfinity-bin'))
+    await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
 
     await user.click(screen.getByRole('button', { name: 'Add files' }))
-    await user.selectOptions(await screen.findByLabelText('Library folder'), '1')
+    // Folder 1, the top-level MakerWorld (another folder deeper down has its name too).
+    await user.click(await screen.findByLabelText('Library folder'))
+    await user.click((await screen.findAllByRole('option', { name: 'MakerWorld' }))[0]!)
     await user.click(await screen.findByRole('checkbox', { name: /Clara's Wand/ }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText("Copies of Wand — Clara's Wand.3mf")).toBeVisible()
@@ -168,11 +176,15 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
     const filing = await screen.findByLabelText('File under')
-    // #2284 — by name, not slug.
-    expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual(
-      fixtures.models.map((m) => m.name),
+    // #2284 — by name, not slug; #3638 — the file's own new model first.
+    await user.click(filing)
+    await waitFor(() =>
+      expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
+        "A new model: Clara's Wand",
+        ...fixtures.models.map((m) => m.name),
+      ]),
     )
-    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(lastArrangeRequest()).toMatchObject({
@@ -188,6 +200,199 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
   })
 })
 
+describe('ArrangeDialog: a library file filed under its own model (#3638)', () => {
+  const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+  it('makes the file a model of its own, files the result there, and uses it next time', async () => {
+    const onArranged = vi.fn()
+    const create = vi.spyOn(api, 'createMeshModel')
+    const dialog = (open: boolean) => (
+      <ArrangeDialog open={open} sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />
+    )
+    const { user, rerender } = renderPage(dialog(true))
+    const filing = await screen.findByLabelText('File under')
+    await waitFor(() => expect(filing).toHaveTextContent("A new model: Clara's Wand"))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: "Clara's Wand", library_file_id: wand.id }))
+    expect(lastArrangeRequest()).toMatchObject({ slug: 'clara-s-wand' })
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({ filedUnder: "Clara's Wand", output: expect.objectContaining({ slug: 'clara-s-wand' }) }),
+    )
+    // Again: the model made from the file is its home, and no second one is made.
+    rerender(dialog(false))
+    rerender(dialog(true))
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent("Clara's Wand"))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledTimes(2))
+    expect(create).toHaveBeenCalledOnce()
+    create.mockRestore()
+  })
+
+  it('offers no new model when the model list could not be read', async () => {
+    server.use(http.get('/api/v1/models', () => problem(503, 'Service Unavailable', 'try again')))
+    renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    expect(await screen.findByText(/could not read its models/)).toBeVisible()
+    expect(screen.queryByRole('option', { name: /A new model/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
+  })
+
+  it('names a new model as the API would file it, past a name already taken', async () => {
+    const create = vi.spyOn(api, 'createMeshModel')
+    const taken = { ...wand, filename: 'Name Keychain.3mf' }
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    const filing = await screen.findByLabelText('File under')
+    await waitFor(() => expect(filing).toHaveTextContent('A new model: Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    // `name-keychain` is a model already, so the new one is "Name Keychain 2".
+    await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Name Keychain 2' })))
+    create.mockRestore()
+  })
+
+  it('still files under an existing model when one is picked', async () => {
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    const filing = await screen.findByLabelText('File under')
+    await user.click(filing)
+    await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(1))
+    await user.click(screen.getByRole('option', { name: nameOf('gridfinity-bin') }))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' }))
+  })
+})
+
+describe('ArrangeDialog: a copy in other colours (#3637)', () => {
+  const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+  it('adds a copy of a library object with one colour swapped', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />)
+    const label = `Wand — ${wand.filename}`
+    expect(await screen.findByLabelText(`Copies of ${label}`)).toHaveValue(1)
+    expect(screen.getByRole('img', { name: `${label} prints in #7B1FA2, #FFD54F` })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: `Add a copy of ${label} in other colours` }))
+    const copy = `${label}, copy 1 in other colours`
+    expect(screen.getByLabelText(`Copies of ${copy}`)).toHaveValue(1)
+    // Its editor opens at once: purple becomes magenta, yellow stays.
+    fireEvent.input(screen.getByLabelText(`#7B1FA2 of ${copy} prints in`), { target: { value: '#ff00ff' } })
+    expect(screen.getByRole('img', { name: `${copy} prints in #FF00FF, #FFD54F` })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()?.objects).toEqual([
+      { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+      { library_file_id: wand.id, part: 'lib1-67-0', count: 1, recolour: { '#7B1FA2': '#FF00FF' } },
+      { library_file_id: wand.id, part: 'lib1-67-1', count: 2 },
+    ])
+    // Each colouring stays its own object, and magenta is a filament of its own.
+    const saved = (onArranged.mock.calls[0]![0] as { output: Output }).output
+    expect(saved.colors).toEqual(expect.arrayContaining(['#7B1FA2', '#FFD54F', '#FF00FF']))
+    expect(saved.manifest?.filter((m) => m.part === 'lib1-67-0').map((m) => m.recolour)).toEqual([
+      {},
+      { '#7B1FA2': '#FF00FF' },
+    ])
+  })
+
+  it('takes a colour from a spool, keeps a colour back, and drops a copy', async () => {
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    const label = `Star — ${wand.filename}`
+    await user.click(await screen.findByRole('button', { name: `Add a copy of ${label} in other colours` }))
+    const copy = `${label}, copy 1 in other colours`
+    const editor = screen.getByRole('list', { name: `Colours of ${copy}` })
+    await user.click(within(editor).getByRole('button', { name: 'Choose from a filament' }))
+    const spools = await within(editor).findByRole('listbox', { name: `Filaments for #FFD54F of ${copy}` })
+    const [spool] = within(spools)
+      .getAllByRole('option')
+      .filter((o) => o.getAttribute('aria-disabled') !== 'true' && !o.textContent?.includes('(the colour now)'))
+    await user.click(spool!)
+    const keep = within(editor).getByRole('button', { name: 'Keep #FFD54F' })
+    await user.click(keep)
+    expect(screen.getByRole('img', { name: `${copy} prints in #FFD54F` })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: `Remove ${copy}` }))
+    expect(screen.queryByLabelText(`Copies of ${copy}`)).not.toBeInTheDocument()
+  })
+
+  it("puts a recoloured output row back in its own colours, and says so to the API", async () => {
+    const entry = first.manifest![0]!
+    const own = entry.colours[0]!.toUpperCase()
+    const once: Output = { ...first, id: '5'.repeat(32), manifest: [{ ...entry, count: 1, recolour: { [own]: '#FF00FF' } }] }
+    addMockOutput(once)
+    const onArranged = vi.fn()
+    const { user } = renderPage(<ArrangeDialog open sources={fromOutputs([once])} onClose={vi.fn()} onArranged={onArranged} />)
+    const label = 'wall (other colours) — Reagan'
+    await screen.findByLabelText(`Copies of ${label}`)
+    await user.click(screen.getByRole('button', { name: 'Change colours' }))
+    await user.click(screen.getByRole('button', { name: `Keep ${own}` }))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()?.objects).toEqual([{ output_id: once.id, part: entry.part, count: 1, recolour: {} }])
+  })
+
+  it('tries the next name when the one guessed for the new model is taken', async () => {
+    let calls = 0
+    server.use(
+      http.post('/api/v1/models/from-mesh', () => {
+        calls += 1
+        if (calls === 1) return problem(409, 'Conflict', "a model named 'clara-s-wand' already exists")
+        return HttpResponse.json({ ...fixtures.models[0]!, slug: 'clara-s-wand-2', name: "Clara's Wand 2" }, { status: 201 })
+      }),
+    )
+    const onArranged = vi.fn()
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />)
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent("A new model: Clara's Wand"))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(calls).toBe(2)
+    expect(lastArrangeRequest()).toMatchObject({ slug: 'clara-s-wand-2' })
+  })
+
+  it('counts a taken name on from its base: "Name Keychain 2" is retried as "Name Keychain 3"', async () => {
+    // `name-keychain` is a model already, so the first try is "Name Keychain 2"; the
+    // server says that is taken too.
+    const names: string[] = []
+    server.use(
+      http.post('/api/v1/models/from-mesh', async ({ request }) => {
+        const { name } = (await request.json()) as { name: string }
+        names.push(name)
+        if (names.length === 1) return problem(409, 'Conflict', "a model named 'name-keychain-2' already exists")
+        return HttpResponse.json({ ...fixtures.models[0]!, slug: 'name-keychain-3', name }, { status: 201 })
+      }),
+    )
+    const onArranged = vi.fn()
+    const taken = { ...wand, filename: 'Name Keychain.3mf' }
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([taken])} onClose={vi.fn()} onArranged={onArranged} />)
+    await waitFor(() => expect(screen.getByLabelText('File under')).toHaveTextContent('A new model: Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(names).toEqual(['Name Keychain 2', 'Name Keychain 3'])
+  })
+
+  it("lists an arranged output's recoloured copies as their own row and keeps their colours", async () => {
+    const entry = first.manifest![0]!
+    const swap = { [entry.colours[0]!.toUpperCase()]: '#FF00FF' }
+    const twice: Output = {
+      ...first,
+      id: '6'.repeat(32),
+      manifest: [
+        { ...entry, count: 1, recolour: {} },
+        { ...entry, count: 1, recolour: swap },
+      ],
+    }
+    addMockOutput(twice)
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([twice])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(1)
+    expect(screen.getByLabelText('Copies of wall (other colours) — Reagan')).toHaveValue(1)
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()?.objects).toEqual([
+      { output_id: twice.id, part: entry.part, count: 1, recolour: {} },
+      { output_id: twice.id, part: entry.part, count: 1, recolour: swap },
+    ])
+  })
+})
+
 describe('ArrangeDialog', () => {
   it('lists every object with its count and sends the build list', async () => {
     const onArranged = vi.fn()
@@ -198,7 +403,7 @@ describe('ArrangeDialog', () => {
     expect(count).toHaveValue(2)
     await user.clear(count)
     await user.type(count, '5')
-    await user.selectOptions(screen.getByLabelText('Goal'), 'by_colour')
+    await choose(user, screen.getByLabelText('Goal'), GOAL_LABELS.by_colour)
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
     await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
     expect(onArranged).toHaveBeenCalledWith({
@@ -344,6 +549,8 @@ describe('ArrangeDialog', () => {
       )
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       expect(await screen.findByRole('list', { name: 'Re-render progress' })).toHaveTextContent('Nova')
+      // #2283 — the stage, above each output's own line.
+      expect(screen.getByText('Re-rendering 2 outputs first…')).toBeInTheDocument()
       await waitFor(() => expect(onArranged).toHaveBeenCalledOnce(), { timeout: 5000 })
       expect(backfill.mock.calls.map(([id]) => id).sort()).toEqual([nova.id, workshop.id].sort())
       expect(lastArrangeRequest()?.objects).toEqual([
@@ -387,10 +594,10 @@ describe('ArrangeDialog', () => {
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
       const tracing = installTestTracing()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
       try {
-        const { user } = renderPage(
-          <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
-        )
         await user.click(screen.getByRole('button', { name: 'Arrange' }))
         await user.click(screen.getByRole('button', { name: 'Re-render' }))
         expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
@@ -405,6 +612,11 @@ describe('ArrangeDialog', () => {
       }
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
+      // #2286 — tried again from here, at once: no second question.
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      await user.click(screen.getByRole('button', { name: 'Re-render again' }))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(nova.id, expect.any(AbortSignal)))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
     })
 
     it('arranges the outputs that never needed a re-render when every re-render fails', async () => {
@@ -424,6 +636,27 @@ describe('ArrangeDialog', () => {
         expect.objectContaining({ skipped: 'Nova could not be re-rendered: revision abc is gone. It was left out of the arrange.' }),
       )
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: first.id, part: 'piece-wall', count: 2 }])
+    })
+
+    it('names the saved arrange by what was arranged, not an output whose re-render failed (#2749 review)', async () => {
+      const bin: Output = { ...first, id: 'b'.repeat(32), slug: 'gridfinity-bin', name: 'Bin', manifest: [] }
+      addMockOutput(bin)
+      server.use(
+        http.post(`/api/v1/outputs/${bin.id}/backfill`, () => problem(422, 'Unprocessable Content', 'revision abc is gone')),
+      )
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const binName = fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name
+      // Before Arrange, the stale one is about to be re-rendered: it is in the placeholder.
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${binName}`),
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
     })
 
     it('opens again without the last alert or prompt', async () => {
@@ -474,6 +707,39 @@ describe('ArrangeDialog', () => {
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 
+    it('keeps the rows as they are while the re-render question is open (#3528)', async () => {
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const removes = await screen.findAllByRole('button', { name: /^Remove / })
+      await user.click(removes[0]!)
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await screen.findByRole('group', { name: 'Re-render first' })
+      // Unanswered, the question is about this arrange: nothing changes it underneath.
+      expect(screen.getByRole('button', { name: /^Restore 1 removed row/ })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Add from a model' })).toBeDisabled()
+    })
+
+    it('leaves a flagged output with objects out once it is removed (#2754 review)', async () => {
+      // The list showed Nova's objects; Arrange's refusal flagged it. Removed, it is in
+      // neither the re-render nor the request, and no prompt opens over an empty list.
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(within(await screen.findByRole('group', { name: 'Re-render first' })).getByRole('button', { name: 'Cancel' }))
+      await user.click(screen.getByRole('button', { name: /^Remove .*Nova$/ }))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual(first.manifest!.map(() => first.id))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
@@ -517,9 +783,271 @@ describe('ArrangeDialog', () => {
       <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
-    const progress = await screen.findByText('Arranging…')
+    const progress = await screen.findByText('Laying out the objects…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  describe('names, not ids (#2285)', () => {
+    it('names an unnamed output by its model and short id, and an object by its model', async () => {
+      const unnamed: Output = {
+        ...first,
+        id: 'a1ac23f1'.padEnd(32, '0'),
+        name: null,
+        manifest: [{ ...first.manifest![0]!, bom_piece: null, file: 'model.scad' }],
+      }
+      addMockOutput(unnamed)
+      renderPage(<ArrangeDialog open sources={fromOutputs([unnamed])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByLabelText('Copies of Name Keychain — a1ac23f1')).toBeInTheDocument()
+      expect(screen.queryByText(/model\.scad/)).not.toBeInTheDocument()
+    })
+
+    it('numbers two objects of one output that would read the same', async () => {
+      const twice: Output = {
+        ...first,
+        id: 'b'.repeat(32),
+        name: 'Pair',
+        manifest: [
+          { ...first.manifest![0]!, part: 'p-1', bom_piece: null },
+          { ...first.manifest![0]!, part: 'p-2', bom_piece: null, count: 1 },
+        ],
+      }
+      addMockOutput(twice)
+      renderPage(<ArrangeDialog open sources={fromOutputs([twice])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByLabelText('Copies of Name Keychain 1 — Pair')).toBeInTheDocument()
+      expect(screen.getByLabelText('Copies of Name Keychain 2 — Pair')).toBeInTheDocument()
+    })
+
+    it('lists an output that needs a re-render as a row; its Re-render makes it an ordinary row', async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const label = 'Name Keychain — c0ffee00'
+      expect(await screen.findByText(label, { exact: false })).toHaveTextContent('needs a re-render')
+      // The note names it as the row does, never by its 32-hex id.
+      expect(screen.getByRole('status')).toHaveTextContent('Name Keychain c0ffee00 was saved before Arrange existed')
+      await user.click(screen.getByRole('button', { name: `Re-render ${label}` }))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(stale.id, expect.any(AbortSignal)))
+      expect(await screen.findByLabelText(/^Copies of .* — c0ffee00$/, {}, { timeout: 5000 })).toBeInTheDocument()
+      expect(screen.queryByText('needs a re-render', { exact: false })).not.toBeInTheDocument()
+    })
+
+    it("traces a row's Re-render as one action (#2754 review)", async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(
+          <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+        )
+        await user.click(await screen.findByRole('button', { name: 'Re-render Name Keychain — c0ffee00' }))
+        await waitFor(() => expect(tracing.exporter.getFinishedSpans().map((s) => s.name)).toContain('rerender'), {
+          timeout: 5000,
+        })
+        const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'rerender')
+        expect(span?.attributes['scadbuddy.output_id']).toBe(stale.id)
+      } finally {
+        tracing.uninstall()
+      }
+    })
+
+    it('takes an output that needs a re-render out with Remove, asking nothing about it', async () => {
+      const stale: Output = { ...first, id: 'c0ffee00'.padEnd(32, '0'), name: null, manifest: [] }
+      addMockOutput(stale)
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Remove Name Keychain — c0ffee00' }))
+      expect(screen.queryByText('needs a re-render', { exact: false })).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
+    it('names an output added as a library file by the file', async () => {
+      const stale: Output = { ...first, id: 'd'.repeat(32), name: null, manifest: [] }
+      addMockOutput(stale)
+      const file = { ...(libraryFiles.find((f) => f.id === 89) as LibraryEntry), output_id: stale.id }
+      renderPage(<ArrangeDialog open sources={fromFiles([file])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      expect(await screen.findByRole('status')).toHaveTextContent(`${file.filename} was saved before Arrange existed`)
+    })
+
+    it('lists models by name with a search, and outputs with their date and size', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+      const select = await screen.findByLabelText('Model')
+      await waitFor(() => expect(select).toBeEnabled())
+      const names = await optionNames(user, select)
+      expect(names.length).toBeGreaterThan(1)
+      expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))
+      await user.type(screen.getByLabelText('Find a model'), 'keychain')
+      const found = await optionNames(user, select)
+      expect(found.length).toBeGreaterThan(0)
+      expect(found.every((o) => /keychain/i.test(o))).toBe(true)
+      await choose(user, select, nameOf('name-keychain'))
+      expect(await screen.findByRole('checkbox', { name: /^Nova · .* ago · .*mm · needs a re-render$/ })).toBeInTheDocument()
+    })
+
+    it('finds a model by its slug as well as its name (#2754 review)', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+      const select = await screen.findByLabelText('Model')
+      await waitFor(() => expect(select).toBeEnabled())
+      // "Name Keychain" holds no hyphen: only its slug matches.
+      await user.type(screen.getByLabelText('Find a model'), 'name-keychain')
+      expect(await optionNames(user, select)).toEqual(['Name Keychain'])
+    })
+  })
+
+  describe('controls (#2286)', () => {
+    it('has a Close button, a primary Arrange, and starts on the name', async () => {
+      const onClose = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={onClose} onArranged={vi.fn()} />,
+      )
+      const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
+      expect(within(dialog).getByLabelText('Name')).toHaveFocus()
+      expect(within(dialog).getByRole('button', { name: 'Arrange' }).className).toContain('bg-primary')
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('takes a row out with Remove, and leaves it out of the request', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '8'.repeat(32),
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const label = await screen.findByLabelText(/^Copies of .*Bin/)
+      const rowLabel = label.getAttribute('aria-label')!.replace(/^Copies of /, '')
+      await user.click(screen.getByRole('button', { name: `Remove ${rowLabel}` }))
+      expect(screen.queryByLabelText(`Copies of ${rowLabel}`)).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
+    })
+
+    it('files under the other template once every row of the first is removed', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '7'.repeat(32),
+        slug: 'gridfinity-bin',
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText('Copies of bin — Bin')
+      const firstName = first.name ?? first.id
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${firstName}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.queryByLabelText(new RegExp(`^Copies of .* — ${firstName}$`))).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()).toMatchObject({
+        slug: 'gridfinity-bin',
+        objects: [{ output_id: bin.id, part: 'piece-bin', count: 1 }],
+        // Named for what it holds, not the template it no longer does.
+        name: `Arrange of ${fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name}`,
+      })
+    })
+
+    it('saves an unnamed arrange under the models it holds, shown as the placeholder', async () => {
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
+    })
+  })
+
+  describe('the default name (#2286)', () => {
+    const wand = { ...(libraryFiles.find((f) => f.id === 67) as LibraryEntry), output_id: null }
+
+    it('stays within the 200 characters the server takes, however long the names', async () => {
+      const onArranged = vi.fn()
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([long])]} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', expect.stringContaining('1 more')),
+      )
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder.length).toBeLessThanOrEqual(200)
+      // The model's name fits; the file that does not is counted rather than cut off.
+      expect(placeholder).toBe('Arrange of Name Keychain, 1 more')
+      expect(screen.getByLabelText('Name')).toHaveAttribute('maxLength', '200')
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe(placeholder)
+    })
+
+    it('cuts a lone name too long to fit, with an ellipsis', async () => {
+      const long = { ...wand, filename: `${'w'.repeat(240)}.3mf` }
+      renderPage(<ArrangeDialog open sources={fromFiles([long])} onClose={vi.fn()} onArranged={vi.fn()} />)
+      await screen.findByLabelText(`Copies of Wand — ${long.filename}`)
+      const placeholder = screen.getByLabelText('Name').getAttribute('placeholder')!
+      expect(placeholder).toHaveLength(200)
+      expect(placeholder).toMatch(/^Arrange of w+…$/)
+    })
+
+    it('leaves out a library file whose every row was removed, and Restore brings them back', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([wand])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const stemmed = wand.filename.replace(/\.[^.]+$/, '')
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`),
+      )
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${wand.filename}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain')
+      await user.click(screen.getByRole('button', { name: 'Restore 2 removed rows' }))
+      expect(screen.getByLabelText(`Copies of Wand — ${wand.filename}`)).toBeInTheDocument()
+      expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${stemmed}`)
+      expect(screen.queryByRole('button', { name: /^Restore/ })).not.toBeInTheDocument()
+    })
+  })
+
+  it('says it is saving once the layout is done, and how long a stage has run (#2283)', async () => {
+    server.use(http.post('/api/v1/models/:slug/outputs', () => new Promise<never>(() => {})))
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByText('Saving the arranged output…', {}, { timeout: 5000 })).toHaveAttribute(
+      'aria-live',
+      'polite',
+    )
+    expect(screen.queryByText('Laying out the objects…')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('arrange-elapsed', {}, { timeout: 5000 })).toHaveTextContent(/^\d+ s$/)
   })
 
   it('stops waiting when it is closed, so the job is never saved behind its back', async () => {
@@ -581,6 +1109,83 @@ describe('ArrangeDialog', () => {
     expect(again![1]).toBe(failed![1])
     expect(failed![5]).toBeTruthy()
     expect(again![5]).toBe(failed![5])
+  })
+
+  it('keeps the save key on Try again when the model list answered in between (#2749 review)', async () => {
+    let answer: (models: typeof fixtures.models) => void = () => {}
+    vi.spyOn(api, 'listModels').mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    // The default name exists only now, after the first attempt.
+    answer(fixtures.models)
+    await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('joins the arrange it started on Try again, under the same key (#3526)', async () => {
+    const arrange = vi
+      .spyOn(api, 'arrangeOutputs')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = arrange.mock.calls
+    expect(failed![2]).toBeTruthy()
+    expect(again![2]).toBe(failed![2])
+  })
+
+  it('starts a new arrange under a new key on Try again after the job failed (#3659)', async () => {
+    const created_at = '2026-09-28T12:00:00Z'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json(
+          { id: 'arrange-fail', slug: 'name-keychain', status: 'pending', created_at },
+          { status: 202 },
+        ),
+      ),
+      http.get('/api/v1/jobs/arrange-fail', () =>
+        HttpResponse.json({
+          id: 'arrange-fail',
+          slug: 'name-keychain',
+          status: 'failed',
+          created_at,
+          error: "group 'big' does not fit on one plate",
+        }),
+      ),
+    )
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(arrange).toHaveBeenCalledTimes(2))
+    const [failed, again] = arrange.mock.calls
+    expect(failed![2]).toBeTruthy()
+    expect(again![2]).toBeTruthy()
+    expect(again![2]).not.toBe(failed![2])
   })
 
   it('offers no Try again for a request the server refused as it is', async () => {
@@ -669,5 +1274,29 @@ describe('ArrangeDialog', () => {
     saved({ ...first, id: 'o-new' })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onArranged).not.toHaveBeenCalled()
+  })
+})
+
+describe('objectNames (#2754 review)', () => {
+  it('names a manifest in one pass, not one per object', () => {
+    const manifest = (parts: number) =>
+      ({
+        ...fixtures.outputs[0],
+        manifest: Array.from({ length: parts }, (_, i) => ({ part: `p${i}`, slug: 'same', bom_piece: null, count: 1 })),
+      }) as unknown as Output
+    const time = (parts: number) => {
+      const output = manifest(parts)
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const began = performance.now()
+        objectNames(output, (slug) => slug)
+        best = Math.min(best, performance.now() - began)
+      }
+      return best
+    }
+    const names = objectNames(manifest(3), (slug) => slug)
+    expect([...names.values()]).toEqual(['same 1', 'same 2', 'same 3'])
+    // Four times the parts is about four times the work; a count per object is sixteen.
+    expect(time(16_000)).toBeLessThan(8 * time(4_000) + 20)
   })
 })

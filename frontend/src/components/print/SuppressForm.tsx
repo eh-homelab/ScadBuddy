@@ -2,8 +2,13 @@ import { useId, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { AnalyzerDiagnostic, ScopeRef } from '../../api/types'
 import { atOrNarrower, sameScope, scopeLabel, widerThanTemplate } from '../../lib/analyzers'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import { Spinner } from '../ui/spinner'
 
 /** The backend's cap on a decision's reason (`DecisionCreate.reason`, max_length=500). */
 const MAX_REASON = 500
@@ -85,80 +90,88 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
   }
 
   return (
+    <Card size="sm" className="mt-2">
+    <CardContent>
     <form
       aria-label={`Suppress ${diagnostic.key}`}
       onSubmit={(event) => void submit(event)}
-      className="mt-2 space-y-2 rounded-[6px] border border-line bg-surface-2 p-2"
+      className="space-y-2"
     >
       <div className="flex flex-col gap-1">
-        <label htmlFor={`${id}-scope`} className="text-[12px] text-muted">
+        <Label htmlFor={`${id}-scope`} className="text-[12px] font-normal text-muted-foreground">
           Scope
-        </label>
-        <select
-          id={`${id}-scope`}
-          value={scope ? scopeValue(scope) : ''}
-          onChange={(event) => {
-            setChoice(event.target.value)
+        </Label>
+        <Select
+          value={scope ? scopeValue(scope) : undefined}
+          onValueChange={(next) => {
+            setChoice(next)
             setConfirmed(false)
           }}
-          className="sb-field"
         >
-          {scopes.map((row) => (
-            <option key={scopeValue(row)} value={scopeValue(row)} title={row.key}>
-              {scopeLabel(row)}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id={`${id}-scope`} size="sm" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {scopes.map((row) => (
+              <SelectItem key={scopeValue(row)} value={scopeValue(row)}>
+                {scopeLabel(row)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
       {accepted && (
-        <p className="text-[12px] text-muted">
+        <p className="text-[12px] text-muted-foreground">
           {replacesAccepted
             ? `This replaces the fix accepted for ${scopeLabel(accepted.scope).toLowerCase()}, so it is about this finding only.`
             : `A fix is accepted for ${scopeLabel(accepted.scope).toLowerCase()}; a wider suppression would not apply, so only that scope and narrower ones are offered.`}
         </p>
       )}
-      <label className="flex items-center gap-2 text-[12px] text-muted">
-        <input
-          type="checkbox"
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id={`${id}-every`}
           checked={everyInstance}
           disabled={replacesAccepted}
-          onChange={(event) => setEveryInstance(event.target.checked)}
-          className="accent-[var(--sb-accent)]"
+          onCheckedChange={(next) => setEveryInstance(next === true)}
         />
-        Every {diagnostic.id} finding
-      </label>
+        <Label htmlFor={`${id}-every`} className="text-[12px] font-normal text-muted-foreground">
+          Every {diagnostic.id} finding
+        </Label>
+      </div>
       <div className="flex flex-col gap-1">
-        <label htmlFor={`${id}-reason`} className="text-[12px] text-muted">
+        <Label htmlFor={`${id}-reason`} className="text-[12px] font-normal text-muted-foreground">
           Reason
-        </label>
-        <textarea
+        </Label>
+        <Textarea
           id={`${id}-reason`}
           required
           maxLength={MAX_REASON}
           rows={2}
           value={reason}
           onChange={(event) => setReason(event.target.value)}
-          className="sb-field h-auto py-1.5"
+          className="min-h-0 text-[13px]"
         />
       </div>
       {needsConfirm && scope && (
-        <label className="flex items-start gap-2 text-[12px] text-warn">
-          <input
-            type="checkbox"
+        <div className="flex items-start gap-2">
+          <Checkbox
+            id={`${id}-confirm`}
             checked={confirmed}
-            onChange={(event) => setConfirmed(event.target.checked)}
-            className="mt-0.5 accent-[var(--sb-accent)]"
+            onCheckedChange={(next) => setConfirmed(next === true)}
+            className="mt-0.5"
           />
-          {`${diagnostic.id} is a problem. Suppress it for ${scopeLabel(scope).toLowerCase()}, not only this template?`}
-        </label>
+          <Label htmlFor={`${id}-confirm`} className="text-[12px] leading-snug font-normal text-destructive">
+            {`${diagnostic.id} is a problem. Suppress it for ${scopeLabel(scope).toLowerCase()}, not only this template?`}
+          </Label>
+        </div>
       )}
       {refusal && (
-        <p role="alert" className="text-[12px] text-warn">
+        <p role="alert" className="text-[12px] text-destructive">
           {refusal}
         </p>
       )}
       <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onCancel} disabled={saving}>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
         <Button size="sm" type="submit" disabled={!ready}>
@@ -167,5 +180,7 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
         </Button>
       </div>
     </form>
+    </CardContent>
+    </Card>
   )
 }

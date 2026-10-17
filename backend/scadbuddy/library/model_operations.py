@@ -126,6 +126,7 @@ def model_kinds(state: AppState) -> list[OperationKind]:
             state.catalogue,
             state.render,
             request["force"],
+            renders=False,
         )
         return {}
 

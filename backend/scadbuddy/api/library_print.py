@@ -10,8 +10,13 @@ reaches the browser.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import logging
+import os
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from functools import partial
-from typing import Annotated
+from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -20,8 +25,10 @@ from pydantic import BaseModel, Field
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
+    DownloadsDep,
     OutputsDep,
     PathsDep,
+    PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
@@ -43,12 +50,20 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
+from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
-from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
+from scadbuddy.bambuddy.errors import LIBRARY_FILES_MISSING_PROBLEM
+from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
-from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
+from scadbuddy.bambuddy.library_listing import (
+    LibraryListing,
+    LibrarySearch,
+    list_library,
+    search_library,
+)
 from scadbuddy.bambuddy.library_view import (
+    SPOOL_DIRNAME,
     NotViewableError,
     library_filaments,
     library_preview,
@@ -73,6 +88,7 @@ from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.library_file_moves import (
     LibraryCopyResult,
     LibraryMoveResult,
@@ -94,13 +110,17 @@ from scadbuddy.library.library_write_operations import (
     LibraryFolderUpdate,
 )
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from scadbuddy.library_search.component import LibraryIndexDep
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/print/library", tags=["print"])
 
@@ -135,6 +155,100 @@ async def get_library(
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
+
+
+#: The most file ids one names lookup reads, and how many it asks Bambuddy at once.
+NAMES_MAX = 100
+NAMES_AT_ONCE = 8
+
+
+class LibraryFileName(BaseModel):
+    """#2349 — one library file as a row that names it shows it."""
+
+    id: int
+    name: str | None = Field(description="Null when Bambuddy no longer has the file")
+    folder_id: int | None = None
+
+
+@router.get(
+    "/names",
+    response_model=list[LibraryFileName],
+    summary="Library files' names, by id",
+)
+async def get_library_names(
+    store: SettingsStoreDep,
+    ids: Annotated[list[Annotated[int, Field(ge=1)]], Query(min_length=1, max_length=NAMES_MAX)],
+) -> list[LibraryFileName]:
+    """Each file's name and folder, in the order asked (a repeated id once), read from
+    Bambuddy one file at a time, so a page that labels a few ids (Settings → Remembered
+    choices, #2349) need not list the whole library. A file Bambuddy no longer has is
+    ``name: null``; any other failure is the route's, and cancels the other reads before
+    the client closes. When several files are asked and Bambuddy has none of them, that
+    reads as a misrouted base URL rather than every file deleted, so it is a 502: a page
+    then shows the ids, never "deleted file" on every row, which invites a wrong Forget."""
+    gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    unique = list(dict.fromkeys(ids))
+    async with client_for(store.load()) as client:
+
+        async def one(file_id: int) -> LibraryFileName:
+            async with gate:
+                try:
+                    file = await client.library_file(file_id)
+                except ApiError as error:
+                    if error.status != status.HTTP_404_NOT_FOUND:
+                        raise
+                    return LibraryFileName(id=file_id, name=None)
+            return LibraryFileName(id=file_id, name=file.filename, folder_id=file.folder_id)
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(one(file_id)) for file_id in unique]
+        except BaseExceptionGroup as group_error:
+            # The read's own error (the 401 that is a 409, say), not an ExceptionGroup.
+            raise group_error.exceptions[0] from None
+    names = [task.result() for task in tasks]
+    if len(names) > 1 and all(file.name is None for file in names):
+        raise ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            "Bambuddy has none of these library files; is its URL right?",
+            title="Bambuddy has none of these library files",
+            type_=LIBRARY_FILES_MISSING_PROBLEM,
+        )
+    return names
+
+
+@router.get(
+    "/search", response_model=LibrarySearch, summary="Find library files by name, in every folder"
+)
+async def get_library_search(
+    store: SettingsStoreDep,
+    index: LibraryIndexDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    q: Annotated[str, Query(max_length=200)],
+    show_all: Annotated[bool, Query(alias="all")] = False,
+    fresh: bool = False,
+) -> LibrarySearch:
+    """The files whose name, or the path of their folder, holds every word of ``q`` as a substring,
+    whatever the case or a separator ``_ - . ( ) [ ]`` (#3630); each names its
+    ``folder_path``. Without ``all`` only unsliced 3MFs, as the listing; ``hidden``
+    counts the matches only ``all`` lists. At most 100 files, ``total`` how many
+    matched.
+
+    Bambuddy has no search, so its whole library is read at once and kept in this
+    process: answered from it for 30 s, and for 10 minutes after while one read
+    replaces it in the background. ``fresh`` waits for a read that started after the
+    request did or at most 2 s before it (a kept read that started then counts too), as
+    the page asks after its own changes."""
+    config = BambuddyConfig.from_settings(store.load())
+    source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
+    # One config for the key and the client, so the two cannot drift apart.
+    snapshot = await index.snapshot(source, partial(BambuddyClient, config), fresh=fresh)
+    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all)
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
+    for entry in found.files:
+        entry.output_id = made.get(entry.id)
+    return found
 
 
 @router.post(
@@ -543,6 +657,7 @@ async def get_library_preview(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     plate: Annotated[int, Query(ge=1)] = 1,
 ) -> Response:
     """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
@@ -551,12 +666,18 @@ async def get_library_preview(
     damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
     async with client_for(store.load()) as client:
         try:
-            data = await library_preview(client, paths.cache, file_id, plate, budget)
+            data = await library_preview(client, paths.cache, file_id, plate, budget, downloads)
         except NotViewableError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except NoSuchPlateError as error:
             raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
     return Response(data, media_type=GLB_MEDIA_TYPE)
+
+
+#: The largest kept file served from the download cache. A hit is copied whole into the
+#: request's own file before its first byte is sent, so past this a cached file would
+#: start later than Bambuddy's stream of it does; it is streamed from Bambuddy instead.
+CACHED_COPY_MAX_BYTES = 256 * 1024 * 1024
 
 
 @router.get(
@@ -566,11 +687,50 @@ async def get_library_preview(
     summary="The library file itself",
 )
 async def get_library_file(
-    file_id: FileIdPath, request: Request, store: SettingsStoreDep
+    file_id: FileIdPath,
+    request: Request,
+    store: SettingsStoreDep,
+    paths: PathsDep,
+    downloads: DownloadsDep,
 ) -> Response:
     """The file as Bambuddy's library holds it: what a print of it was made from. Always
     a download: a library file can be any type (an SVG, an HTML page), and served on
-    ScadBuddy's origin under the type Bambuddy names it could run script there."""
+    ScadBuddy's origin under the type Bambuddy names it could run script there.
+
+    #2788: a whole-file ask for a file Bambuddy states a hash for is served from the
+    shared download cache when it is there, and streamed from Bambuddy while it is
+    kept there when it is not, so the first byte never waits on the whole download. A
+    ranged ask streams from Bambuddy as before."""
+    sha: str | None = None
+    keep = False
+    if request.headers.get("range") is None and downloads is not None:
+        sha = await _cacheable_hash(store, downloads, file_id)
+        kept_size = None if sha is None else await asyncio.to_thread(downloads.size, sha)
+        # One kept but too large to copy before its first byte is not kept again.
+        keep = sha is not None and (kept_size is None or kept_size <= CACHED_COPY_MAX_BYTES)
+        if sha is not None and kept_size is not None and kept_size <= CACHED_COPY_MAX_BYTES:
+            copy = await asyncio.to_thread(
+                downloads.private_copy, sha, paths.cache / SPOOL_DIRNAME, what="library_file"
+            )
+            if copy is not None:
+                size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
+                return StreamingResponse(
+                    _read_closing(copy),
+                    media_type="application/octet-stream",
+                    headers={
+                        "content-disposition": "attachment",
+                        "x-content-type-options": "nosniff",
+                        "content-length": str(size),
+                        # The bytes are whole here; a resumed download is a ranged ask,
+                        # which Bambuddy answers.
+                        "accept-ranges": "bytes",
+                        # The hash names these bytes, so it is their validator. A miss
+                        # keeps Bambuddy's own instead, on purpose: a resume is a ranged
+                        # ask Bambuddy answers, and only its validator can match there,
+                        # so a resume of a hit restarts whole rather than risk mixed bytes.
+                        "etag": f'"{sha}"',
+                    },
+                )
     response = await _proxy(
         store,
         request,
@@ -580,7 +740,102 @@ async def get_library_file(
     )
     response.headers["content-type"] = "application/octet-stream"
     response.headers["content-disposition"] = "attachment"
+    # A body Bambuddy encoded is not the bytes the hash names; it is sent, never kept.
+    if (
+        keep
+        and sha is not None
+        and downloads is not None
+        and response.status_code == 200
+        and "content-encoding" not in response.headers
+    ):
+        assert isinstance(response, StreamingResponse)
+        response.body_iterator = _kept_as_sent(downloads, sha, response.body_iterator)
     return response
+
+
+async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
+    """``copy``'s bytes, closing it however the response ends. It has no name on disk,
+    so a dropped connection leaves nothing behind."""
+    try:
+        while chunk := await asyncio.to_thread(copy.read, 1 << 20):
+            yield chunk
+    finally:
+        await asyncio.to_thread(copy.close)
+
+
+async def _cacheable_hash(
+    store: SettingsStore, downloads: DownloadCache, file_id: int
+) -> str | None:
+    """The hash library file ``file_id`` is kept under in the download cache; None for
+    one streamed from Bambuddy as before: no hash stated (#2160), larger than the
+    cache keeps by its stated size, or a read of the file that failed. That read is only
+    for the cache, so its failure is a miss and the download is still tried.
+
+    It is one more call to Bambuddy before every whole-file download, hit or miss; its
+    own span says so, and whether it found a hash to keep the file under."""
+    with span("library.file_hash", attributes={"scadbuddy.library.file_id": file_id}) as current:
+        try:
+            async with client_for(store.load()) as client:
+                file = await client.library_file(file_id)
+        except ApiError:
+            logger.info(
+                "could not read a library file's hash", extra={"file_id": file_id}, exc_info=True
+            )
+            current.set_attribute("scadbuddy.cache.cacheable", False)
+            return None
+        sha = (file.file_hash or "").lower()
+        cacheable = is_sha256(sha) and (file.file_size or 0) <= downloads.max_entry_bytes
+        current.set_attribute("scadbuddy.cache.cacheable", cacheable)
+        return sha if cacheable else None
+
+
+async def _kept_as_sent(
+    downloads: DownloadCache, sha: str, chunks: AsyncIterable[str | bytes | memoryview]
+) -> AsyncGenerator[bytes | str | memoryview]:
+    """``chunks``, sent as they come, also written into the download cache under
+    ``sha``. Kept only when the bytes are that hash and all of them were sent; past
+    the cache's limit, out of room or on a failing volume the copy stops and the
+    response goes on."""
+    try:
+        fill_cm = downloads.fill(sha)
+        fill: Fill | None = await asyncio.to_thread(fill_cm.__enter__)
+    except OSError:
+        logger.warning("could not start keeping a library file", extra={"sha256": sha})
+        fill = None
+    try:
+        async for chunk in chunks:
+            if fill is not None:
+                # Every chunk is written, a memoryview or str too: one left out would
+                # leave the fill short of its hash, and nothing would be kept.
+                data = chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                try:
+                    await asyncio.to_thread(fill.write, data)
+                except (TooLargeError, OSError):
+                    # Cleared first and closed here, not awaited: a cancel inside an
+                    # awaited close left `fill` set, and the `finally` closed it again
+                    # while the thread was still in it.
+                    fill = None
+                    with contextlib.suppress(OSError):
+                        fill_cm.__exit__(None, None, None)
+            yield chunk
+        if fill is not None:
+            try:
+                await asyncio.to_thread(fill.commit)
+            except OSError:
+                logger.warning("could not keep a library file", extra={"sha256": sha})
+    finally:
+        # First, and not awaited: a browser gone is a cancelled scope, where every await
+        # raises again and nothing after it runs, which left the partial on disk. A
+        # cancel during a `to_thread` write or commit leaves that thread running while
+        # this closes and removes the partial under it: its I/O error is discarded with
+        # the thread and nothing is kept, which is the outcome wanted.
+        if fill is not None:
+            with contextlib.suppress(OSError):
+                fill_cm.__exit__(None, None, None)
+        # The proxied body closes Bambuddy's response when it is closed.
+        close = getattr(chunks, "aclose", None)
+        if close is not None:
+            await close()
 
 
 @router.get(
@@ -634,6 +889,7 @@ async def get_library_choices(
     rack: RackUsageDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -649,7 +905,9 @@ async def get_library_choices(
             file_id,
             uploads=uploads,
             settings=settings,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )
         return await choices_for(
             client,
@@ -658,6 +916,7 @@ async def get_library_choices(
             remembered=remembered,
             printer_id=printer_id,
             cache=paths.cache,
+            catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
 
@@ -685,9 +944,13 @@ async def get_library_filaments(
     uploads: UploadsDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
+    plate_ids: Annotated[
+        list[Annotated[int, Field(ge=1)]] | None, Query(max_length=MAX_PLATES)
+    ] = None,
 ) -> FilamentOptions:
     settings = store.load()
     async with client_for(settings) as client:
@@ -699,7 +962,10 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            plate_ids=plate_ids,
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )
 
 
@@ -721,12 +987,14 @@ async def post_library_run(
     file_id: FileIdPath,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
-) -> PrintRun:
+    downloads: DownloadsDep,
+) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is queued as it is, with no slice (#2671), and never refused: one
@@ -735,14 +1003,48 @@ async def post_library_run(
     run's ``subject`` is ``library:<file id>``, and so is its ``output_id``, which older
     clients read. The file's filament slots go with the run, read from the file as
     ``/choices`` read them (#2550)."""
+    return await start_library_run(
+        file_id,
+        body,
+        runs=runs,
+        activity=activity,
+        store=store,
+        paths=paths,
+        budget=budget,
+        downloads=downloads,
+        response=response,
+        http=http,
+    )
+
+
+async def start_library_run(
+    file_id: int,
+    body: PrintRunRequest,
+    *,
+    runs: PrintCommands,
+    activity: ActivityComponent,
+    store: SettingsStore,
+    paths: DataPaths,
+    budget: ReadBudget,
+    downloads: DownloadCache | None,
+    response: Response | None = None,
+    http: Request | None = None,
+) -> PrintRun | JSONResponse:
+    """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
+    and a batch's Queue all both start one here, so neither depends on the other's
+    signature (#2718 review). ``response`` takes the route's status code; a caller with
+    no response of its own reads the run's ``status`` instead. Only ``http`` asking for
+    ``Prefer: respond-async`` can answer a 202 to follow (#2793); with none, as Queue all
+    calls it, the answer is always the run."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
-        filaments = await _run_filaments(store, paths, budget, file_id)
+        filaments = await _run_filaments(store, paths, budget, file_id, downloads)
         return source.model_copy(update={"filaments": filaments})
 
     return await accept_run(
         runs,
-        response,
+        response if response is not None else Response(),
+        http=http,
         subject=PrintSubject.library(file_id),
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
@@ -753,7 +1055,11 @@ async def post_library_run(
 
 
 async def _run_filaments(
-    store: SettingsStore, paths: DataPaths, budget: ReadBudget, file_id: int
+    store: SettingsStore,
+    paths: DataPaths,
+    budget: ReadBudget,
+    file_id: int,
+    downloads: DownloadCache | None,
 ) -> LocalFilaments | None:
     """The slots a run of library file ``file_id`` reads (#2550): from the cache the
     dialog filled, or a download of the file that fills it. Only for a file Bambuddy
@@ -766,7 +1072,7 @@ async def _run_filaments(
             file = await client.library_file(file_id)
             if not file.file_hash:
                 return None
-            return await library_filaments(client, paths.cache, file, budget)
+            return await library_filaments(client, paths.cache, file, budget, downloads)
     except ApiError:
         return None
 
@@ -910,6 +1216,7 @@ async def post_library_check(
     rack: RackUsageDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550)."""
@@ -922,5 +1229,7 @@ async def post_library_check(
             file_id,
             body,
             rack=rack,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )

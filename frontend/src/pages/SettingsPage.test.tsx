@@ -9,6 +9,7 @@ import { server } from '../mocks/server'
 import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+import { choose, optionsOf } from '../test/select'
 
 /** Bambuddy's "Test connection", as against a plugin endpoint's (RemotePluginsPanel). */
 const bambuddyTest = () =>
@@ -108,7 +109,7 @@ describe('SettingsPage', () => {
 
     await user.click(bambuddyTest())
     expect(await findStatus('limiting requests')).toBeInTheDocument()
-    const answered = screen.getByText('What Bambuddy answered').closest('details')!
+    const answered = screen.getByText('What Bambuddy answered').closest<HTMLElement>('[data-slot=collapsible]')!
     expect(within(answered).getByText('429')).toBeInTheDocument()
     expect(within(answered).getByText('30')).toBeInTheDocument()
     expect(within(answered).getByText('Too many requests for this API key')).toBeInTheDocument()
@@ -124,12 +125,16 @@ describe('SettingsPage', () => {
   })
 
   it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
-    renderPage(<SettingsPage />)
+    const { user } = renderPage(<SettingsPage />)
     await seeded()
-    expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
-    // Bambuddy's ids are integers, so the <select> values are their decimal strings.
-    expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveValue('2')
-    expect(screen.getByLabelText('Printer')).toHaveValue('1')
+    // The stored ids (folder 2, printer 1) are shown by the names Bambuddy reports.
+    await waitFor(() => expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveTextContent('ScadBuddy'))
+    expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-31B-598 (H2C)')
+    expect(await optionsOf(user, screen.getByLabelText('Printer'))).toEqual([
+      'None',
+      '3DP-31B-598 (H2C)',
+      '3DP-77A-114 (H2C)',
+    ])
     // #312: printing is the Print dialog's, which derives its own presets.
     expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
   })
@@ -139,7 +144,7 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.selectOptions(screen.getByLabelText('Printer'), '')
+    await choose(user, screen.getByLabelText('Printer'), 'None')
     await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
@@ -181,8 +186,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     const select = screen.getByLabelText('Default plate')
-    await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
-    await user.selectOptions(select, 'A1 mini')
+    await choose(user, select, /A1 mini/)
     await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
@@ -272,7 +276,19 @@ describe('SettingsPage', () => {
 
     await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '0.5')
     await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
-    expect(await screen.findByText(/at least 1 day/)).toBeInTheDocument()
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+
+  it('refuses a retention over ten years, whose prune Postgres cannot compute', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.type(screen.getByLabelText('Keep finished print runs for (days)'), '3651')
+    await user.click(within(region('Printing defaults')).getByRole('button', { name: 'Save Printing defaults' }))
+    expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
     put.mockRestore()
   })
@@ -283,12 +299,12 @@ describe('SettingsPage', () => {
     await seeded()
 
     const select = screen.getByLabelText('Show dimensions in')
-    expect(select).toHaveValue('mm')
-    expect(screen.getByRole('option', { name: '256 × 256 mm' })).toBeInTheDocument()
+    expect(select).toHaveTextContent('Millimetres (mm)')
+    expect(screen.getByLabelText('Default plate')).toHaveTextContent('256 × 256 mm')
 
-    await user.selectOptions(select, 'in')
+    await choose(user, select, 'Inches (in)')
     // The plate list follows the picker before the save, so the choice can be judged.
-    expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Default plate')).toHaveTextContent('10.08 × 10.08 in')
     expect(getDisplayUnit()).toBe('mm')
 
     await user.click(within(region('Preview')).getByRole('button', { name: 'Save Preview' }))

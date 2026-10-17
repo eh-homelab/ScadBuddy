@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useNavigate, useParams } from 'react-router'
@@ -117,7 +117,7 @@ describe('PrintDetailPage (#311)', () => {
       'Slot 1PLA11.34 g',
       'Slot 2PLA5.02 g',
     ])
-    expect(within(slots).getByTitle('#FF9425')).toBeInTheDocument()
+    expect(within(slots).getByRole('img', { name: '#FF9425' })).toBeInTheDocument()
   })
 
   it('shows Bambuddy’s bookkeeping and every other field it has (#1860)', async () => {
@@ -158,7 +158,7 @@ describe('PrintDetailPage (#311)', () => {
     )
     render(35)
     const slots = within(await section('Slicing')).getByRole('list', { name: 'Filament by slot' })
-    expect(within(slots).getByTitle('url(https://x.example/t.png)')).not.toHaveAttribute('style')
+    expect(within(slots).getByRole('img', { name: 'url(https://x.example/t.png)' })).not.toHaveAttribute('style')
   })
 
   it('rounds Bambuddy’s amounts, names whose currency the cost is in, and opens its links (#1860 review)', async () => {
@@ -218,10 +218,11 @@ describe('PrintDetailPage (#311)', () => {
     render(35)
     const outcome = await section('Outcome')
     const runs = within(outcome).getByRole('list', { name: 'Runs' })
-    expect(within(runs).getByText('1004.2 g, not this print\'s')).toHaveAttribute(
-      'title',
-      expect.stringContaining('not used for the cost'),
-    )
+    const reading = within(runs).getByText('1004.2 g, not this print\'s')
+    expect(reading).toHaveAccessibleDescription(expect.stringContaining('not used for the cost'))
+    // Its tooltip opens from the keyboard too (#3674 review).
+    act(() => reading.focus())
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('not used for the cost')
   })
 
   it('shows why a failed print failed', async () => {
@@ -563,7 +564,7 @@ describe('PrintDetailPage (#311)', () => {
     expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
     const colours = outputs[0]!.colors ?? []
     expect(colours.length).toBeGreaterThan(0)
-    for (const colour of colours) expect(within(dialog).getByTitle(colour.toUpperCase())).toBeInTheDocument()
+    for (const colour of colours) expect(dialog.querySelector(`[data-colour="${colour.toUpperCase()}"]`)).not.toBeNull()
     expect(within(dialog).queryByRole('list', { name: 'Plates' })).not.toBeInTheDocument()
     await user.keyboard('{Escape}')
 
@@ -595,7 +596,8 @@ describe('PrintDetailPage (#311)', () => {
     const files = await section('Files')
     await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
     const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
-    await within(dialog).findByTitle((outputs[0]!.colors ?? [])[0]!.toUpperCase())
+    const first = (outputs[0]!.colors ?? [])[0]!.toUpperCase()
+    await waitFor(() => expect(dialog.querySelector(`[data-colour="${first}"]`)).not.toBeNull())
     expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
   })
 
@@ -709,7 +711,9 @@ describe('PrintDetailPage (#311)', () => {
 
   it('shows what ScadBuddy still knows of a print deleted in Bambuddy', async () => {
     render(38)
-    expect(await screen.findByRole('status')).toHaveTextContent(/deleted in Bambuddy/)
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(/This print was deleted in Bambuddy/),
+    )
     const provenance = await section('Provenance')
     expect(within(provenance).getByRole('table', { name: 'Parameters' })).toHaveTextContent('Workshop')
     const files = await section('Files')

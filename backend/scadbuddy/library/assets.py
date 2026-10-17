@@ -278,6 +278,16 @@ def sanitise_svg(data: bytes) -> bytes:
     return cleaned
 
 
+#: In Pillow's ValueErrors for its PNG metadata limits, what tells them from another
+#: ValueError: a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK`` once
+#: decompressed (``_safe_zlib_decompress``), and text chunks over ``MAX_TEXT_MEMORY`` in
+#: all (``check_text_memory``). The upload keeps none of that metadata either way.
+#: Pillow names no exception type for them, so this matches its message text: a Pillow
+#: bump that rewords one is caught by test_assets.py's real-decode tests (iCCP, zTXt,
+#: MAX_TEXT_MEMORY), which fail rather than let those uploads read as unreadable PNGs.
+PNG_METADATA_LIMITS = ("MAX_TEXT_CHUNK", "MAX_TEXT_MEMORY")
+
+
 def normalise_png(data: bytes) -> tuple[bytes, int, int]:
     """The PNG decoded, capped at `MAX_PNG_SIDE`, and re-encoded without metadata."""
     try:
@@ -309,11 +319,16 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         # Its own refusals (a ValueError too) pass through as they are.
         raise
     except ValueError as error:
-        # Pillow's limit on a decompressed text or ICC chunk (MAX_TEXT_CHUNK): metadata
-        # the upload keeps none of anyway, so re-exported without it the PNG reads.
         logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        if any(limit in str(error) for limit in PNG_METADATA_LIMITS):
+            # One of Pillow's limits on text or ICC chunks: metadata the upload keeps
+            # none of anyway, so re-exported without it the PNG reads.
+            raise AssetRejectedError(
+                "the PNG carries metadata too large to read; re-export it without metadata"
+            ) from None
+        # Any other ValueError Pillow raises while decoding is an unreadable PNG.
         raise AssetRejectedError(
-            "the PNG carries metadata too large to read; re-export it without metadata"
+            "the file is not a readable PNG; re-export it as PNG and try again"
         ) from None
     except (UnidentifiedImageError, OSError) as error:
         # Pillow's text names its stream object by address (#2383): for the log, not the user.

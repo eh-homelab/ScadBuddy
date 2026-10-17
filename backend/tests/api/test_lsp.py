@@ -374,7 +374,22 @@ def test_a_server_that_crashes_is_logged(
     assert re.search(r"openscad-lsp exited with status 3\b", caplog.text)
 
 
-@pytest.mark.skipif(platform.system() != "Linux", reason="reads /proc/<pid>/stat")
+def _pidfd_child_watcher() -> bool:
+    """Whether asyncio watches children with a pidfd, which leaves an exited child a
+    zombie until the loop reads it. Without one (gVisor, an old kernel) a watcher thread
+    reaps it at once, and the test below has no zombie to find (#3378). Only called on
+    Linux, so the Unix-only module is imported here."""
+    import asyncio.unix_events
+
+    can_use_pidfd = getattr(asyncio.unix_events, "can_use_pidfd", None)
+    return can_use_pidfd is not None and bool(can_use_pidfd())
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not _pidfd_child_watcher(),
+    reason="reads /proc/<pid>/stat, and needs asyncio's pidfd child watcher, which leaves"
+    " an exited child for the loop to reap (lsp.kill)",
+)
 async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
     """#1613: a server that exited before asyncio's child watcher read it is killed
     without being reaped, so asyncio still reads its own status. `process.kill()` reaped
@@ -401,7 +416,9 @@ async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
 @pytest.mark.parametrize("module", [lsp, lsp_diagnostics], ids=lambda m: m.__name__)
 def test_the_language_server_is_only_killed_through_lsp_kill(module: Any) -> None:
     """#1613 review: ``process.kill()`` / ``terminate()`` / ``send_signal()`` poll, and
-    reap a server asyncio has not read yet; only ``lsp.kill`` (``os.kill``) may signal it."""
+    reap a server asyncio has not read yet; only ``lsp.kill`` (``os.kill``) may signal it.
+    A tripwire, not a proof: it sees ``x.kill()`` attribute calls only, not
+    ``getattr(x, "kill")()`` or ``functools.partial(x.kill)`` (#3378)."""
     tree = ast.parse(Path(module.__file__).read_text())
     calls = [
         f"{node.lineno}: .{node.func.attr}()"

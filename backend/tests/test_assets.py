@@ -7,6 +7,7 @@ import io
 import struct
 import zlib
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from PIL import Image, PngImagePlugin
@@ -228,16 +229,24 @@ def test_an_undecodable_png_is_refused_without_pillows_text(
     assert getattr(logged[0], "error", None) == str(pillow.value)
 
 
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    """One PNG chunk: its length, type, data and CRC."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def _with_chunk(kind: bytes, data: bytes) -> bytes:
+    """A 4x4 PNG Pillow wrote, with one more chunk right after its IHDR."""
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(out, format="PNG")
+    png = out.getvalue()
+    end_of_ihdr = 8 + 8 + 13 + 4  # signature, IHDR length and type, its data, its CRC
+    return png[:end_of_ihdr] + _chunk(kind, data) + png[end_of_ihdr:]
+
+
 def _png_header(width: int, height: int) -> bytes:
     """A PNG that declares ``width`` x ``height`` (1-bit grey) and holds no pixels."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-        )
-
     ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IEND", b"")
 
 
 def test_a_png_with_a_text_chunk_too_large_to_read_is_refused(store: AssetStore) -> None:
@@ -248,6 +257,40 @@ def test_a_png_with_a_text_chunk_too_large_to_read_is_refused(store: AssetStore)
     Image.new("RGB", (4, 4)).save(out, format="PNG", pnginfo=info)
     with pytest.raises(AssetRejectedError, match="metadata too large to read"):
         store.put(out.getvalue(), "chatty.png")
+
+
+def test_a_png_with_an_icc_profile_too_large_to_read_is_refused(store: AssetStore) -> None:
+    profile = b"icc\x00\x00" + zlib.compress(b"\x00" * (PngImagePlugin.MAX_TEXT_CHUNK + 10))
+    with pytest.raises(AssetRejectedError, match="metadata too large to read"):
+        store.put(_with_chunk(b"iCCP", profile), "profiled.png")
+
+
+def test_text_chunks_over_pillows_total_limit_are_metadata_too_large(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pillow's other metadata limit, on every text chunk together (MAX_TEXT_MEMORY),
+    is refused as metadata too, not as an unreadable PNG. Lowered here, as the real
+    limit is 64 MiB of text."""
+    monkeypatch.setattr(PngImagePlugin, "MAX_TEXT_MEMORY", 64)
+    with pytest.raises(AssetRejectedError, match="metadata too large to read"):
+        store.put(_with_chunk(b"tEXt", b"Comment\x00" + b"x" * 200), "chatty.png")
+
+
+def test_another_value_error_pillow_raises_is_an_unreadable_png(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only Pillow's chunk limit is "metadata too large": any other ValueError it
+    raises while decoding is refused as an unreadable PNG."""
+
+    def broken(*_: object, **__: object) -> NoReturn:
+        raise ValueError("tile cannot extend outside image")
+
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(out, format="PNG")
+    monkeypatch.setattr(Image, "open", broken)
+    with pytest.raises(AssetRejectedError) as refused:
+        store.put(out.getvalue(), "broken.png")
+    assert str(refused.value) == "the file is not a readable PNG; re-export it as PNG and try again"
 
 
 def test_a_png_pillow_refuses_as_a_bomb_is_refused_as_too_large(store: AssetStore) -> None:

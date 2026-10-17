@@ -1,8 +1,12 @@
 import { useId, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { BUDGET_WARNING, budgetUsed, type SessionState } from '../../agent/chat/state'
-import { Button } from '../ui/Button'
-import { Spinner } from '../ui/Spinner'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Spinner } from '../ui/spinner'
 
 /** agent `sessions/manager.ts` MAX_SESSION_BUDGET_USD: no chat's budget goes past it. */
 const MAX_BUDGET_USD = 100
@@ -31,11 +35,11 @@ export function BudgetMeter({ session }: { session: SessionState }) {
         aria-valuemax={100}
         aria-valuenow={percent}
         aria-valuetext={`${usd(session.budget.costUsd)} of ${usd(session.budget.budgetUsd)}`}
-        className="h-1 w-16 overflow-hidden rounded-full bg-surface-3"
+        className="h-1.5 w-16 overflow-hidden rounded-full bg-muted"
       >
-        <div className={`h-full ${used >= BUDGET_WARNING ? 'bg-warn' : 'bg-accent'}`} style={{ width: `${percent}%` }} />
+        <div className={`h-full rounded-full ${used >= BUDGET_WARNING ? 'bg-warn' : 'bg-primary'}`} style={{ width: `${percent}%` }} />
       </div>
-      <span className="sb-num text-faint">
+      <span className="sb-num text-muted-foreground">
         {usd(session.budget.costUsd)} of {usd(session.budget.budgetUsd)}
       </span>
       {close && <span className="text-warn">This chat is close to its budget.</span>}
@@ -86,29 +90,39 @@ export function BudgetSpent({ session, onContinue, onRaise, onStartNew }: SpentP
   }
 
   return (
-    <div role="region" aria-label="Chat budget" className="rounded-[6px] border border-warn/40 bg-warn/5 p-2.5 text-[12.5px]">
+    <Card
+      size="sm"
+      role="region"
+      aria-label="Chat budget"
+      className="gap-1 bg-destructive/5 px-3 text-[12.5px] ring-destructive/40"
+    >
+      <Collapsible open={raising} onOpenChange={setRaising}>
       <p className="font-medium">
         {budget === undefined ? 'This chat used its budget.' : `This chat used its ${usd(budget)} budget.`}
       </p>
-      <p className="mt-0.5 text-muted">Continue in a new chat with this conversation and a fresh budget, or raise this one.</p>
+      <p className="mt-0.5 text-muted-foreground">Continue in a new chat with this conversation and a fresh budget, or raise this one.</p>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <Button size="sm" variant="primary" disabled={busy !== null} aria-busy={busy === 'continue'} onClick={() => void run('continue', onContinue)}>
+        <Button size="sm" disabled={busy !== null} aria-busy={busy === 'continue'} onClick={() => void run('continue', onContinue)}>
           {busy === 'continue' && <Spinner />}
           Continue in a new chat
         </Button>
         {room > 0 && (
-          <Button size="sm" disabled={busy !== null} aria-expanded={raising} onClick={() => setRaising((r) => !r)} {...USER_ONLY}>
-            Raise this chat&rsquo;s budget
-          </Button>
+          <CollapsibleTrigger asChild>
+            <Button size="sm" variant="outline" disabled={busy !== null} {...USER_ONLY}>
+              Raise this chat&rsquo;s budget
+            </Button>
+          </CollapsibleTrigger>
         )}
         <Button size="sm" variant="ghost" disabled={busy !== null} onClick={onStartNew}>
           Start a new chat
         </Button>
       </div>
-      {raising && (
+      <CollapsibleContent asChild>
         <form onSubmit={raise} className="mt-2 flex flex-wrap items-center gap-1.5" {...USER_ONLY}>
-          <label htmlFor={amountId}>Add (USD)</label>
-          <input
+          <Label htmlFor={amountId} className="text-[12.5px] font-normal">
+            Add (USD)
+          </Label>
+          <Input
             id={amountId}
             type="number"
             inputMode="decimal"
@@ -118,19 +132,20 @@ export function BudgetSpent({ session, onContinue, onRaise, onStartNew }: SpentP
             required
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
-            className="sb-field sb-num w-24"
+            className="sb-num h-7 w-24"
           />
-          <Button type="submit" size="sm" variant="primary" disabled={busy !== null} aria-busy={busy === 'raise'}>
+          <Button type="submit" size="sm" disabled={busy !== null} aria-busy={busy === 'raise'}>
             {busy === 'raise' && <Spinner />}
             Raise
           </Button>
         </form>
-      )}
+      </CollapsibleContent>
       {error && (
         <p role="alert" className="mt-1.5 text-warn">
           {error}
         </p>
       )}
-    </div>
+      </Collapsible>
+    </Card>
   )
 }

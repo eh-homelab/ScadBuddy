@@ -36,6 +36,9 @@ RunFn = Callable[[dict[str, Any], dict[str, Any]], Coroutine[Any, Any, dict[str,
 class OperationKind:
     name: str
     check: CheckFn
+    #: Returns the route's answer model's ``model_dump(mode="json")``: a follow of a 202
+    #: (`follow_command`) sends that stored result as it is, where the route validates
+    #: it into its model (review #2836, #3038).
     run: RunFn
     #: 1 unless Bambuddy dedupes the effect (§4.2: a repeat never repeats the effect).
     #: Above 1, a transient Bambuddy failure is retried too, not only a crash (#1144).
@@ -44,8 +47,8 @@ class OperationKind:
     #: How long one run may take; the workflow's ``RUN_TIMEOUT`` when None.
     run_timeout: timedelta | None = None
     #: What to check before repeating an effect that may have happened ("Check
-    #: Bambuddy ..."); its queue's ``WHERE`` when None.
-    where: str | None = None
+    #: Bambuddy ..."); its queue's ``WHERE`` when left empty, so never empty once made.
+    where: str = ""
     #: Another kind, on its own queue, whose run goes first (#1060): the part of this
     #: kind's effect that needs what its queue's worker does not hold. Only when
     #: ``needs_prelude`` says the request needs it.
@@ -60,7 +63,7 @@ class OperationKind:
         # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
         if self.run_attempts < 1:
             raise ValueError(f"{self.name!r}: run_attempts must be at least 1")
-        if self.where is None:
+        if not self.where:
             object.__setattr__(self, "where", WHERE[self.queue])
 
 
@@ -129,6 +132,10 @@ class ThreadSteps:
 #: The run's steps, set by the run's activity (`workflows/operation_activities.py`);
 #: None outside one.
 THREAD_STEPS: ContextVar[ThreadSteps | None] = ContextVar("thread_steps", default=None)
+#: The operation a run belongs to (its workflow's id, the same on every attempt), set by
+#: the run's activity; None outside one. A run's claim is keyed by it, so the same
+#: operation's retry can take its own claim back.
+OPERATION_RUN: ContextVar[str | None] = ContextVar("operation_run", default=None)
 
 
 async def to_thread_to_end[T](fn: Callable[[], T], landed: Callable[[T], None] | None = None) -> T:

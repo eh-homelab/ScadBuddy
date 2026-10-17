@@ -1,17 +1,19 @@
 """The host functions and result types a flow script sees, for the editor's completion
-and hover (#2487). Rendered on each call by the harness from `SCRIPT_TOOLS`, the list
-`check_script`'s type check is built over, so the two never drift."""
+and hover (#2487). Rendered on each call by the harness from `HOST_FUNCTIONS`, the
+list `check_script`'s type check is built over, so the two never drift."""
 
 from __future__ import annotations
 
 import ast
 import copy
 from collections.abc import Mapping
+from typing import Any
 
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
 
-from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
+from scadbuddy.flows.inputs import schema_problems
+from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS, inputs_tool
 
 
 class HostFunction(BaseModel):
@@ -45,10 +47,18 @@ class HostInterface(BaseModel):
 
 
 def host_interface(
-    tool_tiers: Mapping[str, str], *, tools_unavailable: str | None = None
+    tool_tiers: Mapping[str, str],
+    *,
+    tools_unavailable: str | None = None,
+    inputs_schema: dict[str, Any] | None = None,
 ) -> HostInterface:
-    """The host functions and types, and the agent's tools at `tool_tiers`."""
-    source = render_host_interface(SCRIPT_TOOLS)
+    """The host functions and types, and the agent's tools at `tool_tiers`. With a flow's
+    `inputs_schema` (#2651), `inputs()` and its `FlowInputs` too, as the type check gives
+    that flow; a schema the check refuses gives none, its problems being the check's."""
+    functions_offered = HOST_FUNCTIONS
+    if inputs_schema is not None and not schema_problems(inputs_schema):
+        functions_offered = [*HOST_FUNCTIONS, inputs_tool(inputs_schema)]
+    source = render_host_interface(functions_offered)
     functions: list[HostFunction] = []
     types: list[HostType] = []
     for node in ast.parse(source).body:

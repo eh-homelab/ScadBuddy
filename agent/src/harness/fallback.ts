@@ -17,6 +17,7 @@ import {
   cooldownUntil,
   probeCredential,
 } from './credentialErrors.js'
+import { CONTINUE_PROMPT } from './continuePrompt.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from './run.js'
 
 // Several Claude credentials, in priority order, with fallback (#1093).
@@ -109,7 +110,7 @@ export type AttemptOutcome =
 /** Where a turn gets its credentials (CredentialPool; a fixed one in tests). */
 export type CredentialSource = {
   /** Usable credentials, in priority order; throws (NoUsableCredentialError) when none is usable now. */
-  candidates(): Promise<PooledCredential[]>
+  candidates(options?: { includeCooling?: boolean }): Promise<PooledCredential[]>
   /** `runWithFallback`'s `report` for one turn, which its audit rows name. */
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
@@ -124,9 +125,7 @@ export class NoUsableCredentialError extends Error {
   }
 }
 
-/** Sent as the next credential's prompt when it resumes a turn another one started. */
-export const CONTINUE_PROMPT =
-  'The request to the model failed and was sent again with another Claude credential. Continue where you left off.'
+export { CONTINUE_PROMPT }
 
 /** Claude Code's retries of a transient failure on one credential, when there is another to fall back to. */
 export const DEFAULT_TRANSIENT_RETRIES = 2
@@ -160,12 +159,22 @@ export type FallbackOptions = {
    */
   onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
   /**
-   * Called as each attempt after the first starts, once the caller has seen
-   * every message of the attempts before it. The caller cannot tell otherwise:
-   * only the first attempt's init message is passed on. The session manager
-   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
+   * Called as each attempt starts, the first included (`index` 0), once the
+   * caller has seen every message of the attempts before it. The caller cannot
+   * tell otherwise: only the first attempt's init message is passed on. The
+   * session manager forgets the earlier attempts' unfinished requests on each
+   * attempt after the first (unpricedSpend.ts, #1666), and points the turn's own
+   * model calls (WebFetch's nested query) at the credential the attempt is on
+   * (#2973), so it need not know which candidate comes first (#3508 review).
    */
-  onAttempt?: () => void
+  onAttempt?: (credential: PooledCredential, index: number) => void
+  /**
+   * The SDK session every attempt runs in, when the caller fixes it: a warm
+   * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
+   * a turn it serves after its first sees no init message. A failed attempt
+   * is then continued there as one that reported an init is.
+   */
+  session?: string
 }
 
 /**
@@ -301,8 +310,8 @@ export async function* runWithFallback(
   let continuing = false
 
   for (let i = 0; i < candidates.length; i++) {
-    if (i > 0) options.onAttempt?.()
     const current = candidates[i] as PooledCredential
+    options.onAttempt?.(current, i)
     const next = candidates[i + 1]
     const controller = linked(base.signal)
     const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base
@@ -334,7 +343,7 @@ export async function* runWithFallback(
     /** The retry this attempt was stopped at. */
     let refused: FailureEvidence | undefined
     let progressed = false
-    let sessionSeen: string | undefined
+    let sessionSeen: string | undefined = options.session
     let model: string | undefined
     let thrown: unknown
     try {
@@ -366,7 +375,9 @@ export async function* runWithFallback(
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
             // (sdk.mjs 0.3.283 and 0.3.287), so a retry or two may still go
             // out in that grace; they are refused like the first and cost
-            // nothing.
+            // nothing. On a warm process (sessions/warmTurn.ts) the abort
+            // lets the live process end on its own first, so the return()
+            // waits up to warm.ts DRAIN_MS before the next attempt.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
           }
@@ -532,8 +543,12 @@ export class CredentialPool implements CredentialSource {
     this.log = options.log ?? ((line) => console.warn(line))
   }
 
-  /** Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none. */
-  async candidates(): Promise<PooledCredential[]> {
+  /**
+   * Usable credentials, decrypted, in priority order; throws NoUsableCredentialError when there is none.
+   * `includeCooling` also lists a rate-limited one (the warm resync looks for the credential a process
+   * runs on, which a cooldown does not end); a disabled one is never listed.
+   */
+  async candidates(options: { includeCooling?: boolean } = {}): Promise<PooledCredential[]> {
     const kek = this.kek
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
     // One SELECT for every row, its state, epoch and sealed secret together:
@@ -542,7 +557,7 @@ export class CredentialPool implements CredentialSource {
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {
-      if (c.status !== 'active' || !credential) continue
+      if (!credential || (c.status !== 'active' && !(options.includeCooling && c.status === 'cooling_down'))) continue
       out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
     }
     if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))

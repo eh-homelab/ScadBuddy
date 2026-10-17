@@ -191,8 +191,13 @@ async def test_outputs_with_the_same_parts_are_told_apart_by_their_saved_index(
     second = written.record.model_copy(update={"output_index": 1})
     assert choose_output(both, second) is twin
     assert choose_output(both, written.record.model_copy(update={"output_index": 0})) is written
-    with pytest.raises(AmbiguousOutputError):
+    with pytest.raises(AmbiguousOutputError) as unrecorded:
         choose_output(both, written.record)  # saved before the index was recorded
+    assert unrecorded.value.recorded_index is None
+    with pytest.raises(AmbiguousOutputError) as elsewhere:
+        # Recorded, but the re-render's outputs with these Parts are not at that index.
+        choose_output(both, written.record.model_copy(update={"output_index": 2}))
+    assert elsewhere.value.recorded_index == 2
 
 
 async def test_a_saved_output_records_which_of_its_jobs_outputs_it_is(tmp_path: Path) -> None:
@@ -219,6 +224,30 @@ async def test_an_ambiguous_rerender_fails_the_backfill_and_says_why(
         assert attach_backfills(store, BlobRefs(pool), _jobs(rerender)) == 0
     state = store.backfill(old.id)
     assert state is not None and state.error is not None and "several outputs" in state.error
+    assert "saved before outputs recorded" in state.error
+    assert store.manifest(old.id) == []
+
+
+@pytest.mark.requires_postgres
+async def test_an_ambiguous_rerender_of_an_output_with_an_index_says_it_is_not_there(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#3142: an output that did record its index, which none of the matching outputs
+    has, was told it was saved before outputs recorded one."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    (store.directory(old.id) / "record.json").write_text(
+        written.record.model_copy(update={"output_index": 2}).model_dump_json(),
+        encoding="utf-8",
+    )
+    twin = written.model_copy(update={"name": "second layout"})
+    rerender = job.model_copy(update={"outputs": [written, twin]})
+    with store_pool(pg_conninfo) as pool:
+        assert attach_backfills(store, BlobRefs(pool), _jobs(rerender)) == 0
+    state = store.backfill(old.id)
+    assert state is not None and state.error is not None and "several outputs" in state.error
+    assert "saved before outputs recorded" not in state.error
+    assert "not among them" in state.error
     assert store.manifest(old.id) == []
 
 
@@ -359,11 +388,14 @@ async def test_a_job_that_does_not_validate_is_retried_not_failed(
 
 @pytest.mark.requires_postgres
 async def test_a_job_that_never_validates_logs_its_trace_once(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    pg_conninfo: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1007 re-review: retried every pass, a row that never validates logged a full
     trace each time. Once per job, then a warning."""
-    backfill_module._unreadable_jobs.clear()
+    monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
     store, old, job, _ = await _legacy_output(tmp_path)
     store.start_backfill(old.id, job.id)
 
@@ -380,6 +412,31 @@ async def test_a_job_that_never_validates_logs_its_trace_once(
     mine = [r for r in caplog.records if r.name == "scadbuddy.library.backfill"]
     assert [r.exc_info is not None for r in mine] == [True, False, False]
     assert [r.levelno for r in mine] == [logging.ERROR, logging.WARNING, logging.WARNING]
+
+
+@pytest.mark.requires_postgres
+async def test_a_pass_forgets_an_unreadable_job_no_output_waits_on(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3143: a job whose row never validated, and whose outputs then stopped waiting on
+    it, was kept for the life of the process. A full pass keeps only the jobs pending."""
+    monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
+    store, old, job, _ = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+
+    def unreadable(job_id: str) -> Job:
+        Job.model_validate({"id": job_id})
+        raise AssertionError("unreachable")
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, unreadable) == 0
+        assert backfill_module._unreadable_jobs == {job.id}
+        assert attach_backfills(store, refs, unreadable) == 0
+        assert backfill_module._unreadable_jobs == {job.id}  # still waited on
+        store.clear_backfill(old.id)
+        assert attach_backfills(store, refs, unreadable) == 0
+    assert backfill_module._unreadable_jobs == set()
 
 
 @pytest.mark.requires_postgres

@@ -56,18 +56,27 @@ async def test_the_housekeeping_sweep_removes_old_claims(tmp_path: Path) -> None
     from types import SimpleNamespace
 
     from scadbuddy.core.paths import DataPaths
-    from scadbuddy.main import _housekeeping_activities
+    from scadbuddy.main import BATCH_TTL, _housekeeping_activities
     from scadbuddy.workflows.housekeeping import SWEEPS
 
     paths = DataPaths(tmp_path)
     old = ClaimStore(paths.claims).put(b"old")
     past = time.time() - timedelta(days=2).total_seconds()
     os.utime(paths.claims / old, (past, past))
-    state = SimpleNamespace(paths=paths)
+    pruned: list[timedelta] = []
+
+    async def prune(ttl: timedelta) -> int:
+        pruned.append(ttl)
+        return 0
+
+    batches = SimpleNamespace(prune=prune)
+    state = SimpleNamespace(paths=paths, components=SimpleNamespace(get=lambda key: batches))
     sweeps = {fn.__temporal_activity_definition.name: fn for fn in _housekeeping_activities(state)}  # type: ignore[arg-type, attr-defined]
     await sweeps["housekeeping_sweep_claims"]()
     assert "housekeeping_sweep_claims" in SWEEPS
     assert not (paths.claims / old).exists()
+    # #2718: the same sweep forgets batch prints left untouched.
+    assert pruned == [BATCH_TTL]
 
 
 def test_a_put_survives_the_sweep_removing_the_claim_under_it(

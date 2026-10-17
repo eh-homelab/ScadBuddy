@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import { useAsync } from '../lib/useAsync'
-import { Spinner } from './ui/Spinner'
+import { SettingBody, SettingCard, SwitchField } from './settings/form'
 
 /**
  * #1911 — lets the AI assistant and MCP clients see a printer's camera (the
@@ -36,32 +35,26 @@ export function PrinterCameraSetting() {
   }
 
   return (
-    <section className="mt-4 rounded-[6px] border border-line bg-surface">
-      <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Printer camera</h2>
-      <div className="p-4">
-        <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={saving}
-            aria-busy={saving}
-            onChange={(event) => void toggle(event.target.checked)}
-            className="mt-0.5"
-            aria-describedby="printer-camera-help"
-          />
-          Let the assistant see printers&rsquo; cameras
-          {saving && <Spinner />}
-        </label>
-        <p id="printer-camera-help" className="mt-1.5 text-[12px] text-muted">
+    <SettingCard title="Printer camera">
+      <SettingBody className="space-y-1.5">
+        <SwitchField
+          label={<>Let the assistant see printers&rsquo; cameras</>}
+          checked={enabled}
+          disabled={saving}
+          busy={saving}
+          onCheckedChange={(next) => void toggle(next)}
+          describedBy="printer-camera-help"
+        />
+        <p id="printer-camera-help" className="text-xs text-muted-foreground">
           A camera frame shows whatever is in view of the printer, not only the print. Applies to the
           assistant and to MCP clients; while off, they are told the camera is turned off here.
         </p>
         {error && (
-          <p role="alert" className="mt-1.5 text-[12px] text-warn">
+          <p role="alert" className="text-xs text-warn">
             {error}
           </p>
         )}
-      </div>
-    </section>
+      </SettingBody>
+    </SettingCard>
   )
 }

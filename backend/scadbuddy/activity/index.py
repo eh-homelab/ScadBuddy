@@ -8,6 +8,7 @@ import binascii
 import builtins
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -143,6 +144,28 @@ def _escape_like(text: str) -> str:
 
 #: Placeholders are never read.
 _VISIBLE = sql.SQL("source <> ''")
+
+#: One key per subject, as the facet counts it and the filter matches it (#3856). A
+#: library file's print run is written ``library-<id>`` (``library_slug``) and its print
+#: subject ``library:<id>``; an output's run its bare id (``run_subject``) and its subject
+#: ``output:<id>``. Both are read as the ``kind:id`` key; the rows keep what was written.
+#: A model slug of exactly 32 hex digits would read as an output: none is made that way.
+_LIBRARY_RUN = re.compile(r"library-([0-9]+)")
+_OUTPUT_ID = re.compile(r"[0-9a-f]{32}")
+_SUBJECT_KEY = sql.SQL(
+    "CASE WHEN subject ~ '^library-[0-9]+$' THEN 'library:' || substr(subject, 9)"
+    " WHEN subject ~ '^[0-9a-f]{32}$' THEN 'output:' || subject ELSE subject END"
+)
+
+
+def subject_key(subject: str) -> str:
+    """``subject`` as :data:`_SUBJECT_KEY` reads it: the key one subject is counted and
+    filtered under, whichever spelling wrote it."""
+    if match := _LIBRARY_RUN.fullmatch(subject):
+        return f"library:{match[1]}"
+    if _OUTPUT_ID.fullmatch(subject):
+        return f"output:{subject}"
+    return subject
 
 
 def _where(conditions: list[sql.Composable]) -> sql.Composable:
@@ -288,17 +311,23 @@ class ActivityIndex:
         with self.pool.connection() as conn, conn.transaction():
             if self.events is not None:
                 hold_event_log(conn)  # before the row, as upsert_in does
-            conn.execute(
+            # Only a row this fills in is written and announced: a follow that answers
+            # again finds it attributed, and fans out no event for it (#3566).
+            changed = conn.execute(
                 "INSERT INTO activity"
                 " (id, kind, principal, session, via_tool, status, title, source, source_id)"
                 " VALUES (%s, '', %s, %s, %s, 'queued', '', '', '')"
                 " ON CONFLICT (id) DO UPDATE SET"
                 " principal = coalesce(activity.principal, EXCLUDED.principal),"
                 " session = coalesce(activity.session, EXCLUDED.session),"
-                " via_tool = coalesce(activity.via_tool, EXCLUDED.via_tool)",
+                " via_tool = coalesce(activity.via_tool, EXCLUDED.via_tool)"
+                " WHERE (activity.principal IS NULL AND EXCLUDED.principal IS NOT NULL)"
+                " OR (activity.session IS NULL AND EXCLUDED.session IS NOT NULL)"
+                " OR (activity.via_tool IS NULL AND EXCLUDED.via_tool IS NOT NULL)"
+                " RETURNING id",
                 (activity_id, principal, session, via_tool),
-            )
-            if self.events is not None:
+            ).fetchone()
+            if changed is not None and self.events is not None:
                 self.events.publish_in(
                     conn, ActivityEvent(activity_id=activity_id, principal=principal)
                 )
@@ -527,12 +556,15 @@ class ActivityIndex:
             ("principal", filters.principal),
             ("session", filters.session),
             ("via_tool", filters.via_tool),
-            ("subject", filters.subject),
             ("parent_id", filters.parent),
         ):
             if value is not None:
                 where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
                 params.append(value)
+        if filters.subject is not None:
+            # Either spelling finds the rows of both (#3856).
+            where.append(sql.SQL("{} = %s").format(_SUBJECT_KEY))
+            params.append(subject_key(filters.subject))
         if filters.q is not None:
             add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
         if filters.since is not None:
@@ -580,11 +612,15 @@ class ActivityIndex:
                 present = sql.SQL("{} IS NOT NULL").format(sql.Identifier(column))
                 if blank is not None:
                     present = sql.SQL("{} <> ''").format(sql.Identifier(column))
+                # A subject is counted once under its key, whichever spelling wrote it (#3856).
+                value: sql.Composable = (
+                    _SUBJECT_KEY if column == "subject" else sql.Identifier(column)
+                )
                 found = conn.execute(
                     sql.SQL(
-                        "SELECT {c} AS value, count(*) AS count FROM activity"
-                        " WHERE {where} AND {present} GROUP BY {c} ORDER BY count DESC, {c}"
-                    ).format(c=sql.Identifier(column), where=where, present=present),
+                        "SELECT {v} AS value, count(*) AS count FROM activity"
+                        " WHERE {where} AND {present} GROUP BY 1 ORDER BY count DESC, 1"
+                    ).format(v=value, where=where, present=present),
                     [start],
                 ).fetchall()
                 counted[column] = [Count(r["value"], r["count"]) for r in found]

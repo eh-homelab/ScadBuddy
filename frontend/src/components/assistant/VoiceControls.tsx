@@ -8,7 +8,10 @@ import {
   useSpeakReplies,
 } from '../../agent/chat/voice'
 import { openExternal } from '../../lib/embed'
-import { Button } from '../ui/Button'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+import { Toggle } from '@/components/ui/toggle'
+import { Tip } from './Tip'
 import type { Dictation } from './useVoice'
 
 /** A press held at least this long is push-to-talk: letting go stops listening. */
@@ -47,20 +50,21 @@ export function MicButton({
   if (!recognitionCtor()) return null
   if (embedded && (dictation.blocked || microphoneAllowedByPolicy() === false)) {
     return (
-      <Button
-        size="sm"
-        variant="ghost"
-        title="Bambuddy doesn’t give its embedded pages the microphone"
-        disabled={disabled}
-        aria-describedby={describedBy}
-        onClick={() => {
-          if (!disabled) openExternal(window.location.href, true)
-        }}
-        {...USER_ONLY}
-      >
-        <MicIcon />
-        Open in a new tab to use voice
-      </Button>
+      <Tip wrap={disabled} content="Bambuddy doesn’t give its embedded pages the microphone">
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={disabled}
+          aria-describedby={describedBy}
+          onClick={() => {
+            if (!disabled) openExternal(window.location.href, true)
+          }}
+          {...USER_ONLY}
+        >
+          <MicIcon />
+          Open in a new tab to use voice
+        </Button>
+      </Tip>
     )
   }
 
@@ -83,25 +87,28 @@ export function MicButton({
   }
 
   return (
-    <Button
-      size="sm"
-      variant={dictation.listening ? 'primary' : 'default'}
-      aria-label="Voice input"
-      aria-pressed={dictation.listening}
-      aria-describedby={describedBy}
-      title="Press to talk and press again to stop, or hold while you speak"
-      disabled={disabled}
-      onPointerDown={onPointerDown}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
-      onClick={onClick}
-      {...USER_ONLY}
-    >
-      {dictation.listening && (
-        <span aria-hidden="true" className="h-2 w-2 rounded-full bg-accent-ink motion-safe:animate-pulse" />
-      )}
-      <MicIcon />
-    </Button>
+    <Tip wrap={disabled} content="Press to talk and press again to stop, or hold while you speak">
+      {/* Pressed while listening; the presses are handled above, not by the toggle itself. */}
+      <Toggle
+        size="sm"
+        variant="outline"
+        className="data-[state=on]:border-primary data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
+        aria-label="Voice input"
+        pressed={dictation.listening}
+        aria-describedby={describedBy}
+        disabled={disabled}
+        onPointerDown={onPointerDown}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onClick={onClick}
+        {...USER_ONLY}
+      >
+        {dictation.listening && (
+          <span aria-hidden="true" className="h-2 w-2 rounded-full bg-primary-foreground motion-safe:animate-pulse" />
+        )}
+        <MicIcon />
+      </Toggle>
+    </Tip>
   )
 }
 
@@ -116,7 +123,7 @@ export function MicButton({
 export function VoiceDisclosure({ id }: { id: string }) {
   if (!recognitionCtor()) return null
   return (
-    <p id={id} className="mt-1 text-[11px] text-faint">
+    <p id={id} className="mt-1 text-[11px] text-muted-foreground">
       Voice input is transcribed by your browser, which may send the audio to its maker’s servers.
     </p>
   )
@@ -127,8 +134,8 @@ export function SpeakRepliesToggle() {
   const on = useSpeakReplies()
   if (!speechSynthesisSupported()) return null
   return (
-    <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11.5px] text-muted" {...USER_ONLY}>
-      <input type="checkbox" checked={on} onChange={(event) => setSpeakReplies(event.target.checked)} {...USER_ONLY} />
+    <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] whitespace-nowrap text-muted-foreground" {...USER_ONLY}>
+      <Switch size="sm" checked={on} onCheckedChange={setSpeakReplies} {...USER_ONLY} />
       Read replies aloud
     </label>
   )

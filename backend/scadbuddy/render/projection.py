@@ -27,6 +27,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import (
     CANCELLED_ERROR,
+    SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
     QueueCounts,
@@ -144,12 +145,16 @@ RECENT_RENDERS = 20
 #: The shortest render `recent_render_seconds` counts: piece-cache hits finish in well
 #: under a second and say nothing about how long a full queue takes to drain.
 MIN_COUNTED_RENDER_SECONDS = 1.0
-#: The event a settled job announces; `core.events.JobKind` has no ``job.cancelled``.
-_FINISHED_KINDS: dict[str, JobKind] = {
-    "done": "job.done",
-    "failed": "job.failed",
-    "cancelled": "job.superseded",
-}
+#: The event a settled job announces. A cancelled one is `_cancelled_kind`'s.
+_FINISHED_KINDS: dict[str, JobKind] = {"done": "job.done", "failed": "job.failed"}
+
+
+def _settled_kind(state: str, error: str | None) -> JobKind:
+    """``job.superseded`` only for a job a newer render replaced: a subscriber reads it
+    as "a replacement exists". A release with none is ``job.cancelled`` (#607)."""
+    if state != "cancelled":
+        return _FINISHED_KINDS[state]
+    return "job.superseded" if error == SUPERSEDED_ERROR else "job.cancelled"
 
 
 def workflow_id_for(job_id: str) -> str:
@@ -400,7 +405,7 @@ class JobProjection:
             (now(), error, row["id"]),
         ).fetchone()
         assert dropped is not None
-        self._announce(conn, row["id"], row["slug"], "job.superseded")
+        self._announce(conn, row["id"], row["slug"], _settled_kind("cancelled", error))
         return _job(dropped)
 
     def release_claim(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
@@ -413,6 +418,21 @@ class JobProjection:
             if row is None:
                 return None
             return self._release(conn, row, error=error)
+
+    def drop_claims(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
+        """Cancel an unfinished row whatever claims it holds (#2387: its model is being
+        deleted). Returns the cancelled job, or None when it had already settled."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE render_jobs SET state = 'cancelled', claims = 0, finished_at = %s,"
+                " error = %s WHERE id = %s AND slug = %s AND state IN ('pending', 'running')"
+                " RETURNING *",
+                (now(), error, job_id, slug),
+            ).fetchone()
+            if row is None:
+                return None
+            self._announce(conn, row["id"], row["slug"], "job.superseded")
+        return _job(row)
 
     def fail_legacy_running(self) -> list[Job]:
         """At start-up: fail the rows a pre-Temporal release's queue left running (no
@@ -478,7 +498,7 @@ class JobProjection:
                 ),
             )
             if cursor.rowcount == 1:
-                self._announce(conn, job.id, job.slug, _FINISHED_KINDS[job.state])
+                self._announce(conn, job.id, job.slug, _settled_kind(job.state, job.error))
                 return True
             if job.state != "cancelled":
                 return False
@@ -523,6 +543,17 @@ class JobProjection:
     def list_jobs(self) -> list[Job]:
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM render_jobs ORDER BY created_at, id").fetchall()
+        return [_job(row) for row in rows]
+
+    def unfinished(self, slug: str) -> list[Job]:
+        """Every pending or running job of ``slug``: a render, or an arrange of its
+        outputs (#2387: what deleting the model cancels)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('pending', 'running')"
+                " ORDER BY created_at, id",
+                (slug,),
+            ).fetchall()
         return [_job(row) for row in rows]
 
     def has_unfinished(self, slug: str) -> bool:

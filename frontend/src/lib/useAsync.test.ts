@@ -222,26 +222,30 @@ it('does nothing with a background read that lands after unmount', async () => {
   }
   // No state update either: React would warn (an act() or unmounted-update warning).
   const errors = vi.spyOn(console, 'error')
-  const { result, unmount } = renderHook(() => useAsync(load, [], ['m']))
-  await waitFor(() => expect(result.current.data).toBe('first'))
-  const failed = vi.fn()
-  const accept = vi.fn(() => true)
-  act(() => result.current.refresh(undefined, failed))
-  await waitFor(() => expect(reads).toBe(2))
-  unmount()
-  await act(async () => fail(new Error('the agent went away')))
-  expect(failed).not.toHaveBeenCalled()
+  // Restored even when an assertion fails, so the spy never leaks into later tests (#3111).
+  try {
+    const { result, unmount } = renderHook(() => useAsync(load, [], ['m']))
+    await waitFor(() => expect(result.current.data).toBe('first'))
+    const failed = vi.fn()
+    const accept = vi.fn(() => true)
+    act(() => result.current.refresh(undefined, failed))
+    await waitFor(() => expect(reads).toBe(2))
+    unmount()
+    await act(async () => fail(new Error('the agent went away')))
+    expect(failed).not.toHaveBeenCalled()
 
-  const second = renderHook(() => useAsync(load, [], ['m']))
-  await waitFor(() => expect(reads).toBe(3))
-  await act(async () => pass('second'))
-  act(() => second.result.current.refresh(accept))
-  await waitFor(() => expect(reads).toBe(4))
-  second.unmount()
-  await act(async () => pass('late'))
-  expect(accept).not.toHaveBeenCalled()
-  expect(errors).not.toHaveBeenCalled()
-  errors.mockRestore()
+    const second = renderHook(() => useAsync(load, [], ['m']))
+    await waitFor(() => expect(reads).toBe(3))
+    await act(async () => pass('second'))
+    act(() => second.result.current.refresh(accept))
+    await waitFor(() => expect(reads).toBe(4))
+    second.unmount()
+    await act(async () => pass('late'))
+    expect(accept).not.toHaveBeenCalled()
+    expect(errors).not.toHaveBeenCalled()
+  } finally {
+    errors.mockRestore()
+  }
 })
 
 describe('with the socket already open (#1039)', () => {

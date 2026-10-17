@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any, BinaryIO
 
 import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import bambu3mf, zipcopy
 from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PROJECT_SETTINGS_NAME,
@@ -83,3 +86,30 @@ def test_a_file_without_covers_gets_none(tmp_path: Path) -> None:
 def test_a_colour_list_of_the_wrong_length_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="2 filament"):
         recolour_3mf(_written(tmp_path), ["#00C000"])
+
+
+def test_recolouring_copies_what_it_does_not_change_and_writes_nothing_to_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3679: the meshes are copied as their compressed bytes, not deflated again, and
+    the covers are drawn from the recoloured file in memory, not from a copy on disk."""
+    payload = _written(tmp_path)
+    copied: list[str] = []
+    real = zipcopy.copy_raw
+
+    def spy(source: BinaryIO, info: zipfile.ZipInfo, *args: Any, **kwargs: Any) -> None:
+        copied.append(info.filename)
+        real(source, info, *args, **kwargs)
+
+    def no_disk(*_: object, **__: object) -> None:
+        raise AssertionError("recolouring wrote a temporary file")
+
+    monkeypatch.setattr(bambu3mf, "copy_raw", spy)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", no_disk)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", no_disk)
+    recoloured = recolour_3mf(payload, ["#00C000", "#FF9425"])
+
+    assert {"3D/Objects/object_1.model", "3D/Objects/object_2.model"} <= set(copied)
+    assert PROJECT_SETTINGS_NAME not in copied
+    assert _colours(recoloured) == ["#00C000", "#FF9425"]
+    assert not np.array_equal(_cover(recoloured), _cover(payload))

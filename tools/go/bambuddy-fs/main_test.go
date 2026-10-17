@@ -21,8 +21,30 @@ func TestParseFlags(t *testing.T) {
 	if cfg.API != "http://h/api/v1" || !cfg.ReadOnly || cfg.TTL != 2*time.Second || cfg.Mountpoint != "/mnt/x" {
 		t.Fatalf("%+v", cfg)
 	}
-	if _, err := parse([]string{"mount", "/mnt/x"}); err == nil {
-		t.Fatal("--api is required")
+}
+
+func TestMountDefaultsItsAPIAndMountpoint(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	t.Setenv("BAMBUDDY_FS_API", "")
+	t.Setenv("BAMBUDDY_FS_DIR", "")
+	cfg, err := parse([]string{"mount"})
+	if err != nil || cfg.API != DefaultAPI || cfg.Mountpoint != "/home/u/bambuddy" {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+	t.Setenv("BAMBUDDY_FS_API", "http://env/api/v1")
+	t.Setenv("BAMBUDDY_FS_DIR", "/env/mnt")
+	cfg, err = parse([]string{"mount"})
+	if err != nil || cfg.API != "http://env/api/v1" || cfg.Mountpoint != "/env/mnt" {
+		t.Fatalf("env: %+v %v", cfg, err)
+	}
+	for _, cmd := range []string{"umount", "unmount", "status"} {
+		cfg, err := parse([]string{cmd, "--state-dir", "/s"})
+		if err != nil || cfg.Command != strings.Replace(cmd, "unmount", "umount", 1) || cfg.Mountpoint != "/env/mnt" || cfg.StateDir != "/s" {
+			t.Errorf("%s: %+v %v", cmd, cfg, err)
+		}
+		if cfg, err := parse([]string{cmd, "/m"}); err != nil || cfg.Mountpoint != "/m" {
+			t.Errorf("%s /m: %+v %v", cmd, cfg, err)
+		}
 	}
 }
 
@@ -76,7 +98,7 @@ func TestParseHelpAndErrors(t *testing.T) {
 			t.Errorf("%v: %v, want ErrHelp", args, err)
 		}
 	}
-	for _, args := range [][]string{{"unsent", "x"}, {"unsent", "--api", "http://h/api/v1"}, {"frobnicate"}, {"mount", "--api", "http://h/api/v1"}, {"mount", "--api", "http://h/api/v1", "a", "b"}, {"mount", "--bogus"}} {
+	for _, args := range [][]string{{"unsent", "x"}, {"unsent", "--api", "http://h/api/v1"}, {"frobnicate"}, {"mount", "--api", ""}, {"mount", "--api", "http://h/api/v1", "a", "b"}, {"mount", "--bogus"}, {"mount", "--allow-other", "--no-allow-other"}, {"umount", "a", "b"}, {"status", "--ro"}, {"allow-other", "x"}} {
 		if _, err := parse(args); err == nil || errors.Is(err, flag.ErrHelp) {
 			t.Errorf("%v: %v, want an error", args, err)
 		}

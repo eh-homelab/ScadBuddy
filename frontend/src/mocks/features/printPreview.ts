@@ -1,7 +1,8 @@
 import { HttpResponse, http } from 'msw'
-import type { Operation, OperationAccepted, PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
+import type { PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
 import { demoToolpath } from '../toolpath'
 import { H2C_FILE, assignH2cTray, h2cPlan, h2cSlice, resetH2c } from '../h2c'
+import { acceptOperation } from './operations'
 
 /**
  * #2169 — the print dialog's background slice: started per output or library file, then
@@ -23,17 +24,10 @@ function start(request: PrintRunRequest, h2c: boolean): PreviewStarted {
 /**
  * Since #2700 the backend answers a preview-slice start 202 with its running operation as
  * soon as it is recorded, and the dialog's `command()` follows it (#2824). Each start's
- * operation, finished with the slice's `PreviewStarted` on its first read.
+ * operation is recorded in `operations.ts`, finished with the slice's `PreviewStarted`.
  */
-const operations = new Map<string, Operation>()
-let nextOperation = 0
-
-function accepted(subject: string, result: PreviewStarted): HttpResponse<OperationAccepted> {
-  const created = new Date().toISOString()
-  const id = `preview${(++nextOperation).toString(16).padStart(30, '0')}`
-  const op = { id, kind: 'preview_slice', subject, status: 'running', created_at: created } as const
-  operations.set(id, { ...op, status: 'succeeded', finished_at: created, result: { ...result } })
-  return HttpResponse.json({ ...op, repeated: false }, { status: 202 })
+function accepted(subject: string, result: PreviewStarted) {
+  return acceptOperation('preview_slice', subject, { ...result })
 }
 
 export const handlers = [
@@ -54,18 +48,6 @@ export const handlers = [
       ? new HttpResponse(demoToolpath(), { headers: { 'Content-Type': 'application/octet-stream' } })
       : HttpResponse.json({ detail: 'there is no background slice' }, { status: 404 }),
   ),
-
-  // The operations the starts above recorded; no other mock records one.
-  http.get(`${base}/operations/:id`, ({ params }) => {
-    const op = operations.get(String(params['id']))
-    if (!op) {
-      return HttpResponse.json(
-        { title: 'Not Found', status: 404, detail: `there is no operation ${String(params['id'])}` },
-        { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
-      )
-    }
-    return HttpResponse.json(op)
-  }),
 
   http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params }) => {
     const jobId = Number(params['job'])
@@ -102,6 +84,5 @@ export const handlers = [
 
 export function reset(): void {
   jobs.clear()
-  operations.clear()
   resetH2c()
 }

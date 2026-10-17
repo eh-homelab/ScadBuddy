@@ -4,6 +4,7 @@ import { type AppDeps, createApp, type Health } from '../src/app.js'
 import type { Credential } from '../src/credentials.js'
 import type { ConnectionTest } from '../src/harness/testConnection.js'
 import { originPolicy } from '../src/http/origins.js'
+import { LEGACY_CREDENTIALS_DEPRECATED } from '../src/routes/credentials.js'
 import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -128,13 +129,30 @@ describe('/api/v1/ai/credentials', () => {
       await app.request('/api/v1/ai/credentials', { method: 'DELETE', headers: UI }),
     ]
     for (const res of legacy) {
-      expect(res.headers.get('deprecation'), res.url).toBe('true')
+      expect(res.headers.get('deprecation'), res.url).toBe(LEGACY_CREDENTIALS_DEPRECATED)
       expect(res.headers.get('link'), res.url).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
     }
     const current = await app.request('/api/v1/ai/credentials/entries', { headers: UI })
     expect(current.status).toBe(200)
     expect(current.headers.get('deprecation')).toBeNull()
     expect(current.headers.get('link')).toBeNull()
+  })
+
+  // A guard's refusal is an answer from a deprecated route too: the read guard's and the
+  // write guard's (#3557).
+  it('marks a legacy route deprecated even when a guard refuses it', async () => {
+    const app = createApp(deps())
+    const refused = [
+      await app.request('/api/v1/ai/credentials'),
+      await app.request('/api/v1/ai/credentials', { method: 'PUT', body: '{}' }),
+      await app.request('/api/v1/ai/credentials/test', { method: 'POST' }),
+      await app.request('/api/v1/ai/credentials', { method: 'DELETE' }),
+    ]
+    for (const res of refused) {
+      expect(res.status, res.url).toBe(403)
+      expect(res.headers.get('deprecation'), res.url).toBe(LEGACY_CREDENTIALS_DEPRECATED)
+      expect(res.headers.get('link'), res.url).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+    }
   })
 
   it('reads as unconfigured, and says whether saving is possible', async () => {

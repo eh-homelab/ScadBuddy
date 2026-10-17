@@ -22,10 +22,10 @@ function Hash() {
   return <output aria-label="address">{useLocation().hash}</output>
 }
 
-function Harness() {
+function Harness({ known }: { known?: readonly string[] }) {
   return (
     <MemoryRouter>
-      <SettingsCollapseProvider>
+      <SettingsCollapseProvider known={known}>
         <Hash />
         <SectionContents label="Assistant settings" items={GROUPS} />
         <SubSection id="g-model" title="Model & limits">
@@ -76,6 +76,20 @@ describe('SubSection and SectionContents (#2769)', () => {
     expect(screen.getByText('audit rows')).toBeVisible()
     // Scrolling to it is the section nav's, which follows the address (#2345).
     expect(screen.getByRole('status', { name: 'address' })).toHaveTextContent('#g-audit')
+  })
+
+  it('drops a fold the page no longer has from the stored list, keeping unrendered ones (#3415)', async () => {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(['g-renamed', 'g-hidden-today']))
+    const user = userEvent.setup()
+    render(<Harness known={[...GROUPS.map((group) => group.id), 'g-hidden-today']} />)
+    await user.click(screen.getByRole('button', { name: 'Audit log' }))
+    expect(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')).toEqual(['g-hidden-today', 'g-audit'])
+  })
+
+  it('drops a stale fold on mount, without waiting for a toggle (#3415 review)', () => {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(['g-renamed', 'g-audit']))
+    render(<Harness known={GROUPS.map((group) => group.id)} />)
+    expect(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')).toEqual(['g-audit'])
   })
 
   it('opens everything when the browser keeps nothing readable', () => {

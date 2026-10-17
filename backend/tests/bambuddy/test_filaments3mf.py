@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError, model_key, read_filaments
+from scadbuddy.bambuddy.filaments3mf import (
+    UnreadableFilamentsError,
+    model_key,
+    read_filaments,
+    same_family,
+)
 
 SETTINGS = {
     "filament_colour": ["#FF0000", "#0000FF", "#FFFFFF"],
@@ -228,11 +233,91 @@ def test_printer_models_compare_across_bambu_studio_and_bambuddy(
     assert (model_key(studio) == model_key(bambuddy)) is same
 
 
-def test_only_the_model_names_known_to_differ_are_aliased() -> None:
-    """#2691 review: X1 Carbon is the one name Bambu Studio and Bambuddy are known to
-    spell differently. Any other difference (a "Combo" suffix, say) is not matched, so
-    the file is held for a manual start: the safe side until #2956 sources the names."""
-    from scadbuddy.bambuddy import filaments3mf
+#: Every model Bambu Studio writes as ``printer_model`` (``machine_model_list`` in
+#: bambulab/BambuStudio@47a13eeb ``resources/profiles/BBL.json``), beside the short name
+#: Bambuddy stores as ``Printer.model`` for it (``PRINTER_MODEL_MAP`` in
+#: maziggy/bambuddy@943f3587 ``backend/app/utils/printer_models.py``) (#2956).
+STUDIO_TO_BAMBUDDY = {
+    "Bambu Lab X1 Carbon": "X1C",
+    "Bambu Lab X1": "X1",
+    "Bambu Lab X1E": "X1E",
+    "Bambu Lab P1P": "P1P",
+    "Bambu Lab P1S": "P1S",
+    "Bambu Lab A1 mini": "A1 Mini",
+    "Bambu Lab A1": "A1",
+    "Bambu Lab H2D": "H2D",
+    "Bambu Lab H2D Pro": "H2D Pro",
+    "Bambu Lab H2S": "H2S",
+    "Bambu Lab P2S": "P2S",
+    "Bambu Lab H2C": "H2C",
+    "Bambu Lab X2D": "X2D",
+    "Bambu Lab A2L": "A2L",
+    # Bambuddy's note: newer cloud presets write the short form (its #1649).
+    "Bambu Lab A1M": "A1 Mini",
+}
+#: The code a printer announces over SSDP (``DevModel``), which Bambuddy may keep as
+#: ``Printer.model``, beside its short name (``PRINTER_MODEL_ID_MAP``, same file).
+DEVICE_CODES = {
+    "BL-P001": "X1C",
+    "BL-P002": "X1",
+    "C13": "X1E",
+    "C11": "P1P",
+    "C12": "P1S",
+    "N7": "P2S",
+    "N6": "X2D",
+    "N9": "A2L",
+    "A11": "A1",
+    "A12": "A1 Mini",
+    "N1": "A1 Mini",
+    "N2S": "A1",
+    "A04": "A1 Mini",
+    "O1D": "H2D",
+    "O1E": "H2D Pro",
+    "O2D": "H2D Pro",
+    "O1C": "H2C",
+    "O1C2": "H2C",
+    "O1S": "H2S",
+}
 
-    assert filaments3mf._MODEL_ALIASES == {"X1CARBON": "X1C"}
+
+@pytest.mark.parametrize(("studio", "bambuddy"), STUDIO_TO_BAMBUDDY.items())
+def test_every_model_bambu_studio_names_matches_bambuddys_name_for_it(
+    studio: str, bambuddy: str
+) -> None:
+    """#2956: a file sliced for a model fits a printer Bambuddy names that model, and
+    no other model's name."""
+    assert model_key(studio) == model_key(bambuddy)
+    others = {name for name in STUDIO_TO_BAMBUDDY.values() if name != bambuddy}
+    assert all(model_key(studio) != model_key(other) for other in others)
+
+
+@pytest.mark.parametrize(("code", "bambuddy"), DEVICE_CODES.items())
+def test_a_printer_bambuddy_keeps_by_its_device_code_matches_its_model(
+    code: str, bambuddy: str
+) -> None:
+    assert model_key(code) == model_key(bambuddy)
+
+
+def test_a_name_neither_table_lists_is_not_matched_to_another() -> None:
+    """A difference no source accounts for (a "Combo" suffix, say) is not matched, so
+    the file is held for a manual start: the safe side."""
     assert model_key("Bambu Lab P1S Combo") != model_key("P1S")
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "family"),
+    [
+        ("Bambu Lab X1 Carbon", "P1S", True),
+        ("Bambu Lab X1E", "X1C", True),
+        ("C11", "Bambu Lab X1", True),
+        ("Bambu Lab X1 Carbon", "X1C", False),  # one model, not a family match
+        ("Bambu Lab X1 Carbon", "H2C", False),
+        ("Bambu Lab A1 mini", "A1", False),  # Bambuddy lists no A1 family
+        ("Bambu Lab P2S", "P1S", False),
+    ],
+)
+def test_only_bambuddys_g_code_family_counts_as_another_model_that_fits(
+    a: str, b: str, family: bool
+) -> None:
+    """#2956: ``GCODE_COMPAT_FAMILIES`` (Bambuddy, same file) is the X1 and P1 series."""
+    assert same_family(model_key(a), model_key(b)) is family

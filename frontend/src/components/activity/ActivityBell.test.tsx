@@ -60,6 +60,50 @@ describe('ActivityBell', () => {
     expect(screen.getByText(/Render box/, { selector: 'li span' })).toBeInTheDocument()
   })
 
+  // #3706: a read that settles after the bell is gone, as a test's teardown leaves one, must
+  // set no state. React's dispatchSetState reads `window` first, so with the environment torn
+  // down (no `window`) any update threw "window is not defined" after every test had passed.
+  describe('after it is unmounted (#3706)', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>((r) => (resolve = r))
+      return { promise, resolve }
+    }
+    /** Settles `settle` with `window` gone, and returns what went unhandled meanwhile. */
+    async function withoutWindow(settle: () => void): Promise<unknown[]> {
+      const unhandled: unknown[] = []
+      const onRejection = (reason: unknown) => void unhandled.push(reason)
+      process.on('unhandledRejection', onRejection)
+      vi.stubGlobal('window', undefined)
+      try {
+        settle()
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+      } finally {
+        vi.unstubAllGlobals()
+      }
+      await new Promise((r) => setTimeout(r, 0))
+      process.off('unhandledRejection', onRejection)
+      return unhandled
+    }
+
+    it('sets nothing when the settings read settles', async () => {
+      const settings = deferred<Awaited<ReturnType<typeof api.getSettings>>>()
+      vi.spyOn(api, 'getSettings').mockReturnValue(settings.promise)
+      const { unmount } = renderPage(<ActivityBell />)
+      unmount()
+      expect(await withoutWindow(() => settings.resolve(mockSettings()))).toEqual([])
+    })
+
+    it('sets nothing, and toasts nothing, when an activity read settles', async () => {
+      const page = deferred<Awaited<ReturnType<typeof api.listActivity>>>()
+      const list = vi.spyOn(api, 'listActivity').mockReturnValue(page.promise)
+      const { unmount } = renderPage(<ActivityBell />)
+      await waitFor(() => expect(list).toHaveBeenCalled())
+      unmount()
+      expect(await withoutWindow(() => page.resolve({ items: [finished('browser')], next: null } as never))).toEqual([])
+    })
+  })
+
   it('ignores principals not followed', async () => {
     const live = fakeRealtime()
     renderPage(
@@ -210,7 +254,7 @@ describe('ActivityBell', () => {
     const { user } = mount()
     const bell = screen.getByRole('button', { name: /Activity, 0 finished/ })
     await user.click(bell)
-    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('div')!.id)
+    expect(bell).toHaveAttribute('aria-controls', screen.getByText('All activity').closest('[data-slot="popover-content"]')!.id)
     await user.keyboard('{Escape}')
     expect(screen.queryByText('All activity')).toBeNull()
     expect(bell).toHaveFocus()

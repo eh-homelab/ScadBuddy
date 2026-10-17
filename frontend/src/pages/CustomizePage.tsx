@@ -20,12 +20,16 @@ import { ParameterPanel } from '../components/ParameterPanel'
 import { RawInputs } from '../components/RawInputs'
 import { PresetPicker, type SelectedElsewhere } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
-import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
+import { Hint } from '../components/Hint'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { PageProblem } from '../components/PageState'
+import { PortalContainer } from '@/components/ui/portal-container'
+import { Skeleton } from '@/components/ui/skeleton'
 
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
-import { Spinner } from '../components/ui/Spinner'
 import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
 import {
   allParams,
@@ -69,6 +73,13 @@ import {
   useRenderJob,
   canRetry,
 } from '../lib/useRenderJob'
+
+/** A banner across the page, under the header: its message and its buttons on one row. */
+const BANNER = 'flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-3 py-2 text-xs'
+/** A line under the preview: what the render says. */
+const STRIP = 'border-t px-3 py-2 text-xs'
+/** A warning's colours, on a banner or a strip. */
+const WARN = 'border-destructive/40 bg-destructive/10 text-destructive'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -365,6 +376,7 @@ export function CustomizePage() {
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
+  const renderable = Boolean(settled && seed && !invalid)
   const {
     job,
     rendering,
@@ -374,9 +386,9 @@ export function CustomizePage() {
     settledFor,
     jobFor,
     stage: renderStage,
-  } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  } = useRenderJob(slug, renderable ? debounced : undefined, version, extra)
   // Armed only while the values would render: retryRender does nothing without them.
-  useRenderAutoRetry(renderError, rendering, retryRender, debounced, Boolean(settled && seed && !invalid))
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced, renderable)
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
@@ -779,6 +791,13 @@ export function CustomizePage() {
   const workspace = useRef<HTMLDivElement>(null)
   const fullscreen = useFullscreen(workspace)
   const full = fullscreen.mode !== null
+  // #3672 — in full screen the overlays (a select, a popover, the font picker) portal into
+  // the workspace: in the Fullscreen API's top layer nothing outside it shows.
+  const [workspaceElement, setWorkspaceElement] = useState<HTMLDivElement | null>(null)
+  const workspaceRef = useCallback((element: HTMLDivElement | null) => {
+    workspace.current = element
+    setWorkspaceElement(element)
+  }, [])
   const [flyout, setFlyout] = useState(false)
   // Each full screen opens on the view alone.
   if (!full && flyout) setFlyout(false)
@@ -815,9 +834,21 @@ export function CustomizePage() {
   // Reopened inputs wait for their migration: the panel must not paint defaults first.
   if (schemaState.loading || migrating) {
     return (
-      <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
-        <Spinner /> Loading model
-      </p>
+      <div
+        role="status"
+        aria-label="Loading model"
+        className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)] lg:grid-rows-1"
+      >
+        <div className="flex flex-col gap-3 border-r p-3 max-lg:border-b">
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-7 w-2/3" />
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+        </div>
+        <Skeleton className="m-3 rounded-xl" />
+        <span className="sr-only">Loading model</span>
+      </div>
     )
   }
 
@@ -825,32 +856,24 @@ export function CustomizePage() {
   // read runs OpenSCAD) is a failed load, and may well succeed when asked again.
   if (schemaState.error && !(schemaState.error instanceof ApiError && schemaState.error.status === 404)) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">Could not load this model</h1>
-        <p className="mt-2 text-[13px] text-muted">{schemaState.error.message}</p>
-        <div className="mt-4 flex items-center justify-center gap-3">
-          <Button size="sm" onClick={schemaState.reload}>
-            Try again
-          </Button>
-          <Link to="/" className="text-[13px] text-accent underline">
-            Back to models
-          </Link>
-        </div>
-      </div>
+      <PageProblem title="Could not load this model" message={schemaState.error.message}>
+        <Button type="button" onClick={schemaState.reload}>
+          Try again
+        </Button>
+        <Button asChild variant="ghost">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
   if (schemaState.error || !schema) {
     return (
-      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
-        <h1 className="text-[15px] font-medium">That model is not here</h1>
-        <p className="mt-2 text-[13px] text-muted">
-          {schemaState.error?.message ?? 'The model has no customizer schema.'}
-        </p>
-        <Link to="/" className="mt-4 inline-block text-[13px] text-accent underline">
-          Back to models
-        </Link>
-      </div>
+      <PageProblem title="That model is not here" message={schemaState.error?.message ?? 'The model has no customizer schema.'}>
+        <Button asChild variant="outline">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
     )
   }
 
@@ -871,8 +894,8 @@ export function CustomizePage() {
   const previewElement = (
     <Suspense
       fallback={
-        <div className="flex h-full items-center justify-center bg-bg text-[13px] text-faint">
-          Loading the viewer
+        <div role="status" aria-label="Loading the viewer" className="h-full bg-background p-3">
+          <Skeleton className="size-full rounded-xl" />
         </div>
       }
     >
@@ -918,12 +941,14 @@ export function CustomizePage() {
     preview: previewElement,
     generate: (
       <span className="inline-flex items-center gap-2">
+        <Hint content={invalid} wrap={uiGenerate.generating || !current || job?.status !== 'done'}>
         <Button
+          type="button"
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
           disabled={uiGenerate.generating || !current || job?.status !== 'done'}
-          title={invalid ?? undefined}
+          aria-description={invalid ?? undefined}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -933,8 +958,9 @@ export function CustomizePage() {
                 : 'Rendering…'
               : 'Generate'}
         </Button>
+        </Hint>
         {uiGenerate.error && (
-          <span role="alert" className="text-[12px] text-warn">
+          <span role="alert" className="text-xs text-destructive">
             Could not generate: {uiGenerate.error}
           </span>
         )}
@@ -975,7 +1001,7 @@ export function CustomizePage() {
   )
 
   const uiOrigin = (
-    <span data-testid="ui-origin" className="ml-auto shrink-0 text-[11px] text-faint">
+    <span data-testid="ui-origin" className="ml-auto shrink-0 text-xs text-muted-foreground">
       Custom interface · {originLabel}
     </span>
   )
@@ -1016,49 +1042,44 @@ export function CustomizePage() {
       className={`grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)] ${full ? '' : 'short:block short:overflow-y-auto phone:block phone:overflow-y-auto'}`}
     >
       {/* Wraps rather than running off the right edge on a narrow (or zoomed) window (#971, #362). */}
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line bg-surface px-3 py-1.5">
-        <div className="flex min-w-0 items-baseline gap-2">
-          <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b bg-background px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <Link to="/" className="shrink-0 text-sm text-muted-foreground hover:text-foreground">
             Models
           </Link>
-          <span className="text-faint">/</span>
-          <h1 className="truncate text-[13px] font-medium">{displayName}</h1>
+          <span className="text-muted-foreground">/</span>
+          <h1 className="truncate text-sm font-medium">{displayName}</h1>
           <DuplicatedFrom upstream={modelState.data?.upstream} className="shrink-0" />
           {reopened && (
-            <span className="sb-num shrink-0 text-[11px] text-faint">
+            <span className="sb-num shrink-0 text-xs text-muted-foreground">
               reopened from {reopened.name ?? reopened.output_id.slice(0, 8)}
             </span>
           )}
           {version && (
-            <span
-              data-testid="version-badge"
-              className="sb-num shrink-0 rounded-[6px] bg-accent/12 px-1.5 py-0.5 text-[11px] text-accent"
-            >
+            <Badge data-testid="version-badge" variant="secondary" className="sb-num shrink-0 bg-primary/15 text-primary">
               revision {version.slice(0, 7)}
-            </span>
+            </Badge>
           )}
         </div>
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {version && (
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 const next = new URLSearchParams(search)
                 next.delete('version')
                 setSearch(next, { replace: true })
               }}
-              className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
             >
               Back to current
-            </button>
+            </Button>
           )}
           {origin === 'builtin' && (
-            <span
-              data-testid="builtin-badge"
-              className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
-            >
+            <Badge data-testid="builtin-badge" variant="outline" className="shrink-0 text-muted-foreground">
               Built-in template — read-only
-            </span>
+            </Badge>
           )}
           {origin === 'mine' && (
             <UpstreamUpdateButton
@@ -1073,34 +1094,26 @@ export function CustomizePage() {
             />
           )}
           {origin && (
-            <Link
-              to={modelPath(slug, 'source')}
-              className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-            >
-              {origin === 'builtin' ? 'View source' : 'Edit source'}
-            </Link>
+            <Button asChild variant="ghost" size="sm">
+              <Link to={modelPath(slug, 'source')}>{origin === 'builtin' ? 'View source' : 'Edit source'}</Link>
+            </Button>
           )}
-          <Link
-            to={modelPath(slug, 'versions')}
-            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-          >
-            Versions
-          </Link>
-          <Link
-            to={modelPath(slug, 'history')}
-            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-          >
-            History
-            {outputsState.data && outputsState.data.length > 0 && (
-              <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
-            )}
-          </Link>
-          <Link
-            to={modelPath(slug, 'prints')}
-            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-          >
-            Prints
-          </Link>
+          <Button asChild variant="ghost" size="sm">
+            <Link to={modelPath(slug, 'versions')}>Versions</Link>
+          </Button>
+          <Button asChild variant="ghost" size="sm">
+            <Link to={modelPath(slug, 'history')}>
+              History
+              {outputsState.data && outputsState.data.length > 0 && (
+                <Badge variant="secondary" className="sb-num h-4 px-1.5 text-[10px]">
+                  {outputsState.data.length}
+                </Badge>
+              )}
+            </Link>
+          </Button>
+          <Button asChild variant="ghost" size="sm">
+            <Link to={modelPath(slug, 'prints')}>Prints</Link>
+          </Button>
           {/* #931 — the assistant sessions that changed this model, and the output reopened here. */}
           <ResourceSessions resource={{ type: 'model', id: slug }} model={slug} />
           {reopenId && (
@@ -1144,42 +1157,32 @@ export function CustomizePage() {
       {/* The write actions wait on the record, so a failed fetch has to say so. */}
       <div>
         {sourceChanged && (
-          <div
-            role="status"
-            className="flex items-center gap-3 border-b border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
-          >
+          <div role="status" className={`${BANNER} border-primary/40 bg-primary/10`}>
             <span>This model&apos;s source changed elsewhere. Reload its parameters? Your changes here are kept until you do.</span>
-            <Button size="sm" onClick={reloadSchema}>
+            <Button type="button" size="sm" onClick={reloadSchema}>
               Reload parameters
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setSourceChangedFor(null)}>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setSourceChangedFor(null)}>
               Keep mine
             </Button>
           </div>
         )}
         {modelState.error && (
-          <div
-            role="alert"
-            className="flex items-center gap-3 border-b border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
-          >
+          <div role="alert" className={`${BANNER} ${WARN}`}>
             <span>Could not load this model&apos;s details: {modelState.error.message}</span>
-            <Button size="sm" onClick={reloadModel}>
+            <Button type="button" size="sm" variant="outline" onClick={reloadModel}>
               Try again
             </Button>
           </div>
         )}
         {/* A malformed declaration arrives as `ui: null` plus `ui_error`: banner that too. */}
         {failure && (declared || record?.ui_error) && (
-          <div
-            role="alert"
-            aria-label="Template interface failed"
-            className="flex items-center gap-3 border-b border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
-          >
+          <div role="alert" aria-label="Template interface failed" className={`${BANNER} ${WARN}`}>
             <span>
               This template&apos;s own interface ({failure.file}) could not start: {failure.message}. Showing the
               generated form instead.
             </span>
-            <Button size="sm" onClick={retryUi}>
+            <Button type="button" size="sm" variant="outline" onClick={retryUi}>
               Try again
             </Button>
           </div>
@@ -1188,55 +1191,54 @@ export function CustomizePage() {
 
       {!choosing && customUi?.slot === 'page' ? (
         <div
-          ref={workspace}
+          ref={workspaceRef}
           data-testid="workspace"
           // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
           // frame) the `window` mode is this element covering the window.
           className={`grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] ${
-            full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
+            full ? `bg-background ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
           }`}
         >
+          <PortalContainer value={full ? workspaceElement : null}>
           {/* One grid row: the page slot has no flyout to hold unmigrated inputs (#917). */}
-          <div className="border-b border-line">
+          <div className="border-b">
             <div className="flex flex-wrap items-center gap-2 px-3 py-1.5">
               {uiPresets}
               {uiOrigin}
             </div>
             {/* Capped: in full screen this row's height comes out of the template's own. */}
-            {unmigrated && (
-              <div className="max-h-[30vh] overflow-auto">
-                <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />
-              </div>
-            )}
+            {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} rows={4} capped />}
           </div>
           {templateUi}
           {actionBar}
+          </PortalContainer>
         </div>
       ) : (
       <div
-        ref={workspace}
+        ref={workspaceRef}
         data-testid="workspace"
         className={`grid min-h-0 grid-cols-[minmax(0,1fr)] ${
           full
-            ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
+            ? `bg-background [--sb-flyout:100%] md:[--sb-flyout:360px] ${
                 fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
               }`
             : 'lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]'
         }`}
       >
+        <PortalContainer value={full ? workspaceElement : null}>
         <div
           id={FLYOUT_ID}
           hidden={full && !flyout}
           className={
             full
-              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
-              : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b max-lg:border-line'
+              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) bg-card shadow-2xl'
+              : 'min-h-0 min-w-0 stacked-tall:max-h-[45vh] max-lg:border-b'
           }
         >
           {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />}
           {choosing ? null : templateUi ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5">
+              <div className="flex flex-wrap items-center gap-2 border-b px-3 py-1.5">
                 {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                 {uiPresets}
                 {uiOrigin}
@@ -1294,7 +1296,7 @@ export function CustomizePage() {
             className={
               full
                 ? 'contents'
-                : 'contents phone:sticky phone:top-0 phone:z-10 phone:order-first phone:flex phone:h-[max(15rem,45vh)] phone:flex-col phone:border-b phone:border-line phone:bg-bg'
+                : 'contents phone:sticky phone:top-0 phone:z-10 phone:order-first phone:flex phone:h-[max(15rem,45vh)] phone:flex-col phone:border-b phone:bg-background'
             }
           >
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
@@ -1304,50 +1306,38 @@ export function CustomizePage() {
             {choosing ? null : previewElement}
           </PreviewGallery>
           {misfit.length > 0 && (
-            <p
-              role="status"
-              data-testid="plate-fit"
-              className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
-            >
+            <p role="status" data-testid="plate-fit" className={`${STRIP} ${WARN}`}>
               Does not fit: {misfit.join('; ')}.
             </p>
           )}
           {renderBusy !== undefined && (
-            <p
-              role="status"
-              data-testid="render-busy"
-              className="border-t border-line px-3 py-2 text-[12px] text-muted"
-            >
+            <p role="status" data-testid="render-busy" className={`${STRIP} text-muted-foreground`}>
               {renderBusyText(renderBusy)}
             </p>
           )}
           {/* A template UI draws its own fields, so it is not the panel that flags the value. */}
           {invalid && templateUi && (
-            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+            <p role="alert" className={`${STRIP} ${WARN}`}>
               {invalid}
             </p>
           )}
           {/* #2444 — the field says why, but it may be on another tab: say so here too,
               with the way to it. A status, as the field's own alert already announced it. */}
           {invalid && !templateUi && unrenderable && (
-            <p
-              role="status"
-              data-testid="render-blocked"
-              className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
-            >
+            <p role="status" data-testid="render-blocked" className={`${STRIP} ${WARN}`}>
               Not rendering: {invalid}{' '}
-              <Button size="sm" onClick={() => setReveal({ name: unrenderable.name })}>
+              <Button type="button" size="xs" variant="outline" onClick={() => setReveal({ name: unrenderable.name })}>
                 Show the field
               </Button>
             </p>
           )}
           {renderError && (
-            <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
+            <p role="alert" className={`${STRIP} ${WARN}`}>
               {renderError.message}
               {canRetry(renderError) && (
                 <>
                   {' '}
-                  <Button size="sm" onClick={retryRender}>
+                  <Button type="button" size="xs" variant="outline" onClick={retryRender}>
                     Try again
                   </Button>
                 </>
@@ -1355,8 +1345,8 @@ export function CustomizePage() {
             </p>
           )}
           {workflowUrl && (
-            <p data-testid="render-workflow" className="border-t border-line px-3 py-2 text-[12px] text-muted">
-              <a href={workflowUrl} {...NEW_TAB} className="text-accent underline">
+            <p data-testid="render-workflow" className={`${STRIP} text-muted-foreground`}>
+              <a href={workflowUrl} {...NEW_TAB} className="text-primary underline-offset-4 hover:underline">
                 Open workflow ↗
               </a>
             </p>
@@ -1368,6 +1358,7 @@ export function CustomizePage() {
             {actionBar}
           </div>
         </div>
+        </PortalContainer>
       </div>
       )}
     </div>

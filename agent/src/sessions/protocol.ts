@@ -150,7 +150,14 @@ export type ServerEvent = V &
         author: Owner
         images?: SentImage[]
       }
-    | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
+    | {
+        type: 'assistant.text.delta'
+        sessionId: string
+        messageId: string
+        delta: string
+        /** A refused credential's notice in a durable turn (#3703): shown as the turn's reason, never retained as the assistant's. */
+        notice?: true
+      }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
     /**
      * `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it.

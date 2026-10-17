@@ -19,13 +19,17 @@ from scadbuddy.bambuddy import library_view
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.library_view import (
     NotViewableError,
+    library_filaments,
     library_geometry,
     library_preview,
 )
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import read_glb
+from scadbuddy.render.objects3mf import PlateRead
 from scadbuddy.render.split import ColourPart
+from scadbuddy.store.download_cache import DownloadCache
 from tests.bambuddy.conftest import BASE_URL
 
 API = f"{BASE_URL}/api/v1"
@@ -225,6 +229,18 @@ def _out_of_memory(*_: object, **__: object) -> object:
     raise MemoryError
 
 
+@pytest.mark.parametrize("step", ["read_plate_parts", "write_glb"])
+def test_a_plate_glb_out_of_memory_is_a_read_out_of_memory_error(
+    monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """#2767: plate_glb maps a MemoryError itself, so no route has to (an output's plate,
+    a job's): reading the plate, or writing its GLB."""
+    monkeypatch.setattr(library_view, "read_plate_parts", lambda *_: PlateRead([], 1))
+    monkeypatch.setattr(library_view, step, _out_of_memory)
+    with pytest.raises(ReadOutOfMemoryError):
+        library_view.plate_glb(b"", 1)
+
+
 @respx.mock
 @pytest.mark.parametrize(
     ("step", "read"),
@@ -258,3 +274,90 @@ async def test_running_out_of_memory_is_refused_as_such_and_never_cached(
     monkeypatch.undo()
     assert await read(bambuddy, cache, 7, 1)
     assert download.call_count == 2
+
+
+# --- #2788: the download itself, shared by every read and every process ---------------
+
+
+@respx.mock
+async def test_every_read_of_one_files_bytes_downloads_it_once(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """Its preview, its analysis, a second plate and its filament slots, each in a
+    process of its own (another ``cache``), share one download of the same bytes."""
+    download = library_file(7, two_colour_3mf(tmp_path))
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    await library_preview(bambuddy, tmp_path / "api", 7, 1, downloads=downloads)
+    await library_geometry(bambuddy, tmp_path / "other", 7, 1, downloads=downloads)
+    with pytest.raises(NoSuchPlateError):
+        await library_preview(bambuddy, tmp_path / "third", 7, 2, downloads=downloads)
+    file = await bambuddy.library_file(7)
+    assert await library_filaments(bambuddy, tmp_path / "fourth", file, downloads=downloads)
+    assert download.call_count == 1
+
+
+@respx.mock
+async def test_bytes_that_are_not_the_stated_hash_are_read_but_never_kept(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """A file changed after Bambuddy stated its hash: this read is of what came, and
+    nothing is kept under a hash it does not have."""
+    content = two_colour_3mf(tmp_path)
+    respx.get(f"{API}/library/files/7").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 7, "filename": "a.3mf", "file_type": "3mf", "file_hash": "0" * 64},
+        )
+    )
+    download = respx.get(f"{API}/library/files/7/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    await library_geometry(bambuddy, tmp_path / "a", 7, 1, downloads=downloads)
+    await library_geometry(bambuddy, tmp_path / "b", 7, 1, downloads=downloads)
+    assert download.call_count == 2
+    assert list((tmp_path / "shared").iterdir()) == []
+
+
+@respx.mock
+async def test_an_stl_is_not_kept_as_a_download(bambuddy: BambuddyClient, tmp_path: Path) -> None:
+    """What is read of an STL is the 3MF it is wrapped in, not the file's own bytes."""
+    buffer = io.BytesIO()
+    _box(30, 20, 10).export(buffer, file_type="stl")
+    library_file(8, buffer.getvalue(), file_type="stl")
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    await library_geometry(bambuddy, tmp_path / "a", 8, 1, downloads=downloads)
+    assert not (tmp_path / "shared").exists()
+
+
+@respx.mock
+async def test_bytes_planted_under_a_files_hash_are_never_read(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """Whatever can write the shared directory, a read uses only bytes that are the
+    stated hash: a planted entry is dropped and the file downloaded (#2788)."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    downloads.root.mkdir()
+    sha = hashlib.sha256(content).hexdigest()
+    downloads.path(sha).write_bytes(content[:-10])
+    analysis = await library_geometry(bambuddy, tmp_path / "a", 7, 1, downloads=downloads)
+    assert [part.colour for part in analysis.parts] == ["#FF0000", "#0000FF"]
+    assert download.call_count == 1
+    assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+async def test_a_download_cache_that_cannot_be_used_never_fails_the_read(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """Keeping a copy is best effort: a cache directory that cannot be written (a full
+    or unwritable volume) is a read without one, never a failed read (#2788 review)."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    (tmp_path / "shared").write_bytes(b"not a directory")
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    analysis = await library_geometry(bambuddy, tmp_path / "a", 7, 1, downloads=downloads)
+    assert [part.colour for part in analysis.parts] == ["#FF0000", "#0000FF"]
+    assert download.call_count == 1

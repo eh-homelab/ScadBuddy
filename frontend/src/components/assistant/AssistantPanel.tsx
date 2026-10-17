@@ -1,5 +1,6 @@
 import { loadChatTransportFactory, type ChatTransportFactory } from '../../agent/chat/transport'
 import { useAsync } from '../../lib/useAsync'
+import { Skeleton } from '@/components/ui/skeleton'
 import { McpAuthBanner } from '../McpAuthBanner'
 import { AssistantChat, type OpenRequest } from './AssistantChat'
 
@@ -13,12 +14,21 @@ interface Props {
   /** #931 — a session a page asked to open (AppShell's AssistantOpener). */
   openRequest?: OpenRequest | null
   onOpenHandled?: () => void
+  /** #3164 — whether this tab came back from a reload, read by the shell at page load. */
+  reloaded?: boolean
 }
 
-export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest, onOpenHandled }: Props) {
+export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest, onOpenHandled, reloaded }: Props) {
   const loaded = useAsync(async () => factory ?? (await loadChatTransportFactory()), [factory])
   if (loaded.loading) {
-    return <p className="p-3 text-[12.5px] text-muted">Connecting to the assistant…</p>
+    return (
+      <div role="status" className="flex flex-col gap-2 p-3">
+        <span className="sr-only">Connecting to the assistant…</span>
+        <Skeleton className="h-6 w-1/2" />
+        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-16 w-4/5" />
+      </div>
+    )
   }
   if (!loaded.data) {
     return (
@@ -39,6 +49,7 @@ export function AssistantPanel({ onClose, focusKey, factory, embedded, openReque
           embedded={embedded}
           openRequest={openRequest}
           onOpenHandled={onOpenHandled}
+          reloaded={reloaded}
         />
       </div>
     </div>

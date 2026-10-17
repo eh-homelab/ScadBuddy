@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Principal } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
+import { DurableUnavailable } from '../src/gate/durable.js'
 import { CLAIM_LEASE_S, EscalationError, Escalations, type EscalationDurable } from '../src/flows/escalations.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { PendingProjection } from '../src/gate/projection.js'
@@ -252,6 +253,41 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     expect((await row(stale))?.hop).toBe('person')
     expect((await row(stale))?.hops.at(-1)).toMatchObject({ action: 'timeout', actor: 'system' })
     expect((await row(fresh))?.hop).toBe('parent')
+  })
+
+  it('a pass up or a second deny on an entry a deny holds says the deny is in flight (#3518)', async () => {
+    const id = await park()
+    await db.sql`UPDATE ai_pending_input SET hop_until = 'infinity', hop_claimed_at = now() WHERE request_id = ${id}`
+    for (const action of ['pass_up', 'deny'] as const) {
+      const err = await refused(escalations.respond({ principal: OWNER, session: parent }, id, action, {}))
+      expect(err.status).toBe(409)
+      expect(err.message).toContain('a deny for that call is already in flight')
+    }
+    expect(sent).toEqual([])
+  })
+
+  it('a deny whose Update timed out keeps its claim for the lease to end, never the passed deadline (#3518)', async () => {
+    const id = await park()
+    const timedOut = new Escalations({
+      sql: db.sql,
+      durable: () => ({ respond: async () => Promise.reject(new DurableUnavailable("the session's worker is not answering")) }),
+    })
+    await expect(timedOut.respond({ principal: OWNER, session: parent }, id, 'deny', {})).rejects.toBeInstanceOf(DurableUnavailable)
+    // It may have landed: still held, so the sweep moves it only once the lease is over.
+    const [after] = await db.sql<{ claimed: boolean; hop_claimed_at: Date | null }[]>`
+      SELECT hop_until = 'infinity' AS claimed, hop_claimed_at FROM ai_pending_input WHERE request_id = ${id}`
+    expect(after).toMatchObject({ claimed: true })
+    expect(after?.hop_claimed_at).not.toBeNull()
+    expect(await escalations.moveDue()).toBe(0)
+    // The parent's retry while the claim is held is told the deny is in flight (#3910).
+    const retry = await refused(escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {}))
+    expect([retry.status, retry.message]).toEqual([409, expect.stringContaining('a deny for that call is already in flight')])
+    // Once the lease is over, the sweep hands the entry to the person.
+    await db.sql`
+      UPDATE ai_pending_input SET hop_claimed_at = now() - make_interval(secs => ${CLAIM_LEASE_S + 1})
+      WHERE request_id = ${id}`
+    expect(await escalations.moveDue()).toBe(1)
+    expect((await row(id))?.hop).toBe('person')
   })
 
   it('a deny that does not land puts the deadline back and drops its claim (review #3018)', async () => {

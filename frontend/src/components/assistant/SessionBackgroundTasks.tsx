@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { BackgroundTask } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
-import { Button } from '../ui/Button'
+import { Button } from '@/components/ui/button'
+import { Tip } from './Tip'
 
 interface Props {
   sessionId: string
@@ -48,7 +49,7 @@ export function SessionBackgroundTasks({ sessionId, refreshKey, canWrite }: Prop
   }
 
   return (
-    <section aria-label="Scheduled in this session" className="shrink-0 border-b border-line px-3 py-1.5 text-[12px]">
+    <section aria-label="Scheduled in this session" className="shrink-0 border-b border-border px-3 py-1.5 text-xs">
       {error && (
         <p role="alert" className="text-warn">
           {error}
@@ -57,19 +58,19 @@ export function SessionBackgroundTasks({ sessionId, refreshKey, canWrite }: Prop
       <ul className="space-y-1">
         {active.map((task) => (
           <li key={task.id} className="flex items-baseline gap-1.5">
-            <span className="shrink-0 text-faint" title={task.kind === 'cron' ? 'CronCreate' : 'ScheduleWakeup'}>
-              {task.schedule}
-            </span>
-            <span className="min-w-0 flex-1 truncate" title={task.prompt}>
-              {task.prompt}
-            </span>
+            <Tip content={task.kind === 'cron' ? 'CronCreate' : 'ScheduleWakeup'}>
+              <span className="shrink-0 text-muted-foreground">{task.schedule}</span>
+            </Tip>
+            <Tip content={task.prompt}>
+              <span className="min-w-0 flex-1 truncate">{task.prompt}</span>
+            </Tip>
             {task.next_at && (
-              <span className="shrink-0 text-faint" title={task.next_at}>
-                next {when(task.next_at)}
-              </span>
+              <Tip content={task.next_at}>
+                <span className="shrink-0 text-muted-foreground">next {when(task.next_at)}</span>
+              </Tip>
             )}
             {canWrite && (
-              <Button size="sm" variant="ghost" data-agent-user-only="" aria-label={`Cancel ${task.id}`} onClick={() => void cancel(task)}>
+              <Button size="xs" variant="ghost" data-agent-user-only="" aria-label={`Cancel ${task.id}`} onClick={() => void cancel(task)}>
                 Cancel
               </Button>
             )}

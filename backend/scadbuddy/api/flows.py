@@ -536,7 +536,9 @@ async def start_flow_run(
         raise _script_problems(problems, "The flow no longer type-checks.")
     options = body or RunCreate()
     try:
-        inputs = resolve_inputs(definition.inputs_schema, options.inputs)
+        # Off the event loop: its patterns may take PATTERNS_BUDGET_S, and every other
+        # request would wait that long behind them (#3417).
+        inputs = await asyncio.to_thread(resolve_inputs, definition.inputs_schema, options.inputs)
     except InputsError as err:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

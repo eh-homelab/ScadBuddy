@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 
 import httpx
 import pytest
 import respx
 
-from scadbuddy.bambuddy.archive_cache import FAILED_FRAMES_TTL, TIMELAPSE_TTL, ArchiveCache
+from scadbuddy.bambuddy.archive_cache import (
+    FAILED_FRAMES_TTL,
+    TIMELAPSE_TTL,
+    ArchiveCache,
+    Primed,
+)
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import recording
@@ -147,10 +153,10 @@ async def test_prime_keeps_what_one_list_read_holds(clock: Clock) -> None:
     )
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        held = await cache.prime(
+        primed = await cache.prime(
             bambuddy, [35, 36], date_from=date(2026, 9, 26), date_to=date(2026, 9, 28), limit=8
         )
-        assert held == 1
+        assert primed == Primed(missing=2, listed=1)
         found = await cache.archive(bambuddy, 35)
         assert found is not None and found.id == 35
         assert (await cache.archive(bambuddy, 36)) is not None
@@ -195,8 +201,8 @@ async def test_a_failed_list_read_leaves_the_archives_to_single_reads(
     ]
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        held = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
-        assert held == 0
+        primed = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
+        assert primed == Primed(missing=2, listed=0)
         assert [
             (await cache.archive(bambuddy, archive_id)) is not None for archive_id in (35, 36)
         ] == [
@@ -204,6 +210,80 @@ async def test_a_failed_list_read_leaves_the_archives_to_single_reads(
             True,
         ]
     assert [route.call_count for route in singles] == [1, 1]
+
+
+@respx.mock
+async def test_a_row_that_does_not_parse_leaves_the_rows_that_do(clock: Clock) -> None:
+    """#3015 review: one bad row cost every archive a single read; now only its own."""
+    detail = recording("archive-detail.json")
+    respx.get(f"{BASE}/api/v1/archives/").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": "not-an-id"}, {**detail, "id": 35}, {**detail, "id": 36}]
+        )
+    )
+    single = respx.get(url__regex=rf"{BASE}/api/v1/archives/\d+$").mock(
+        return_value=httpx.Response(500)
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        primed = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
+        assert primed == Primed(missing=2, listed=2)
+        assert [
+            (await cache.archive(bambuddy, archive_id)) is not None for archive_id in (35, 36)
+        ] == [
+            True,
+            True,
+        ]
+    assert not single.called
+
+
+@respx.mock
+async def test_a_wanted_archive_whose_row_does_not_parse_falls_back_to_its_single_read(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3477 review: a malformed row for an archive the page wants costs that archive a
+    single read, and the bad rows are logged once per list read, not once each."""
+    detail = recording("archive-detail.json")
+    respx.get(f"{BASE}/api/v1/archives/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {**detail, "id": 37, "file_size": "not a size"},
+                {"id": "not-an-id"},
+                {**detail, "id": 35},
+            ],
+        )
+    )
+    single = respx.get(f"{BASE}/api/v1/archives/37").mock(
+        return_value=httpx.Response(200, json={**detail, "id": 37})
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    with caplog.at_level(logging.INFO, logger="scadbuddy.bambuddy.client"):
+        async with client() as bambuddy:
+            primed = await cache.prime(bambuddy, [35, 37], date_from=None, date_to=None, limit=8)
+            assert primed == Primed(missing=2, listed=1)
+            assert (await cache.archive(bambuddy, 37)) is not None
+    assert single.call_count == 1
+    unparsed = [r for r in caplog.records if "did not parse" in r.getMessage()]
+    assert len(unparsed) == 1
+    assert getattr(unparsed[0], "rows", None) == 2
+
+
+@respx.mock
+async def test_prime_counts_only_the_archives_not_kept_already(clock: Clock) -> None:
+    """#3015 review: the span's hit rate is of the archives the read was for."""
+    detail = recording("archive-detail.json")
+    respx.get(f"{BASE}/api/v1/archives/35").mock(
+        return_value=httpx.Response(200, json={**detail, "id": 35})
+    )
+    listed = respx.get(f"{BASE}/api/v1/archives/").mock(return_value=httpx.Response(200, json=[]))
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        await cache.archive(bambuddy, 35)
+        assert await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8) == (
+            Primed(missing=1, listed=0)
+        )
+    assert not listed.called, "one missing archive is no cheaper by a list read"
 
 
 @respx.mock

@@ -6,6 +6,7 @@ import { setDurableAvailable } from '../mocks/features/sessionMode'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SessionModeSetting } from './SessionModeSetting'
+import { choose } from '../test/select'
 
 const LABEL = 'Default session mode'
 
@@ -13,11 +14,11 @@ describe('SessionModeSetting', () => {
   it('shows the stored default, durable until set, and saves a new one', async () => {
     const { user } = renderPage(<SessionModeSetting />)
     const select = await screen.findByRole('combobox', { name: LABEL })
-    expect(select).toHaveValue('durable')
+    expect(select).toHaveTextContent('Durable')
     expect(screen.queryByTestId('session-mode-unavailable')).not.toBeInTheDocument()
     const save = screen.getByRole('button', { name: 'Save' })
     expect(save).toBeDisabled()
-    await user.selectOptions(select, 'classic')
+    await choose(user, select, 'Classic')
     await user.click(save)
     expect(await screen.findByRole('status')).toHaveTextContent('Saved')
     expect((await api.getSessionMode()).mode).toBe('classic')
@@ -42,7 +43,7 @@ describe('SessionModeSetting', () => {
       http.put('/api/v1/ai/settings/session-mode', () => HttpResponse.json({ detail: 'mode: Nope' }, { status: 400 })),
     )
     const { user } = renderPage(<SessionModeSetting />)
-    await user.selectOptions(await screen.findByRole('combobox', { name: LABEL }), 'classic')
+    await choose(user, await screen.findByRole('combobox', { name: LABEL }), 'Classic')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('mode: Nope')
   })

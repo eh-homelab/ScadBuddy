@@ -270,6 +270,9 @@ export interface AuditRepo extends AuditSink {
   setRetentionDays(days: number, context: AuditContext): Promise<number>
 }
 
+/** What a session's turns need of the audit log: its rows, and the hash and summary of a call. */
+export type AuditDeps = Pick<AuditLog, 'record' | 'hash' | 'summarise'>
+
 export type AuditLogDeps = {
   sql: Sql
   /** ai_settings, for the retention. A thunk: the settings store audits its writes here, so it is made after the log. */

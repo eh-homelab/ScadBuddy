@@ -519,6 +519,23 @@ def test_the_check_previews_the_rack_sides_eligible_positions(
 
 
 @respx.mock
+def test_the_check_reads_the_spools_once_for_the_plan_and_the_rack(
+    client: TestClient, model: str
+) -> None:
+    """#2936: the rack preview reuses the check's inventory read."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    spools = respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+
+    assert check(client, output_id)["rack"] is not None
+
+    assert spools.call_count == 1
+
+
+@respx.mock
 def test_a_manual_pick_that_fits_is_previewed_and_sent(client: TestClient, model: str) -> None:
     output_id = prepared(client, model)
     upload_route()

@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
@@ -41,7 +41,7 @@ describe('SpoolInventoryPanel (#2351)', () => {
     await screen.findByTestId('spool-15')
     expect(screen.queryByTestId('spool-30')).toBeNull()
 
-    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    await user.click(screen.getByRole('switch', { name: 'Include archived spools' }))
     expect(await screen.findByTestId('spool-30')).toHaveTextContent('(archived)')
     expect(screen.getByTestId('spool-inventory-total')).toHaveTextContent('3 spools, 2.33 kg left')
     // Greyed out, and sorted with the rest rather than put last (#2923).
@@ -57,7 +57,7 @@ describe('SpoolInventoryPanel (#2351)', () => {
       http.get('/api/v1/farm/inventory', () => HttpResponse.json({ detail: 'Bambuddy timed out' }, { status: 504 })),
     )
 
-    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    await user.click(screen.getByRole('switch', { name: 'Include archived spools' }))
     expect(await screen.findByTestId('spool-inventory-error')).toHaveTextContent('Bambuddy timed out')
     expect(screen.queryByRole('table')).toBeNull()
   })
@@ -78,7 +78,7 @@ describe('SpoolInventoryPanel (#2351)', () => {
     )
     renderPage(<SpoolInventoryPanel />)
     const note = await screen.findByTestId('spool-inventory-unconfigured')
-    expect(note).toHaveClass('text-muted')
+    expect(note).toHaveClass('text-muted-foreground')
     expect(screen.queryByTestId('spool-inventory-error')).toBeNull()
   })
 
@@ -86,8 +86,8 @@ describe('SpoolInventoryPanel (#2351)', () => {
     renderPage(<SpoolInventoryPanel />)
     const clear = await screen.findByTestId('spool-15')
     expect(within(clear).getByTestId('clear-swatch')).toBeInTheDocument()
-    expect(clear.querySelector('[title="#000000"]')).toBeNull()
-    expect(within(screen.getByTestId('spool-2')).getByTitle('#F5547C')).toBeInTheDocument()
+    expect(clear.querySelector('[data-colour="#000000"]')).toBeNull()
+    expect(screen.getByTestId('spool-2').querySelector('[data-colour="#F5547C"]')).not.toBeNull()
   })
 
   it('keeps the last table while a re-read is in flight, then shows the new one (#2971 review)', async () => {
@@ -101,13 +101,56 @@ describe('SpoolInventoryPanel (#2351)', () => {
       }),
     )
 
-    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    await user.click(screen.getByRole('switch', { name: 'Include archived spools' }))
     expect(screen.getByTestId('spool-15')).toBeInTheDocument()
     expect(screen.queryByText("Reading Bambuddy's inventory…")).toBeNull()
+    // Marked as the last selection's while the re-read is out (#3357), the total with the
+    // table (#3486 review).
+    const result = screen.getByTestId('spool-inventory-result')
+    expect(result).toHaveAttribute('aria-busy', 'true')
+    expect(result).toContainElement(screen.getByTestId('spool-inventory-total'))
+    expect(result).toContainElement(screen.getByRole('table'))
 
     answer()
     expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
     expect(screen.queryByRole('table')).toBeNull()
+    expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'false')
+
+    // An empty answer is the last selection's too while the next re-read is out.
+    server.use(
+      http.get('/api/v1/farm/inventory', async () => {
+        await new Promise<void>((resolve) => (answer = resolve))
+        return HttpResponse.json({ spools: [], slots: [] })
+      }),
+    )
+    await user.click(screen.getByRole('switch', { name: 'Include archived spools' }))
+    expect(screen.getByTestId('spool-inventory-result')).toContainElement(screen.getByText('Bambuddy has no spools.'))
+    expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'true')
+    answer()
+    await waitFor(() => expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'false'))
+  })
+
+  it("clears a failed read's error as soon as a toggle reads again (#3357)", async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () => HttpResponse.json({ detail: 'Bambuddy timed out' }, { status: 504 })),
+    )
+    const { user } = renderPage(<SpoolInventoryPanel />)
+    expect(await screen.findByTestId('spool-inventory-error')).toHaveTextContent('Bambuddy timed out')
+    let answer = () => {}
+    server.use(
+      http.get('/api/v1/farm/inventory', async () => {
+        await new Promise<void>((resolve) => (answer = resolve))
+        return HttpResponse.json({ spools: [], slots: [] })
+      }),
+    )
+
+    await user.click(screen.getByRole('switch', { name: 'Include archived spools' }))
+    // The old error is not this read's, so it goes while the new read is out.
+    expect(screen.queryByTestId('spool-inventory-error')).toBeNull()
+    expect(screen.getByText("Reading Bambuddy's inventory…")).toBeInTheDocument()
+
+    answer()
+    expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
   })
 
   it('draws a spool with no colour recorded as unknown, not clear and not black (#2971 review)', async () => {
@@ -125,9 +168,9 @@ describe('SpoolInventoryPanel (#2351)', () => {
     renderPage(<SpoolInventoryPanel />)
     for (const id of [40, 41]) {
       const row = await screen.findByTestId(`spool-${id}`)
-      expect(within(row).getByTestId('unknown-swatch')).toHaveAttribute('title', 'colour not recorded')
+      expect(within(row).getByTestId('unknown-swatch')).toHaveAttribute('data-colour', 'colour not recorded')
       expect(within(row).queryByTestId('clear-swatch')).toBeNull()
-      expect(row.querySelector('[title="#000000"]')).toBeNull()
+      expect(row.querySelector('[data-colour="#000000"]')).toBeNull()
     }
   })
 

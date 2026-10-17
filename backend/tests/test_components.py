@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy
+from scadbuddy import main
 from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
 from scadbuddy.api.deps import STATE_ATTR
@@ -301,21 +303,15 @@ def test_a_replaced_state_keeps_its_components(
     assert copy.components.get(probe) == "probe"
 
 
-def test_the_lifespan_enters_a_discovered_components_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
-) -> None:
+def _lifespan_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str) -> FastAPI:
+    """An app for a lifespan test: no ``SCADBUDDY_*`` from the environment, the test
+    database, and a Temporal that is never reached."""
     for name in list(os.environ):
         if name.startswith("SCADBUDDY_"):
             monkeypatch.delenv(name)
-    log: list[str] = []
-    probe: Key[str] = Key("probe")
-    component = Component(
-        probe, build=lambda core, components: "probe", run=lambda value: _run(log, value)
-    )
-    monkeypatch.setattr(deps, "discover_components", lambda: [component])
     seed = tmp_path / "seed"
     seed.mkdir()
-    app = create_app(
+    return create_app(
         Settings(
             openscad=str(tmp_path / "no-openscad"),
             data_dir=tmp_path / "data",
@@ -326,6 +322,18 @@ def test_the_lifespan_enters_a_discovered_components_run(
             preview_renders=False,
         )
     )
+
+
+def test_the_lifespan_enters_a_discovered_components_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    log: list[str] = []
+    probe: Key[str] = Key("probe")
+    component = Component(
+        probe, build=lambda core, components: "probe", run=lambda value: _run(log, value)
+    )
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
     state = getattr(app.state, STATE_ATTR)
     # Built with the state, before the app starts; run only once it does.
     assert state.components.get(probe) == "probe"
@@ -333,6 +341,78 @@ def test_the_lifespan_enters_a_discovered_components_run(
     with TestClient(app):
         assert log == ["enter probe"]
     assert log == ["enter probe", "exit probe"]
+
+
+def test_a_component_that_raises_on_exit_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653: the error is raised, after the render queue's pool, the projection's and
+    the settings store's are closed."""
+    probe: Key[str] = Key("probe")
+
+    @asynccontextmanager
+    async def raises_on_exit(_value: str) -> AsyncIterator[None]:
+        yield
+        raise RuntimeError("lost its connection on the way out")
+
+    component = Component(probe, build=lambda core, components: "probe", run=raises_on_exit)
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
+    state = getattr(app.state, STATE_ATTR)
+    with pytest.raises(RuntimeError, match="on the way out"), TestClient(app):
+        assert not state.projection._pool.closed
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_a_core_close_that_raises_still_lets_the_rest_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653 review: not only a component's exit; the render queue's close raising
+    still closes the projection's pool and the settings store's after it."""
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
+    state = getattr(app.state, STATE_ATTR)
+    close_render = state.render.aclose
+
+    async def raises() -> None:
+        await close_render()
+        raise RuntimeError("render pool lost on the way out")
+
+    monkeypatch.setattr(state.render, "aclose", raises)
+    with pytest.raises(RuntimeError, match="render pool lost"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#3125: stopping the in-process worker raising still closes the pools after it."""
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
+    state = getattr(app.state, STATE_ATTR)
+
+    async def idles(
+        _settings: object, _deps: object, _temporal: object, stop: asyncio.Event
+    ) -> None:
+        await stop.wait()
+
+    async def fails_to_stop(*_args: object) -> None:
+        raise RuntimeError("the worker would not stop")
+
+    async def no_queue_workers(_state: object, stop: asyncio.Event, _name: str) -> None:
+        await stop.wait()
+
+    # Only the in-process render worker runs; the queue workers stand down.
+    monkeypatch.setattr(state, "temporal", object())
+    monkeypatch.setattr(main, "_connect_until", no_queue_workers)
+    monkeypatch.setattr(main, "worker_deps_from_state", lambda _state: None)
+    monkeypatch.setattr(main, "run_inprocess_worker", idles)
+    monkeypatch.setattr(main, "_stop_worker", fails_to_stop)
+    with pytest.raises(RuntimeError, match="would not stop"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
 
 
 def test_build_state_alone_registers_every_features_operation_kinds(
