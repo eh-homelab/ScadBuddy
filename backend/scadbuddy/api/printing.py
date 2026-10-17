@@ -1223,7 +1223,7 @@ async def get_progress(
 async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
     """Every Bambuddy project, with the library folder that belongs to it (#79).
 
-    Also the project the last send went to, so the picker opens where it was left.
+    Also the default project (``last_project_id``), which only Settings changes (#3188).
     ScadBuddy models no relationship between a model and a project: which prints
     belong to a project is on the project's own page, and keeping a second answer
     here would be a copy that goes stale.
@@ -1231,20 +1231,6 @@ async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
     settings = store.load()
     async with client_for(settings) as client:
         return await describe_projects(client, last_project_id=settings.last_project_id)
-
-
-class LastProject(BaseModel):
-    """The project the pickers open on (#317); ``null`` is "No project"."""
-
-    project_id: int | None = None
-
-
-@router.put("/projects/last", response_model=LastProject, summary="Remember the chosen project")
-def put_last_project(body: LastProject, store: SettingsStoreDep) -> LastProject:
-    """The project chosen on the Customize page or in the print dialog, which both open
-    on next (``last_project_id``). ScadBuddy's own preference: it needs no Bambuddy."""
-    settings = store.remember_project(body.project_id)
-    return LastProject(project_id=settings.last_project_id)
 
 
 @router.post(

@@ -444,7 +444,7 @@ class ChoosesProject(Protocol):
 
 def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
     """The request's ``project_id`` when it sent one, ``null`` included ("No project");
-    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    the default project (``last_project_id``) only when it left the field out (#317)."""
     if "project_id" in request.model_fields_set:
         return request.project_id
     return settings.last_project_id

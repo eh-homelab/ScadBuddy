@@ -2643,11 +2643,11 @@ describe('PrintPicker · Projects', () => {
   })
 
   it('files the print under the project the run chose when the project list could not be read (#1830)', async () => {
-    // The server remembers project 2 as the last one printed to.
-    await fetch('/api/v1/print/projects/last', {
+    // The server's default project is 2.
+    await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: 2 }),
+      body: JSON.stringify({ last_project_id: 2 }),
     })
     const runs = watch('POST', '/run')
     const { bodies } = watch('POST', '/project')

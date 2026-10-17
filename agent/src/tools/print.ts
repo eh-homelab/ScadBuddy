@@ -418,7 +418,9 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_print_projects',
-    description: "Bambuddy's projects, to file prints under, and the one last used." + PAGED,
+    description: "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
+      'the user changes, in Settings.' +
+      PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
     source:
@@ -777,22 +779,6 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'remember_last_project',
-    description:
-      'Choose `last_project_id` (null for "No project"): the project a print dialog with no project of its own ' +
-      '(a library file) opens on, and a run that names none is filed under. The Customize page opens on the ' +
-      "project remembered for the model and preset instead (get_remembered_choices' `model_projects`), or on no " +
-      'project. list_print_projects shows the current `last_project_id`.',
-    input: z.object({ project_id: z.number().int().nullable() }),
-    risk: 'write',
-    routes: ['PUT /api/v1/print/projects/last'],
-    handler: async ({ project_id }, { backend }) =>
-      json(
-        await ok(backend.PUT('/api/v1/print/projects/last', { body: { project_id } }), 'remember the project'),
-      ),
-  }),
-
-  defineTool({
     name: 'remember_printer_bed_type',
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
@@ -845,7 +831,7 @@ export const printTools: Tool[] = [
       "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
-      'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
+      'project: omit it for the default project (`last_project_id`), or pass null for "No project". ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
