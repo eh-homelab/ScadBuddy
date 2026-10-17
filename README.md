@@ -739,8 +739,11 @@ workers restart.
     while the loop runs on. For a hang it does not catch,
     `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
     The renders dashboard's "Worker event loops" panel charts the render and print
-    workers. `scadbuddy-projects` has no scrape target, so its stalls show only in
-    its log.
+    workers by `job="scadbuddy-render"` and `job="scadbuddy-print"`. Each `job` is
+    the name of the worker's Service, which its ServiceMonitor scrapes (eh-homelab/clusters
+    `applications/scadbuddy/scadbuddy-{render,print}.yaml`, no `jobLabel`), so renaming
+    either Service empties its series. `scadbuddy-projects` has no scrape target, so
+    its stalls show only in its log.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.

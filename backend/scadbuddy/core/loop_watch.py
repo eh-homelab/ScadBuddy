@@ -82,8 +82,8 @@ class LoopWatch:
         tb: TracebackType | None,
     ) -> None:
         # Not joined: a join through `asyncio.to_thread` waits for the very pool whose
-        # stall this reports. The thread is a daemon, and it returns within one
-        # `interval` of the event.
+        # stall this reports. The thread is a daemon, and it returns within
+        # `threshold` of the event: a beat it posted just before may still be waited on.
         self._stopping.set()
 
     def _watch(self, loop: asyncio.AbstractEventLoop, loop_thread: int) -> None:
@@ -110,6 +110,8 @@ class LoopWatch:
             if ran.wait(self.threshold):
                 self._check_probe(loop_thread)
                 continue
+            if self._stopping.is_set() or loop.is_closed():
+                return  # the beat was left unrun by the shutdown, not by a stall
             self.metrics.event_loop_stalls.inc()
             logger.warning(
                 "the event loop has not run for %.1f s (this watch woke %.1f s late);"
