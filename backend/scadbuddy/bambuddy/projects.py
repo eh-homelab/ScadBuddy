@@ -70,7 +70,7 @@ class ProjectView(BaseModel):
     #: When a file in its folder last changed in Bambuddy, else when the project was
     #: made (#3651): the picker's "modified" order.
     modified_at: datetime | None = None
-    #: The later of ``modified_at`` and the last print, filing or choice of it from
+    #: The later of ``modified_at`` and the last print or filing into it from
     #: ScadBuddy (#3651): the picker's "last touched" order, its default.
     touched_at: datetime | None = None
 

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_print, run_request, run_routes
+from tests.api.test_print_run_choices import allow_reprints, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press, subjects
@@ -212,9 +212,10 @@ def test_filing_an_output_with_no_project_says_so(client: TestClient, model: str
     assert "no project" in response.json()["detail"]
 
 
-def _projects_and_folders() -> None:
-    """Project 7 owns folder 9; folder 30, "Home", is no project's."""
-    respx.get(f"{API}/projects/").mock(
+def _projects_and_folders() -> respx.Route:
+    """Project 7 owns folder 9; folder 30, "Home", is no project's. Returns the projects
+    route."""
+    projects = respx.get(f"{API}/projects/").mock(
         return_value=httpx.Response(200, json=[{"id": 7, "name": "Reagan", "status": "active"}])
     )
     respx.get(f"{API}/library/folders").mock(
@@ -226,6 +227,7 @@ def _projects_and_folders() -> None:
             ],
         )
     )
+    return projects
 
 
 @pytest.mark.requires_postgres
@@ -255,6 +257,39 @@ def test_a_print_into_a_library_folder_uploads_there_under_no_project(
     listed = client.get("/api/v1/print/projects").json()
     assert [(row["id"], row["path"]) for row in listed["folders"]] == [(30, "Home")]
     assert listed["folders"][0]["touched_at"] is not None
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.parametrize(
+    "elsewhere", [{"folder_id": 30}, {"project_id": None}], ids=["folder", "no-project"]
+)
+def test_a_print_elsewhere_clears_the_outputs_earlier_project(
+    client: TestClient, model: str, elsewhere: dict[str, Any]
+) -> None:
+    """#3790 review — an output printed into project 7 and then into a folder of no
+    project, or into "No project", shows no project of its own any more."""
+    configure(client, library_folder_id=2)
+    allow_reprints(client)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    _projects_and_folders()
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
+    )
+
+    first = run_print(client, output_id, json=run_request(project_id=7)).json()
+    assert first["project_id"] == 7
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] == 7
+
+    request = {**run_request(), **elsewhere}
+    second = run_print(client, output_id, json=request).json()
+
+    assert second["project_id"] is None
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] is None
 
 
 @pytest.mark.requires_postgres
@@ -307,6 +342,30 @@ def test_a_deleted_settings_default_falls_through_rather_than_failing_the_print(
     assert body["project_id"] is None
     assert uploaded.calls.last.request.url.params["folder_id"] == "2"
     assert not deleted.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_run_reads_the_project_list_once(client: TestClient, model: str) -> None:
+    """#3790 review — the default project is resolved in the check and carried to the
+    plan, so one run asks Bambuddy for its projects once."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    projects = _projects_and_folders()
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
+    )
+    saved = client.put("/api/v1/settings", json={"last_project_id": 7})
+    assert saved.status_code == 200, saved.text
+
+    body = run_print(client, output_id, json=run_request()).json()
+
+    assert body["project_id"] == 7
+    assert projects.call_count == 1
 
 
 @pytest.mark.requires_postgres

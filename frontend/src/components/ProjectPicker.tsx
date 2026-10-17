@@ -39,7 +39,7 @@ import { Spinner } from './ui/spinner'
  *
  * #3651 — a searchable list (fuzzy: typos and letters in order match), each row labelled
  * Project or Folder and shown with its path, sorted like a file explorer: by when it was
- * last touched (printed, filed or chosen here, or written to in Bambuddy; the default),
+ * last touched (printed or filed here, or written to in Bambuddy; the default),
  * modified, or by name. Settings sets the order it opens on; the list can re-sort.
  *
  * The control fetches its own list, unless the parent passes one from
@@ -129,8 +129,9 @@ interface Props {
    */
   folder?: { value: number | null; onChange: (folderId: number | null) => void }
   /**
-   * The project the last send went to, reported once the list has loaded, so the parent
-   * can seed `value` from it without ever handling a `ProjectChoices`.
+   * The Settings default project (`last_project_id`), reported once the list has
+   * loaded, so the parent can seed `value` from it without ever handling a
+   * `ProjectChoices`.
    */
   onLoaded?: (projectId: number | null) => void
   /**

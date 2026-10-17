@@ -400,6 +400,33 @@ def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
 
 
 @respx.mock
+def test_a_library_run_reads_the_project_list_once(client: TestClient) -> None:
+    """#4008 review — a library file's check resolves the default project too, and the
+    plan reuses it: a Settings default Bambuddy no longer has is one read, then the
+    inbox."""
+    configure(client)
+    saved = client.put("/api/v1/settings", json={"last_project_id": 99})
+    assert saved.status_code == 200, saved.text
+    projects = respx.get(f"{API}/projects/").mock(return_value=httpx.Response(200, json=[]))
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert upload.calls.last.request.url.params["folder_id"] == "2"
+    assert projects.call_count == 1
+
+
+@respx.mock
 def test_a_library_print_queues_with_the_options_remembered_for_that_file(
     client: TestClient,
 ) -> None:

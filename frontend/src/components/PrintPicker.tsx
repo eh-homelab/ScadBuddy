@@ -505,7 +505,7 @@ export function PrintPicker({
   const ownProjects = useProjectList(undefined, open && !project)
   /**
    * #3651 — where the dialog opens: the one project all of the content is in already,
-   * else the Settings default, else the last send's. Asked on each open of a new source;
+   * else the Settings default, else none. Asked on each open of a new source;
    * a choice made before it answers stands.
    */
   const [ownDefaultKnown, setOwnDefaultKnown] = useState(false)

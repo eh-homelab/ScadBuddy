@@ -471,6 +471,13 @@ def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | N
     return settings.last_project_id
 
 
+class ResolvedProject(BaseModel):
+    """:func:`resolve_project`'s answer, carried from a run's check to its plan so the
+    project list is read once (#3790 review); ``None`` is "No project"."""
+
+    project_id: int | None = None
+
+
 async def resolve_project(
     client: BambuddyClient, request: ChoosesProject, settings: StoredSettings
 ) -> int | None:
@@ -483,6 +490,18 @@ async def resolve_project(
         return project_id
     known = {project.id for project in await client.projects()}
     return project_id if project_id in known else None
+
+
+async def planned_project(
+    client: BambuddyClient,
+    request: PrintRunRequest,
+    settings: StoredSettings,
+    prepared: PreparedPlates,
+) -> int | None:
+    """The project the check resolved, else :func:`resolve_project` now."""
+    if prepared.project is not None:
+        return prepared.project.project_id
+    return await resolve_project(client, request, settings)
 
 
 async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
@@ -1190,6 +1209,9 @@ class PreparedRun:
     warnings: list[FilamentWarning] = field(default_factory=list)
     #: The resolved printer's model, which the plate warnings are judged against (#2858).
     printer_model: str | None = None
+    #: The project the caller resolved already, if it did; :func:`plan_run` reads it
+    #: rather than Bambuddy's project list again.
+    project: ResolvedProject | None = None
 
 
 async def prepare_run(
@@ -1200,6 +1222,7 @@ async def prepare_run(
     *,
     rack: RackUsage | None = None,
     refuse_manual_pick: bool = True,
+    project: ResolvedProject | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -1273,6 +1296,7 @@ async def prepare_run(
             printer_model=printer.model,
             warnings=plate_warnings
             + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
+            project=project,
         )
     printer = await _require_resolvable_printer(client, printer_id)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
@@ -1301,6 +1325,7 @@ async def prepare_run(
         printer_status=printer_status,
         printer_name=printer.name,
         printer_model=printer.model,
+        project=project,
     )
 
 
@@ -1319,6 +1344,12 @@ class PreparedPlates(BaseModel):
     #: As :attr:`PreparedRun.printer_model`. ``None`` in a run accepted before it was
     #: carried, which then says nothing of an unlisted plate.
     printer_model: str | None = None
+    #: As :attr:`PreparedRun.project`. ``None`` in a run accepted before it was carried,
+    #: whose plan resolves the project itself. The plan trusts it: a default project
+    #: deleted between the check and the plan fails the run on its folder rather than
+    #: falling through to "No project", a window of seconds accepted for one read
+    #: (#4008 review).
+    project: ResolvedProject | None = None
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1336,6 +1367,7 @@ class PreparedPlates(BaseModel):
             printer_status=prepared.printer_status,
             warnings=prepared.warnings,
             printer_model=prepared.printer_model,
+            project=prepared.project,
         )
 
 
@@ -1479,7 +1511,7 @@ async def plan_run(
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
-    project_id = await resolve_project(client, request, settings)
+    project_id = await planned_project(client, request, settings, prepared)
     # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
     # One read of the inventory for the plan and every plate's options (#480).
     inventory = await read_inventory(client)
@@ -1702,7 +1734,7 @@ async def _plan_sliced(
     for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
     it as soon as the printer is idle, before anyone read the warning."""
     printer_id = prepared.printer_id
-    project_id = await resolve_project(client, request, settings)
+    project_id = await planned_project(client, request, settings, prepared)
     profile = source.sliced_profile
     nozzle_size = sliced_nozzle_size(profile, prepared, request)
     printed = await source.file_to_print(
