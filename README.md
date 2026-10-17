@@ -744,8 +744,50 @@ workers restart.
     full Bambuddy key and template code can print. The Settings page shows the same
     warning.
 
-  If a `bambuddy` store cannot start (no URL or folder), see "Recovering an unready
-  blob store" below.
+  If a `bambuddy` or `s3` store cannot start (no URL or folder; no endpoint, bucket or
+  keys), see "Recovering an unready blob store" below.
+
+- **`s3`**: an S3-compatible object store, the second multi-worker backend (design:
+  `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4). The
+  workers need no shared volume, exactly as for `bambuddy` above (an `emptyDir` at
+  `/data`, the same cache and sweep settings). Settings → **Blob store** takes seven
+  values, each seeded by the `SCADBUDDY_<FIELD>` variable of the same name and applied
+  at restart:
+
+  | Setting | Default | What it is |
+  |---|---|---|
+  | `store_s3_endpoint` | none | The service's URL, e.g. a [Garage](https://garagehq.deuxfleurs.fr/) or [MinIO](https://min.io/) address. |
+  | `store_s3_region` | `us-east-1` | The signing region; Garage and MinIO take whatever they are configured with. |
+  | `store_s3_bucket` | none | An existing bucket. ScadBuddy never creates it. |
+  | `store_s3_prefix` | `scadbuddy` | Objects are stored at `<prefix>/<kind>/<sha256>`, so one bucket can hold several instances, each under its own prefix. |
+  | `store_s3_access_key_id` | none | The key's id. |
+  | `store_s3_secret_access_key` | none | The key's secret, sealed under the KEK like the other secrets and never returned by the API. |
+  | `store_s3_path_style` | `true` | Addresses the bucket in the path (`endpoint/bucket/key`) rather than the hostname. Garage and MinIO need it ([Garage](https://garagehq.deuxfleurs.fr/documentation/), [MinIO](https://min.io/docs/minio/linux/index.html) docs). |
+
+  A save that switches to `s3` without the endpoint, bucket and both keys is refused.
+  Uploads above 64 MiB go as multipart ([S3's limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)).
+  An object whose upload never got a row (a crash between the two) is removed by the
+  blob sweep once it is older than `SCADBUDDY_JOB_TTL`.
+
+  **Switching a store that already holds blobs.** Changing `store_backend` alone would
+  leave every existing piece, snapshot and upload behind, so the move is two phases:
+  1. Save the S3 settings, leaving **Blob store** on its current backend.
+  2. Start the copy: `POST /api/v1/store/migrate` with
+     `{"source": "bambuddy", "target": "s3"}` (optionally `"batch": 50`), or ask the
+     assistant (`store_migrate`). One `StoreMigration` workflow runs per pair, and a
+     second POST joins it. It answers 409 when the saved `store_backend` already is the
+     target and 422 for an invalid pair. The copy writes each blob to the target and
+     records it on the row; the running processes keep reading from the source.
+  3. Follow `GET /api/v1/store/migrate?source=bambuddy&target=s3` (or
+     `store_migrate_status`): `remaining`, `copied`, `failed` (up to 200 rows with the
+     error), `failed_count` and `running`. A new POST retries the failed rows.
+  4. When `remaining` is `0`, set **Blob store** to `s3` and restart the API and every
+     render worker **together**. At start on the new backend each process switches every
+     copied row onto its copy in one statement, so a replica that has not restarted yet
+     misses on those blobs until it does: do not roll them one at a time.
+
+  The migration never deletes from the source; clear the old inbox folder yourself once
+  you are satisfied.
 
 **Environment:**
 
@@ -772,17 +814,18 @@ each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
 
 With `store_backend` set to `bambuddy`, the API and the render worker refuse to start
 without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
-is out of reach. Settings no longer saves that state, but a stored `bambuddy` beats
+is out of reach. The same holds for `s3` without its endpoint, bucket and both keys, and
+the recovery below is the same. Settings no longer saves that state, but a stored `bambuddy` beats
 `SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
 database, in the schema `SCADBUDDY_DATABASE_URL` uses (the `settings` table is
 unqualified: on a custom schema, `SET search_path` to it first), then set the URL and
-folder in Settings and choose the Bambuddy store again:
+folder (or the S3 values) in Settings and choose that store again:
 
 ```sql
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
 ```
 
-When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy`),
+When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy` or `s3`),
 set `SCADBUDDY_STORE_BACKEND=local` instead.
 
 ### Encrypted API keys (#602)
