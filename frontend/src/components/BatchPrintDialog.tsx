@@ -161,15 +161,15 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
           <DialogHeader>
             <DialogTitle>Print files</DialogTitle>
           </DialogHeader>
-            {error ? (
-              <p role="alert" className="text-[13px] text-warn">
-                {error}
-              </p>
-            ) : (
-              <p className="flex items-center gap-2 text-[13px] text-subtle">
-                <Spinner /> Reading the batch print
-              </p>
-            )}
+          {error ? (
+            <p role="alert" className="text-[13px] text-warn">
+              {error}
+            </p>
+          ) : (
+            <p className="flex items-center gap-2 text-[13px] text-subtle">
+              <Spinner /> Reading the batch print
+            </p>
+          )}
         </DialogContent>
       </Dialog>
     )
@@ -417,6 +417,7 @@ function ReviewRow({
     summary?.print_seconds ? formatDuration(summary.print_seconds) : null,
     summary?.filament_g ? `${Math.round(summary.filament_g * 10) / 10} g` : null,
   ].filter(Boolean)
+  const overrides = item.request ? overridesOf(item.request) : []
   return (
     <li className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2" data-testid={`batch-row-${item.position}`}>
       <div className="min-w-0 flex-1">
@@ -430,6 +431,11 @@ function ReviewRow({
             {details.length > 0 && <p className="text-[12px] text-subtle">{details.join(' · ')}</p>}
             {(summary?.spools ?? []).length > 0 && (
               <p className="text-[12px] text-subtle">{(summary?.spools ?? []).join(', ')}</p>
+            )}
+            {overrides.length > 0 && (
+              <p className="text-[12px] text-subtle" data-testid={`batch-overrides-${item.position}`}>
+                {overrides.join(' · ')}
+              </p>
             )}
           </>
         )}
@@ -460,6 +466,32 @@ function ReviewRow({
   )
 }
 
+/**
+ * #3799 — what a step chose over the template and the process, so a choice that went
+ * missing shows before Queue all: left out, each is the template's or the process's.
+ */
+function overridesOf(request: NonNullable<BatchItem['request']>): string[] {
+  const shown: string[] = []
+  const supports = request.supports
+  if (supports) {
+    shown.push(
+      !supports.enabled
+        ? 'No supports'
+        : supports.type
+          ? `${supports.type === 'tree' ? 'Tree' : 'Normal'} supports`
+          : 'Supports on',
+    )
+  }
+  const tower = request.prime_tower
+  if (tower) {
+    shown.push(!tower.enabled ? 'No prime tower' : tower.no_sparse_layers ? 'Prime tower, no sparse layers' : 'Prime tower')
+  }
+  if (request.print_sequence) shown.push(request.print_sequence === 'by object' ? 'By object' : 'By layer')
+  const profiles = request.filament_profiles ?? []
+  if (profiles.length > 0) shown.push(`Filament ${profiles.length === 1 ? 'profile' : 'profiles'}: ${profiles.join(', ')}`)
+  return shown
+}
+
 /** A file whose print has started, or may have: its choices no longer change. */
 function locked(item: BatchItem): boolean {
   return item.outcome?.status === 'started' || item.outcome?.status === 'pending'
@@ -473,6 +505,15 @@ function Outcome({ item, run }: { item: BatchItem; run: PrintRun | undefined }) 
     return (
       <p role="status" className="text-[12px] text-subtle" data-testid={`batch-outcome-${item.position}`}>
         Still being checked{outcome.detail ? `: ${outcome.detail}` : '.'} Queue all again to follow it.
+      </p>
+    )
+  }
+  if (outcome.status === 'refused' && outcome.stale) {
+    // #3798 — edited since: the refusal was of other choices than these.
+    return (
+      <p role="status" className="text-[12px] text-subtle" data-testid={`batch-outcome-${item.position}`}>
+        Edited since it was refused{outcome.detail ? ` (${outcome.detail})` : ''}. Queue all sends the new
+        choices.
       </p>
     )
   }

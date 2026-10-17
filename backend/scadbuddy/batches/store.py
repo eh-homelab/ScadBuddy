@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -21,6 +22,10 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 
 BatchStatus = Literal["open", "queued"]
+
+#: An item Queue all is still following, in SQL on ``print_batch_items`` aliased ``i``:
+#: its batch is kept so the run can be followed rather than started twice (#2718 review).
+_PENDING = "NOT i.removed AND i.outcome->>'status' = 'pending'"
 
 
 class BatchSummary(BaseModel):
@@ -57,6 +62,9 @@ class BatchOutcome(BaseModel):
     detail: str | None = None
     #: How many failed runs came before this one: part of its ``request_id``.
     attempt: int = 0
+    #: A refusal whose file was edited since: its choices are not the ones refused, and
+    #: the next Queue all sends the new ones (#3798). Kept, not cleared, for ``attempt``.
+    stale: bool = False
 
 
 class BatchItem(BaseModel):
@@ -134,6 +142,8 @@ class PrintBatchStore:
         return await asyncio.to_thread(self._with_pending)
 
     async def set_step(self, batch_id: str, step: int) -> PrintBatch | None:
+        """The batch with its step moved, or ``None`` when it is gone or no longer open:
+        a Queue all that queued it since the caller looked keeps its step (#3798)."""
         return await asyncio.to_thread(self._set_step, batch_id, step)
 
     async def choose(self, batch_id: str, position: int, choice: BatchChoice) -> PrintBatch | None:
@@ -164,19 +174,32 @@ class PrintBatchStore:
         (#2718 review)."""
         return await asyncio.to_thread(self._mark_queued, batch_id)
 
-    async def prune(self, older_than: timedelta) -> int:
+    async def prune(self, older_than: timedelta, *, pending_older_than: timedelta) -> Pruned:
         """Forgets every batch nobody has touched for ``older_than``: one closed without
-        Cancel or Done (a tab closed) would otherwise stay for good (#2718 review)."""
-        return await asyncio.to_thread(self._prune, older_than)
+        Cancel or Done (a tab closed) would otherwise stay for good (#2718 review). One
+        with a file still ``pending`` is kept, so Queue all can follow that run, until
+        ``pending_older_than`` (#3798): those are named, so the caller can say so."""
+        return await asyncio.to_thread(self._prune, older_than, pending_older_than)
 
-    def _prune(self, older_than: timedelta) -> int:
+    def _prune(self, older_than: timedelta, pending_older_than: timedelta) -> Pruned:
+        pending = (
+            f"EXISTS (SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id AND {_PENDING})"
+        )
         with self._pool.connection() as conn:
             deleted = conn.execute(
-                "DELETE FROM print_batches WHERE updated_at < now() - %s", (older_than,)
-            )
-            return deleted.rowcount
+                "DELETE FROM print_batches b WHERE b.updated_at < now() - %s"
+                f" AND (NOT {pending} OR b.updated_at < now() - %s)"
+                f" RETURNING b.id, {pending} AS pending",
+                (older_than, pending_older_than),
+            ).fetchall()
+        return Pruned(
+            count=len(deleted),
+            pending=sorted(row["id"] for row in deleted if row["pending"]),
+        )
 
-    async def delete(self, batch_id: str) -> bool:
+    async def delete(self, batch_id: str) -> Deleted:
+        """``pending`` refuses it: a file still being checked is followed by the batch,
+        and a new one would send it again (#3798). One statement, so it cannot race."""
         return await asyncio.to_thread(self._delete, batch_id)
 
     def _create(self, files: list[NewBatchFile]) -> PrintBatch:
@@ -198,15 +221,23 @@ class PrintBatchStore:
         return found
 
     def _with_pending(self) -> list[PrintBatch]:
+        # Two reads on one connection, whatever the count (#3798).
         with self._pool.connection() as conn:
-            ids = conn.execute(
-                "SELECT b.id FROM print_batches b WHERE b.status = 'open' AND EXISTS ("
-                "SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id"
-                " AND NOT i.removed AND i.outcome->>'status' = 'pending')"
+            batches = conn.execute(
+                "SELECT b.id, b.status, b.step, b.created_at FROM print_batches b"
+                " WHERE b.status = 'open' AND EXISTS ("
+                f"SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id AND {_PENDING})"
                 " ORDER BY b.created_at DESC"
             ).fetchall()
-        batches = [self._get(row["id"]) for row in ids]
-        return [batch for batch in batches if batch is not None]
+            rows = conn.execute(
+                f"SELECT batch_id, {_ITEM_COLUMNS} FROM print_batch_items"
+                " WHERE batch_id = ANY(%s) ORDER BY batch_id, position",
+                ([batch["id"] for batch in batches],),
+            ).fetchall()
+        items: dict[str, list[BatchItem]] = {}
+        for row in rows:
+            items.setdefault(row["batch_id"], []).append(_item(row))
+        return [_batch(batch, items.get(batch["id"], [])) for batch in batches]
 
     def _get(self, batch_id: str, touch: bool = False) -> PrintBatch | None:
         with self._pool.connection() as conn:
@@ -220,40 +251,41 @@ class PrintBatchStore:
             if batch is None:
                 return None
             rows = conn.execute(
-                "SELECT position, library_file_id, filename, sliced, skipped, removed, request,"
-                " summary, problems, outcome FROM print_batch_items WHERE batch_id = %s"
+                f"SELECT {_ITEM_COLUMNS} FROM print_batch_items WHERE batch_id = %s"
                 " ORDER BY position",
                 (batch_id,),
             ).fetchall()
-        return PrintBatch(
-            id=batch["id"],
-            status=batch["status"],
-            step=batch["step"],
-            created_at=batch["created_at"],
-            items=[_item(row) for row in rows],
-        )
+        return _batch(batch, [_item(row) for row in rows])
 
     def _set_step(self, batch_id: str, step: int) -> PrintBatch | None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE print_batches SET step = %s, updated_at = now() WHERE id = %s",
+            moved = conn.execute(
+                "UPDATE print_batches SET step = %s, updated_at = now()"
+                " WHERE id = %s AND status = 'open'",
                 (step, batch_id),
-            )
-        return self._get(batch_id)
+            ).rowcount
+        return self._get(batch_id) if moved else None
 
     def _choose(self, batch_id: str, position: int, choice: BatchChoice) -> PrintBatch | None:
         with self._pool.connection() as conn, conn.transaction():
+            request = _request_json(choice.request)
             changed = conn.execute(
                 "UPDATE print_batch_items SET request = %s, skipped = %s, removed = %s,"
-                " summary = %s, problems = %s WHERE batch_id = %s AND position = %s"
+                " summary = %s, problems = %s,"
+                # A refusal of other choices than these says so (#3798).
+                " outcome = CASE WHEN outcome->>'status' = 'refused'"
+                " AND request IS DISTINCT FROM %s"
+                " THEN outcome || '{\"stale\": true}'::jsonb ELSE outcome END"
+                " WHERE batch_id = %s AND position = %s"
                 # Not while Queue all is sending it, or once it started (#2718 review).
                 " AND (outcome IS NULL OR outcome->>'status' NOT IN ('started', 'pending'))",
                 (
-                    _request_json(choice.request),
+                    request,
                     choice.skipped,
                     choice.removed,
                     _summary_json(choice.summary),
                     Jsonb(choice.problems),
+                    request,
                     batch_id,
                     position,
                 ),
@@ -317,10 +349,46 @@ class PrintBatchStore:
                 == 1
             )
 
-    def _delete(self, batch_id: str) -> bool:
+    def _delete(self, batch_id: str) -> Deleted:
         with self._pool.connection() as conn:
-            deleted = conn.execute("DELETE FROM print_batches WHERE id = %s", (batch_id,))
-            return deleted.rowcount > 0
+            found = conn.execute(
+                "WITH gone AS (DELETE FROM print_batches b WHERE b.id = %s AND NOT EXISTS ("
+                f"SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id AND {_PENDING})"
+                " RETURNING b.id)"
+                " SELECT EXISTS (SELECT 1 FROM gone) AS deleted,"
+                " EXISTS (SELECT 1 FROM print_batches WHERE id = %s) AS kept",
+                (batch_id, batch_id),
+            ).fetchone()
+        assert found is not None
+        if found["deleted"]:
+            return "deleted"
+        return "pending" if found["kept"] else "missing"
+
+
+Deleted = Literal["deleted", "pending", "missing"]
+
+
+@dataclass(frozen=True)
+class Pruned:
+    count: int
+    #: The batches pruned with a file still ``pending``, kept the longer TTL (#3798).
+    pending: list[str]
+
+
+_ITEM_COLUMNS = (
+    "position, library_file_id, filename, sliced, skipped, removed, request, summary,"
+    " problems, outcome"
+)
+
+
+def _batch(row: dict[str, Any], items: list[BatchItem]) -> PrintBatch:
+    return PrintBatch(
+        id=row["id"],
+        status=row["status"],
+        step=row["step"],
+        created_at=row["created_at"],
+        items=items,
+    )
 
 
 def _item(row: dict[str, Any]) -> BatchItem:
