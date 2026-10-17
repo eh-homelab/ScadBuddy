@@ -98,6 +98,7 @@ from scadbuddy.bambuddy.print_source import (
     OutputSource,
     PrintSource,
 )
+from scadbuddy.bambuddy.projects import require_destination_folder
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -462,6 +463,23 @@ def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | N
     if settings.default_project_id is not None:
         return settings.default_project_id
     return settings.last_project_id
+
+
+async def resolve_project(
+    client: BambuddyClient, request: ChoosesProject, settings: StoredSettings
+) -> int | None:
+    """:func:`chosen_project`, with a project left out resolved only to one Bambuddy still
+    has, as ``destinations.default_destination`` does: a Settings default or a last send's
+    project that was deleted falls through to the next, then to none, rather than failing
+    the print on its folder (#3651 review). A project the request names is used as sent."""
+    project_id = chosen_project(request, settings)
+    if project_id is None or "project_id" in request.model_fields_set:
+        return project_id
+    known = {project.id for project in await client.projects()}
+    for fallback in (settings.default_project_id, settings.last_project_id):
+        if fallback is not None and fallback in known:
+            return fallback
+    return None
 
 
 async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
@@ -1192,6 +1210,8 @@ async def prepare_run(
     position that does not fit is refused too (spec 2026-10-01 §5), unless
     ``refuse_manual_pick`` is off: the check says it as an error beside its preview.
     """
+    if request.folder_id is not None and "project_id" not in request.model_fields_set:
+        await require_destination_folder(client, request.folder_id, settings.library_folder_id)
     laid_out = await source.plate_ids(client)
     asked = request.asked_plates()
     plate_ids = laid_out if asked is None else asked
@@ -1456,7 +1476,7 @@ async def plan_run(
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
-    project_id = chosen_project(request, settings)
+    project_id = await resolve_project(client, request, settings)
     # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
     # One read of the inventory for the plan and every plate's options (#480).
     inventory = await read_inventory(client)
@@ -1679,7 +1699,7 @@ async def _plan_sliced(
     for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
     it as soon as the printer is idle, before anyone read the warning."""
     printer_id = prepared.printer_id
-    project_id = chosen_project(request, settings)
+    project_id = await resolve_project(client, request, settings)
     profile = source.sliced_profile
     nozzle_size = sliced_nozzle_size(profile, prepared, request)
     printed = await source.file_to_print(

@@ -42,11 +42,11 @@ from scadbuddy.bambuddy.print_run import (
     PreparedPlates,
     PrintRunResult,
     QueuedPlate,
-    chosen_project,
     finish_run,
     plan_run,
     prepare_run,
     queue_plate,
+    resolve_project,
 )
 from scadbuddy.bambuddy.print_source import (
     LibrarySource,
@@ -211,26 +211,23 @@ class PrintActivities:
         settings = self._settings()
         spec = input.source
         try:
-            if spec.kind == "output":
-                assert spec.output_id is not None
-                meta = await require(self.d.outputs, spec.output_id)
-                # A copy uploaded into a project's folder is named like the one Generate
-                # files (#317); a model.json that refuses its print settings refuses the
-                # run here, before the record (#770).
-                naming = await self.d.outputs.naming(meta)
-                if naming.invalid_meta is not None:
-                    raise invalid_meta(naming.invalid_meta)
-                spec = spec.model_copy(
-                    update={
-                        "stem": (
-                            naming.stem
-                            if chosen_project(input.request, settings) is not None
-                            else None
-                        ),
-                        "print_settings": naming.print_settings,
-                    }
-                )
             async with client_for(settings) as client:
+                if spec.kind == "output":
+                    assert spec.output_id is not None
+                    meta = await require(self.d.outputs, spec.output_id)
+                    # A copy uploaded into a project's folder is named like the one
+                    # Generate files (#317); a model.json that refuses its print settings
+                    # refuses the run here, before the record (#770).
+                    naming = await self.d.outputs.naming(meta)
+                    if naming.invalid_meta is not None:
+                        raise invalid_meta(naming.invalid_meta)
+                    project_id = await resolve_project(client, input.request, settings)
+                    spec = spec.model_copy(
+                        update={
+                            "stem": naming.stem if project_id is not None else None,
+                            "print_settings": naming.print_settings,
+                        }
+                    )
                 source = await self._source(client, spec, settings)
                 prepared = await prepare_run(
                     client, source, settings, input.request, rack=self.d.rack
@@ -406,14 +403,15 @@ class PrintActivities:
         if file_hash is not None:
             await self.d.uploads.record_slice_hash(subject.run_subject, sliced_id, file_hash)
 
-    async def _touch(self, planned: PlannedRun) -> None:
+    async def _touch(self, planned: PlannedRun, inbox_id: int | None) -> None:
         """The project or library folder printed into, touched for the destination
         picker's order (#3651). Best effort and bounded, like remembering the project:
-        every plate is queued by now."""
+        every plate is queued by now. The inbox ("No project") is never offered, so it
+        is never touched."""
         if planned.project_id is not None:
             kind: DestinationKind = "project"
             target = planned.project_id
-        elif planned.folder_id is not None:
+        elif planned.folder_id is not None and planned.folder_id != inbox_id:
             kind, target = "folder", planned.folder_id
         else:
             return
@@ -447,7 +445,7 @@ class PrintActivities:
                     )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)
-        await self._touch(planned)
+        await self._touch(planned, settings.library_folder_id)
         try:
             config: BambuddyConfig | None = BambuddyConfig.from_settings(settings)
         except ApiError as error:

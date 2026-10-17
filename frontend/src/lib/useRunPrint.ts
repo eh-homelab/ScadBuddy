@@ -191,6 +191,8 @@ export function useRunPrint({
     profilesKey,
     rackPosition,
     rackAlgorithm,
+    projectId,
+    folderId,
   ])
 
   /**

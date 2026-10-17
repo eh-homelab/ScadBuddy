@@ -559,6 +559,9 @@ def test_generate_files_into_a_library_folder_of_no_project(client: TestClient, 
     by_project = respx.get(url__regex=rf"{API}/library/folders/by-project/\d+").mock(
         return_value=httpx.Response(200, json=[])
     )
+    respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(200, json=[{"id": 30, "name": "Home", "children": []}])
+    )
 
     response = client.post(
         f"/api/v1/outputs/{output_id}/project-file", json={"folder_id": 30}, headers=press()
@@ -675,6 +678,10 @@ def test_a_run_that_names_no_project_uses_the_remembered_one(
     output_id = make_output(client, model)
     remember_project(client, PROJECT)
     project_folder_routes()
+    # The remembered project is used only while Bambuddy still has it (#3651 review).
+    respx.get(f"{API}/projects/").mock(
+        return_value=httpx.Response(200, json=[{"id": PROJECT, "name": "Kids", "status": "active"}])
+    )
     uploaded = uploads(41)
     run_routes()
     slice_routes()
@@ -685,6 +692,29 @@ def test_a_run_that_names_no_project_uses_the_remembered_one(
     assert ran.status_code == 200, ran.text
     assert (ran.json()["project_id"], ran.json()["folder_id"]) == (PROJECT, FOLDER)
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+
+
+@respx.mock
+def test_generate_refuses_a_folder_the_picker_does_not_offer(
+    client: TestClient, model: str
+) -> None:
+    """#3651 review — a project's own folder is that project, never a folder of none."""
+    configure(client)
+    output_id = make_output(client, model)
+    uploaded = uploads(41)
+    respx.get(f"{API}/library/folders").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": FOLDER, "name": "Kids' room", "project_id": PROJECT, "children": []}]
+        )
+    )
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/project-file", json={"folder_id": FOLDER}, headers=press()
+    )
+
+    assert response.status_code == 422, response.text
+    assert "not a library folder" in response.text
+    assert not uploaded.called
 
 
 def test_attaching_with_an_explicit_no_project_files_nothing(

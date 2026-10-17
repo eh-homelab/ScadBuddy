@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
 from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import PrintRunRequest, chosen_project
+from scadbuddy.bambuddy.print_run import PrintRunRequest, resolve_project
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
@@ -143,7 +143,9 @@ def bambuddy_kinds_over(
         if not library:
             await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
-        project_id = chosen_project(body, await asyncio.to_thread(settings_store.load))
+        settings = await asyncio.to_thread(settings_store.load)
+        async with client_for(settings) as client:
+            project_id = await resolve_project(client, body, settings)
         if project_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,

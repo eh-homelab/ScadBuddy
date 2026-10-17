@@ -29,7 +29,7 @@ from scadbuddy.bambuddy.extruders import (
 )
 from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, one_side_map
-from scadbuddy.bambuddy.projects import folder_for
+from scadbuddy.bambuddy.projects import folder_for, require_destination_folder
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
@@ -219,6 +219,8 @@ async def file_into_project(
     """
     if project_id is not None:
         folder_id = await folder_for(client, project_id)
+    elif folder_id is not None:
+        await require_destination_folder(client, folder_id, settings.library_folder_id)
     if folder_id is None:
         raise ApiError(400, "file it into a project or a library folder")
     target = await generate_target(client, uploads, meta, settings, project_id)

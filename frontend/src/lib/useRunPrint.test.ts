@@ -106,6 +106,18 @@ describe('useRunPrint', () => {
     expect(result.current.runError).toBeNull()
   })
 
+  it('another destination after a 422 is worth another try (#3651)', async () => {
+    runPrint.mockRejectedValueOnce(new ApiError(422, 'folder 9 is not a library folder a print can be filed in'))
+    const { result, rerender } = renderHook((props) => useRunPrint(props), {
+      initialProps: { ...input(), folderId: 9 },
+    })
+    await act(() => result.current.run())
+    expect(result.current.refused).toBe(true)
+
+    rerender({ ...input(), folderId: 10 })
+    await waitFor(() => expect(result.current.refused).toBe(false))
+  })
+
   it('anything but a 422 is worth retrying as it stands', async () => {
     runPrint.mockRejectedValueOnce(new ApiError(502, 'Bambuddy is down.'))
     const props = input()

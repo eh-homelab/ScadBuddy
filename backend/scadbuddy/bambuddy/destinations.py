@@ -13,6 +13,7 @@ not "in one project", so the Settings default applies.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Literal
 
@@ -27,6 +28,10 @@ from scadbuddy.library.settings_store import StoredSettings
 #: Why the default is what it is: the content's own project, the Settings default, the
 #: last send's project, or none at all ("No project").
 DefaultReason = Literal["content", "settings", "last", "none"]
+
+#: Library files read from Bambuddy at once for one default (#3651 review): an Arrange
+#: of many files stays quick without flooding Bambuddy.
+LIBRARY_READS = 8
 
 
 class DefaultDestination(BaseModel):
@@ -46,7 +51,8 @@ async def default_destination(
 ) -> DefaultDestination:
     """This module's rule for the outputs and library files given.
 
-    Two reads of Bambuddy, the projects and the folder tree, plus one per library file.
+    Two reads of Bambuddy, the projects and the folder tree, plus one per library file,
+    ``LIBRARY_READS`` at a time.
     A project that is no longer in Bambuddy is never a default, so a deleted Settings
     default falls through to the last send's project rather than failing the print.
     """
@@ -69,16 +75,20 @@ async def default_destination(
         if meta.project_id is not None:
             home.add(meta.project_id)
         homes.append(home)
-    for file_id in library_file_ids:
-        try:
-            file = await client.library_file(file_id)
-        except ApiError as error:
-            if error.status != 404:
-                raise
-            homes.append(set())
-            continue
+    reads = asyncio.Semaphore(LIBRARY_READS)
+
+    async def home_of(file_id: int) -> set[int]:
+        async with reads:
+            try:
+                file = await client.library_file(file_id)
+            except ApiError as error:
+                if error.status != 404:
+                    raise
+                return set()
         project = folder_project.get(file.folder_id) if file.folder_id is not None else None
-        homes.append({project} if project is not None else set())
+        return {project} if project is not None else set()
+
+    homes.extend(await asyncio.gather(*(home_of(file_id) for file_id in library_file_ids)))
 
     shared = set.intersection(*homes) if homes else set()
     if len(shared) == 1 and all(len(home) == 1 for home in homes):

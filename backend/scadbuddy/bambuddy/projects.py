@@ -197,6 +197,21 @@ def _destination_folders(
     return found
 
 
+async def require_destination_folder(
+    client: BambuddyClient, folder_id: int, inbox_id: int | None
+) -> None:
+    """Refuse a library folder the picker would not offer (#3651 review): the inbox,
+    a project's folder or anything under one, an external folder, or one that is gone.
+    The picker hides them; an API or agent caller is told the same with a 422."""
+    offered = _destination_folders(await client.folders(), {}, inbox_id)
+    if all(folder.id != folder_id for folder in offered):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"folder {folder_id} is not a library folder a print can be filed in: pick"
+            " one from GET /api/v1/print/projects, or a project",
+        )
+
+
 async def describe_projects(
     client: BambuddyClient,
     *,
