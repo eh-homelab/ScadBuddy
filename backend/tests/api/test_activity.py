@@ -152,11 +152,12 @@ def test_an_output_subject_is_labelled_from_the_store(
 
 
 def test_an_output_subject_is_labelled_with_its_name_else_its_models() -> None:
-    named = SimpleNamespace(name="Kai's tag", slug="keychain")
-    unnamed = SimpleNamespace(name=None, slug="keychain")
-    metas = {"a" * 32: named, "b" * 32: unnamed}
+    metas: dict[str, tuple[str | None, str]] = {
+        "a" * 32: ("Kai's tag", "keychain"),
+        "b" * 32: (None, "keychain"),
+    }
 
-    def get(output_id: str) -> SimpleNamespace:
+    def get(output_id: str) -> tuple[str | None, str]:
         if output_id not in metas:
             raise OutputNotFoundError(output_id)
         return metas[output_id]
@@ -169,7 +170,7 @@ def test_an_output_subject_is_labelled_with_its_name_else_its_models() -> None:
         Count(value, 1)
         for value in ("output:" + "a" * 32, "output:" + "b" * 32, "output:" + "c" * 32)
     ]
-    labels = _subject_labels(subjects, catalogue, SimpleNamespace(get=get))  # type: ignore[arg-type]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
     assert labels == {"output:" + "a" * 32: "Kai's tag", "output:" + "b" * 32: "Name Keychain"}
 
 
@@ -178,15 +179,19 @@ def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> Non
     leaves its chip unnamed rather than failing the facets."""
     asked: list[str] = []
 
-    def get(output_id: str) -> SimpleNamespace:
+    def get(output_id: str) -> tuple[str | None, str]:
         asked.append(output_id)
-        raise ValueError("meta.json does not validate")
+        if output_id == "d" * 32:
+            raise ValueError("meta.json does not validate")
+        raise FileNotFoundError(output_id)  # deleted between the lookup and the read
 
     catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
-    subjects = [Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32)]
-    labels = _subject_labels(subjects, catalogue, SimpleNamespace(get=get))  # type: ignore[arg-type]
+    subjects = [
+        Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32, "output:" + "e" * 32)
+    ]
+    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
     assert labels == {}
-    assert asked == ["d" * 32]
+    assert sorted(asked) == ["d" * 32, "e" * 32]
 
 
 def test_facets_without_agent_tables(client: TestClient) -> None:

@@ -33,12 +33,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.outputs import (
-    OUTPUT_ID_PATTERN,
-    OutputMeta,
-    OutputNotFoundError,
-    OutputStore,
-)
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -280,7 +275,7 @@ def _subject_labels(
     # The most frequent first: past them a chip shows its reference, and the facets
     # stay one catalogue read and a bounded number of output reads.
     values = {c.value for c in subjects[:LABELLED_SUBJECTS]}
-    metas: dict[str, OutputMeta] = {}
+    metas: dict[str, tuple[str | None, str]] = {}
     for value in values:
         if not value.startswith("output:"):
             continue
@@ -288,15 +283,15 @@ def _subject_labels(
         if not re.fullmatch(OUTPUT_ID_PATTERN, output_id):
             continue  # not an id at all: never let it near the store's paths
         try:
-            metas[value] = outputs.get(output_id)
-        except (OutputNotFoundError, ValueError):
-            continue  # deleted since, or its meta unreadable: the chip keeps its id
-    wanted = values | {meta.slug for meta in metas.values()}
+            metas[value] = outputs.name_and_slug(output_id)
+        except (OutputNotFoundError, OSError, ValueError):
+            continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
+    wanted = values | {slug for _, slug in metas.values()}
     slugs = [slug for slug in catalogue.slugs() if slug in wanted]
     names = {record.slug: record.name for record in catalogue.list_models(slugs)}
     labels = {value: name for value, name in names.items() if value in values}
-    for value, meta in metas.items():
-        name = meta.name or names.get(meta.slug)
+    for value, (own, slug) in metas.items():
+        name = own or names.get(slug)
         if name:
             labels[value] = name
     return labels

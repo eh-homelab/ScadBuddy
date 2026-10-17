@@ -264,6 +264,13 @@ class OutputStore:
         [meta] = self._with_last_prints([meta])
         return meta
 
+    def name_and_slug(self, output_id: str) -> tuple[str | None, str]:
+        """The output's own name and its model, from ``meta.json`` alone: `get` without
+        the last-print read, for a caller that only labels it (#3856)."""
+        directory = self._find_dir(output_id)
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        return meta.name, meta.slug
+
     def _with_last_prints(self, metas: list[OutputMeta]) -> list[OutputMeta]:
         """Each output's recorded last print (#1060) over its file's; one with no row
         keeps what an older release wrote into its ``meta.json``."""
