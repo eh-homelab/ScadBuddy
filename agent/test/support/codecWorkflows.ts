@@ -33,7 +33,11 @@ export async function failingTool(text: string): Promise<string> {
   }
 }
 
-/** Hands its words to a tool, as a turn hands a large tool input over (#3739). */
-export async function toolInput(text: string): Promise<number> {
-  return await lengthOf(text)
+/**
+ * Hands a tool `chars` characters, as a turn hands a large tool input over (#3739).
+ * Built here, so the workflow's own input and result stay small: the only large
+ * payload is the activity's input.
+ */
+export async function toolInput(chars: number): Promise<number> {
+  return await lengthOf('x'.repeat(chars))
 }

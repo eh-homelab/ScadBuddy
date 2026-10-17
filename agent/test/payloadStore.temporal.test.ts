@@ -56,9 +56,10 @@ describe.skipIf(!TEMPORAL_CLI)(`a session's payloads kept by reference${TEMPORAL
       await handle.signal('finish')
       expect(await handle.result()).toBe(`${words} (done)`)
       // An activity's input over OFFLOAD_BYTES: the agent-tools worker's own walk.
-      expect(await client.workflow.execute('toolInput', { workflowId: tool, taskQueue, args: [words] })).toBe(words.length)
+      expect(await client.workflow.execute('toolInput', { workflowId: tool, taskQueue, args: [words.length] })).toBe(words.length)
     })
-    // Both by reference, not inline: each subject's payloads are files on the share.
+    // Both by reference, not inline: each subject's payloads are files on the share
+    // (`tool`'s only large payload is its activity's input).
     for (const s of [subject, tool]) expect(readdirSync(join(root, s)).length).toBeGreaterThan(0)
   })
 })
