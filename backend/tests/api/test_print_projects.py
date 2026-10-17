@@ -259,11 +259,14 @@ def test_a_print_into_a_library_folder_uploads_there_under_no_project(
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_a_print_into_a_folder_clears_the_outputs_earlier_project(
-    client: TestClient, model: str
+@pytest.mark.parametrize(
+    "elsewhere", [{"folder_id": 30}, {"project_id": None}], ids=["folder", "no-project"]
+)
+def test_a_print_elsewhere_clears_the_outputs_earlier_project(
+    client: TestClient, model: str, elsewhere: dict[str, Any]
 ) -> None:
     """#3790 review — an output printed into project 7 and then into a folder of no
-    project shows no project of its own any more."""
+    project, or into "No project", shows no project of its own any more."""
     configure(client, library_folder_id=2)
     allow_reprints(client)
     output_id = make_output(client, model)
@@ -280,9 +283,10 @@ def test_a_print_into_a_folder_clears_the_outputs_earlier_project(
     assert first["project_id"] == 7
     assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] == 7
 
-    second = run_print(client, output_id, json=run_request(folder_id=30)).json()
+    request = {**run_request(), **elsewhere}
+    second = run_print(client, output_id, json=request).json()
 
-    assert (second["project_id"], second["folder_id"]) == (None, 30)
+    assert second["project_id"] is None
     assert client.get(f"/api/v1/outputs/{output_id}").json()["project_id"] is None
 
 

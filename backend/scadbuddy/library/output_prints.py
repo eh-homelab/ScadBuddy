@@ -22,7 +22,8 @@ from scadbuddy.library.outputs import PlateSend, PrintRoute
 
 #: The fields a row lays over the file's even when ``None``: the last print's project
 #: is its own, ``None`` for a folder or no project (#3790 review). Every other null
-#: id leaves the file's.
+#: id leaves the file's. A row written before then with a null project lays it over an
+#: older ``meta.json``'s project too, as intended: the row is always the newer print.
 ALWAYS_OVERLAID = frozenset({"project_id"})
 
 
