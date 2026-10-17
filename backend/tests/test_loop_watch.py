@@ -63,12 +63,15 @@ async def test_a_full_default_executor_is_logged_with_what_holds_it(
     ``project``), with the loop itself running."""
     metrics = Metrics()
     caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
-    loop = asyncio.get_running_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-    async with LoopWatch(metrics, threshold=0.2, interval=0.05):
-        await asyncio.sleep(0.1)
-        await asyncio.to_thread(_holds_the_executor, 0.6)
-        await asyncio.sleep(0.2)
+    executor = ThreadPoolExecutor(max_workers=1)
+    asyncio.get_running_loop().set_default_executor(executor)
+    try:
+        async with LoopWatch(metrics, threshold=0.2, interval=0.05):
+            await asyncio.sleep(0.1)
+            await asyncio.to_thread(_holds_the_executor, 0.6)
+            await asyncio.sleep(0.2)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     held = [r for r in caplog.records if "default executor" in r.getMessage()]
     assert held, caplog.text
     assert "_holds_the_executor" in held[0].getMessage()
@@ -82,10 +85,31 @@ async def test_leaving_the_watch_does_not_wait_for_a_held_default_executor() -> 
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1)
     loop.set_default_executor(executor)
-    held = loop.run_in_executor(None, _holds_the_executor, 1.0)
     watch = LoopWatch(Metrics(), threshold=2.0, interval=0.05)
+    try:
+        held = loop.run_in_executor(None, _holds_the_executor, 1.0)
+        await watch.__aenter__()
+        left = time.monotonic()
+        await watch.__aexit__(None, None, None)
+        assert time.monotonic() - left < 0.5
+        await held
+    finally:
+        watch._stopping.set()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def test_a_beat_left_unrun_after_leaving_is_no_stall(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A beat posted just before the watch is left, and never run because the loop is
+    held or closing, is the shutdown, not a stall to log with every stack."""
+    metrics = Metrics()
+    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    watch = LoopWatch(metrics, threshold=0.3, interval=0.05)
     await watch.__aenter__()
-    left = time.monotonic()
-    await watch.__aexit__(None, None, None)
-    assert time.monotonic() - left < 0.5
-    await held
+    _blocks_the_loop(0.15)  # past `interval`: a beat is posted and left unrun
+    await watch.__aexit__(None, None, None)  # sets the stop without yielding
+    _blocks_the_loop(0.5)  # past `threshold`, with the stop set
+    await asyncio.sleep(0.1)
+    assert not caplog.records, caplog.text
+    assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
