@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +22,7 @@ from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.client import connect, connect_lazily
@@ -313,6 +315,16 @@ def test_a_field_never_stored_follows_the_environment_it_starts_with(
     later = settings.model_copy(update={"public_url": "https://scad.example"})
     with TestClient(create_app(later)) as client:
         assert client.get("/api/v1/settings").json()["public_url"] == "https://scad.example"
+
+
+def test_a_seeded_native_library_on_the_local_store_does_not_start(settings: Settings) -> None:
+    """Ruling 3 at start: the environment's seed is never checked by a save."""
+    native = settings.model_copy(update={"library_backend": "native"})
+    with (
+        pytest.raises(StoreNotReadyError, match=re.escape(RECOVER_BAMBUDDY_LIBRARY_SQL)),
+        TestClient(create_app(native)),
+    ):
+        pass
 
 
 @respx.mock

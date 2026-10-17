@@ -85,7 +85,12 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.library.settings_store import (
+    NATIVE_LIBRARY_NOT_READY,
+    RECOVER_BAMBUDDY_LIBRARY_SQL,
+    StoreNotReadyError,
+    load_render_store_settings,
+)
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
@@ -1268,6 +1273,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # #2788: on the API's /data, so every replica shares it.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
         )
+        # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
+        # (a save never checks a seeded value), `native` needs a content store.
+        if snapshot.stored.library_backend == "native" and state.store.content is None:
+            await state.store.aclose()
+            raise StoreNotReadyError(
+                f"{NATIVE_LIBRARY_NOT_READY}. To start on"
+                f" Bambuddy's library, run {RECOVER_BAMBUDDY_LIBRARY_SQL} in ScadBuddy's"
+                " database, in the schema its SCADBUDDY_DATABASE_URL uses (or, when no"
+                " library_backend is stored, set SCADBUDDY_LIBRARY_BACKEND=bambuddy)."
+            )
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
         await asyncio.to_thread(state.settings_store.close)

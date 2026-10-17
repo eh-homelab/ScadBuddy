@@ -54,10 +54,15 @@ class NativeFile(BaseModel):
 
     @property
     def file_type(self) -> str:
-        lower = self.name.lower()
-        if lower.endswith(".gcode.3mf"):
-            return "gcode.3mf"
-        return lower.rsplit(".", 1)[-1] if "." in lower else ""
+        return file_type_of(self.name)
+
+
+def file_type_of(name: str) -> str:
+    """Bambuddy's `file_type`: the extension, ``"gcode.3mf"`` for a sliced file."""
+    lower = name.lower()
+    if lower.endswith(".gcode.3mf"):
+        return "gcode.3mf"
+    return lower.rsplit(".", 1)[-1] if "." in lower else ""
 
 
 _FILE_COLUMNS = (

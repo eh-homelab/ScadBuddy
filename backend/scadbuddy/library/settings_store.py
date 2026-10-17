@@ -192,6 +192,10 @@ NATIVE_LIBRARY_NOT_READY = (
     "ScadBuddy's own library keeps its files in the blob store: "
     "set store_backend to s3 or bambuddy first"
 )
+#: What returns a refused start (`native` over the local store) to Bambuddy's library.
+RECOVER_BAMBUDDY_LIBRARY_SQL = (
+    "UPDATE settings SET value = '\"bambuddy\"' WHERE name = 'library_backend';"
+)
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
 )
