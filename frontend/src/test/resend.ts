@@ -36,6 +36,7 @@ export function resending(
         if (attempt === 1) log(`vitest.setup: resending ${url}, which MSW let through (mswjs/interceptors#862)`)
         // A task's pause, so the socket that let it through can settle before the resend.
         await new Promise((resolve) => realSetTimeout(resolve, 0))
+        if (signal?.aborted) throw error
       }
     }
   }

@@ -41,10 +41,11 @@ beforeAll(() => {
   server.listen({ onUnhandledFrame: 'error' })
   // MSW lets some requests through to the real network; `resending` sends them again.
   const intercepted = globalThis.fetch
-  // The test's file in the line, as files run in parallel and their stderr interleaves.
-  globalThis.fetch = resending(intercepted, (line) =>
-    process.stderr.write(`${line} [${expect.getState().testPath ?? 'outside a test'}]\n`),
-  )
+  // The test in the line, as files run in parallel and their stderr interleaves.
+  globalThis.fetch = resending(intercepted, (line) => {
+    const { testPath, currentTestName } = expect.getState()
+    process.stderr.write(`${line} [${testPath ?? 'outside a test'} > ${currentTestName ?? '-'}]\n`)
+  })
   mswFetch = intercepted
 })
 afterEach(async () => {
