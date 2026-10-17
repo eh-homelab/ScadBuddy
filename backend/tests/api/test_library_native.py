@@ -14,6 +14,7 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -23,7 +24,6 @@ from scadbuddy.print_library.store import NativeFile
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
-from tests.api.test_send import make_output
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -92,8 +92,16 @@ def in_folder(native_client: TestClient, tmp_path: Path) -> NativeFile:
 
 
 @pytest.fixture
-def uploaded_with_output(native_client: TestClient, model: str, tmp_path: Path) -> NativeFile:
-    output_id = make_output(native_client, model)
+def uploaded_with_output(
+    native_client: TestClient, model: str, paths: DataPaths, tmp_path: Path
+) -> NativeFile:
+    """A file whose row names a saved output. On the S3 store a render needs the
+    template's git snapshot, so the output is its directory and `meta.json` alone,
+    which is all `OutputStore.directory` finds it by."""
+    output_id = "0123456789abcdef"
+    directory = paths.outputs / model / output_id
+    directory.mkdir(parents=True)
+    (directory / "meta.json").write_text("{}", encoding="utf-8")
     return _upload(native_client, _three_mf(tmp_path / "bracket.3mf"), output_id=output_id)
 
 
@@ -181,7 +189,7 @@ def test_search_finds_by_folder_path(native_client: TestClient, in_folder: Nativ
 
 def test_plates_on_native(native_client: TestClient, uploaded: NativeFile) -> None:
     plates = native_client.get(f"/api/v1/print/library/{uploaded.id}/plates").json()
-    assert plates == [{"index": 1, "has_thumbnail": True, "name": None}]
+    assert plates == [{"index": 1, "has_thumbnail": True, "name": "bracket"}]
 
 
 def test_plate_thumbnail_is_the_3mf_cover(native_client: TestClient, uploaded: NativeFile) -> None:
@@ -211,7 +219,8 @@ def test_a_missing_thumbnail_is_404(
 def test_an_entry_names_its_live_output(
     native_client: TestClient, uploaded_with_output: NativeFile
 ) -> None:
-    # The row is inserted with output_id of a saved output (Task 8 adds the filing that does it for real).
+    # The row is inserted with output_id of a saved output (Task 8 adds the filing that
+    # does it for real).
     assert (
         native_client.get("/api/v1/print/library").json()["files"][0]["output_id"]
         == uploaded_with_output.output_id

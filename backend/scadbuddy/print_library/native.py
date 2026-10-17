@@ -221,6 +221,8 @@ class NativeLibrary:
         stat = await self.content.stat(f.blob_key)
         if stat is None:
             return None
+        # The store's spool is made on its first use (`DownloadCache.private_copy`).
+        await asyncio.to_thread(self.spool.mkdir, parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=self.spool) as copy:
             async with aclosing(self.content.get(stat.ref)) as chunks:
                 async for chunk in chunks:

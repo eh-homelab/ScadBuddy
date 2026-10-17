@@ -73,6 +73,15 @@ class PrintLibrary:
             self._native = NativeLibrary(NativeLibraryStore(self._pool), content, content.spool)
         return self._native
 
+    async def serving_native(self) -> NativeLibrary | None:
+        """The native library when it serves the routes, else None (``bambuddy``). The
+        first read of `backend` is a blocking settings read, so it runs off the event
+        loop; later ones are the cached value."""
+        backend = self._backend
+        if backend is None:
+            backend = await asyncio.to_thread(lambda: self.backend)
+        return self.native if backend == "native" else None
+
     def close(self) -> None:
         self._pool.close()
 

@@ -104,6 +104,7 @@ from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.store import NativeFile
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
@@ -405,6 +406,17 @@ async def live_outputs_for_files(
     whose output is gone is any other library file (#2138). The library listing and
     Arrange both ask this, so they cannot disagree about a file."""
     made = await uploads.outputs_for_files(library_file_ids)
+    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
+async def native_outputs_for_files(
+    outputs: OutputStore, files: Iterable[NativeFile]
+) -> dict[int, str]:
+    """`live_outputs_for_files` for ScadBuddy's own library (plan
+    2026-10-17-native-print-library, Task 4): the output each file's row names, while
+    that output still exists."""
+    made = {f.id: f.output_id for f in files if f.output_id is not None}
     live = await asyncio.to_thread(_existing, outputs, set(made.values()))
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
 
