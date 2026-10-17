@@ -193,7 +193,7 @@ class S3ContentBackend:
                 key = item["Key"]
                 if not _OBJECT.fullmatch(key.removeprefix(prefix)):
                     continue
-                if item["LastModified"] < cutoff and not recorded(key):
+                if item["LastModified"] < cutoff and not await asyncio.to_thread(recorded, key):
                     await client.delete_object(Bucket=self.settings.bucket, Key=key)
                     removed += 1
         return removed

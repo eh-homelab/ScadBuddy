@@ -5,6 +5,7 @@ import hashlib
 import io
 import os
 import socket
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -236,8 +237,11 @@ async def test_sweep_unrecorded_removes_old_unrecorded_objects_only(s3: S3Settin
         await asyncio.sleep(1.1)
         young = await backend.upload("piece", b"young", name="c", scope=SCOPE)
         seen: list[str] = []
+        loop_thread = threading.current_thread()
 
         def recorded(key: str) -> bool:
+            # A Postgres query: it must not block the event loop.
+            assert threading.current_thread() is not loop_thread
             seen.append(key)
             return key == kept
 

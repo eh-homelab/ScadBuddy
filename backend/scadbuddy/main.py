@@ -377,9 +377,9 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 failed = True
                 raise
             finally:
-                # Both steps above need Bambuddy (a stale blob's release is a round
-                # trip too): one that is down must not stop the local cache being
-                # trimmed, or it grows for as long as Bambuddy stays down (#2115).
+                # Both steps above need the remote store (a stale blob's release is a
+                # round trip too): one that is down must not stop the local cache being
+                # trimmed, or it grows for as long as the remote stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
                     try:
                         await asyncio.to_thread(state.store.blobs.evict)
