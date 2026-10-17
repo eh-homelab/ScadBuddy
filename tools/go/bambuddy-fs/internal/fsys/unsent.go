@@ -803,6 +803,10 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		sentAs.Name, sentAs.FolderID = u.Name, u.FolderID
 	} else {
 		got, conflict, err = t.sendOnce(ctx, e, rec)
+		// A conflict copy is sent under its own name. A lost answer's file renamed in
+		// the library since (#3318) keeps the record's name here on purpose: sent()
+		// renames the file to whatever the record says once the entry has been renamed
+		// locally, and a library rename the user made must not be undone by that.
 		if conflict {
 			sentAs.Name = got.Name
 		}

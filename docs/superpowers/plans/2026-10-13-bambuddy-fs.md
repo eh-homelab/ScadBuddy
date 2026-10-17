@@ -1630,7 +1630,7 @@ The changes:
   asks for `permission-contents: write`, and the `RUNNER_APP` installation must hold
   `contents: write` on this repo (check before enabling: it only commented until now).
 - **After the merge (#3053).** A `go-client` job runs `scripts/generate-go-client.sh
-  --check` on every non-PR run (push to main, schedule); `CI Summary` requires it
+  --check` on every non-PR run (push to main, merge queue, schedule); `CI Summary` requires it
   there. Two PRs that each regenerate cleanly can still land a stale client.
 - **Determinism and freshness step.** After "Diff the API against the base", add:
 

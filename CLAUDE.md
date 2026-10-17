@@ -197,9 +197,9 @@ vendor`, for consumers outside the workspace) and then runs `go work vendor`; it
 runs `go work sync`, which would move a lagging client's `go.mod` past its own
 `vendor/modules.txt` and edit bambuddy-fs's `go.mod` on a client-only change (#2686).
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
-device). The Go toolchain is pinned in five places, moved together: `go.work`'s
+device). The Go toolchain is pinned in six places, moved together: `go.work`'s
 `toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, and `GOTOOLCHAIN` in
-`go-module-ci.yml` and in `ci.yml`'s two freshness steps.
+`go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
