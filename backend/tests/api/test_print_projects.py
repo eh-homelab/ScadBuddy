@@ -210,9 +210,10 @@ def test_filing_an_output_with_no_project_says_so(client: TestClient, model: str
     assert "no project" in response.json()["detail"]
 
 
-def _projects_and_folders() -> None:
-    """Project 7 owns folder 9; folder 30, "Home", is no project's."""
-    respx.get(f"{API}/projects/").mock(
+def _projects_and_folders() -> respx.Route:
+    """Project 7 owns folder 9; folder 30, "Home", is no project's. Returns the projects
+    route."""
+    projects = respx.get(f"{API}/projects/").mock(
         return_value=httpx.Response(200, json=[{"id": 7, "name": "Reagan", "status": "active"}])
     )
     respx.get(f"{API}/library/folders").mock(
@@ -224,6 +225,7 @@ def _projects_and_folders() -> None:
             ],
         )
     )
+    return projects
 
 
 @pytest.mark.requires_postgres
@@ -305,6 +307,30 @@ def test_a_deleted_settings_default_falls_through_rather_than_failing_the_print(
     assert body["project_id"] is None
     assert uploaded.calls.last.request.url.params["folder_id"] == "2"
     assert not deleted.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_run_reads_the_project_list_once(client: TestClient, model: str) -> None:
+    """#3790 review — the default project is resolved in the check and carried to the
+    plan, so one run asks Bambuddy for its projects once."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    projects = _projects_and_folders()
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
+    )
+    saved = client.put("/api/v1/settings", json={"last_project_id": 7})
+    assert saved.status_code == 200, saved.text
+
+    body = run_print(client, output_id, json=run_request()).json()
+
+    assert body["project_id"] == 7
+    assert projects.call_count == 1
 
 
 @pytest.mark.requires_postgres

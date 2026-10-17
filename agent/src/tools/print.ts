@@ -445,7 +445,7 @@ export const printTools: Tool[] = [
     description:
       'Where a print (or Arrange, or Generate) of some outputs and library files is filed by default: the one ' +
       'project they are all in already (`reason: "content"`), else the Settings default (`"settings"`), else ' +
-      'the project the last send went to (`"last"`), else none. Pass it to print_output as `project_id` to file ' +
+      'none (`"none"`). Pass it to print_output as `project_id` to file ' +
       'the print as the print dialog would.',
     input: z.object({
       output_ids: z.array(outputId).max(100).optional(),

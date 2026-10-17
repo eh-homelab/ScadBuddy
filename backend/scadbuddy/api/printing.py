@@ -1260,8 +1260,8 @@ async def get_default_project(
     library_file_id: Annotated[list[int] | None, Query(max_length=MAX_DEFAULT_CONTENT)] = None,
 ) -> DefaultDestination:
     """The project a print or Generate of these outputs and library files opens on
-    (#3651): the one project they are all in already, else the Settings default, else
-    the project the last send went to, else none. ``reason`` says which."""
+    (#3651): the one project they are all in already, else the Settings default
+    (``last_project_id``, #3188), else none. ``reason`` says which."""
     metas = [require_output(outputs, one) for one in dict.fromkeys(output_id or [])]
     settings = store.load()
     async with client_for(settings) as client:

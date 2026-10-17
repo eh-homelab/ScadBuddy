@@ -502,8 +502,8 @@ class BambuddyUploadStore:
         await asyncio.to_thread(self._forget_folderless, project_id)
 
     async def touch_destination(self, kind: DestinationKind, target_id: int) -> None:
-        """Note that a project or library folder was just printed into, filed into or
-        chosen (#3651): the destination picker's "last touched" order."""
+        """Note that a project or library folder was just printed into or filed into
+        (#3651): the destination picker's "last touched" order."""
         await asyncio.to_thread(self._touch_destination, kind, target_id)
 
     async def destination_touches(self) -> dict[tuple[DestinationKind, int], datetime]:

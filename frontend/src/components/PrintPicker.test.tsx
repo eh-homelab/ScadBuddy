@@ -602,6 +602,21 @@ describe('PrintPicker', () => {
     await screen.findByTestId('filament-slot-1')
   })
 
+  it('keeps a folder chosen before a Re-arrange replaces the source (#3790 review)', async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    const list = await openPicker(user, await screen.findByTestId('project-select'))
+    await user.click(within(list).getByTestId('folder-option-1'))
+    expect(screen.getByTestId('project-select')).toHaveTextContent('Folder: MakerWorld')
+
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    await screen.findByTestId('filament-slot-1')
+
+    expect(screen.getByTestId('project-select')).toHaveTextContent('Folder: MakerWorld')
+  })
+
   it('re-arranges a recoloured output with a slot for every colour it prints in (#3637)', async () => {
     const entry = output.manifest![0]!
     const own = entry.colours[0]!.toUpperCase()

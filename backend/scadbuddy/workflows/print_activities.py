@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.print_run import (
     PreparedPlates,
     PrintRunResult,
     QueuedPlate,
+    ResolvedProject,
     finish_run,
     plan_run,
     prepare_run,
@@ -212,6 +213,10 @@ class PrintActivities:
         spec = input.source
         try:
             async with client_for(settings) as client:
+                # Resolved once and carried to the plan (#3790 review).
+                project = ResolvedProject(
+                    project_id=await resolve_project(client, input.request, settings)
+                )
                 if spec.kind == "output":
                     assert spec.output_id is not None
                     meta = await require(self.d.outputs, spec.output_id)
@@ -221,16 +226,15 @@ class PrintActivities:
                     naming = await self.d.outputs.naming(meta)
                     if naming.invalid_meta is not None:
                         raise invalid_meta(naming.invalid_meta)
-                    project_id = await resolve_project(client, input.request, settings)
                     spec = spec.model_copy(
                         update={
-                            "stem": naming.stem if project_id is not None else None,
+                            "stem": naming.stem if project.project_id is not None else None,
                             "print_settings": naming.print_settings,
                         }
                     )
                 source = await self._source(client, spec, settings)
                 prepared = await prepare_run(
-                    client, source, settings, input.request, rack=self.d.rack
+                    client, source, settings, input.request, rack=self.d.rack, project=project
                 )
         except ApiError as error:
             raise raised_as(error, REFUSED) from None

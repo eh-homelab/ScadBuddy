@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 DisplayUnit = Literal["mm", "in"]
 
 #: How the destination picker orders projects and folders (#3651), as a file explorer
-#: would: most recently touched first (printed, filed or chosen here, or written to in
+#: would: most recently touched first (printed or filed here, or written to in
 #: Bambuddy), most recently modified in Bambuddy first, or by name.
 DestinationSort = Literal["touched", "modified", "name"]
 
