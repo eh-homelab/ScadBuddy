@@ -60,7 +60,9 @@
    has a file of that name replaces it: upload the new file, then delete the old one.
    Renaming onto an existing name returns `EEXIST`. Pinned in Task 8.
 2. **Partial writes from editors and slicers.** A slicer opens, truncates to 0, writes,
-   flushes several times and closes. Only the final `release` uploads, exactly once.
+   flushes several times and closes. The upload runs on `flush` when writes are
+   unsent, exactly once, and returns its error to `close()`; `release` uploads only
+   what is still unsent (spec §8: `close()` returns before `release` runs).
    Pinned in Task 8.
 3. **A deleted or vanished file is still cached.** After `unlink` (or a 404 on read),
    the path and its cache entry go away, and a later `ls` does not show it. Pinned in
@@ -1396,8 +1398,10 @@ Expected: FAIL.
 - [ ] **Step 3: Implement `write.go`**
 
 - **`Create`** returns a handle on a temp file under `CacheDir`. `Write`/`Flush`
-  touch only the temp file. `Release` uploads once (Upload with the parent folder ID
-  and name). If the name existed before, it then calls `DeleteFiles(oldID)`. It then
+  touch only the temp file until `Flush` finds unsent writes: it uploads once (Upload
+  with the parent folder ID and name) and returns the error to `close()`. `Release`
+  uploads only what is still unsent. A mount test makes `Upload` fail and checks that
+  `f.Close()` returns the error. If the name existed before, it then calls `DeleteFiles(oldID)`. It then
   invalidates the parent's listing (`NotifyEntry`) and moves the temp file into the
   cache as `<newID>`.
 - **`Open` with `O_TRUNC|O_WRONLY` or `O_RDWR`** on an existing file starts the same
@@ -1622,7 +1626,12 @@ Add `go` to `dispatch-review.needs`.
 The changes:
 
 - **Permissions.** The job's `permissions` become
-  `contents: write, pull-requests: write`. The app token step already exists.
+  `contents: write, pull-requests: write`. The app token step already exists; it
+  asks for `permission-contents: write`, and the `RUNNER_APP` installation must hold
+  `contents: write` on this repo (check before enabling: it only commented until now).
+- **After the merge (#3053).** A `go-client` job runs `scripts/generate-go-client.sh
+  --check` on every non-PR run (push to main, schedule); `CI Summary` requires it
+  there. Two PRs that each regenerate cleanly can still land a stale client.
 - **Determinism and freshness step.** After "Diff the API against the base", add:
 
 ```yaml
@@ -1641,8 +1650,9 @@ The changes:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          touched=$(git diff --name-only "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh | head -1)
-          if [ "${LINES:-0}" = "0" ] && [ -z "$touched" ]; then
+          # `--quiet`, not `| head -1`: under pipefail a SIGPIPE'd git fails the step.
+          if [ "${LINES:-0}" = "0" ] \
+            && git diff --quiet "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh; then
             echo "state=unchanged" | tee -a "$GITHUB_OUTPUT"; exit 0
           fi
           scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
@@ -1858,7 +1868,8 @@ Copy gooey's file, with these changes:
   as `ci.yml:1437` does), passed to checkout's `token`. CI then re-runs on the
   pushed head. Replace gooey's closing `::notice::` accordingly.
 
-Keep its `if: github.actor == 'dependabot[bot]' && head repo == this repo` guard, and
+Guard on `github.event.pull_request.user.login == 'dependabot[bot]'` (the PR's author;
+`github.actor` is whoever triggered the run) and head repo == this repo, and keep
 its `pull_request_target` trigger with gooey's `paths`. It checks out the PR head by
 SHA and runs only `go`, so no PR code executes.
 
