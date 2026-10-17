@@ -124,8 +124,8 @@ class StoreMigrationStatus(BaseModel):
 async def get_store_migration(
     state: StateDep,
     ops: OperationsDep,
-    source: StoreBackend = "bambuddy",
-    target: StoreBackend = "s3",
+    source: StoreBackend,
+    target: StoreBackend,
 ) -> StoreMigrationStatus:
     try:
         StoreMigrationParams(source=source, target=target)

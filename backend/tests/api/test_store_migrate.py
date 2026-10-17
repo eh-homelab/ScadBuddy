@@ -81,7 +81,12 @@ def test_post_starts_once_and_get_reports_the_rows(
         " ('bad', 'c', 'piece', 'bambuddy', '3', 1, NULL, NULL, 'BlobMissingError: gone', now())",
     )
 
-    assert client.get("/api/v1/store/migrate").status_code == 404
+    # The pair is required: a default would silently read another pair's progress.
+    assert client.get("/api/v1/store/migrate").status_code == 422
+    assert client.get("/api/v1/store/migrate", params={"source": "bambuddy"}).status_code == 422
+    assert client.get("/api/v1/store/migrate", params={"target": "s3"}).status_code == 422
+    pair = {"source": "bambuddy", "target": "s3"}
+    assert client.get("/api/v1/store/migrate", params=pair).status_code == 404
     body = {"source": "bambuddy", "target": "s3", "batch": 7}
     first = client.post("/api/v1/store/migrate", json=body)
     assert first.status_code == 202, first.text
