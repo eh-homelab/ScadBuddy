@@ -729,6 +729,12 @@ workers restart.
     data directory as allocated on disk, which is what kubelet holds an emptyDir's
     `sizeLimit` against: alert on that one before eviction (#1785). It is walked at
     most once a minute (#2020), so it can lag a scrape by that much.
+  - Every worker watches its own event loop (#3788). `scadbuddy_event_loop_lag_seconds`
+    is how late a no-op posted to it ran. A loop held for over a second counts in
+    `scadbuddy_event_loop_stalls_total` and logs every thread's stack while it is
+    still held (logger `scadbuddy.core.loop_watch`): that is what times workflow tasks
+    out at 10 s with the pod's CPU idle. For a hang it does not catch,
+    `kubectl exec <pod> -- sh -c 'kill -USR1 1'` writes every thread's stack to the log.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
