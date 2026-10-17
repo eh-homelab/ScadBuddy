@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex, Count
 from scadbuddy.api.activity import _subject_labels
-from scadbuddy.library.outputs import OutputNotFoundError
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
@@ -149,29 +148,6 @@ def test_an_output_subject_is_labelled_from_the_store(
     subjects = {s["value"]: s for s in client.get("/api/v1/activity/facets").json()["subjects"]}
     assert subjects[f"output:{named}"]["label"] == "Kai's tag"
     assert subjects[f"output:{unnamed}"]["label"] == "Demo"
-
-
-def test_an_output_subject_is_labelled_with_its_name_else_its_models() -> None:
-    metas: dict[str, tuple[str | None, str]] = {
-        "a" * 32: ("Kai's tag", "keychain"),
-        "b" * 32: (None, "keychain"),
-    }
-
-    def get(output_id: str) -> tuple[str | None, str]:
-        if output_id not in metas:
-            raise OutputNotFoundError(output_id)
-        return metas[output_id]
-
-    catalogue = SimpleNamespace(
-        slugs=lambda: ["keychain"],
-        list_models=lambda slugs: [SimpleNamespace(slug=s, name="Name Keychain") for s in slugs],
-    )
-    subjects = [
-        Count(value, 1)
-        for value in ("output:" + "a" * 32, "output:" + "b" * 32, "output:" + "c" * 32)
-    ]
-    labels = _subject_labels(subjects, catalogue, SimpleNamespace(name_and_slug=get))  # type: ignore[arg-type]
-    assert labels == {"output:" + "a" * 32: "Kai's tag", "output:" + "b" * 32: "Name Keychain"}
 
 
 def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> None:

@@ -105,10 +105,12 @@ function DebouncedInput({
 const ANY_TIME = 'any'
 
 /** The values of one facet as chips, plus any selected value the facets do not list. */
+type Counted = ActivityFacets['subjects'][number]
+
 function valueChips(
-  listed: Array<{ value: string; count: number; label?: string | null }>,
+  listed: Counted[],
   selected: string,
-): Array<{ value: string; count: number | null; label?: string | null }> {
+): Array<Omit<Counted, 'count'> & { count: number | null }> {
   const extra = selected && !listed.some((l) => l.value === selected) ? [{ value: selected, count: null }] : []
   return [...listed, ...extra]
 }

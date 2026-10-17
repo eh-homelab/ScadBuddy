@@ -1240,7 +1240,10 @@ PROJECT_NAME_SUBJECT_CHARS = 200
 def project_subject(body: ProjectRequest) -> str:
     """The project linked, or the name of the one created: one chip per project on the
     Activity page, not one for them all (#3856). The name is prefixed, so one that reads
-    like a model's slug or ``library:89`` never shares that subject's chip."""
+    like a model's slug or ``library:89`` never shares that subject's chip.
+
+    The name is what a person typed, and it is shown to everyone who reads the
+    operations record or the Activity facets, as the project itself is in Bambuddy."""
     if body.project_id is not None:
         return f"project:{body.project_id}"
     if body.name:
