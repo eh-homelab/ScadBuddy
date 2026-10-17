@@ -112,7 +112,8 @@ export class PostgresSessionStore implements SessionStore {
     const dek = await this.keyOf(key.sessionId, true)
     try {
       // Every row's id is reserved first, in order, so a batch keeps its order and a row
-      // without a uuid can be bound by its own id.
+      // without a uuid can be bound by its own id. Outside the transaction below on purpose:
+      // a refused append only skips sequence values, which nothing relies on being dense.
       const ids = await this.sql<{ id: string }[]>`
         SELECT nextval(pg_get_serial_sequence('ai_session_entries', 'id'))::text AS id FROM generate_series(1, ${entries.length})`
       const rows = entries.map((entry, i) => {
@@ -133,6 +134,8 @@ export class PostgresSessionStore implements SessionStore {
       // forgetSubject tombstones under the subject's lock and deletes the entries later,
       // so a write under that lock, shared, lands either before the tombstone (and goes
       // with the entries) or after it, and is refused as a fresh key lookup would be.
+      // The tombstone is its own SELECT, not a NOT EXISTS on the insert: ON CONFLICT
+      // also inserts no row for a repeated uuid, so a zero count could not tell the two apart.
       const subject = `session-${key.sessionId}`
       await this.sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
