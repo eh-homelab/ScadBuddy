@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -82,6 +83,12 @@ _LAST_PRINT_FIELDS = frozenset(
 
 class OutputNotFoundError(KeyError):
     pass
+
+
+#: How long `name_and_slug` does not look again for an output it found gone (#3856):
+#: each look globs the outputs volume, and the Activity page refetches its facets often.
+GONE_OUTPUT_SECONDS = 60.0
+_GONE_OUTPUTS_KEPT = 1000
 
 
 class PlateSend(BaseModel):
@@ -227,6 +234,8 @@ class OutputStore:
         #: flight across a forget still knows not to store what it found.
         self._cover_epoch = 0
         self._covers_lock = threading.Lock()
+        #: Outputs `name_and_slug` found gone, each until it looks again.
+        self._gone: dict[str, float] = {}
         #: Called with a model's id when one of its outputs is saved or deleted --
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
@@ -266,8 +275,17 @@ class OutputStore:
 
     def name_and_slug(self, output_id: str) -> tuple[str | None, str]:
         """The output's own name and its model, from ``meta.json`` alone: `get` without
-        the last-print read, for a caller that only labels it (#3856)."""
-        directory = self._find_dir(output_id)
+        the last-print read, for a caller that only labels it (#3856). One found gone
+        is not looked for again for `GONE_OUTPUT_SECONDS`."""
+        if self._gone.get(output_id, 0.0) > time.monotonic():
+            raise OutputNotFoundError(output_id)
+        try:
+            directory = self._find_dir(output_id)
+        except OutputNotFoundError:
+            if len(self._gone) >= _GONE_OUTPUTS_KEPT:
+                self._gone.clear()
+            self._gone[output_id] = time.monotonic() + GONE_OUTPUT_SECONDS
+            raise
         meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
         return meta.name, meta.slug
 

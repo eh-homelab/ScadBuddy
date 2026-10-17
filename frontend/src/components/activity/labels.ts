@@ -12,6 +12,9 @@ export function principalLabel(principal: string | null, _facets?: ActivityFacet
   }
 }
 
+/** How much of a project's name a chip shows; a title (backend `TITLE_NAME_CHARS`) as much. */
+const SUBJECT_NAME_CHARS = 40
+
 /**
  * #3856 — how a subject chip reads: the name the server found for it, else its raw
  * reference made legible (a library file, a folder, a project by id or by name, an
@@ -29,7 +32,9 @@ export function subjectLabel(subject: { value: string; label?: string | null }):
     if (prefix === 'library-folder') return `Library folder ${id}`
     if (prefix === 'project') return `Project ${id}`
     // Up to 200 characters, typed by a person: the chip shows the start, its title all.
-    if (prefix === 'project-name') return `Project “${id.length > 40 ? `${id.slice(0, 40)}…` : id}”`
+    if (prefix === 'project-name') {
+      return `Project “${id.length > SUBJECT_NAME_CHARS ? `${id.slice(0, SUBJECT_NAME_CHARS)}…` : id}”`
+    }
     if (prefix === 'output') return `Output ${id.slice(0, 8)}`
   }
   if (subject.value === 'library-files') return 'Library files'

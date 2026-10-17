@@ -17,6 +17,9 @@ _STATUS: dict[str, ActivityStatus] = {
 }
 
 
+#: How much of a project's name a title shows; the chip (frontend `labels.ts`
+#: `SUBJECT_NAME_CHARS`) shows as much.
+TITLE_NAME_CHARS = 40
 #: A Bambuddy subject's prefix; the kind before it in a title already names the thing.
 _ID_PREFIXES = ("library:", "library-folder:", "project:")
 
@@ -26,7 +29,8 @@ def _subject_text(subject: str) -> str:
     ``Create project project-name:Shelf``; the filter chip shows the reference."""
     if subject.startswith("project-name:"):
         name = subject.removeprefix("project-name:")
-        return f"“{name[:40]}…”" if len(name) > 40 else f"“{name}”"
+        clipped = len(name) > TITLE_NAME_CHARS
+        return f"“{name[:TITLE_NAME_CHARS]}…”" if clipped else f"“{name}”"
     if subject == "library-files":
         return "(several files)"
     for prefix in _ID_PREFIXES:

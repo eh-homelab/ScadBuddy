@@ -1243,7 +1243,11 @@ def project_subject(body: ProjectRequest) -> str:
     like a model's slug or ``library:89`` never shares that subject's chip.
 
     The name is what a person typed, and it is shown to everyone who reads the
-    operations record or the Activity facets, as the project itself is in Bambuddy."""
+    operations record or the Activity facets, as the project itself is in Bambuddy.
+
+    The create keeps this subject once the project has an id, so its chip is apart
+    from the ``project:<id>`` one its later links share: the record says what was
+    asked for, and the id is not known until Bambuddy answers."""
     if body.project_id is not None:
         return f"project:{body.project_id}"
     if body.name:

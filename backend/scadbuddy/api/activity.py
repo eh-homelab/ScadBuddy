@@ -10,9 +10,9 @@ runtime (``api/components.py``).
 
 import asyncio
 import contextlib
+import logging
 import math
 import re
-import time
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
@@ -35,6 +35,8 @@ from scadbuddy.api.deps import CatalogueDep, OutputsDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputNotFoundError, OutputStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -266,10 +268,6 @@ def _counts(counts: list[Count], labels: Mapping[str, str] | None = None) -> lis
 
 #: How many subjects (the most frequent) the facets look up a name for (#3856).
 LABELLED_SUBJECTS = 100
-#: How long an output found gone is not looked for again: each look is a glob of the
-#: outputs volume, and a page refetches its facets on every change.
-GONE_OUTPUT_SECONDS = 60.0
-_gone_outputs: dict[str, float] = {}
 
 
 def _subject_labels(
@@ -287,19 +285,17 @@ def _subject_labels(
         output_id = value.removeprefix("output:")
         if not re.fullmatch(OUTPUT_ID_PATTERN, output_id):
             continue  # not an id at all: never let it near the store's paths
-        if _gone_outputs.get(output_id, 0.0) > time.monotonic():
-            continue
         try:
             metas[value] = outputs.name_and_slug(output_id)
-        except OutputNotFoundError:
-            if len(_gone_outputs) >= 10 * LABELLED_SUBJECTS:
-                _gone_outputs.clear()
-            _gone_outputs[output_id] = time.monotonic() + GONE_OUTPUT_SECONDS
-        except (OSError, ValueError):
-            continue  # deleted mid-read, or its meta unreadable: the chip keeps its id
+        except (OutputNotFoundError, OSError, ValueError):
+            continue  # deleted (even mid-read), or its meta unreadable: the chip keeps its id
     wanted = values | {slug for _, slug in metas.values()}
-    slugs = [slug for slug in catalogue.slugs() if slug in wanted]
-    names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+    names: dict[str, str] = {}
+    try:
+        slugs = [slug for slug in catalogue.slugs() if slug in wanted]
+        names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+    except Exception:  # the facets are the activity index's; a name is only a nicety
+        logger.warning("activity facets: no model names from the catalogue", exc_info=True)
     # An output's model is looked up only to name the output; it is no chip of its own.
     labels = {value: name for value, name in names.items() if value in values}
     for value, (own, slug) in metas.items():
