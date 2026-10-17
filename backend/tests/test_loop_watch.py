@@ -110,6 +110,38 @@ async def test_a_beat_left_unrun_after_leaving_is_no_stall(
     _blocks_the_loop(0.15)  # past `interval`: a beat is posted and left unrun
     await watch.__aexit__(None, None, None)  # sets the stop without yielding
     _blocks_the_loop(0.5)  # past `threshold`, with the stop set
-    await asyncio.sleep(0.1)
+    assert watch._thread is not None
+    await asyncio.to_thread(watch._thread.join, 2)
+    assert not watch._thread.is_alive()
     assert not caplog.records, caplog.text
     assert _sample(metrics, "scadbuddy_event_loop_stalls_total") == 0
+
+
+async def test_a_probe_left_waiting_after_leaving_is_no_stall(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The executor's no-op, still queued behind held work when the watch is left, is
+    the shutdown too: its beat runs after the stop, and must not report it."""
+    metrics = Metrics()
+    caplog.set_level(logging.WARNING, logger="scadbuddy.core.loop_watch")
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(executor)
+    watch = LoopWatch(metrics, threshold=0.6, interval=0.05)
+    try:
+        held = loop.run_in_executor(None, _holds_the_executor, 2.0)
+        await watch.__aenter__()
+        await asyncio.sleep(0.4)  # the probe is handed, and waits under `threshold`
+        _blocks_the_loop(0.2)  # a beat is posted and left unrun
+        await watch.__aexit__(None, None, None)
+        _blocks_the_loop(0.2)  # the probe passes `threshold`
+        await asyncio.sleep(0.1)  # and the beat runs, after the stop
+        assert watch._thread is not None
+        watch._thread.join(2)
+        assert not watch._thread.is_alive()
+        assert not caplog.records, caplog.text
+        assert _sample(metrics, "scadbuddy_default_executor_stalls_total") == 0
+        await held
+    finally:
+        watch._stopping.set()
+        executor.shutdown(wait=False, cancel_futures=True)
