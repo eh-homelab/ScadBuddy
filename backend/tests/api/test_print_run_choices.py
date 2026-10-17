@@ -17,6 +17,7 @@ import time
 import zipfile
 from datetime import timedelta
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 import pytest
@@ -1428,6 +1429,74 @@ def test_high_flow_chosen_for_a_high_flow_left_is_sliced_as_high_flow(
     assert settings["extruder_nozzle_stats"] == ["High Flow#1", "Standard#0"]
     with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         assert "Metadata/slice_info.config" not in archive.namelist()
+
+
+def _sides_run(
+    client: TestClient, model: str, paths: DataPaths, **choices: Any
+) -> tuple[httpx.Response, respx.Route, respx.Route]:
+    """A two-colour run on an H2C with a Standard 0.4 on each side, so both are offered
+    and the plan puts one colour on each; the upload and the slice it posted."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**_mounted(("HS01", "0.4"), ("HS01", "0.4")))
+    sliced = slice_routes()
+    queue_route()
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(tier="standard", nozzles=[{"size": "0.4"}], **choices),
+            "filament_plan": BOTH_ON_RIGHT,
+        },
+    )
+    return response, upload, sliced
+
+
+def _plate_metadata(route: respx.Route) -> list[dict[str, str]]:
+    """Each ``<plate>``'s metadata in the uploaded 3MF, as key → value."""
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(route))) as archive:
+        root = ET.fromstring(archive.read("Metadata/model_settings.config"))
+    return [
+        {entry.get("key", ""): entry.get("value", "") for entry in plate.findall("metadata")}
+        for plate in root.findall("plate")
+    ]
+
+
+@respx.mock
+def test_sides_chosen_by_hand_are_pinned_on_every_plate_and_sliced_whole(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955: a side chosen by hand was regrouped by the slicer (preview-slice 140 put
+    black on the right, chosen left). The deployed slicer keeps a map only when the
+    plate states it in "Nozzle Manual" mode with the project's nozzle map, and reads that
+    only in a slice of the whole file: a slice naming a plate segfaults."""
+    response, upload, sliced = _sides_run(client, model, paths, sides={"1": "R", "2": "L"})
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    # The slicer numbers its extruders left (1) then right (2).
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["filament_nozzle_map"] == ["1", "0"]
+    [plate] = _plate_metadata(upload)
+    assert plate["filament_map_mode"] == "Nozzle Manual"
+    assert plate["filament_maps"] == "2 1"
+    assert plate["filament_volume_maps"] == "0 0"
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [0]
+
+
+@respx.mock
+def test_a_plan_nobody_touched_is_left_to_the_slicers_grouping(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#3955: with every side on Automatic the slicer still groups the filaments itself
+    (Auto For Flush), as the owner's inkjet-easy default, and the plate is named."""
+    response, upload, sliced = _sides_run(client, model, paths)
+
+    assert response.status_code == 200, response.text
+    assert "filament_nozzle_map" not in _uploaded_settings(upload)
+    assert all("filament_map_mode" not in plate for plate in _plate_metadata(upload))
+    assert [json.loads(call.request.content)["plate"] for call in sliced.calls] == [1]
 
 
 def _mounted(right: tuple[str, str], left: tuple[str, str]) -> dict[str, Any]:

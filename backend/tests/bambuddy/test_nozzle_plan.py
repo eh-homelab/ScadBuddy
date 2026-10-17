@@ -92,6 +92,30 @@ def test_a_side_chosen_by_hand_wins() -> None:
     assert plan.nozzle_stats(HF) == ["High Flow#0", "High Flow#1"]
 
 
+def test_a_plan_with_a_side_chosen_by_hand_states_a_pinned_map() -> None:
+    """#3955: the owner's H2C, black chosen left and green right. The slice must keep
+    that, so the map is pinned; a plan nobody touched is left to the slicer's grouping."""
+    chosen = plan_nozzles(h2c(), HF, [GREEN, BLACK], {1: "R", 2: "L"})
+    planned = plan_nozzles(h2c(), HF, [GREEN, BLACK])
+
+    assert chosen is not None and planned is not None
+    assert chosen.by_hand
+    assert chosen.stated_map(2) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
+    assert not planned.by_hand
+    stated = planned.stated_map(2)
+    assert stated is not None and not stated.pinned
+
+
+def test_one_side_chosen_by_hand_pins_the_planned_rest_too() -> None:
+    """Only black chosen (left); green is planned (right). Both are pinned: the slice
+    prints what the dialog shows."""
+    plan = plan_nozzles(h2c(), HF, [GREEN, BLACK], {2: "L"})
+
+    assert plan is not None
+    assert [(slot.side, slot.by_hand) for slot in plan.slots] == [("R", False), ("L", True)]
+    assert plan.stated_map(2) == FilamentMap(("2", "1"), ("1", "1"), pinned=True)
+
+
 def test_only_the_side_with_the_size_is_planned() -> None:
     """Queue item 159's printer: the right 0.2, the left 0.4. A 0.2 print goes right."""
     plan = plan_nozzles(fts_status(), [NozzleChoice(size="0.2")], [GREEN, BLACK])
