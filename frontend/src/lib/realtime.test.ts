@@ -295,6 +295,11 @@ describe('RealtimeClient', () => {
       const refused = realtime.check(['e1'], ['models'])
       last().deliver({ type: 'error', message: 'expected subscribe or unsubscribe' })
       await expect(refused).resolves.toEqual(['models'])
+      // Another error leaves a waiting check be.
+      const kept = realtime.check(['e1'], ['models'])
+      last().deliver({ type: 'error', message: 'at most 64 topics; not following [...]' })
+      last().deliver({ type: 'changed', id: 4, topics: [] })
+      await expect(kept).resolves.toEqual([])
       const dropped = realtime.check(['e1'], ['models'])
       last().close()
       await expect(dropped).resolves.toEqual(['models'])

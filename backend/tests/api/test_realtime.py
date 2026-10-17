@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +15,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
-from scadbuddy.api import realtime
+from scadbuddy.api import realtime, runtime
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import (
     AnalyzerDecisionEvent,
@@ -467,6 +469,19 @@ class LoggedBus(InProcessEventBus):
         self.last_event_id: str | None = None
         self.live_event_id: str | None = None
         self.pruned = 0
+        self.settling = 0
+
+    def settle(self) -> Callable[[], None]:
+        self.settling += 1
+        released = False
+
+        def release() -> None:  # once, however often called, as the Postgres bus's
+            nonlocal released
+            if not released:
+                released = True
+                self.settling -= 1
+
+        return release
 
     def publish(self, event: Event) -> None:
         self.log.append(event)
@@ -696,3 +711,44 @@ def test_a_read_s_cursor_clears_the_re_read_on_the_postgres_bus(client: TestClie
         client.put("/api/v1/settings", json={"public_url": "https://two.example"})
         assert ws.receive_json()["topics"] == ["settings"]  # the event itself
         assert check(ws, [last], "settings", "fonts") == ["settings"]
+
+
+def test_a_read_carries_no_cursor_while_a_listener_is_settling(
+    client: TestClient, logged: LoggedBus
+) -> None:
+    logged.publish(SettingsChanged(section="connection"))
+    release = logged.settle()
+    assert realtime.CURSOR_HEADER not in client.get("/api/v1/settings").headers
+    release()
+    assert realtime.CURSOR_HEADER in client.get("/api/v1/settings").headers
+
+
+async def test_a_heard_settings_change_holds_cursors_until_it_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1039: the runtime settings are applied in a task after the event is heard. Until
+    then a read would show the old ones, so it must carry no cursor."""
+    bus = LoggedBus()
+    reread = threading.Event()
+    applied: list[str] = []
+
+    def snapshot() -> SimpleNamespace:
+        reread.wait(5)
+        return SimpleNamespace(runtime="new")
+
+    state = SimpleNamespace(events=bus, settings_store=SimpleNamespace(snapshot=snapshot))
+    monkeypatch.setattr(runtime, "apply_runtime", lambda _state, value: applied.append(value))
+    stop = runtime.follow_changes(state)  # type: ignore[arg-type]
+    try:
+        bus.publish(SettingsChanged(section="connection"))
+        assert realtime.last_heard(bus) is None
+        reread.set()
+        for _ in range(200):
+            if applied:
+                break
+            await asyncio.sleep(0.01)
+        assert applied == ["new"]
+        assert realtime.last_heard(bus) == bus.log[-1].id
+    finally:
+        reread.set()
+        stop()

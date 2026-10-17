@@ -341,6 +341,9 @@ class PgNotifyEventBus:
         #: The last event heard since the listener last (re)connected, or None: every
         #: event after it reaches this process's subscriptions (#1039's ``last``).
         self.live_event_id: str | None = None
+        #: Listeners still applying what they heard to in-process state (#1039): while
+        #: any is, a read may show less than `last_event_id`, so it carries no cursor.
+        self.settling = 0
         self._pool: AsyncConnectionPool[AsyncConnection[TupleRow]] = AsyncConnectionPool(
             conninfo,
             min_size=1,
@@ -476,6 +479,20 @@ class PgNotifyEventBus:
     ) -> Subscription:
         return self.local.subscribe(kinds=kinds, maxsize=maxsize)
 
+    def settle(self) -> Callable[[], None]:
+        """Mark in-process state as behind what was heard until the returned function is
+        called: a listener that applies an event asynchronously takes this as it hears it."""
+        self.settling += 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if not released:
+                released = True
+                self.settling -= 1
+
+        return release
+
     def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
         """See :meth:`InProcessEventBus.add_listener`: called for each event heard."""
         return self.local.add_listener(listener)
@@ -595,10 +612,12 @@ class PgNotifyEventBus:
             # Another version's kind, or something else NOTIFYing on the channel.
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
+        self.metrics.events_received.inc()
+        # Listeners first: one that applies the event later takes `settle` here, before
+        # any read can be stamped with it (#1039).
+        self.local.publish(event)
         self.last_event_id = event.id
         self.live_event_id = event.id
-        self.metrics.events_received.inc()
-        self.local.publish(event)
 
     def _connected(self, reconnected: bool) -> None:
         self._listening.set()

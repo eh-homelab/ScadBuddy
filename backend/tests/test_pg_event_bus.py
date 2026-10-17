@@ -578,3 +578,27 @@ def test_retention_settings_come_from_the_environment(monkeypatch: pytest.Monkey
     settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
     assert settings.event_log_retention_seconds == 120
     assert settings.event_log_retention_rows == 0
+
+
+@pytest.mark.requires_postgres
+async def test_a_listener_runs_before_its_event_becomes_the_cursor(make_bus: BusFactory) -> None:
+    """#1039: a listener that applies an event later takes `settle` before a read could
+    be stamped with that event."""
+    bus = await make_bus()
+    subscription = bus.subscribe()
+    seen: list[tuple[str | None, int]] = []
+    releases: list[Callable[[], None]] = []
+
+    def listener(event: Event) -> None:
+        seen.append((bus.last_event_id, bus.settling))
+        releases.append(bus.settle())
+
+    bus.add_listener(listener)
+    event = _model("held")
+    bus.publish(event)
+    await _next(subscription)
+    assert seen == [(None, 0)]
+    assert bus.last_event_id == event.id and bus.settling == 1
+    releases[0]()
+    releases[0]()  # releasing twice counts once
+    assert bus.settling == 0

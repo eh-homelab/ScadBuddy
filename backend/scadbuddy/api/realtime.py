@@ -43,6 +43,11 @@ process had heard when the request arrived. Postgres delivers a NOTIFY only afte
 log row commits, and a change is published after it is made, so that event and
 everything before it in the log is reflected in the read.
 
+A listener that applies an event to in-process state asynchronously (the runtime
+settings, `api/runtime.follow_changes`) holds ``settle()`` from hearing it until it has
+applied it. Meanwhile a read may show less than the last event heard, so it carries
+no cursor and the client reads again.
+
 ``subscribed`` carries ``last``, the last event this process had heard once the
 topics were followed; anything after it reaches the client as an ``event`` frame. A
 client whose read saw ``last`` itself has missed nothing. After the bus's listener
@@ -152,6 +157,8 @@ MAX_FRAME_CHARS = 16_384
 CURSOR_HEADER = "X-ScadBuddy-Last-Event"
 #: The most events a ``check`` replays before it answers "every topic changed".
 CHECK_MAX_EVENTS = 1000
+#: How many events a ``check`` reads from the log at a time.
+CHECK_PAGE = 500
 #: The most cursors one ``check`` may carry: one per request of a read.
 CHECK_MAX_SINCE = 8
 #: The most ``check`` frames one socket keeps waiting for its worker.
@@ -346,6 +353,8 @@ def last_heard(events: object) -> str | None:
     """The id of the last event this process heard, or None: none yet, or a bus with no
     log to check a cursor against (the in-process one). A read's cursor."""
     last = getattr(events, "last_event_id", None)
+    if getattr(events, "settling", 0):
+        return None  # a listener is still applying what was heard: a read may lag it
     return last if isinstance(last, str) and hasattr(events, "replay") else None
 
 
@@ -372,7 +381,7 @@ async def changed_topics(events: object, since: list[str], topics: list[str]) ->
     changed: set[str] = set()
     seen = 0
     while True:
-        page = await replay(after, limit=min(500, CHECK_MAX_EVENTS))
+        page = await replay(after, limit=min(CHECK_PAGE, CHECK_MAX_EVENTS))
         if page.gap:
             return topics
         for logged in page.events:

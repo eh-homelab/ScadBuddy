@@ -72,6 +72,8 @@ const MAX_MS = 30_000
 const IDLE_MS = 60_000
 /** How long a `check` waits for its answer before it counts every topic as changed. */
 export const CHECK_MS = 3_000
+/** The server's error messages for a check it would not run (backend `api/realtime.py`). */
+const CHECK_REFUSALS = ['a check needs', 'expected subscribe or unsubscribe']
 
 export class RealtimeClient {
   private readonly url: string
@@ -263,8 +265,10 @@ export class RealtimeClient {
         return
       case 'error':
         console.warn('realtime:', frame.message)
-        // An error frame names no request: it may be a check's (a server without them).
-        this.failChecks()
+        // An error frame names no request. A refused check (or a server without them,
+        // which refuses every frame but a subscribe) fails the checks waiting; any other
+        // error (a refused topic, say) leaves them be.
+        if (CHECK_REFUSALS.some((refusal) => frame.message.startsWith(refusal))) this.failChecks()
         return
     }
   }

@@ -9,8 +9,10 @@
  *
  * A request belongs to every scope open when it starts: `inReadScope` opens one for
  * the synchronous part of a call, which is where a read's requests start. A request a
- * read makes after an `await` belongs to no scope; it starts after the read's first
- * requests, so their cursors still cover it. A read that joins a request someone else
+ * read makes after awaiting an earlier one's answer belongs to no scope, and is covered:
+ * it reaches the server after that answer left it, so after its cursor was taken. One
+ * made after awaiting anything else is not, since it may arrive before the scope's
+ * requests do: a loader should start its requests before its first `await`. A read that joins a request someone else
  * started (a shared one) must `adopt` that request's scope, or its scope would vouch
  * for data it never saw a cursor for.
  */
