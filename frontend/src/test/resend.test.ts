@@ -67,6 +67,8 @@ describe('resending (mswjs/interceptors#862)', () => {
     }
   })
 
+  // A real fetch given `{ signal: null }` drops the Request's own (aborted) signal; the
+  // mock here never looks at a signal, so this pins only that the wrapper resends.
   it("treats init's explicit null signal as none, as fetch does", async () => {
     const request = new Request('http://test/e', { signal: AbortSignal.abort() })
     const intercepted = vi.fn().mockRejectedValueOnce(refused()).mockResolvedValue(new Response('ok'))

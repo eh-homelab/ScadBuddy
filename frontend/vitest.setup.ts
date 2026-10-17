@@ -1,3 +1,4 @@
+import path from 'node:path'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, configure, getConfig } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, expect, vi } from 'vitest'
@@ -45,7 +46,8 @@ beforeAll(() => {
   // refused in a hook after the file's tests reads "outside a test"; that is no fault.
   globalThis.fetch = resending(intercepted, (line) => {
     const { testPath, currentTestName } = expect.getState()
-    process.stderr.write(`${line} [${testPath ?? 'outside a test'} > ${currentTestName ?? '-'}]\n`)
+    const file = testPath ? path.relative(process.cwd(), testPath) : 'outside a test'
+    process.stderr.write(`${line} [${file} > ${currentTestName ?? '-'}]\n`)
   })
   mswFetch = intercepted
 })
