@@ -212,10 +212,10 @@ class OutputFiles(Protocol):
 
 def _read_if_there(path: Path) -> str | None:
     """The file's text, or None when there is none: read once, so a file cleared between
-    a check and the read is not an error."""
+    a check and the read is not an error. A directory there is none, as `is_file` said."""
     try:
         return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except (FileNotFoundError, IsADirectoryError):
         return None
 
 

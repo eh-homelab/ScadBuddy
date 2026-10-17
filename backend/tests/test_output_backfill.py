@@ -87,15 +87,16 @@ async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
         (outputs_module.RECORD_NAME, OutputStore.record, None),
     ],
 )
-async def test_a_file_cleared_as_it_is_read_reads_as_none(
+async def test_no_reader_checks_then_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     read: Callable[[OutputStore, str], object],
     none: object,
 ) -> None:
-    """The attach clears ``backfill.json`` on its own thread, and a read that found it
-    and then could not open it raised (a CI flake on #3975); every reader reads once.
+    """A regression guard, not a race reproduction: should a check-then-read come back,
+    this fails. The attach clears ``backfill.json`` on its own thread, and a read that
+    found it and then could not open it raised (a CI flake on #3975).
 
     ``is_file`` answering yes for the gone file is what made a check-then-read fail
     (main's, before the fix); the read-once readers never ask it, so here each must
