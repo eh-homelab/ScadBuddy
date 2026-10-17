@@ -335,11 +335,17 @@ export interface ReadRecord {
   shown: Promise<boolean>
 }
 
-/** Runs `load` as one read, recording what it saw for `readAgain`. */
-export function recordRead<T>(load: () => Promise<T>): { record: ReadRecord; result: Promise<T> } {
+/**
+ * Runs `load` as one read, recording what it saw for `readAgain`. `applied` says whether
+ * its answer is the one in use; a read whose answer was dropped vouches for nothing.
+ */
+export function recordRead<T>(
+  load: () => Promise<T>,
+  applied: (value: T) => boolean = () => true,
+): { record: ReadRecord; result: Promise<T> } {
   const scope = new ReadScope()
   const result = inReadScope(scope, load)
-  return { record: { scope, shown: result.then(() => true, () => false) }, result }
+  return { record: { scope, shown: result.then(applied, () => false) }, result }
 }
 
 /**

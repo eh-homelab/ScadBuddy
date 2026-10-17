@@ -11,6 +11,9 @@ import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
 import { chooseProject, pickerValue } from '../test/projectPicker'
+import { CURSOR_HEADER, trackRequest } from '../lib/readCursor'
+import { getRealtime } from '../lib/realtime'
+import { fakeRealtime } from '../lib/realtime.fake'
 
 const job: Job = {
   id: 'a'.repeat(32),
@@ -413,5 +416,41 @@ describe("the remembered project across a model change (#1660, #2142's review)",
     // And back on apple, its own projects are read again, not the late answer's.
     rerender(bar('apple'))
     await waitFor(() => expect(pickerValue(picker())).toBe('1'))
+  })
+
+  describe("and the settings subscription's confirmation (#1039)", () => {
+    /** `getModelProjects`, answering with cursor `e5` the way the server stamps a read. */
+    function counted() {
+      let reads = 0
+      vi.spyOn(api, 'getModelProjects').mockImplementation(() => {
+        const answered = trackRequest()
+        reads += 1
+        return Promise.resolve().then(() => {
+          answered(new Headers({ [CURSOR_HEADER]: 'e5' }))
+          return { projects: [] }
+        })
+      })
+      return () => reads
+    }
+
+    it("reads the remembered projects once when the read saw the server's last event", async () => {
+      const reads = counted()
+      fakeRealtime({ confirmation: { last: 'e5' } })
+      const check = vi.spyOn(getRealtime(), 'check')
+      renderPage(bar('apple'))
+      await waitFor(() => expect(reads()).toBe(1))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(reads()).toBe(1)
+      expect(check).not.toHaveBeenCalled()
+    })
+
+    it('reads them again when the server says settings changed since', async () => {
+      const reads = counted()
+      fakeRealtime({ confirmation: { last: 'e9' } })
+      const check = vi.spyOn(getRealtime(), 'check').mockResolvedValue(['settings'])
+      renderPage(bar('apple'))
+      await waitFor(() => expect(reads()).toBe(2))
+      expect(check).toHaveBeenCalledWith(['e5'], ['settings'])
+    })
   })
 })

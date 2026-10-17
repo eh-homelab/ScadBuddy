@@ -54,6 +54,22 @@ unknown or pruned id, a gap, more events than `CHECK_MAX_EVENTS`, a topic this s
 does not follow, a log that cannot be read, or a bus with no log answers every topic:
 the client re-reads, as it did before.
 
+Replaying by ``seq`` is sound because ``seq`` order is commit order. Every log write is
+`~scadbuddy.core.pg_events.write_event`, which takes ``EVENT_LOG_LOCK``
+(``pg_advisory_xact_lock``) before its INSERT. A transaction-level lock is held until
+the caller's transaction commits, savepoint or not, so a publish that starts while
+another's transaction is open waits for it. No event can commit after one with a
+larger ``seq`` (``tests/test_pg_event_bus.py::test_log_order_is_commit_order``).
+
+An event the publisher drops before it is logged (``scadbuddy_events_dropped_total``:
+the outbox full, or a failed write) never reaches the log or any socket. Without a
+cursor, the cold load's re-read happened to cover such a drop. With one, the drop goes
+unseen there too, as it always did for a page already open.
+
+A socket runs one ``check`` at a time, off the loop that reads its frames, so a slow
+log never holds up its subscribes. A ``check`` sent while one is running is answered
+"every topic changed".
+
 Security
 --------
 - ``Origin`` must be the configured public URL's origin, one of
@@ -397,7 +413,48 @@ async def _check(frame: dict[str, Any], topics: set[str], events: object, send: 
     )
 
 
+class _Checks:
+    """A socket's one ``check`` in flight, run beside its frame loop."""
+
+    def __init__(self) -> None:
+        self.running: asyncio.Task[None] | None = None
+
+    async def start(
+        self, frame: dict[str, Any], topics: set[str], events: object, send: Send
+    ) -> None:
+        if self.running is not None and not self.running.done():
+            # One at a time: the client reads, as it would without a cursor.
+            requested = frame.get("topics")
+            if isinstance(frame.get("id"), int) and isinstance(requested, list):
+                named = [t for t in dict.fromkeys(requested) if valid_topic(t)]
+                await send({"type": "changed", "id": frame["id"], "topics": named})
+            else:
+                await _check(frame, topics, events, send)  # refused before any read
+            return
+        self.running = asyncio.create_task(self._run(frame, topics, events, send))
+
+    @staticmethod
+    async def _run(frame: dict[str, Any], topics: set[str], events: object, send: Send) -> None:
+        # The socket may close under the answer; the session is ending then anyway.
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+            await _check(frame, topics, events, send)
+
+    def cancel(self) -> None:
+        if self.running is not None:
+            self.running.cancel()
+
+
 async def _read(websocket: WebSocket, topics: set[str], send: Send, events: object = None) -> None:
+    checks = _Checks()
+    try:
+        await _read_frames(websocket, topics, send, events, checks)
+    finally:
+        checks.cancel()
+
+
+async def _read_frames(
+    websocket: WebSocket, topics: set[str], send: Send, events: object, checks: _Checks
+) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
         message = await websocket.receive()
@@ -422,7 +479,7 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send, events: obje
         if kind == "pong":
             continue
         if kind == "check" and isinstance(frame, dict):
-            await _check(frame, topics, events, send)
+            await checks.start(frame, topics, events, send)
             continue
         requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):

@@ -100,8 +100,9 @@ export function ActivityBell() {
   })
 
   const followKey = follow === null ? null : JSON.stringify(follow)
-  const refresh = useCallback(async () => {
-    if (followKey === null) return
+  /** True when its answer is what the bell now shows. */
+  const refresh = useCallback(async (): Promise<boolean> => {
+    if (followKey === null) return false
     const principals = JSON.parse(followKey) as string[]
     const mine = ++generation.current
     const since = new Date(seen.current - LOOKBACK_MS).toISOString()
@@ -114,7 +115,7 @@ export function ActivityBell() {
       ),
     )
     // A newer read started meanwhile: its answer is the fresher one. Gone: nothing to show.
-    if (mine !== generation.current || !live.current) return
+    if (mine !== generation.current || !live.current) return false
     const fresh = pages
       .flat()
       .filter((row) => finishedAt(row) > seen.current)
@@ -130,6 +131,7 @@ export function ActivityBell() {
       })
     }
     setRows(fresh)
+    return true
   }, [followKey, mounted])
 
   useEffect(() => {
@@ -162,7 +164,7 @@ export function ActivityBell() {
       }
       schedule()
     })
-    activityRead.current = recordRead(refresh).record
+    activityRead.current = recordRead(refresh, (applied) => applied).record
     return () => {
       stop()
       clearTimeout(timer)

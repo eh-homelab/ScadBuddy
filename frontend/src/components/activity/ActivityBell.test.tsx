@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Activity } from '../../api/types'
 import { api } from '../../api/client'
 import { fakeRealtime } from '../../lib/realtime.fake'
-import { seedActivity } from '../../mocks/features/activity'
+import { getRealtime } from '../../lib/realtime'
+import { seedActivity, setActivityListCursor } from '../../mocks/features/activity'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { clearToasts } from '../../lib/toast'
 import { renderPage } from '../../test/utils'
@@ -58,6 +59,40 @@ describe('ActivityBell', () => {
     await user.click(screen.getByRole('button', { name: /Activity, 1 finished/ }))
     expect(screen.getByTestId('activity-bell-count')).not.toBeVisible()
     expect(screen.getByText(/Render box/, { selector: 'li span' })).toBeInTheDocument()
+  })
+
+  describe("and the activity subscription's confirmation (#1039)", () => {
+    afterEach(() => setActivityListCursor(undefined))
+
+    /** How many times the bell reads its followed activity. */
+    function countReads() {
+      const list = vi.spyOn(api, 'listActivity')
+      return () => list.mock.calls.length
+    }
+
+    it("reads once when its read saw the server's last event", async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e5' } })
+      const check = vi.spyOn(getRealtime(), 'check')
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await waitFor(() => expect(reads()).toBe(1))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(1)
+      expect(check).not.toHaveBeenCalledWith(expect.anything(), ['activity'])
+    })
+
+    it('reads again when the server says activity changed since', async () => {
+      setActivityListCursor('e5')
+      const live = fakeRealtime({ confirmation: { last: 'e9' } })
+      vi.spyOn(getRealtime(), 'check').mockImplementation(async (_since, topics) => topics)
+      const reads = countReads()
+      renderPage(<ActivityBell />)
+      await waitFor(() => expect(live.following()).toContain('activity'))
+      await act(async () => vi.advanceTimersByTimeAsync(5_000))
+      expect(reads()).toBe(2)
+    })
   })
 
   // #3706: a read that settles after the bell is gone, as a test's teardown leaves one, must

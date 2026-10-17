@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 
@@ -601,6 +602,32 @@ def test_a_check_the_log_cannot_answer_names_every_topic(
         assert check(ws, [seen.id], "settings") == ["settings"]
         # The socket stays open.
         assert check(ws, [seen.id], "settings") == ["settings"]
+
+
+def test_a_slow_check_holds_up_neither_subscribes_nor_a_second_check(
+    client: TestClient, logged: LoggedBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check runs beside the frame loop, one per socket: a second is answered "every
+    topic changed" at once, and a subscribe is confirmed while the first waits."""
+    seen = SettingsChanged(section="connection")
+    logged.publish(seen)
+    release = threading.Event()
+    replay = logged.replay
+
+    async def slow(after: int, *, limit: int = 100) -> Replay:
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return await replay(after, limit=limit)
+
+    monkeypatch.setattr(logged, "replay", slow)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "settings")
+        ws.send_json({"type": "check", "id": 1, "since": [seen.id], "topics": ["settings"]})
+        ws.send_json({"type": "check", "id": 2, "since": [seen.id], "topics": ["settings"]})
+        assert ws.receive_json() == {"type": "changed", "id": 2, "topics": ["settings"]}
+        subscribe(ws, "fonts")
+        release.set()
+        assert ws.receive_json() == {"type": "changed", "id": 1, "topics": []}
 
 
 def test_a_malformed_check_is_answered_with_an_error(client: TestClient, logged: LoggedBus) -> None:
