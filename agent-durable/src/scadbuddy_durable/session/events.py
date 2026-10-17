@@ -6,8 +6,10 @@ turn. It reads the workflow's live output with the plugin's ``follow_agent`` fro
 (agent/src/sessions/protocol.ts), and appends the events and moves the offset in one
 transaction, so a retried or doubled subscriber writes each event once. A
 ``tool.result`` names the images its call produced (``with_images``, #2478). It ends at
-the turn's last event (``done``, ``error``, ``cancelled``). The turn's result, its
-error and its final status are ``finish_turn``'s, written after this ends.
+the turn's last event (``done``, ``error``, ``cancelled``) or when the workflow closes; a
+stream that ends before either fails, and its retry resumes from the offset (#4019). The
+turn's result, its error and its final status are ``finish_turn``'s, written after this
+ends.
 
 What the log gets of a tool call's input is what the agent's ``scrubForLog`` lets
 through: a sensitive argument's value blanked at any depth, and an input longer than
@@ -27,6 +29,7 @@ from typing import Any
 import psycopg
 from temporalio import activity
 from temporalio.claude_agent_sdk import follow_agent
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
@@ -247,8 +250,9 @@ class SessionEvents:
         # A turn with a prompt ends only after it: an earlier turn's end, left unread when
         # its subscriber was cancelled, is written but does not end this one. A turn
         # carried over by continue-as-new sent its prompt in an earlier run, so it tells
-        # an earlier turn's end by its time instead (#2123).
-        own = not args.prompted
+        # an earlier turn's end by its time instead (#2123), and so does a retry, which
+        # resumes from durable_offset and may be past its prompt already (#4019).
+        own = not args.prompted or (args.since is not None and activity.info().attempt > 1)
         beater = asyncio.create_task(beat())
         try:
             async for event in follow_agent(activity.client(), args.workflow_id, from_offset=at[0]):
@@ -261,6 +265,25 @@ class SessionEvents:
                         written += len(translated)
                 if own and event.get("type") in LAST and not _before(event, args.since):
                     return FollowResult(ended=str(event["type"]), events=written)
+            # The stream also ends when a poll does: the client turns a poll cancelled
+            # (the worker shutting down cancels this activity) or timed out into
+            # WorkflowUpdateRPCTimeoutOrCancelledError, and subscribe ends cleanly on it
+            # while the workflow still runs. Completed, nothing wrote the rest of the turn
+            # (#4019): only a workflow that closed ends it, anything else is retried from
+            # durable_offset.
+            if activity.is_cancelled() and not activity.is_worker_shutdown():
+                raise asyncio.CancelledError  # the workflow's own cancel, past FOLLOW_DRAIN
+            if activity.is_worker_shutdown() or await _running(args.workflow_id):
+                raise StreamEndedError
             return FollowResult(ended="closed", events=written)
         finally:
             beater.cancel()
+
+
+class StreamEndedError(Exception):
+    """The stream ended before the turn did, and the workflow has not closed."""
+
+
+async def _running(workflow_id: str) -> bool:
+    described = await activity.client().get_workflow_handle(workflow_id).describe()
+    return described.status == WorkflowExecutionStatus.RUNNING
