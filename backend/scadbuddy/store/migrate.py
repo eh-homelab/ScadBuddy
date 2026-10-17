@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import logging
 import tempfile
 from collections.abc import Callable
 from contextlib import AsyncExitStack, aclosing
 from datetime import datetime
-from typing import Any
+from typing import Any, BinaryIO
 
 from pydantic import BaseModel
 from temporalio import activity
@@ -55,28 +54,11 @@ class MigrateBatchInput(BaseModel):
     started: datetime
 
 
-class _Spool(io.BufferedRandom):
-    """The copy's temporary file. It counts its reads, which an upload makes a part at a
-    time in its own threads: `_beat_while` heartbeats from the event loop while the count
-    moves (temporalio's heartbeat is not callable from another thread)."""
-
-    def __init__(self, raw: io.RawIOBase) -> None:
-        super().__init__(raw)
-        self.progress = 0
-
-    def read(self, size: int | None = -1, /) -> bytes:
-        self.progress += 1
-        return super().read(size)
-
-
-async def _beat_while(spool: _Spool, key: str, beat: Callable[[str], None]) -> None:
-    """``beat(key)`` now, then every `HEARTBEAT_EVERY` that the copy made progress: a
-    stalled copy stops beating, and its heartbeat timeout ends it."""
-    seen = -1
+async def _beat_while(key: str, beat: Callable[[str], None]) -> None:
+    """``beat(key)`` now and every `HEARTBEAT_EVERY` until cancelled, whether or not
+    bytes moved: the activity's start-to-close timeout bounds a stalled copy."""
     while True:
-        if spool.progress != seen:
-            seen = spool.progress
-            beat(key)
+        beat(key)
         await asyncio.sleep(HEARTBEAT_EVERY)
 
 
@@ -94,7 +76,7 @@ async def migrate_batch(
     cannot be read or is not its sha256, or whose copy the target refused, records the
     error and is ``failed``; one that moved on meanwhile (its mark missed) is left for
     the next batch. ``heartbeat`` is called with the key, from the event loop, while
-    each copy makes progress (`_beat_while`)."""
+    each copy runs (`_beat_while`)."""
     rows = await asyncio.to_thread(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
@@ -126,15 +108,14 @@ async def _copy(
     beat: Callable[[str], None],
 ) -> str | None:
     """None once copied and recorded, "" when the row moved on, else the error."""
-    # Closed by the `_Spool` that wraps it.
-    raw = await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", buffering=0))  # noqa: SIM115
-    assert isinstance(raw, io.RawIOBase)
-    with _Spool(raw) as spool:
-        beating = asyncio.create_task(_beat_while(spool, row.key, beat))
+    spool = await asyncio.to_thread(tempfile.TemporaryFile, "w+b")
+    with spool:
+        beating = asyncio.create_task(_beat_while(row.key, beat))
         try:
             return await _copy_through(index, source, target, row, spool)
         finally:
             beating.cancel()
+            await asyncio.gather(beating, return_exceptions=True)
 
 
 async def _copy_through(
@@ -142,14 +123,13 @@ async def _copy_through(
     source: ContentBackend,
     target: ContentBackend,
     row: BlobStat,
-    spool: _Spool,
+    spool: BinaryIO,
 ) -> str | None:
     ref = row.ref
     digest = hashlib.sha256()
     try:
         async with aclosing(source.download(ref.backend_id)) as chunks:
             async for chunk in chunks:
-                spool.progress += 1
                 digest.update(chunk)
                 await asyncio.to_thread(spool.write, chunk)
     except Exception as error:

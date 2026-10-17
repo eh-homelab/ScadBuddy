@@ -325,6 +325,42 @@ async def test_a_slow_copy_heartbeats_from_the_event_loop_while_it_streams(
         await target.aclose()
 
 
+class _Stalled(LocalContentBackend):
+    """Pauses once, past several heartbeat periods, before its one chunk."""
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        data = b"".join([chunk async for chunk in super().download(backend_id)])
+        await asyncio.sleep(0.3)
+        yield data
+
+
+async def test_a_copy_heartbeats_while_no_bytes_move(
+    pool: Pool, tmp_path: Path, target: S3ContentBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Beats do not wait on progress: the activity's start-to-close bounds a stall."""
+    monkeypatch.setattr(migrate, "HEARTBEAT_EVERY", 0.05)
+    backend = _Stalled(tmp_path / "a")
+    index = BlobIndex(pool)
+    ref = await ContentStore(backend, index).put("piece", b"stall", name="s", scope=SCOPE)
+    env = ActivityEnvironment()
+    beats: list[Any] = []
+    _beats_into(env, beats)
+    try:
+        result = await env.run(
+            migrate_batch,
+            index,
+            backend,
+            target,
+            limit=10,
+            started=index.now(),
+            heartbeat=activity.heartbeat,
+        )
+        assert result == MigrationBatch(moved=1, remaining=0, failed=[])
+        assert len(beats) >= 4 and set(beats) == {(f"piece-{ref.sha256}",)}
+    finally:
+        await target.aclose()
+
+
 async def test_a_multipart_upload_reading_in_threads_copies_inside_an_activity(
     pool: Pool, tmp_path: Path, s3: S3Settings
 ) -> None:
