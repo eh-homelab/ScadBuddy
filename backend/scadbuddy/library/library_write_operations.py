@@ -15,6 +15,16 @@ nothing in it: no file, trashed file or subfolder, read by a key that still sees
 user's trash. A folder with a file Bambuddy
 skipped, with anything that arrived after the check, or with a subfolder kept for
 either reason, is not deleted.
+
+On ``library_backend=native`` (plan 2026-10-17-native-print-library, Rulings 2, 11 and
+15) the same kinds write ScadBuddy's own rows, chosen when they run. ``folder_id`` and
+``parent_id`` ``0`` are the top level there too (bambuddy-fs sends ``folder_id=0``,
+``tools/go/bambuddy-fs/internal/api/api.go`` ``MoveFile``). A missing file, folder,
+target or parent is a 404, as Bambuddy answers it. A folder delete trashes every file in
+the subtree, then deletes the folders deepest first, in one transaction, as Bambuddy and
+bambuddy-fs's ``Rmdir`` take a folder's contents with it: nothing is refused for being
+non-empty, and nothing is left behind (``NativeLibraryStore.delete_folder_tree``). An
+upload the store has no room for is a 507, as ``api/assets.py`` answers it.
 """
 
 from __future__ import annotations
@@ -44,9 +54,12 @@ from scadbuddy.library.library_file_operations import (
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.store import Unset, UnsetType
+from scadbuddy.store.content_models import StoreFullError
 
 if TYPE_CHECKING:
-    from scadbuddy.core.components import Core
+    from scadbuddy.core.components import Components, Core
 
 Name = Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\x00]+$")]
 
@@ -203,7 +216,19 @@ def _moved_first(
     ]
 
 
-def library_write_kinds(state: Core) -> list[OperationKind]:
+def _place(folder_id: int | None) -> int | UnsetType | None:
+    """A request's ``folder_id``/``parent_id`` as a native row takes it: absent leaves it,
+    ``0`` is the top level (``None``)."""
+    if folder_id is None:
+        return Unset
+    return None if folder_id == 0 else folder_id
+
+
+def library_write_kinds(state: Core, components: Components) -> list[OperationKind]:
+    """Bound to this process's settings store and print library, whose backend each check
+    and run reads when it runs."""
+    library = components.get(PRINT_LIBRARY)
+
     async def settings() -> Any:
         return await asyncio.to_thread(state.settings_store.load)
 
@@ -213,12 +238,29 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, "give `filename`, `folder_id` or both"
             )
+        native = await library.serving_native()
+        if native is not None:
+            await native.library_file(request["file_id"])
+            return {}
         async with waiting_on_bambuddy(), client_for(await settings()) as client:
             await read_files(client, [request["file_id"]])
         return {}
 
     async def update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFileUpdate.model_validate(request["update"])
+        native = await library.serving_native()
+        if native is not None:
+            place = _place(body.folder_id)
+            row = await native.update_file(
+                request["file_id"],
+                name=body.filename,
+                folder_id=place,
+                # Ruling 8: a file moved is no longer the output's filed copy.
+                filed=None if isinstance(place, UnsetType) else False,
+            )
+            return LibraryEntryUpdated(
+                id=row.id, filename=row.name, folder_id=row.folder_id
+            ).model_dump(mode="json")
         stored = await settings()
         async with client_for(stored) as client:
             found = await client.update_library_file(
@@ -240,6 +282,12 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFolderCreate.model_validate(request)
+        native = await library.serving_native()
+        if native is not None:
+            folder = await native.create_folder(body.name, body.parent_id)
+            return LibraryFolder(
+                id=folder.id, name=folder.name, parent_id=folder.parent_id
+            ).model_dump(mode="json")
         async with client_for(await settings()) as client:
             made = await client.create_folder(
                 FolderCreate(name=body.name, parent_id=body.parent_id)
@@ -250,6 +298,14 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
 
     async def folder_update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFolderUpdate.model_validate(request["update"])
+        native = await library.serving_native()
+        if native is not None:
+            folder = await native.update_folder(
+                request["folder_id"], name=body.name, parent_id=_place(body.parent_id)
+            )
+            return LibraryFolder(
+                id=folder.id, name=folder.name, parent_id=folder.parent_id
+            ).model_dump(mode="json")
         async with client_for(await settings()) as client:
             changed = await client.update_folder(
                 request["folder_id"], FolderUpdate(name=body.name, parent_id=body.parent_id)
@@ -259,6 +315,10 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
         ).model_dump(mode="json")
 
     async def folder_delete_check(request: dict[str, Any]) -> dict[str, Any]:
+        native = await library.serving_native()
+        if native is not None:
+            await native.folder(request["folder_id"])
+            return {}
         async with waiting_on_bambuddy(), client_for(await settings()) as client:
             folder = _find(await client.folders(), request["folder_id"])
             order = _deepest_first(folder)
@@ -300,6 +360,17 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
         return {"files": found, "tree": tree}
 
     async def folder_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        native = await library.serving_native()
+        if native is not None:
+            trashed, folders = await native.delete_folder(request["folder_id"])
+            return LibraryFolderDeleteResult(
+                deleted=[
+                    DeletedLibraryFile(id=row.id, filename=row.name, trashed=True)
+                    for row in trashed
+                ],
+                skipped=[],
+                folders=folders,
+            ).model_dump(mode="json")
         files: list[dict[str, Any]] = checked["files"]
         async with client_for(await settings()) as client:
             moved, not_moved = await _to_top_level(
@@ -381,6 +452,19 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                 # Not "send it again": a re-send with the same key replays this answer.
                 "this request's upload is no longer held; upload the file again",
             ) from None
+        native = await library.serving_native()
+        if native is not None:
+            with held:
+                try:
+                    row = await native.upload(body.filename, held, body.folder_id)
+                except StoreFullError as error:
+                    raise ApiError(
+                        status.HTTP_507_INSUFFICIENT_STORAGE,
+                        f"the blob store has no room for this file: {error}",
+                    ) from None
+            return LibraryEntryUpdated(
+                id=row.id, filename=row.name, folder_id=row.folder_id
+            ).model_dump(mode="json")
         with held:
             async with client_for(await settings()) as client:
                 made = await client.upload_library_file(

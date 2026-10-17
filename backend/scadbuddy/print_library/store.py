@@ -237,12 +237,16 @@ class NativeLibraryStore:
         return found[0] if found else None
 
     def create_folder(self, name: str, parent_id: int | None) -> NativeFolder:
-        (out,) = self._folders(
-            f"INSERT INTO library_folders (name, parent_id) VALUES (%s, %s)"
-            f" RETURNING {_FOLDER_COLUMNS}",
-            (name, parent_id),
-        )
-        return out
+        """Under the tree lock, so a folder made under one being deleted waits for the
+        delete and then fails its FK, never the delete (``parent_id`` is RESTRICT)."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(_FOLDER_TREE_LOCK)
+            row = conn.execute(
+                f"INSERT INTO library_folders (name, parent_id) VALUES (%s, %s)"
+                f" RETURNING {_FOLDER_COLUMNS}".encode(),
+                (name, parent_id),
+            ).fetchone()
+        return NativeFolder.model_validate(row)
 
     def update_folder(
         self, id: int, *, name: str | None, parent_id: int | UnsetType | None
@@ -271,6 +275,42 @@ class NativeLibraryStore:
                 (*params, id),
             ).fetchone()
         return NativeFolder.model_validate(row) if row else None
+
+    def delete_folder_tree(self, id: int) -> tuple[list[NativeFile], list[int]] | None:
+        """Trash every live file in the folder and its subfolders, then delete the
+        folders deepest first, in one transaction; ``None`` when the folder is gone.
+
+        The subtree's rows are locked ``FOR UPDATE`` before the files are read, and an
+        insert or move into a folder takes ``FOR KEY SHARE`` on it for its FK check, so
+        a file arriving mid-delete waits and then fails its FK: no live file is left in
+        a deleted folder for ``ON DELETE SET NULL`` to drop at the top level."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(_FOLDER_TREE_LOCK)
+            tree = conn.execute(
+                "WITH RECURSIVE sub AS ("
+                " SELECT id, 0 AS depth FROM library_folders WHERE id = %s"
+                " UNION ALL SELECT f.id, sub.depth + 1 FROM library_folders f"
+                " JOIN sub ON f.parent_id = sub.id)"
+                " SELECT id, depth FROM sub ORDER BY depth DESC, id",
+                (id,),
+            ).fetchall()
+            if not tree:
+                return None
+            order = [int(r["id"]) for r in tree]
+            conn.execute(
+                "SELECT id FROM library_folders WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                (order,),
+            )
+            rows = conn.execute(
+                f"UPDATE library_files SET deleted_at = now(), updated_at = now()"
+                f" WHERE folder_id = ANY(%s) AND deleted_at IS NULL"
+                f" RETURNING {_FILE_COLUMNS}".encode(),
+                (order,),
+            ).fetchall()
+            for folder_id in order:
+                conn.execute("DELETE FROM library_folders WHERE id = %s", (folder_id,))
+        files = sorted((NativeFile.model_validate(r) for r in rows), key=lambda f: f.id)
+        return files, order
 
     def delete_folder(self, id: int) -> bool:
         with self._pool.connection() as conn:

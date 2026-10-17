@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import BinaryIO
 from xml.etree import ElementTree
 
+from psycopg.errors import ForeignKeyViolation
+
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
     Folder,
@@ -27,9 +29,12 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.store import (
+    FolderCycleError,
     NativeFile,
     NativeFolder,
     NativeLibraryStore,
+    Unset,
+    UnsetType,
     file_type_of,
 )
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, plates_of
@@ -97,7 +102,16 @@ def _read_upload(data: BinaryIO) -> tuple[list[LibraryPlate], bool]:
 
 
 def _not_found(file_id: int) -> ApiError:
-    return ApiError(404, f"library file {file_id} not found")
+    return ApiError(404, f"library file {file_id} not found", file_id=file_id)
+
+
+def _folder_not_found(folder_id: int | None) -> ApiError:
+    """Bambuddy answers a missing folder, target or parent, with 404 too."""
+    return ApiError(404, f"library folder {folder_id} not found", folder_id=folder_id)
+
+
+#: `FolderCycleError`'s answer.
+FOLDER_CYCLE = "a folder cannot move into itself or a folder under it"
 
 
 class NativeLibrary:
@@ -122,7 +136,7 @@ class NativeLibrary:
             not is_native_id(folder_id)
             or await asyncio.to_thread(self.rows.folder, folder_id) is None
         ):
-            raise ApiError(404, f"library folder {folder_id} not found")
+            raise _folder_not_found(folder_id)
 
     # reads (`LibraryListingSource`, `LibraryReads`)
 
@@ -274,7 +288,16 @@ class NativeLibrary:
             updated_at=now,
             deleted_at=None,
         )
-        return await asyncio.to_thread(self.rows.insert_file, row)
+        return await self._insert(row, folder_id)
+
+    async def _insert(self, row: NativeFile, folder_id: int | None) -> NativeFile:
+        """The row for a blob just stored; the folder deleted since its check is the
+        FK's refusal, the 404, with the blob released."""
+        try:
+            return await asyncio.to_thread(self.rows.insert_file, row)
+        except ForeignKeyViolation:
+            await self.content.delete(row.blob_key)
+            raise _folder_not_found(folder_id) from None
 
     async def copy(self, file_id: int, folder_id: int | None) -> NativeFile:
         """A new file, the same bytes: the source's object indexed under the copy's key
@@ -299,7 +322,90 @@ class NativeLibrary:
                 "deleted_at": None,
             }
         )
-        return await asyncio.to_thread(self.rows.insert_file, row)
+        return await self._insert(row, folder_id)
+
+    async def update_file(
+        self,
+        file_id: int,
+        *,
+        name: str | None = None,
+        folder_id: int | UnsetType | None = Unset,
+        filed: bool | None = None,
+    ) -> NativeFile:
+        """A rename, a move (``None`` is the top level), or both; a missing file or
+        target folder is the 404, ``file_id`` or ``folder_id`` in its extensions."""
+        await self._file(file_id)
+        if not isinstance(folder_id, UnsetType):
+            await self._folder_must_exist(folder_id)
+        try:
+            row = await asyncio.to_thread(
+                self.rows.update_file, file_id, name=name, folder_id=folder_id, filed=filed
+            )
+        except ForeignKeyViolation:
+            raise _folder_not_found(
+                None if isinstance(folder_id, UnsetType) else folder_id
+            ) from None
+        if row is None:
+            raise _not_found(file_id)
+        return row
+
+    async def trash(self, ids: list[int]) -> list[NativeFile]:
+        """The files moved to the trash; one already there or gone is left out."""
+        native = [i for i in ids if is_native_id(i)]
+        return await asyncio.to_thread(self.rows.trash, native) if native else []
+
+    async def restore(self, ids: list[int]) -> list[int]:
+        native = [i for i in ids if is_native_id(i)]
+        return await asyncio.to_thread(self.rows.restore, native) if native else []
+
+    async def folder(self, folder_id: int) -> NativeFolder:
+        """The folder, or the 404 naming it."""
+        found = (
+            await asyncio.to_thread(self.rows.folder, folder_id)
+            if is_native_id(folder_id)
+            else None
+        )
+        if found is None:
+            raise _folder_not_found(folder_id)
+        return found
+
+    async def create_folder(self, name: str, parent_id: int | None) -> NativeFolder:
+        await self._folder_must_exist(parent_id)
+        try:
+            return await asyncio.to_thread(self.rows.create_folder, name, parent_id)
+        except ForeignKeyViolation:
+            raise _folder_not_found(parent_id) from None
+
+    async def update_folder(
+        self, folder_id: int, *, name: str | None, parent_id: int | UnsetType | None = Unset
+    ) -> NativeFolder:
+        """A missing folder or parent is the 404; a move under itself the 422."""
+        await self._folder_must_exist(folder_id)
+        if not isinstance(parent_id, UnsetType):
+            await self._folder_must_exist(parent_id)
+        try:
+            row = await asyncio.to_thread(
+                self.rows.update_folder, folder_id, name=name, parent_id=parent_id
+            )
+        except FolderCycleError:
+            raise ApiError(422, FOLDER_CYCLE, folder_id=folder_id) from None
+        except ForeignKeyViolation:
+            raise _folder_not_found(
+                None if isinstance(parent_id, UnsetType) else parent_id
+            ) from None
+        if row is None:
+            raise _folder_not_found(folder_id)
+        return row
+
+    async def delete_folder(self, folder_id: int) -> tuple[list[NativeFile], list[int]]:
+        """Every file in the folder's subtree trashed, then the folders deleted, deepest
+        first (`NativeLibraryStore.delete_folder_tree`)."""
+        if not is_native_id(folder_id):
+            raise _folder_not_found(folder_id)
+        done = await asyncio.to_thread(self.rows.delete_folder_tree, folder_id)
+        if done is None:
+            raise _folder_not_found(folder_id)
+        return done
 
     async def purge(self, file_id: int, cutoff: datetime) -> bool:
         """Delete a trashed file older than ``cutoff`` and release its blob; False when a
