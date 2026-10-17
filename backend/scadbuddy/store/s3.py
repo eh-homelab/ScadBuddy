@@ -114,6 +114,11 @@ class S3ContentBackend:
         sha256, size = await asyncio.to_thread(blob_digest, data)
         key = object_key(self.settings.prefix, kind, sha256)
         if await self.exists(key):
+            # Not atomic with the row the caller inserts next: a remove of the last row
+            # naming this key, or `sweep_unrecorded`, could delete the object between
+            # this HEAD and that insert, leaving a row that names a missing object. That
+            # read is a miss, not corruption, and the piece re-renders; and the sweep
+            # only removes objects last written before its cutoff. So no lock.
             return key
         client = await self._s3()
         bucket = self.settings.bucket
