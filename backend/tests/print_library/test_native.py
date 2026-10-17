@@ -322,3 +322,18 @@ async def test_an_oversized_cover_is_no_thumbnail(
     big = _rewritten(three_mf, tmp_path / "big.3mf", "Metadata/plate_1.png", b"\0" * (32 << 20))
     f = await upload(native, big)
     assert f.has_thumbnail and await native.thumbnail(f.id, 1) is None
+
+
+async def test_a_3mf_with_only_a_cover_lists_with_a_thumbnail(
+    native: NativeLibrary, tmp_path: Path
+) -> None:
+    cover = b"\x89PNG cover"
+    plain = tmp_path / "plain.3mf"
+    with zipfile.ZipFile(plain, "w") as z:
+        z.writestr("3D/3dmodel.model", "<model/>")
+        z.writestr("Metadata/thumbnail.png", cover)
+    f = await upload(native, plain)
+    assert f.plates == [] and f.has_thumbnail
+    [row] = await native.library_listing(folder_id=None)
+    assert row.thumbnail_path is not None
+    assert await native.thumbnail(f.id, None) == cover

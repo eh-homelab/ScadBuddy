@@ -20,11 +20,15 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.config import LibraryBackend
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeLibraryStore
 
 #: The rows' own pool: a library write is one statement or one short transaction.
 ROW_POOL_SIZE = 4
+#: As `analyzers/decisions.py` and `rack/usage.py`: an unreachable database fails a
+#: request within about this, never hangs it.
+CONNECT_TIMEOUT = 5.0
 
 
 class PrintLibrary:
@@ -38,8 +42,14 @@ class PrintLibrary:
             min_size=1,
             max_size=ROW_POOL_SIZE,
             open=False,
+            timeout=CONNECT_TIMEOUT,
             connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row},
+            kwargs={
+                "autocommit": True,
+                "row_factory": dict_row,
+                "connect_timeout": max(1, int(CONNECT_TIMEOUT)),
+                **TCP_KEEPALIVE,
+            },
             name="scadbuddy-print-library",
         )
 

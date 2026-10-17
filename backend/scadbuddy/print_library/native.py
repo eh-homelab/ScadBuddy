@@ -65,26 +65,33 @@ MAX_PLATE_SETTINGS_BYTES = 16 * 1024 * 1024
 MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024
 
 
-def _settings_fit(data: BinaryIO) -> bool:
-    with zipfile.ZipFile(data) as archive:
-        return archive.getinfo(MODEL_SETTINGS_NAME).file_size <= MAX_PLATE_SETTINGS_BYTES
+#: A 3MF's own cover, beside or instead of its plates' (`thumbnail(plate=None)`).
+COVER_NAME = "Metadata/thumbnail.png"
 
 
-def _read_plates(data: BinaryIO) -> list[LibraryPlate]:
-    """Ruling 9: read once, at upload. A file that will not read has no plates."""
+def _read_upload(data: BinaryIO) -> tuple[list[LibraryPlate], bool]:
+    """Ruling 9: the plates and whether there is a cover, read once, at upload. A file
+    that will not read has neither; one with no plate metadata may still have a cover."""
     try:
-        if not _settings_fit(data):
-            return []
+        with zipfile.ZipFile(data) as archive:
+            names = set(archive.namelist())
+            settings = (
+                archive.getinfo(MODEL_SETTINGS_NAME) if MODEL_SETTINGS_NAME in names else None
+            )
+        cover = COVER_NAME in names
+        if settings is None or settings.file_size > MAX_PLATE_SETTINGS_BYTES:
+            return [], cover
         data.seek(0)
         entries = plates_of(data)
     except (zipfile.BadZipFile, KeyError, ElementTree.ParseError, ValueError, OSError):
-        return []
+        return [], False
     finally:
         data.seek(0)
-    return [
+    plates = [
         LibraryPlate(index=p.index, name=p.name, has_thumbnail=p.thumbnail is not None)
         for p in entries
     ]
+    return plates, cover or any(p.has_thumbnail for p in plates)
 
 
 def _not_found(file_id: int) -> ApiError:
@@ -207,7 +214,7 @@ class NativeLibrary:
         names = (
             [f"Metadata/plate_{plate}.png"]
             if plate is not None
-            else ["Metadata/thumbnail.png", "Metadata/plate_1.png"]
+            else [COVER_NAME, "Metadata/plate_1.png"]
         )
         stat = await self.content.stat(f.blob_key)
         if stat is None:
@@ -237,8 +244,10 @@ class NativeLibrary:
         await self._folder_must_exist(folder_id)
         file_id = await asyncio.to_thread(self.rows.next_file_id)
         file_type = file_type_of(filename)
-        plates = (
-            await asyncio.to_thread(_read_plates, data) if file_type in ("3mf", "gcode.3mf") else []
+        plates, has_thumbnail = (
+            await asyncio.to_thread(_read_upload, data)
+            if file_type in ("3mf", "gcode.3mf")
+            else ([], False)
         )
         key = blob_key(file_id)
         ref = await self.content.put(
@@ -254,7 +263,7 @@ class NativeLibrary:
             blob_key=key,
             media_type=_media_type(filename, file_type),
             plates=plates,
-            has_thumbnail=any(p.has_thumbnail for p in plates),
+            has_thumbnail=has_thumbnail,
             output_id=output_id,
             filed=filed,
             created_at=now,
