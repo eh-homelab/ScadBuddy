@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
@@ -272,11 +273,19 @@ def test_a_stale_base_a_sibling_write_finds_in_its_run_carries_current(
 
     monkeypatch.setattr(model_files, "file_put_run", held)
     try:
-        started = client.put(
-            f"/api/v1/models/{slug}/files/parts.scad",
-            json={"content": "module bar() {}\n", "base": version},
-            headers=press(),
-        )
+        # Sent again with the same key while it is still being accepted (#3926): on a
+        # loaded runner the 1 s deadline passes first, and 503 says "send it again".
+        key = press()
+        resend_until = time.monotonic() + 60
+        while True:
+            started = client.put(
+                f"/api/v1/models/{slug}/files/parts.scad",
+                json={"content": "module bar() {}\n", "base": version},
+                headers=key,
+            )
+            if started.json().get("type") != operations_api.STILL_ACCEPTING_PROBLEM:
+                break
+            assert time.monotonic() < resend_until, started.text
         assert started.status_code == 202, started.text
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
