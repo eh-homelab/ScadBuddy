@@ -354,8 +354,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # "Slicer worker").
 #
 # The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
-# bump the two together. The Temporal Core SDK's build runs protoc.
-FROM rust:1.99.1-bookworm AS slicer-build
+# bump the two together, tag and digest. The Temporal Core SDK's build runs protoc.
+FROM rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS slicer-build
 
 # hadolint ignore=DL3008
 RUN apt-get update \
