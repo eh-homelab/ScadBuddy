@@ -663,6 +663,9 @@ jobs:
         run: pnpm build
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # `type=gha` only because this is a GitHub-hosted runner (see the header
       # of this file). Its own `scope` so this job and `image`, which run in
@@ -808,6 +811,9 @@ jobs:
         run: uv run --frozen pytest -v
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # The stage copies the agent's tool manifest from `agent-build` (5e), so
       # it also reads `scope=agent`, whose mode=max index holds that chain.
@@ -884,6 +890,9 @@ jobs:
           fetch-depth: 1
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       # --target test, and --load so it lands in the local docker daemon.
       #
@@ -1221,6 +1230,9 @@ jobs:
         run: git lfs checkout
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Build the test image
         uses: docker/build-push-action@v7
@@ -1416,6 +1428,9 @@ jobs:
           echo "pipelines=${pipelines}" >>"$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
         if: ${{ steps.select.outputs.count != '0' }}
 
       # Read-only cache. The entries it hits were written by an EARLIER run's
