@@ -312,11 +312,15 @@ class OutputStore:
         """The output's inputs; one from before them reads as its params at ``v`` 0.
         A caller that already read :meth:`params` passes them, so they are read once."""
         path = self._find_dir(output_id) / INPUTS_NAME
-        if not path.is_file():
+        try:
+            text = _read_if_there(path)
+        except OSError:
+            text = ""  # unreadable: as damaged, below
+        if text is None:
             return legacy_inputs(self.params(output_id) if params is None else params)
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            loaded = json.loads(text)
+        except ValueError:
             loaded = None
         if not isinstance(loaded, dict):
             # The record itself (meta, files, params) is intact: read it as one from

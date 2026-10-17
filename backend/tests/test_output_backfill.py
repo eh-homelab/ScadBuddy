@@ -40,6 +40,7 @@ from scadbuddy.library.outputs import (
     reap_orphan_holds,
     release_parts,
 )
+from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
@@ -105,6 +106,21 @@ async def test_a_file_cleared_as_it_is_read_reads_as_none(
     is_file = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda self: self.name == name or is_file(self))
     assert read(store, old.id) == none
+
+
+async def test_inputs_cleared_as_they_are_read_read_as_the_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As above for ``inputs.json``, whose absence means an output from before inputs.
+    (Before read-once this already held, through a warning for an "unreadable" file.)"""
+    store, old, _, _ = await _legacy_output(tmp_path)
+    expected = legacy_inputs(store.params(old.id))
+    (store.directory(old.id) / outputs_module.INPUTS_NAME).unlink(missing_ok=True)
+    is_file = Path.is_file
+    monkeypatch.setattr(
+        Path, "is_file", lambda self: self.name == outputs_module.INPUTS_NAME or is_file(self)
+    )
+    assert store.inputs(old.id) == expected
 
 
 @pytest.mark.requires_postgres
