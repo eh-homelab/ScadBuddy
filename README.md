@@ -792,10 +792,11 @@ workers restart.
   4. Only when `GET` shows both `remaining` and `failed_count` at `0`, set **Blob
      store** to `s3` and restart every replica together: the API and every render
      worker at once. After that flip no retry is possible (`POST` answers 409), so a
-     row still failed then would stay on the source. At start on the new backend each
-     process switches every copied row onto its copy in one statement, so a replica
-     that has not restarted yet misses on those blobs until it does: do not roll them
-     one at a time.
+     row still failed then would stay on the source. The API, at its start on the new
+     backend, switches every copied row onto its copy in one statement; render workers
+     do not, so restart the API with (or before) the workers, never a worker alone, and
+     a replica that has not restarted yet misses on those blobs until it does: do not
+     roll them one at a time.
 
   The migration never deletes from the source; clear the old inbox folder yourself once
   you are satisfied.
