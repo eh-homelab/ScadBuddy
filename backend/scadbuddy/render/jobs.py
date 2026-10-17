@@ -496,7 +496,8 @@ async def plate_layout(
                     diagnostics_dropped=error.diagnostics_dropped,
                     missing_files=error.missing_files,
                 ) from error
-            split = split_by_material(raw)
+            # Off the loop, as every mesh parse (#3788): see `_render_solids`.
+            split = await asyncio.to_thread(split_by_material, raw)
             if not split:
                 if may_be_empty:
                     continue
@@ -1123,7 +1124,11 @@ async def _render_solids(
     stage: Callable[[RenderStage], AbstractContextManager[None]],
 ) -> PlateLayout:
     with stage("split"):
-        preview_parts = extruder_order(split_by_material(work / RAW_RENDER_NAME), schema, staged)
+        # Parsing and writing meshes is CPU work: off the loop, which runs every workflow
+        # task and activity of this worker. Held here, it timed workflow tasks out at 10 s
+        # (#3788).
+        split = await asyncio.to_thread(split_by_material, work / RAW_RENDER_NAME)
+        preview_parts = extruder_order(split, schema, staged)
         if not preview_parts:
             raise OpenSCADError(
                 "the render produced no geometry",
@@ -1133,7 +1138,7 @@ async def _render_solids(
                 missing_files=output.missing_files,
                 warnings=failed_render_warnings(output.missing_files, schema, params),
             )
-        write_glb(preview_parts, work / PREVIEW_NAME)
+        await _thread_to_end(write_glb, preview_parts, work / PREVIEW_NAME)
 
     with stage("solids"):
         # One plate unless the template asked for more (spec §6.4); every plate
