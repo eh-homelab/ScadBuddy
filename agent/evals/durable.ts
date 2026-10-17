@@ -420,8 +420,11 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let log = ''
+  // Read as it arrives, before the log is trimmed: a long uv sync could push it out.
+  let port: number | undefined
   const take = (d: Buffer) => {
     const text = d.toString()
+    port ??= durableHealthPort(log + text)
     log = (log + text).slice(-20_000)
     if (o.stderr) for (const line of text.split('\n')) if (line) o.stderr(line)
   }
@@ -431,7 +434,6 @@ async function startDurableWorker(o: { url: string; address: string; dir: string
   const deadline = Date.now() + 240_000
   for (;;) {
     if (worker.exitCode !== null) throw new Error(`the durable worker exited: ${log}`)
-    const port = durableHealthPort(log)
     const status = port === undefined
       ? undefined
       : await fetch(`http://127.0.0.1:${port}/healthz`)

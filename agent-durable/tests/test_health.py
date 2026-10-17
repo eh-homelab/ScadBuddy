@@ -41,12 +41,16 @@ async def test_the_sidecar_on_port_0_says_which_port_it_bound() -> None:
     )
     try:
         assert proc.stderr is not None
-        port = None
-        while port is None:
-            line = (await asyncio.wait_for(proc.stderr.readline(), timeout=30)).decode()
-            assert line, "the sidecar exited before it named its port"
-            if match := re.search(r"health on port (\d+)", line):
-                port = int(match[1])
+        stderr = proc.stderr
+
+        async def named_port() -> int:
+            while True:
+                line = (await stderr.readline()).decode()
+                assert line, "the sidecar exited before it named its port"
+                if match := re.search(r"health on port (\d+)", line):
+                    return int(match[1])
+
+        port = await asyncio.wait_for(named_port(), timeout=30)
         status, body = await _get(port, "/healthz")
         assert status == "HTTP/1.1 200 OK"
         assert json.loads(body)["status"] == "ok"

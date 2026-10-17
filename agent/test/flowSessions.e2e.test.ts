@@ -263,10 +263,11 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
 
     // Both workers up (uv may sync their environments first).
     const deadline = Date.now() + 240_000
+    let port: number | undefined
     for (;;) {
       if (durable.child.exitCode !== null) throw new Error(`the durable worker exited: ${durable.log()}`)
       if (projects.child.exitCode !== null) throw new Error(`the projects worker exited: ${projects.log()}`)
-      const port = durableHealthPort(durable.log())
+      port ??= durableHealthPort(durable.log())
       const status = port === undefined
         ? undefined
         : await fetch(`http://127.0.0.1:${port}/healthz`)

@@ -107,9 +107,10 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     worker.stderr?.on('data', (d: Buffer) => (workerLog += d.toString()))
     // uv may sync the worker's environment first.
     const deadline = Date.now() + 240_000
+    let port: number | undefined
     for (;;) {
       if (worker.exitCode !== null) throw new Error(`the durable worker exited: ${workerLog}`)
-      const port = durableHealthPort(workerLog)
+      port ??= durableHealthPort(workerLog)
       const status = port === undefined
         ? undefined
         : await fetch(`http://127.0.0.1:${port}/healthz`)
