@@ -1987,11 +1987,45 @@ jobs:
           exit 1
 
   # ── The required check ──────────────────────────────────────────────────────
+  # The Go client on the commit main actually gets (#3053). `freshness` checks it on a
+  # PR, against the PR merged into its base as that base stood then. Required checks
+  # are not strict, so two PRs that each regenerate cleanly can land a combined client
+  # that matches neither spec, and nothing on the PR side sees it. Every other run (a
+  # push to main, the weekly schedule) regenerates it from its own commit's spec and
+  # fails on drift; the fix is a PR that runs the generator. Nothing is pushed here.
+  go-client:
+    name: Go client is fresh
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # As `freshness`: the spec depends on the locked FastAPI/pydantic, not on uv.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+      - name: Regenerate the Go client and compare
+        env:
+          # As go-module-ci.yml: a newer runner Go would write a different vendor/.
+          GOTOOLCHAIN: go1.26.9+auto
+        run: scripts/generate-go-client.sh --check
+
   summary:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
+    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2028,6 +2062,7 @@ jobs:
           GO_SELECT_RESULT: ${{ needs.go-select.result }}
           GO_RESULT: ${{ needs.go.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
+          GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
@@ -2103,6 +2138,10 @@ jobs:
           is_pr=false
           if [ "$EVENT_NAME" = "pull_request" ]; then is_pr=true; fi
           assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$is_pr"
+          # Its mirror: the Go client checked on the commit itself, required off a PR.
+          not_pr=true
+          if [ "$is_pr" = true ]; then not_pr=false; fi
+          assert "Go client is fresh"                     "$GO_CLIENT_RESULT" "$not_pr"
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::CI Summary failed — see the job results above."
