@@ -759,12 +759,16 @@ workers restart.
   | `store_s3_endpoint` | none | The service's URL, e.g. a [Garage](https://garagehq.deuxfleurs.fr/) or [MinIO](https://min.io/) address. |
   | `store_s3_region` | `us-east-1` | The signing region; Garage and MinIO take whatever they are configured with. |
   | `store_s3_bucket` | none | An existing bucket. ScadBuddy never creates it. |
-  | `store_s3_prefix` | `scadbuddy` | Objects are stored at `<prefix>/<kind>/<sha256>`, so one bucket can hold several instances, each under its own prefix. |
+  | `store_s3_prefix` | `scadbuddy` | Objects are stored at `<prefix>/<kind>/<sha256>`, so one bucket can hold several instances, each under its own prefix. Leading and trailing `/` are dropped when it is saved; a blank prefix refuses the start. |
   | `store_s3_access_key_id` | none | The key's id. |
   | `store_s3_secret_access_key` | none | The key's secret, sealed under the KEK like the other secrets and never returned by the API. |
-  | `store_s3_path_style` | `true` | Addresses the bucket in the path (`endpoint/bucket/key`) rather than the hostname. Garage and MinIO need it ([Garage](https://garagehq.deuxfleurs.fr/documentation/), [MinIO](https://min.io/docs/minio/linux/index.html) docs). |
+  | `store_s3_path_style` | `true` | Addresses the bucket in the path (`endpoint/bucket/key`) rather than the hostname. Garage and MinIO default to path-style ([Garage](https://garagehq.deuxfleurs.fr/documentation/), [MinIO](https://min.io/docs/minio/linux/index.html) docs); turn it off for a service that wants the bucket in the hostname. |
 
   A save that switches to `s3` without the endpoint, bucket and both keys is refused.
+  The access key needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and
+  `s3:ListBucket` on the bucket: without `ListBucket` a `HEAD` of a missing object is a
+  403, which the backend surfaces as an error, not a miss
+  ([S3's HeadObject permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)).
   Uploads above 64 MiB go as multipart ([S3's limits](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)).
   An object whose upload never got a row (a crash between the two) is removed by the
   blob sweep once it is older than `SCADBUDDY_JOB_TTL`.
@@ -776,15 +780,22 @@ workers restart.
      `{"source": "bambuddy", "target": "s3"}` (optionally `"batch": 50`), or ask the
      assistant (`store_migrate`). One `StoreMigration` workflow runs per pair, and a
      second POST joins it. It answers 409 when the saved `store_backend` already is the
-     target and 422 for an invalid pair. The copy writes each blob to the target and
+     target, and 422 for an invalid pair (`local` is never a source or a target) or
+     when either backend cannot be built from the saved settings (the detail says what
+     to save). The copy writes each blob to the target and
      records it on the row; the running processes keep reading from the source.
   3. Follow `GET /api/v1/store/migrate?source=bambuddy&target=s3` (or
      `store_migrate_status`): `remaining`, `copied`, `failed` (up to 200 rows with the
-     error), `failed_count` and `running`. A new POST retries the failed rows.
-  4. When `remaining` is `0`, set **Blob store** to `s3` and restart the API and every
-     render worker **together**. At start on the new backend each process switches every
-     copied row onto its copy in one statement, so a replica that has not restarted yet
-     misses on those blobs until it does: do not roll them one at a time.
+     error), `failed_count` and `running`. A failed row is cleared by `POST`ing again:
+     the new run retries the failed rows, and a copy that succeeds clears the row's
+     error.
+  4. Only when `GET` shows both `remaining` and `failed_count` at `0`, set **Blob
+     store** to `s3` and restart every replica together: the API and every render
+     worker at once. After that flip no retry is possible (`POST` answers 409), so a
+     row still failed then would stay on the source. At start on the new backend each
+     process switches every copied row onto its copy in one statement, so a replica
+     that has not restarted yet misses on those blobs until it does: do not roll them
+     one at a time.
 
   The migration never deletes from the source; clear the old inbox folder yourself once
   you are satisfied.
