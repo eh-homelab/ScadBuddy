@@ -184,13 +184,15 @@ async def check_backends(
             stack.push_async_callback(build_backend(name, current, settings, pool).aclose)
 
 
-def migrate_activity(pool: Pool, defaults: Settings) -> Callable[..., Any]:
+def migrate_activity(pool_of: Callable[[], Pool], defaults: Settings) -> Callable[..., Any]:
     """`store_migrate_batch`, in the API process (its `library` worker): both backends
     built from the settings as they are now, so the target's are saved before
-    `store_backend` names it."""
+    `store_backend` names it. The pool is read when a batch runs, as the operation
+    activities read the settings store."""
 
     @activity.defn(name=MIGRATE_BATCH)
     async def store_migrate_batch(params: MigrateBatchInput) -> MigrationBatch:
+        pool = pool_of()
         current = await asyncio.to_thread(load_render_store_settings, pool, defaults)
         settings = RenderSettingsSource(pool, defaults)
         settings.seed(current)

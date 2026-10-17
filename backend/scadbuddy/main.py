@@ -1075,7 +1075,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
-        migrate_activity(state.settings_store.pool, state.settings),
+        migrate_activity(lambda: state.settings_store.pool, state.settings),
     ]
     try:
         while not stop.is_set():
