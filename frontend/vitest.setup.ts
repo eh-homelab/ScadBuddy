@@ -44,7 +44,8 @@ beforeAll(() => {
   const intercepted = globalThis.fetch
   mswFetch = intercepted
   // The test in the line, as files run in parallel and their stderr interleaves. One
-  // refused in a hook after the file's tests reads "outside a test"; that is no fault.
+  // refused in a file's own hooks has no test (`> -`); "outside a test" means not even
+  // a file. Neither is a fault.
   globalThis.fetch = resending(intercepted, (line) => {
     const { testPath, currentTestName } = expect.getState()
     const file = testPath ? path.relative(process.cwd(), testPath) : 'outside a test'

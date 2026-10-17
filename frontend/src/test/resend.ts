@@ -4,6 +4,8 @@
  * still in 0.45.8). Nothing listens there, so the page shows "could not reach its
  * server" (#3936, #3935). It is a race and shows under load. The connection was refused,
  * so nothing was sent: `resending` sends it again, up to `tries` times, and MSW sees it.
+ * A `Request`'s body is cloned for each try; a stream passed as `init.body` is not, and
+ * would be spent on a retry. Nothing here sends one.
  *
  * It writes to `log` (stderr in the setup, rather than console.warn, which tests spy
  * on) on the first resend and on giving up after every try was refused: a line means the
