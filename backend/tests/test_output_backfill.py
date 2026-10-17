@@ -83,7 +83,10 @@ async def test_a_backfill_cleared_as_it_is_read_reads_as_none(
     store, old, job, _ = await _legacy_output(tmp_path)
     store.start_backfill(old.id, job.id)
     (store.directory(old.id) / outputs_module.BACKFILL_NAME).unlink()
-    monkeypatch.setattr(Path, "is_file", lambda self: True)  # it was there when looked for
+    is_file = Path.is_file
+    monkeypatch.setattr(  # it was there when looked for
+        Path, "is_file", lambda self: self.name == outputs_module.BACKFILL_NAME or is_file(self)
+    )
     assert store.backfill(old.id) is None
 
 

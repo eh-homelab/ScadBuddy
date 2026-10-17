@@ -210,6 +210,15 @@ class OutputFiles(Protocol):
         ...
 
 
+def _read_if_there(path: Path) -> str | None:
+    """The file's text, or None when there is none: read once, so a file cleared between
+    a check and the read is not an error."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
@@ -470,43 +479,39 @@ class OutputStore:
         return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
-        path = self.directory(output_id) / BOM_NAME
-        if not path.is_file():
+        text = _read_if_there(self.directory(output_id) / BOM_NAME)
+        if text is None:
             return []
-        return [BomEntry.model_validate(e) for e in json.loads(path.read_text(encoding="utf-8"))]
+        return [BomEntry.model_validate(e) for e in json.loads(text)]
 
     def manifest(self, output_id: str) -> list[ManifestObject]:
         """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
         try:
-            path = self.directory(output_id) / MANIFEST_NAME
+            text = _read_if_there(self.directory(output_id) / MANIFEST_NAME)
         except OutputNotFoundError:
             return []
-        if not path.is_file():
+        if text is None:
             return []
-        return [
-            ManifestObject.model_validate(m) for m in json.loads(path.read_text(encoding="utf-8"))
-        ]
+        return [ManifestObject.model_validate(m) for m in json.loads(text)]
 
     def arranged_from(self, output_id: str) -> list[str]:
         """For an arranged output, the outputs its objects came from, and each library
         file ScadBuddy did not make as `library:<id>` (#2284)."""
         try:
-            path = self.directory(output_id) / ARRANGED_NAME
+            text = _read_if_there(self.directory(output_id) / ARRANGED_NAME)
         except OutputNotFoundError:
             return []
-        if not path.is_file():
+        if text is None:
             return []
-        return _ID_LIST.validate_json(path.read_text(encoding="utf-8"))
+        return _ID_LIST.validate_json(text)
 
     def backfill(self, output_id: str) -> BackfillState | None:
         """The re-render queued to give this output a manifest (#902), if any."""
         try:
-            path = self.directory(output_id) / BACKFILL_NAME
+            text = _read_if_there(self.directory(output_id) / BACKFILL_NAME)
         except OutputNotFoundError:
             return None
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:  # none, or the attach just cleared it
+        if text is None:  # none, or the attach just cleared it
             return None
         return BackfillState.model_validate_json(text)
 
