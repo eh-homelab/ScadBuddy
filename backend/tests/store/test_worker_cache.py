@@ -247,7 +247,7 @@ async def test_an_eviction_cut_short_leaves_no_hit_behind(
     os.utime(a.local.root / "old", (past, past))
 
     def killed_part_way(path: Path, *args: object, **kwargs: object) -> None:
-        (path / "m").unlink()  # the local_store goes first; the process dies before the rest
+        (path / "m").unlink()  # the content goes first; the process dies before the rest
         raise SystemExit
 
     monkeypatch.setattr(shutil, "rmtree", killed_part_way)
